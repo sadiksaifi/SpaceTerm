@@ -55,8 +55,14 @@ pub(crate) enum RemoteWorkspaceValueError {
 ///
 /// Equality is spelling-sensitive so different configured aliases remain distinct even when they
 /// currently resolve to the same host. The token is passed as one validated OpenSSH argument.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SshDestination(String);
+
+impl fmt::Debug for SshDestination {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SshDestination(<redacted>)")
+    }
+}
 
 impl SshDestination {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
@@ -80,8 +86,14 @@ impl SshDestination {
 ///
 /// This remote value is preserved for display and shell startup. It is not local filesystem
 /// authority and must never be converted to `PathBuf` or passed to a local path API.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RemoteWorkspaceDirectory(String);
+
+impl fmt::Debug for RemoteWorkspaceDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceDirectory(<redacted>)")
+    }
+}
 
 impl RemoteWorkspaceDirectory {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
@@ -101,8 +113,14 @@ impl RemoteWorkspaceDirectory {
 ///
 /// Its normalized path-like spelling is an opaque remote identity used for deduplication and
 /// revalidation. It must never become a local `PathBuf` or local filesystem identity.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RemoteDirectoryIdentity(String);
+
+impl fmt::Debug for RemoteDirectoryIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteDirectoryIdentity(<redacted>)")
+    }
+}
 
 impl RemoteDirectoryIdentity {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
@@ -128,10 +146,16 @@ impl RemoteDirectoryIdentity {
 ///
 /// Both the exact destination token and validated physical directory participate in equality.
 /// The selected directory spelling is deliberately excluded and remains separate startup data.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct RemoteWorkspaceKey {
     destination: SshDestination,
     physical_directory: RemoteDirectoryIdentity,
+}
+
+impl fmt::Debug for RemoteWorkspaceKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceKey(<redacted>)")
+    }
 }
 
 impl RemoteWorkspaceKey {
@@ -322,13 +346,19 @@ impl WorkspaceDirectoryAvailability {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 /// A validated local Workspace Directory and its local filesystem identity.
 ///
 /// This is the only Workspace directory value that may enter local `Path` and `PathBuf` APIs.
 pub(crate) struct ValidatedWorkspaceDirectory {
     path: PathBuf,
     identity: WorkspaceDirectoryIdentity,
+}
+
+impl fmt::Debug for ValidatedWorkspaceDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ValidatedWorkspaceDirectory(<redacted>)")
+    }
 }
 
 impl ValidatedWorkspaceDirectory {
@@ -1259,6 +1289,28 @@ mod tests {
 
     fn remote_directory(value: &str) -> RemoteWorkspaceDirectory {
         RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    }
+
+    #[test]
+    fn remote_identity_debug_should_redact_destination_and_directories() {
+        let destination = ssh_destination("sensitive-host");
+        let selected = remote_directory("/sensitive/selected");
+        let physical = RemoteDirectoryIdentity::new("/sensitive/physical".to_owned()).unwrap();
+        let key = RemoteWorkspaceKey::new(destination.clone(), physical.clone());
+        let local = ValidatedWorkspaceDirectory::new(
+            PathBuf::from("/sensitive/local"),
+            WorkspaceDirectoryIdentity::new(1, 1),
+        );
+
+        for debug in [
+            format!("{destination:?}"),
+            format!("{selected:?}"),
+            format!("{physical:?}"),
+            format!("{key:?}"),
+            format!("{local:?}"),
+        ] {
+            assert!(!debug.contains("sensitive"));
+        }
     }
 
     fn remote_identity(value: &str) -> RemoteDirectoryIdentity {

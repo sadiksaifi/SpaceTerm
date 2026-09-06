@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::str;
 use std::sync::Arc;
@@ -24,11 +25,16 @@ const MAXIMUM_REMOTE_PATH_BYTES: usize = 4096;
 const UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
 
-#[derive(Debug)]
 /// Content-free exit status plus bounded untrusted stdout from one utility process.
 pub(crate) struct RemoteUtilityProcessOutput {
     exit: ProcessExit,
     stdout: Vec<u8>,
+}
+
+impl fmt::Debug for RemoteUtilityProcessOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteUtilityProcessOutput(<redacted>)")
+    }
 }
 
 impl RemoteUtilityProcessOutput {
@@ -214,7 +220,7 @@ pub(crate) enum RemoteUtilityError {
     RemoteFailed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 /// Strictly decoded account metadata returned by protocol version 1.
 pub(crate) struct RemoteAccountMetadata {
     user: String,
@@ -223,6 +229,12 @@ pub(crate) struct RemoteAccountMetadata {
     login_shell: String,
     physical_home: String,
     posix_sh_login_capability: PosixShLoginCapability,
+}
+
+impl fmt::Debug for RemoteAccountMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteAccountMetadata(<redacted>)")
+    }
 }
 
 impl RemoteAccountMetadata {
@@ -253,11 +265,17 @@ impl RemoteAccountMetadata {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 /// Bounded safe directory names plus an explicit partial-listing marker.
 pub(crate) struct RemoteUtilityDirectoryListing {
     names: Vec<String>,
     truncated: bool,
+}
+
+impl fmt::Debug for RemoteUtilityDirectoryListing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteUtilityDirectoryListing(<redacted>)")
+    }
 }
 
 impl RemoteUtilityDirectoryListing {
@@ -985,6 +1003,18 @@ mod tests {
     use crate::ssh::process::{ProcessExit, SshProcessEnvironment};
 
     const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn process_output_debug_should_redact_remote_stdout() {
+        let output = RemoteUtilityProcessOutput::new(
+            ProcessExit::successful(),
+            b"sensitive-remote-output".to_vec(),
+        );
+
+        let debug = format!("{output:?}");
+        assert_eq!(debug, "RemoteUtilityProcessOutput(<redacted>)");
+        assert!(!debug.contains("sensitive"));
+    }
 
     #[derive(Default)]
     struct FakeRunnerState {

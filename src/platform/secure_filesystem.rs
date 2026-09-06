@@ -117,7 +117,7 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         directory: &SecureDirectory,
         target: &OsStr,
         bytes: &[u8],
-        allocation_sequence: u64,
+        allocation_nonce: [u8; 16],
     ) -> Result<PreparedPrivateFile, SecureFilesystemError>;
 
     fn commit_private_file(

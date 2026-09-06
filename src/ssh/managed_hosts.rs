@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::num::NonZeroU16;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
@@ -24,8 +24,6 @@ const IDENTITY_FILE_BYTES: usize = 1024;
 const MANAGED_CONFIG_BYTES: usize = 1024 * 1024;
 const TEMP_CREATION_ATTEMPTS: usize = 128;
 const MUTATION_ATTEMPTS: usize = 8;
-
-static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedSshHostField {
@@ -55,13 +53,19 @@ pub(crate) struct ManagedSshHostValidationError {
     pub(crate) kind: ManagedSshHostValueError,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ManagedSshHost {
     alias: SshHostAlias,
     host_name: String,
     user: Option<String>,
     port: Option<NonZeroU16>,
     identity_file: Option<String>,
+}
+
+impl fmt::Debug for ManagedSshHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManagedSshHost(<redacted>)")
+    }
 }
 
 impl ManagedSshHost {
@@ -122,10 +126,10 @@ pub(crate) enum ManagedHostsFormatError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ManagedHostsError {
-    #[error("SSH alias `{alias}` is already configured")]
-    AliasCollision { alias: String },
-    #[error("managed SSH alias `{alias}` does not exist")]
-    Missing { alias: String },
+    #[error("the SSH alias is already configured")]
+    AliasCollision,
+    #[error("the managed SSH alias does not exist")]
+    Missing,
     #[error("the managed SSH config is not in SpaceTerm's canonical format")]
     NonCanonical,
     #[error(
@@ -202,9 +206,7 @@ impl<'a> ManagedHostsStore<'a> {
             .iter()
             .any(|configured| configured_host_collides(configured, host.alias(), editing_alias))
         {
-            return Err(ManagedHostsError::AliasCollision {
-                alias: host.alias().as_str().to_owned(),
-            });
+            return Err(ManagedHostsError::AliasCollision);
         }
         for _ in 0..MUTATION_ATTEMPTS {
             let snapshot = self.read_snapshot()?;
@@ -218,26 +220,20 @@ impl<'a> ManagedHostsStore<'a> {
                 let position = hosts
                     .iter()
                     .position(|existing| existing.alias() == editing_alias)
-                    .ok_or_else(|| ManagedHostsError::Missing {
-                        alias: editing_alias.as_str().to_owned(),
-                    })?;
+                    .ok_or(ManagedHostsError::Missing)?;
                 if editing_alias != host.alias()
                     && hosts
                         .iter()
                         .any(|existing| existing.alias() == host.alias())
                 {
-                    return Err(ManagedHostsError::AliasCollision {
-                        alias: host.alias().as_str().to_owned(),
-                    });
+                    return Err(ManagedHostsError::AliasCollision);
                 }
                 hosts.remove(position);
             } else if hosts
                 .iter()
                 .any(|existing| existing.alias() == host.alias())
             {
-                return Err(ManagedHostsError::AliasCollision {
-                    alias: host.alias().as_str().to_owned(),
-                });
+                return Err(ManagedHostsError::AliasCollision);
             }
             hosts.push(host.clone());
             match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
@@ -264,9 +260,7 @@ impl<'a> ManagedHostsStore<'a> {
             let position = hosts
                 .iter()
                 .position(|host| host.alias() == alias)
-                .ok_or_else(|| ManagedHostsError::Missing {
-                    alias: alias.as_str().to_owned(),
-                })?;
+                .ok_or(ManagedHostsError::Missing)?;
             hosts.remove(position);
             match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
                 SecureCommitOutcome::Committed => return Ok(()),
@@ -317,11 +311,12 @@ impl<'a> ManagedHostsStore<'a> {
             .file_name()
             .ok_or(ManagedHostsError::StorageUnavailable)?;
         for _ in 0..TEMP_CREATION_ATTEMPTS {
-            let sequence = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
+            let mut nonce = [0_u8; 16];
+            getrandom::fill(&mut nonce).map_err(|_| ManagedHostsError::StorageUnavailable)?;
             match self
                 .paths
                 .filesystem()
-                .prepare_private_file(directory, name, bytes, sequence)
+                .prepare_private_file(directory, name, bytes, nonce)
             {
                 Ok(prepared) => {
                     return self
@@ -626,6 +621,8 @@ mod tests {
         directories: BTreeSet<PathBuf>,
         files: BTreeMap<(PathBuf, String), (Vec<u8>, u64)>,
         conflicts_remaining: usize,
+        prepare_collisions_remaining: usize,
+        preparation_nonces: Vec<[u8; 16]>,
         next_identity: u64,
         events: Vec<&'static str>,
     }
@@ -650,6 +647,10 @@ mod tests {
 
         fn set_conflicts(&self, conflicts: usize) {
             self.state.lock().unwrap().conflicts_remaining = conflicts;
+        }
+
+        fn set_prepare_collisions(&self, collisions: usize) {
+            self.state.lock().unwrap().prepare_collisions_remaining = collisions;
         }
     }
 
@@ -722,9 +723,16 @@ mod tests {
             directory: &SecureDirectory,
             target: &OsStr,
             bytes: &[u8],
-            _: u64,
+            nonce: [u8; 16],
         ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
-            self.state.lock().unwrap().events.push("prepare");
+            let mut state = self.state.lock().unwrap();
+            state.events.push("prepare");
+            state.preparation_nonces.push(nonce);
+            if state.prepare_collisions_remaining > 0 {
+                state.prepare_collisions_remaining -= 1;
+                return Err(SecureFilesystemError::AlreadyExists);
+            }
+            drop(state);
             Ok(PreparedPrivateFile::from_opaque(RecordingPrepared(
                 Self::directory_path(directory)?.clone(),
                 target.to_string_lossy().into_owned(),
@@ -865,6 +873,27 @@ mod tests {
     }
 
     #[test]
+    fn mutation_should_retry_temporary_name_collisions_with_fresh_nonces() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem.set_prepare_collisions(2);
+        let paths = paths(filesystem.clone());
+        let store = ManagedHostsStore::new(&paths);
+
+        store
+            .upsert(host("work", "work.example"), &[], None)
+            .unwrap();
+
+        let state = filesystem.state.lock().unwrap();
+        assert_eq!(state.preparation_nonces.len(), 3);
+        assert!(
+            state
+                .preparation_nonces
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
+        );
+    }
+
+    #[test]
     fn mutation_should_stop_after_the_portable_retry_bound() {
         let filesystem = Arc::new(RecordingFilesystem::default());
         filesystem.set_conflicts(MUTATION_ATTEMPTS);
@@ -915,5 +944,25 @@ mod tests {
             ManagedHostsError::StorageUnavailable.to_string(),
             "managed SSH storage is unavailable"
         );
+        assert_eq!(
+            ManagedHostsError::AliasCollision.to_string(),
+            "the SSH alias is already configured"
+        );
+    }
+
+    #[test]
+    fn managed_host_debug_should_redact_all_connection_values() {
+        let host = ManagedSshHost::new(
+            "sensitive-alias".into(),
+            "sensitive.example".into(),
+            Some("sensitive-user".into()),
+            None,
+            Some("/sensitive/key".into()),
+        )
+        .unwrap();
+
+        let debug = format!("{host:?}");
+        assert_eq!(debug, "ManagedSshHost(<redacted>)");
+        assert!(!debug.contains("sensitive"));
     }
 }

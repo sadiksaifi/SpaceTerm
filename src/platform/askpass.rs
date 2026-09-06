@@ -48,6 +48,28 @@ pub(super) struct AskPassCapability {
     text: Zeroizing<String>,
 }
 
+/// One non-clone, non-Debug capability copy owned only across an SSH spawn boundary.
+pub(crate) struct AskPassCapabilityCopy {
+    bytes: Zeroizing<Vec<u8>>,
+}
+
+impl AskPassCapabilityCopy {
+    pub(crate) fn environment_name(&self) -> &'static OsStr {
+        OsStr::new(CAPABILITY_ENV)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bytes: Zeroizing::new(bytes.to_vec()),
+        }
+    }
+}
+
 impl AskPassCapability {
     pub(super) fn generate() -> Result<Self, AskPassUnavailable> {
         let mut bytes = Zeroizing::new([0_u8; CAPABILITY_BYTES]);
@@ -309,6 +331,9 @@ impl<'a> FrameCursor<'a> {
 }
 
 /// Only the native endpoint connection mechanic is injected into portable helper policy.
+///
+/// Implementations must authenticate the expected broker process before returning a stream. The
+/// portable helper writes its capability and prompt immediately after this method succeeds.
 pub(super) trait AskPassHelperConnector {
     type Stream: Read + Write;
 
@@ -318,7 +343,7 @@ pub(super) trait AskPassHelperConnector {
 struct HelperInvocation {
     mode: OsString,
     endpoint: Option<OsString>,
-    capability: Option<OsString>,
+    capability: Option<Zeroizing<Vec<u8>>>,
     prompt: Option<OsString>,
     prompt_kind: Option<OsString>,
 }
@@ -331,7 +356,9 @@ pub(super) fn dispatch_helper_from_environment(
         let invocation = HelperInvocation {
             mode,
             endpoint: std::env::var_os(ENDPOINT_ENV),
-            capability: std::env::var_os(CAPABILITY_ENV),
+            capability: std::env::var_os(CAPABILITY_ENV)
+                .map(OsString::into_encoded_bytes)
+                .map(Zeroizing::new),
             prompt: std::env::args_os().nth(1),
             prompt_kind: std::env::var_os(SSH_PROMPT_KIND_ENV),
         };
@@ -355,16 +382,13 @@ fn run_helper<C: AskPassHelperConnector, W: Write>(
     let (Some(endpoint), Some(capability)) = (invocation.endpoint, invocation.capability) else {
         return HELPER_FAILED;
     };
-    let Some(capability) = capability.to_str() else {
-        return HELPER_FAILED;
-    };
     if capability.len() != CAPABILITY_TEXT_BYTES {
         return HELPER_FAILED;
     }
     let Ok(mut stream) = connector.connect(&endpoint) else {
         return HELPER_FAILED;
     };
-    if write_request(&mut stream, capability.as_bytes(), &request).is_err() {
+    if write_request(&mut stream, capability.as_slice(), &request).is_err() {
         return HELPER_FAILED;
     }
     let Ok(answer) = read_reply(&mut stream) else {
@@ -836,37 +860,54 @@ impl GpuiAskPassBrokerFactory {
 
 impl AskPassAttemptFactory for GpuiAskPassBrokerFactory {
     fn start_attempt(&self, paths: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
-        let observation = AskPassAttemptObservation::default();
-        let presenter = Arc::new(ObservedAskPassPresenter::new(
+        start_attempt_with_presenter(
+            paths,
+            self.helper_path.clone(),
+            self.local_ipc.as_ref(),
             self.bridge.presenter(),
-            observation.clone(),
-        ));
-        let capability = Arc::new(AskPassCapability::generate()?);
-        let endpoint = self.local_ipc.bind(paths)?;
-        let environment = Arc::new(AskPassEnvironment {
-            helper_path: self.helper_path.clone(),
-            endpoint: endpoint.address.clone(),
-            capability: Arc::clone(&capability),
-        });
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let worker_presenter = Arc::clone(&presenter) as Arc<dyn AskPassPresenter>;
-        let worker = thread::Builder::new()
-            .name("spaceterm-askpass-broker".to_owned())
-            .spawn(move || run_broker(endpoint, capability, worker_presenter, worker_stop))
-            .map_err(|_| AskPassUnavailable)?;
-        let cancel_presenter = Arc::clone(&presenter);
-        let cancel_presentation: Arc<dyn Fn() + Send + Sync> =
-            Arc::new(move || cancel_presenter.cancel_active());
-        let lifetime = Arc::new(AskPassBrokerLifetime {
-            environment,
-            teardown: AskPassTeardown::new(stop, cancel_presentation, worker),
-        });
-        Ok(AskPassAttempt {
-            lease: AskPassBrokerLease::new(lifetime),
-            observation,
-        })
+        )
     }
+}
+
+pub(super) fn start_attempt_with_presenter(
+    paths: &AppPaths,
+    helper_path: PathBuf,
+    local_ipc: &dyn AskPassLocalIpc,
+    presenter: Arc<dyn AskPassPresenter>,
+) -> Result<AskPassAttempt, AskPassUnavailable> {
+    if !helper_path.is_absolute() {
+        return Err(AskPassUnavailable);
+    }
+    let observation = AskPassAttemptObservation::default();
+    let presenter = Arc::new(ObservedAskPassPresenter::new(
+        presenter,
+        observation.clone(),
+    ));
+    let capability = Arc::new(AskPassCapability::generate()?);
+    let endpoint = local_ipc.bind(paths)?;
+    let environment = Arc::new(AskPassEnvironment {
+        helper_path,
+        endpoint: endpoint.address.clone(),
+        capability: Arc::clone(&capability),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker_presenter = Arc::clone(&presenter) as Arc<dyn AskPassPresenter>;
+    let worker = thread::Builder::new()
+        .name("spaceterm-askpass-broker".to_owned())
+        .spawn(move || run_broker(endpoint, capability, worker_presenter, worker_stop))
+        .map_err(|_| AskPassUnavailable)?;
+    let cancel_presenter = Arc::clone(&presenter);
+    let cancel_presentation: Arc<dyn Fn() + Send + Sync> =
+        Arc::new(move || cancel_presenter.cancel_active());
+    let lifetime = Arc::new(AskPassBrokerLifetime {
+        environment,
+        teardown: AskPassTeardown::new(stop, cancel_presentation, worker),
+    });
+    Ok(AskPassAttempt {
+        lease: AskPassBrokerLease::new(lifetime),
+        observation,
+    })
 }
 
 struct AskPassBrokerLifetime {
@@ -881,6 +922,10 @@ impl AskPassLease for AskPassBrokerLifetime {
 
     fn cancel(&self) {
         self.teardown.close();
+    }
+
+    fn capability(&self) -> &[u8] {
+        self.environment.capability.as_str().as_bytes()
     }
 }
 
@@ -929,6 +974,7 @@ fn handle_verified_connection<S: Read + Write + ?Sized>(
 pub(crate) trait AskPassLease: Send + Sync {
     fn entries(&self) -> Vec<(&'static str, &OsStr)>;
     fn cancel(&self);
+    fn capability(&self) -> &[u8];
 }
 #[derive(Clone)]
 pub(crate) struct AskPassBrokerLease(Arc<dyn AskPassLease>);
@@ -936,8 +982,22 @@ impl AskPassBrokerLease {
     pub(crate) fn new(lease: Arc<dyn AskPassLease>) -> Self {
         Self(lease)
     }
+    #[cfg(test)]
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
         self.0.entries().into_iter()
+    }
+
+    pub(crate) fn ordinary_spawn_entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
+        self.0
+            .entries()
+            .into_iter()
+            .filter(|(name, _)| *name != CAPABILITY_ENV)
+    }
+
+    pub(crate) fn capability_copy_for_spawn(&self) -> AskPassCapabilityCopy {
+        AskPassCapabilityCopy {
+            bytes: Zeroizing::new(self.0.capability().to_vec()),
+        }
     }
     pub(crate) fn cancel(&self) {
         self.0.cancel();
@@ -1053,7 +1113,7 @@ mod tests {
         HelperInvocation {
             mode: OsString::from(mode),
             endpoint: Some(OsString::from("private-endpoint")),
-            capability: Some(OsString::from(token().as_str())),
+            capability: Some(Zeroizing::new(token().as_str().as_bytes().to_vec())),
             prompt: Some(OsString::from("Password:")),
             prompt_kind: None,
         }

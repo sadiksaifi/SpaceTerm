@@ -24,7 +24,7 @@ const XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE: &str = "XDG_RUNTIME_DIR";
 
 static NEXT_RUNTIME_OWNER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct AppPathEnvironment {
     pub(crate) home: Option<OsString>,
     pub(crate) xdg_config_home: Option<OsString>,
@@ -32,6 +32,12 @@ pub(crate) struct AppPathEnvironment {
     pub(crate) xdg_state_home: Option<OsString>,
     pub(crate) xdg_cache_home: Option<OsString>,
     pub(crate) xdg_runtime_dir: Option<OsString>,
+}
+
+impl std::fmt::Debug for AppPathEnvironment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AppPathEnvironment(<redacted>)")
+    }
 }
 
 impl AppPathEnvironment {
@@ -515,6 +521,19 @@ mod tests {
         PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome,
     };
 
+    #[test]
+    fn captured_environment_debug_should_redact_paths() {
+        let environment = AppPathEnvironment {
+            home: Some("/sensitive/home".into()),
+            xdg_runtime_dir: Some("/sensitive/runtime".into()),
+            ..AppPathEnvironment::default()
+        };
+
+        let debug = format!("{environment:?}");
+        assert_eq!(debug, "AppPathEnvironment(<redacted>)");
+        assert!(!debug.contains("sensitive"));
+    }
+
     #[derive(Default)]
     struct RecordingFilesystem {
         directories: Mutex<BTreeSet<PathBuf>>,
@@ -596,7 +615,7 @@ mod tests {
             _: &SecureDirectory,
             _: &OsStr,
             _: &[u8],
-            _: u64,
+            _: [u8; 16],
         ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
             Ok(PreparedPrivateFile(Box::new(())))
         }

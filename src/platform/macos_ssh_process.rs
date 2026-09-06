@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
@@ -34,6 +35,9 @@ impl SshProcessAdapter for MacOsSshProcessAdapter {
             .stderr(stdio(request.stderr()));
         for (name, value) in request.environment() {
             command.env(name, value);
+        }
+        if let Some((name, capability)) = request.askpass_capability_environment() {
+            command.env(name, std::ffi::OsStr::from_bytes(capability));
         }
         let mut child = command.spawn().map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -147,6 +151,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::platform::askpass::AskPassCapabilityCopy;
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(
@@ -178,6 +183,40 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(group > 0 && group == process_group && initial.is_none());
+    }
+
+    #[test]
+    fn askpass_capability_should_cross_the_native_spawn_boundary_separately() {
+        let capability = b"test-only-capability";
+        let script = "test \"$SPACETERM_SSH_ASKPASS_CAPABILITY\" = test-only-capability";
+        let request = shell_request(script)
+            .with_askpass_capability(Some(AskPassCapabilityCopy::from_test_bytes(capability)));
+        assert!(
+            request
+                .environment()
+                .iter()
+                .all(|(name, _)| name != "SPACETERM_SSH_ASKPASS_CAPABILITY")
+        );
+        assert_eq!(
+            request.askpass_capability_environment(),
+            Some((
+                std::ffi::OsStr::new("SPACETERM_SSH_ASKPASS_CAPABILITY"),
+                capability.as_slice(),
+            ))
+        );
+
+        let adapter = MacOsSshProcessAdapter;
+        let mut spawned = adapter.spawn(request).unwrap();
+        let exit = (0..100).find_map(|_| {
+            let exit = adapter.try_status(spawned.process_mut()).unwrap();
+            if exit.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            exit
+        });
+        adapter.reap(spawned.into_process()).unwrap();
+
+        assert!(exit.is_some_and(ProcessExit::is_success));
     }
 
     #[test]

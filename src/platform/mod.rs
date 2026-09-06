@@ -32,6 +32,11 @@ mod macos_control_socket;
 pub(crate) mod macos_control_socket;
 
 #[cfg(all(target_os = "macos", not(test)))]
+mod macos_host_config_filesystem;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_host_config_filesystem;
+
+#[cfg(all(target_os = "macos", not(test)))]
 mod macos_secure_filesystem;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_secure_filesystem;

@@ -601,7 +601,6 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::collections::VecDeque;
-    use std::io;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Mutex;
@@ -619,7 +618,8 @@ mod tests {
         &'a mut VisualTestContext,
     );
     use crate::ssh::host_config::{
-        HostConfigFilesystem, HostConfigRoots, HostDiscoveryLimits, discover_ssh_hosts,
+        HostConfigFilesystem, HostConfigFilesystemError, HostConfigRoots, HostDiscoveryLimits,
+        discover_ssh_hosts,
     };
 
     struct MemoryHostConfigFilesystem {
@@ -628,18 +628,22 @@ mod tests {
     }
 
     impl HostConfigFilesystem for MemoryHostConfigFilesystem {
-        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf, HostConfigFilesystemError> {
             Ok(path.to_path_buf())
         }
 
-        fn read_file_limited(&self, path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+        fn read_file_limited(
+            &self,
+            path: &Path,
+            maximum_bytes: usize,
+        ) -> Result<Vec<u8>, HostConfigFilesystemError> {
             if self.unreadable.contains(path) {
-                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+                return Err(HostConfigFilesystemError::Unavailable);
             }
             let contents = self
                 .files
                 .get(path)
-                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+                .ok_or(HostConfigFilesystemError::Missing)?;
             Ok(contents
                 .iter()
                 .copied()
@@ -647,7 +651,11 @@ mod tests {
                 .collect())
         }
 
-        fn read_directory_limited(&self, _: &Path, _: usize) -> io::Result<Vec<PathBuf>> {
+        fn read_directory_limited(
+            &self,
+            _: &Path,
+            _: usize,
+        ) -> Result<Vec<PathBuf>, HostConfigFilesystemError> {
             Ok(Vec::new())
         }
     }

@@ -475,8 +475,10 @@ decisions. Portable managed-host policy owns validation, ordering, conflicts, ac
 protection, mutation sequencing, and retry decisions. The secure-filesystem Interface exposes only
 closed operations and identities needed by those policies. The macOS Adapter privately retains
 descriptor-relative no-follow traversal, native identity and ownership checks, permission
-enforcement, and race-resistant replacement and deletion. Raw descriptors, inode fields, mode
-bits, and native errors never cross the Interface.
+enforcement, unpredictable temporary allocation, and race-resistant replacement and deletion.
+Deletion first moves the named entry into a private unpredictable quarantine and removes it only
+after its exact identity is revalidated there. Raw descriptors, inode fields, mode bits, and native
+errors never cross the Interface.
 
 Portable process supervision owns cancellation, deadlines, graceful and forced escalation,
 descendant cleanup decisions, stale observation rejection, and exactly-once cleanup. The process
@@ -484,6 +486,8 @@ Interface carries validated command values and closed results without process id
 process groups, or raw errors. The macOS Adapter privately retains process-group creation, signal
 delivery, nonblocking status collection, and final reap. A dropped or cancelled operation transfers
 cleanup to retained background ownership, and GPUI never waits for process termination or reap.
+Runtime sockets, owner namespaces, and active alias leases remain owned until the background
+completion observes descendant termination, leader reap, and diagnostic-reader completion.
 
 The portable AskPass broker owns bounded versioned framing, constant-time capability comparison,
 request and reply validation, prompt classification, single-prompt authority, cancellation,
@@ -491,14 +495,20 @@ observation, helper-mode policy, response zeroization, and teardown ordering. Ca
 comes from portable `getrandom`. GPUI coordinates the application-owned Alert or obscured Dialog,
 and only the exact prompt generation may resume connection progress. The macOS local-IPC Adapter
 retains Unix listener and stream mechanics, exact endpoint cleanup, and same-user peer inspection;
-peer inspection occurs before any frame is parsed or presented. The helper dispatch remains before
-startup dependency capture and bypasses GPUI application launch completely.
+the helper authenticates the exact broker process before sending its capability or prompt, and the
+broker authenticates the same-user helper before any frame is parsed or presented. The helper
+dispatch remains before startup dependency capture and bypasses GPUI application launch completely.
 
 The OpenSSH executable, runtime and socket locations, capability tokens, prompts, replies,
 authentication material, environment values, SSH Destinations, process identities, and raw native
 failures never enter Debug output, errors, Local Diagnostics, or terminal state. User-visible
 availability and recovery guidance is host-neutral and never promises one executable or temporary
 directory.
+
+Broker-authorized process launches receive the exact six-variable AskPass overlay with the
+capability held separately in zeroizing spawn ownership. A Terminal Session Channel is already
+authorized against its live Control Connection and receives no AskPass transport state; its fixed
+ControlMaster and ProxyCommand policy fails closed instead of opening a new authenticated path.
 
 The audit against pinned GPUI 0.2.2 and portable Rust retains only these macOS mechanics:
 

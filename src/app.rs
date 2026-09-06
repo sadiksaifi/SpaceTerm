@@ -15,6 +15,7 @@ use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{
     OpenSshExecutable, SshCapability, SshCapabilityProbe, SshUnavailableReason,
 };
+use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
@@ -46,6 +47,7 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
     executable: OpenSshExecutable,
     process_adapter: A,
     control_socket_probe: Arc<dyn ControlSocketProbe>,
+    host_config_filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
@@ -55,6 +57,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         executable: OpenSshExecutable,
         process_adapter: A,
         control_socket_probe: Arc<dyn ControlSocketProbe>,
+        host_config_filesystem: Arc<dyn HostConfigFilesystem>,
     ) -> Result<Self, StartupDependenciesError> {
         let path_environment = AppPathEnvironment::capture();
         let home_directory = path_environment
@@ -88,6 +91,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             executable,
             process_adapter,
             control_socket_probe,
+            host_config_filesystem,
         })
     }
 
@@ -105,6 +109,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
                 executable: self.executable.clone(),
                 process_adapter: self.process_adapter.clone(),
                 control_socket_probe: Arc::clone(&self.control_socket_probe),
+                host_config_filesystem: Arc::clone(&self.host_config_filesystem),
             },
             askpass,
         ))

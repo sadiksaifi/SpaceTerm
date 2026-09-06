@@ -1,9 +1,8 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -13,7 +12,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use super::startup_environment::StartupSshEnvironment;
-use crate::platform::askpass::AskPassBrokerLease;
+use crate::platform::askpass::{AskPassBrokerLease, AskPassCapabilityCopy};
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
 const TRANSIENT_SSH_ERROR_TRUNCATION_MARKER: &str = "[earlier OpenSSH output truncated] ";
@@ -156,8 +155,16 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
         signal: ProcessSignal,
     ) -> Result<(), SshProcessMechanismError>;
 
-    /// Consumes ownership and synchronously terminates and reaps the process group.
-    fn force_cleanup(&self, child: Self::Child);
+    /// Enqueues owned-process cleanup without blocking the caller.
+    ///
+    /// The returned completion resolves only after the process group is killed, the leader is
+    /// reaped, every diagnostic reader has finished, and `after` has run. Dropping the completion
+    /// detaches observation without cancelling cleanup.
+    fn begin_cleanup(
+        &self,
+        child: Self::Child,
+        after: Option<ProcessCleanupCallback>,
+    ) -> SshProcessCleanup;
 
     /// Takes a bounded, sanitized diagnostic tail without exposing raw process output.
     fn take_error_output(&self, _child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
@@ -165,6 +172,26 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     }
 
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send;
+}
+
+pub(crate) type ProcessCleanupCallback = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Clone)]
+/// Awaitable observation of an already-enqueued owned-process cleanup.
+pub(crate) struct SshProcessCleanup {
+    completion: async_channel::Receiver<()>,
+}
+
+impl SshProcessCleanup {
+    pub(crate) fn completed() -> Self {
+        let (sender, completion) = async_channel::bounded(1);
+        drop(sender);
+        Self { completion }
+    }
+
+    pub(crate) async fn wait(&self) {
+        let _ = self.completion.recv().await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +242,7 @@ pub(crate) struct SshProcessSpawnRequest {
     arguments: Vec<OsString>,
     current_directory: PathBuf,
     environment: Vec<(OsString, OsString)>,
+    askpass_capability: Option<AskPassCapabilityCopy>,
     stdin: SshProcessStdio,
     stdout: SshProcessStdio,
     stderr: SshProcessStdio,
@@ -235,6 +263,7 @@ impl SshProcessSpawnRequest {
             arguments,
             current_directory,
             environment,
+            askpass_capability: None,
             stdin,
             stdout,
             stderr,
@@ -255,6 +284,20 @@ impl SshProcessSpawnRequest {
 
     pub(crate) fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
+    }
+
+    pub(crate) fn with_askpass_capability(
+        mut self,
+        capability: Option<AskPassCapabilityCopy>,
+    ) -> Self {
+        self.askpass_capability = capability;
+        self
+    }
+
+    pub(crate) fn askpass_capability_environment(&self) -> Option<(&OsStr, &[u8])> {
+        self.askpass_capability
+            .as_ref()
+            .map(|capability| (capability.environment_name(), capability.as_bytes()))
     }
 
     pub(crate) const fn stdin(&self) -> SshProcessStdio {
@@ -428,27 +471,46 @@ impl SshProcessEnvironment {
         Self::validated(home, SshAuthentication::None, startup.clone())
     }
 
-    fn launch_parts(&self) -> (PathBuf, Vec<(OsString, OsString)>) {
+    fn launch_parts(
+        &self,
+    ) -> (
+        PathBuf,
+        Vec<(OsString, OsString)>,
+        Option<AskPassCapabilityCopy>,
+    ) {
         let mut entries = vec![(OsString::from("HOME"), self.home.as_os_str().to_owned())];
         entries.extend(
             self.startup
                 .entries()
                 .map(|(name, value)| (name.into(), value.to_owned())),
         );
-        match &self.authentication {
-            SshAuthentication::AskPass(authentication) => entries.extend(
-                authentication
-                    .entries()
-                    .map(|(name, value)| (name.into(), value.to_owned())),
-            ),
+        let askpass_capability = match &self.authentication {
+            SshAuthentication::AskPass(authentication) => {
+                entries.extend(
+                    authentication
+                        .ordinary_spawn_entries()
+                        .map(|(name, value)| (name.into(), value.to_owned())),
+                );
+                Some(authentication.capability_copy_for_spawn())
+            }
             #[cfg(test)]
-            SshAuthentication::None => {}
-        }
-        (self.home.clone(), entries)
+            SshAuthentication::None => None,
+        };
+        (self.home.clone(), entries, askpass_capability)
     }
 
-    pub(crate) fn into_launch_environment(self) -> (PathBuf, Vec<(OsString, OsString)>) {
-        self.launch_parts()
+    /// Builds the environment for an already-authorized pane channel.
+    ///
+    /// Pane commands must use their live control connection and never receive AskPass transport
+    /// state. If that connection is unavailable, OpenSSH must fail instead of re-authenticating.
+    pub(crate) fn into_pane_launch_environment(self) -> (PathBuf, Vec<(OsString, OsString)>) {
+        let mut entries = vec![(OsString::from("HOME"), self.home.as_os_str().to_owned())];
+        entries.extend(
+            self.startup
+                .entries()
+                .map(|(name, value)| (name.into(), value.to_owned())),
+        );
+        (self.home, entries)
     }
 }
 
@@ -510,6 +572,8 @@ pub(crate) struct SupervisedSshChild<A: SshProcessAdapter> {
     adapter: A,
     process: Option<A::Process>,
     stderr_reader: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    cleanup_sender: async_channel::Sender<CleanupOwnership<A>>,
+    cleanup_receiver_guard: async_channel::Receiver<CleanupOwnership<A>>,
 }
 
 impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
@@ -552,12 +616,12 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
                     return Ok(exit);
                 }
                 if cancellation.is_cancelled() {
-                    backend.force_cleanup(child);
+                    backend.begin_cleanup(child, None).wait().await;
                     return Err(ProcessRunError::Cancelled);
                 }
                 let now = backend.now();
                 if now >= deadline {
-                    backend.force_cleanup(child);
+                    backend.begin_cleanup(child, None).wait().await;
                     return Err(ProcessRunError::TimedOut);
                 }
                 backend
@@ -589,8 +653,12 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
         child.adapter.signal(process, signal)
     }
 
-    fn force_cleanup(&self, child: Self::Child) {
-        drop(child);
+    fn begin_cleanup(
+        &self,
+        mut child: Self::Child,
+        after: Option<ProcessCleanupCallback>,
+    ) -> SshProcessCleanup {
+        child.enqueue_cleanup(after)
     }
 
     fn take_error_output(&self, child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
@@ -609,20 +677,39 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
 
 impl<A: SshProcessAdapter> Drop for SupervisedSshChild<A> {
     fn drop(&mut self) {
+        let _ = self.enqueue_cleanup(None);
+    }
+}
+
+impl<A: SshProcessAdapter> SupervisedSshChild<A> {
+    fn enqueue_cleanup(&mut self, after: Option<ProcessCleanupCallback>) -> SshProcessCleanup {
         let Some(process) = self.process.take() else {
-            return;
+            return SshProcessCleanup::completed();
         };
-        schedule_cleanup(
-            self.adapter.clone(),
+        let (completion_sender, completion) = async_channel::bounded(1);
+        let ownership = CleanupOwnership {
+            adapter: self.adapter.clone(),
             process,
-            self.stderr_reader.take().into_iter().collect(),
-        );
+            readers: self.stderr_reader.take().into_iter().collect(),
+            after,
+            _completion_sender: completion_sender,
+        };
+
+        // This guard keeps the unbounded queue open through the non-blocking send even if the
+        // dedicated reaper unexpectedly exits. Cleanup starts when the reaper receives ownership.
+        let _guard = &self.cleanup_receiver_guard;
+        let _ = self.cleanup_sender.send_blocking(ownership);
+        SshProcessCleanup { completion }
     }
 }
 
 fn process_request(
     spec: &SshCommandSpec,
-    (current_directory, environment): (PathBuf, Vec<(OsString, OsString)>),
+    (current_directory, environment, askpass_capability): (
+        PathBuf,
+        Vec<(OsString, OsString)>,
+        Option<AskPassCapabilityCopy>,
+    ),
     stdin: SshProcessStdio,
     stdout: SshProcessStdio,
     stderr: SshProcessStdio,
@@ -636,6 +723,7 @@ fn process_request(
         stdout,
         stderr,
     )
+    .with_askpass_capability(askpass_capability)
 }
 
 fn safe_absolute_path(path: &Path) -> bool {
@@ -647,10 +735,10 @@ fn spawn_owned_process<A: SshProcessAdapter>(
     request: SshProcessSpawnRequest,
 ) -> Result<SupervisedSshChild<A>, SshProcessMechanismError> {
     let SpawnedSshProcess { process, mut pipes } = adapter.spawn(request)?;
-    let stderr = pipes
-        .stderr
-        .take()
-        .ok_or(SshProcessMechanismError::PipesUnavailable)?;
+    let Some(stderr) = pipes.stderr.take() else {
+        cleanup_now(&adapter, process, Vec::new());
+        return Err(SshProcessMechanismError::PipesUnavailable);
+    };
     let stderr_reader = match std::thread::Builder::new()
         .name("spaceterm-ssh-stderr".to_owned())
         .spawn(move || read_final_error_tail(stderr))
@@ -661,10 +749,29 @@ fn spawn_owned_process<A: SshProcessAdapter>(
             return Err(SshProcessMechanismError::LaunchFailed);
         }
     };
+    let (cleanup_sender, cleanup_receiver) = async_channel::unbounded::<CleanupOwnership<A>>();
+    let cleanup_receiver_guard = cleanup_receiver.clone();
+    if std::thread::Builder::new()
+        .name("spaceterm-ssh-reaper".to_owned())
+        .spawn(move || {
+            if let Ok(ownership) = cleanup_receiver.recv_blocking() {
+                cleanup_now(&ownership.adapter, ownership.process, ownership.readers);
+                if let Some(after) = ownership.after {
+                    after();
+                }
+            }
+        })
+        .is_err()
+    {
+        cleanup_now(&adapter, process, vec![stderr_reader]);
+        return Err(SshProcessMechanismError::LaunchFailed);
+    }
     Ok(SupervisedSshChild {
         adapter,
         process: Some(process),
         stderr_reader: Some(stderr_reader),
+        cleanup_sender,
+        cleanup_receiver_guard,
     })
 }
 
@@ -714,6 +821,8 @@ struct CleanupOwnership<A: SshProcessAdapter> {
     adapter: A,
     process: A::Process,
     readers: Vec<JoinHandle<io::Result<Vec<u8>>>>,
+    after: Option<ProcessCleanupCallback>,
+    _completion_sender: async_channel::Sender<()>,
 }
 
 fn cleanup_now<A: SshProcessAdapter>(
@@ -725,34 +834,6 @@ fn cleanup_now<A: SshProcessAdapter>(
     let _ = adapter.reap(process);
     for reader in readers {
         let _ = reader.join();
-    }
-}
-
-fn schedule_cleanup<A: SshProcessAdapter>(
-    adapter: A,
-    process: A::Process,
-    readers: Vec<JoinHandle<io::Result<Vec<u8>>>>,
-) {
-    let ownership = CleanupOwnership {
-        adapter,
-        process,
-        readers,
-    };
-    let (sender, receiver) = mpsc::sync_channel::<CleanupOwnership<A>>(1);
-    if std::thread::Builder::new()
-        .name("spaceterm-ssh-reaper".to_owned())
-        .spawn(move || {
-            if let Ok(ownership) = receiver.recv() {
-                cleanup_now(&ownership.adapter, ownership.process, ownership.readers);
-            }
-        })
-        .is_err()
-    {
-        cleanup_now(&ownership.adapter, ownership.process, ownership.readers);
-        return;
-    }
-    if let Err(mpsc::SendError(returned)) = sender.send(ownership) {
-        cleanup_now(&returned.adapter, returned.process, returned.readers);
     }
 }
 
@@ -813,10 +894,11 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
     cancellation: &SshCancellationToken,
     deadline: Instant,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
+    let (current_directory, environment) = environment.launch_parts();
     run_captured_process_with_parts(
         adapter,
         spec,
-        environment.launch_parts(),
+        (current_directory, environment, None),
         CapturedProcessPlan {
             input: None,
             stdout_limit: stream_limit,
@@ -837,7 +919,11 @@ struct CapturedProcessPlan {
 fn run_captured_process_with_parts<A: SshProcessAdapter>(
     adapter: &A,
     spec: &SshCommandSpec,
-    environment: (PathBuf, Vec<(OsString, OsString)>),
+    environment: (
+        PathBuf,
+        Vec<(OsString, OsString)>,
+        Option<AskPassCapabilityCopy>,
+    ),
     plan: CapturedProcessPlan,
     cancellation: &SshCancellationToken,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
@@ -980,7 +1066,7 @@ impl<A: SshProcessAdapter> CapturedProcessOwnership<A> {
 impl<A: SshProcessAdapter> Drop for CapturedProcessOwnership<A> {
     fn drop(&mut self) {
         if let Some(process) = self.process.take() {
-            schedule_cleanup(self.adapter.clone(), process, Vec::new());
+            cleanup_now(&self.adapter, process, Vec::new());
         }
     }
 }
@@ -1101,9 +1187,63 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::Cursor;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::platform::askpass::AskPassLease;
     use crate::ssh::command::SshCommandSpec;
+    use zeroize::Zeroizing;
+
+    const ASKPASS_OVERLAY_NAMES: [&str; 6] = [
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "DISPLAY",
+        "SPACETERM_SSH_ASKPASS_MODE",
+        "SPACETERM_SSH_ASKPASS_SOCKET",
+        "SPACETERM_SSH_ASKPASS_CAPABILITY",
+    ];
+
+    struct TestAskPassLease {
+        helper: OsString,
+        endpoint: OsString,
+        capability: Zeroizing<String>,
+    }
+
+    impl AskPassLease for TestAskPassLease {
+        fn entries(&self) -> Vec<(&'static str, &OsStr)> {
+            vec![
+                ("SSH_ASKPASS", self.helper.as_os_str()),
+                ("SSH_ASKPASS_REQUIRE", OsStr::new("force")),
+                ("DISPLAY", OsStr::new("spaceterm-askpass")),
+                ("SPACETERM_SSH_ASKPASS_MODE", OsStr::new("broker-v1")),
+                ("SPACETERM_SSH_ASKPASS_SOCKET", self.endpoint.as_os_str()),
+                (
+                    "SPACETERM_SSH_ASKPASS_CAPABILITY",
+                    OsStr::new(self.capability.as_str()),
+                ),
+            ]
+        }
+
+        fn cancel(&self) {}
+
+        fn capability(&self) -> &[u8] {
+            self.capability.as_bytes()
+        }
+    }
+
+    fn authenticated_test_environment() -> SshProcessEnvironment {
+        let authentication = AskPassBrokerLease::new(Arc::new(TestAskPassLease {
+            helper: OsString::from("/test/helper"),
+            endpoint: OsString::from("00000001:/test/socket"),
+            capability: Zeroizing::new("test-only-capability".to_owned()),
+        }));
+        SshProcessEnvironment::new(
+            PathBuf::from("/captured/home"),
+            authentication,
+            &StartupSshEnvironment::for_test(None),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn transient_error_output_should_keep_only_the_sanitized_final_eight_kibibytes() {
@@ -1143,10 +1283,11 @@ mod tests {
             Some(agent_socket.clone()),
         )
         .unwrap();
-        let (directory, entries) = environment.launch_parts();
+        let (directory, entries, askpass_capability) = environment.launch_parts();
         let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
 
         assert_eq!(directory, home);
+        assert!(askpass_capability.is_none());
         assert_eq!(
             entries.get(std::ffi::OsStr::new("HOME")),
             Some(&OsString::from("/captured/home"))
@@ -1172,13 +1313,42 @@ mod tests {
         let environment =
             SshProcessEnvironment::new_without_authentication_from_startup(home.clone(), &startup)
                 .unwrap();
-        let (directory, entries) = environment.launch_parts();
+        let (directory, entries, askpass_capability) = environment.launch_parts();
 
         assert_eq!(directory, home);
+        assert!(askpass_capability.is_none());
         assert!(entries.contains(&(
             OsString::from("PATH"),
             OsString::from("/captured/bin:/usr/bin:/bin")
         )));
+    }
+
+    #[test]
+    fn authenticated_process_launch_separates_only_the_capability_from_the_six_entry_overlay() {
+        let (directory, entries, capability) = authenticated_test_environment().launch_parts();
+        let capability = capability.unwrap();
+        let mut overlay_names: Vec<_> = entries
+            .iter()
+            .map(|(name, _)| name.as_os_str())
+            .filter(|name| {
+                ASKPASS_OVERLAY_NAMES
+                    .iter()
+                    .any(|candidate| name == candidate)
+            })
+            .collect();
+        overlay_names.push(capability.environment_name());
+
+        assert_eq!(directory, Path::new("/captured/home"));
+        assert_eq!(
+            overlay_names,
+            ASKPASS_OVERLAY_NAMES.map(OsStr::new).as_slice()
+        );
+        assert_eq!(capability.as_bytes(), b"test-only-capability");
+        assert!(
+            entries
+                .iter()
+                .all(|(name, _)| name != "SPACETERM_SSH_ASKPASS_CAPABILITY")
+        );
     }
 
     #[test]
@@ -1201,7 +1371,7 @@ mod tests {
             Some(OsString::from("/private/tmp/agent.sock")),
         )
         .unwrap();
-        let (directory, entries) = environment.into_launch_environment();
+        let (directory, entries) = environment.into_pane_launch_environment();
         let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
         assert_eq!(directory, home);
         assert_eq!(
@@ -1219,6 +1389,18 @@ mod tests {
         assert!(!entries.contains_key(std::ffi::OsStr::new("SPACETERM_UNKNOWN")));
     }
 
+    #[test]
+    fn authenticated_pane_environment_should_exclude_askpass_transport() {
+        let (directory, entries) = authenticated_test_environment().into_pane_launch_environment();
+
+        assert_eq!(directory, Path::new("/captured/home"));
+        assert!(entries.iter().all(|(name, _)| {
+            !ASKPASS_OVERLAY_NAMES
+                .iter()
+                .any(|candidate| name == candidate)
+        }));
+    }
+
     #[derive(Clone, Default)]
     struct RecordingAdapter {
         state: Arc<Mutex<RecordingState>>,
@@ -1230,6 +1412,7 @@ mod tests {
         stderr: Vec<u8>,
         statuses: VecDeque<Option<ProcessExit>>,
         spawn_error: Option<SshProcessMechanismError>,
+        omit_requested_stderr: bool,
         cancel_on_status: Option<SshCancellationToken>,
         spawns: usize,
         signals: Vec<ProcessSignal>,
@@ -1254,7 +1437,8 @@ mod tests {
                 .then(|| Box::new(io::sink()) as Box<dyn Write + Send>);
             let stdout = (request.stdout() == SshProcessStdio::Piped)
                 .then(|| Box::new(Cursor::new(state.stdout.clone())) as Box<dyn Read + Send>);
-            let stderr = (request.stderr() == SshProcessStdio::Piped)
+            let stderr = (request.stderr() == SshProcessStdio::Piped
+                && !state.omit_requested_stderr)
                 .then(|| Box::new(Cursor::new(state.stderr.clone())) as Box<dyn Read + Send>);
             Ok(SpawnedSshProcess::new(
                 RecordingProcess,
@@ -1435,6 +1619,56 @@ mod tests {
             ) && state.spawns == 1
                 && state.signals.is_empty()
                 && state.reaps == 0
+        );
+    }
+
+    #[test]
+    fn recording_adapter_should_cleanup_when_a_requested_pipe_is_missing() {
+        let adapter = RecordingAdapter::default();
+        adapter.state.lock().unwrap().omit_requested_stderr = true;
+        let request = process_request(
+            &test_spec(),
+            test_environment().launch_parts(),
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+            SshProcessStdio::Piped,
+        );
+
+        let error = match spawn_owned_process(adapter.clone(), request) {
+            Ok(_) => panic!("missing requested stderr should fail the spawn"),
+            Err(error) => error,
+        };
+        let state = adapter.state.lock().unwrap();
+
+        assert_eq!(error, SshProcessMechanismError::PipesUnavailable);
+        assert_eq!(state.signals, [ProcessSignal::Kill]);
+        assert_eq!(state.reaps, 1);
+    }
+
+    #[test]
+    fn cleanup_completion_should_follow_process_reap_readers_and_callback() {
+        let adapter = RecordingAdapter::default();
+        let request = process_request(
+            &test_spec(),
+            test_environment().launch_parts(),
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+            SshProcessStdio::Piped,
+        );
+        let mut child = spawn_owned_process(adapter.clone(), request).unwrap();
+        let callback_ran = Arc::new(AtomicBool::new(false));
+        let callback_observer = Arc::clone(&callback_ran);
+
+        let cleanup = child.enqueue_cleanup(Some(Box::new(move || {
+            callback_observer.store(true, Ordering::Release);
+        })));
+        let _ = cleanup.completion.recv_blocking();
+        let state = adapter.state.lock().unwrap();
+
+        assert!(
+            state.signals == [ProcessSignal::Kill]
+                && state.reaps == 1
+                && callback_ran.load(Ordering::Acquire)
         );
     }
 

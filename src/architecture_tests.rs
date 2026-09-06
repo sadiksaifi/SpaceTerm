@@ -58,6 +58,8 @@ fn portable_ssh_runtime_cannot_encode_host_mechanics_or_host_selected_facts() {
             "std::process::Command",
             "std::process::{Child",
             "std::process::{Command",
+            "std::fs::",
+            "NativeHostConfigFilesystem",
             "libc::",
             "CommandExt",
             "AsRawFd",

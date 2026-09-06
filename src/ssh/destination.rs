@@ -1,7 +1,15 @@
+use std::fmt;
+
 use crate::domain::SshDestination;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SshHostAlias(String);
+
+impl fmt::Debug for SshHostAlias {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SshHostAlias(<redacted>)")
+    }
+}
 
 impl SshHostAlias {
     pub(crate) fn new(value: String) -> Result<Self, SshHostAliasError> {
@@ -31,7 +39,7 @@ impl SshHostAlias {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum DestinationQueryResolution {
     Configured {
         destination: SshDestination,
@@ -41,6 +49,12 @@ pub(crate) enum DestinationQueryResolution {
     AddHost {
         destination: SshDestination,
     },
+}
+
+impl fmt::Debug for DestinationQueryResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DestinationQueryResolution(<redacted>)")
+    }
 }
 
 impl DestinationQueryResolution {
@@ -127,6 +141,20 @@ mod tests {
 
     fn alias(value: &str) -> SshHostAlias {
         SshHostAlias::new(value.to_owned()).unwrap()
+    }
+
+    #[test]
+    fn debug_should_redact_aliases_and_destination_resolutions() {
+        let alias = alias("sensitive-host");
+        let resolution =
+            resolve_destination_query("user@sensitive-host", std::slice::from_ref(&alias), 255)
+                .unwrap();
+
+        assert_eq!(format!("{alias:?}"), "SshHostAlias(<redacted>)");
+        assert_eq!(
+            format!("{resolution:?}"),
+            "DestinationQueryResolution(<redacted>)"
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ struct NativeIdentity {
 
 struct NativePreparedFile {
     directory: Arc<NativeDirectory>,
+    file: File,
+    identity: NativeIdentity,
     temporary_name: CString,
     target_name: OsString,
     active: bool,
@@ -42,7 +44,13 @@ struct NativePreparedFile {
 impl Drop for NativePreparedFile {
     fn drop(&mut self) {
         if self.active {
-            let _ = unlink_at_cstring(&self.directory.file, &self.temporary_name, 0);
+            let name = OsStr::from_bytes(self.temporary_name.as_bytes());
+            let _ = quarantine_and_remove(
+                &self.directory.file,
+                name,
+                self.identity,
+                EntryKind::RegularFile,
+            );
         }
     }
 }
@@ -76,13 +84,28 @@ impl SecureFilesystem for MacosSecureFilesystem {
         let parent = directory(parent)?;
         verify_directory_entry(&parent)?;
         create_directory_at(&parent.file, name).map_err(classify)?;
-        match open_private_child(&parent, name) {
-            Ok(child) => Ok(wrap_directory(child)),
+        let file = open_directory_at(&parent.file, name).map_err(classify)?;
+        let identity = metadata_identity(&file.metadata().map_err(classify)?);
+        let child_parent = match parent.file.try_clone() {
+            Ok(parent) => parent,
             Err(error) => {
-                let _ = remove_at(&parent.file, name, libc::AT_REMOVEDIR);
-                Err(classify(error))
+                let _ = quarantine_and_remove(&parent.file, name, identity, EntryKind::Directory);
+                return Err(classify(error));
             }
+        };
+        let child = NativeDirectory {
+            parent: child_parent,
+            file,
+            name: name.to_os_string(),
+            identity,
+        };
+        if let Err(error) = set_file_mode(&child.file, PRIVATE_DIRECTORY_MODE)
+            .and_then(|()| private_directory_identity(&child.file).map(|_| ()))
+        {
+            let _ = quarantine_and_remove(&parent.file, name, identity, EntryKind::Directory);
+            return Err(classify(error));
         }
+        Ok(wrap_directory(child))
     }
 
     fn verify_directory(
@@ -102,12 +125,10 @@ impl SecureFilesystem for MacosSecureFilesystem {
         let parent = directory(parent_handle)?;
         let child = directory(child_handle)?;
         verify_directory_entry(&parent)?;
-        verify_directory_entry(&child)?;
-        let current = open_directory_at(&parent.file, name).map_err(classify)?;
-        if private_directory_identity(&current).map_err(classify)? != child.identity {
+        if private_directory_identity(&child.file).map_err(classify)? != child.identity {
             return Err(SecureFilesystemError::Unsafe);
         }
-        remove_at(&parent.file, name, libc::AT_REMOVEDIR).map_err(classify)
+        quarantine_and_remove(&parent.file, name, child.identity, EntryKind::Directory)
     }
 
     fn read_private_file(
@@ -149,34 +170,38 @@ impl SecureFilesystem for MacosSecureFilesystem {
         directory_handle: &SecureDirectory,
         target: &OsStr,
         bytes: &[u8],
-        allocation_sequence: u64,
+        allocation_nonce: [u8; 16],
     ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
         let directory = directory(directory_handle)?;
         verify_directory_entry(&directory)?;
-        let temporary_name = temporary_name(target, allocation_sequence)?;
-        let mut temporary = open_file_at_cstring(
+        let temporary_name = temporary_name(target, allocation_nonce)?;
+        let temporary = open_file_at_cstring(
             &directory.file,
             &temporary_name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             PRIVATE_FILE_MODE,
         )
         .map_err(classify)?;
-        if let Err(error) = (|| {
-            set_file_mode(&temporary, PRIVATE_FILE_MODE)?;
-            private_file_identity(&temporary.metadata()?).map_err(as_io_error)?;
-            temporary.write_all(bytes)?;
-            temporary.sync_all()?;
-            verify_directory_entry(&directory).map_err(as_io_error)
-        })() {
-            let _ = unlink_at_cstring(&directory.file, &temporary_name, 0);
-            return Err(classify(error));
-        }
-        Ok(PreparedPrivateFile(Box::new(NativePreparedFile {
+        let identity = metadata_identity(&temporary.metadata().map_err(classify)?);
+        let mut prepared = NativePreparedFile {
             directory: Arc::clone(&directory),
+            file: temporary,
+            identity,
             temporary_name,
             target_name: target.to_os_string(),
             active: true,
-        })))
+        };
+        if let Err(error) = (|| {
+            set_file_mode(&prepared.file, PRIVATE_FILE_MODE)?;
+            private_file_identity(&prepared.file.metadata()?).map_err(as_io_error)?;
+            (&prepared.file).write_all(bytes)?;
+            prepared.file.sync_all()?;
+            verify_directory_entry(&directory).map_err(as_io_error)
+        })() {
+            prepared.active = true;
+            return Err(classify(error));
+        }
+        Ok(PreparedPrivateFile(Box::new(prepared)))
     }
 
     fn commit_private_file(
@@ -189,6 +214,19 @@ impl SecureFilesystem for MacosSecureFilesystem {
             .downcast::<NativePreparedFile>()
             .map_err(|_| SecureFilesystemError::Unsafe)?;
         verify_directory_entry(&prepared.directory)?;
+        let open_identity = private_file_identity(&prepared.file.metadata().map_err(classify)?)?;
+        if open_identity != prepared.identity {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        let temporary_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
+        if entry_identity_at(
+            &prepared.directory.file,
+            temporary_name,
+            EntryKind::RegularFile,
+        )? != prepared.identity
+        {
+            return Err(SecureFilesystemError::Unsafe);
+        }
         let actual = file_identity_at(&prepared.directory.file, &prepared.target_name)?;
         let expected = expected.map(identity).transpose()?;
         if actual.as_ref() != expected {
@@ -201,6 +239,11 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 &prepared.target_name,
             )
             .map_err(classify)?;
+            if file_identity_at(&prepared.directory.file, &prepared.target_name)?
+                != Some(prepared.identity)
+            {
+                return Err(SecureFilesystemError::Unsafe);
+            }
             let displaced_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
             let displaced = match file_identity_at(&prepared.directory.file, displaced_name) {
                 Ok(displaced) => displaced,
@@ -231,7 +274,24 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 }
                 return Ok(SecureCommitOutcome::Conflict);
             }
-            if unlink_at_cstring(&prepared.directory.file, &prepared.temporary_name, 0).is_err() {
+            if quarantine_and_remove(
+                &prepared.directory.file,
+                displaced_name,
+                expected.copied().ok_or(SecureFilesystemError::Unsafe)?,
+                EntryKind::RegularFile,
+            )
+            .is_err()
+            {
+                if entry_identity_at(
+                    &prepared.directory.file,
+                    &prepared.target_name,
+                    EntryKind::RegularFile,
+                )? != prepared.identity
+                {
+                    prepared.active = false;
+                    return Err(SecureFilesystemError::Unsafe);
+                }
+                prepared.active = false;
                 return Ok(SecureCommitOutcome::CommittedButUnsynced);
             }
         } else {
@@ -241,9 +301,24 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 &prepared.target_name,
             ) {
                 Ok(()) => {
-                    if unlink_at_cstring(&prepared.directory.file, &prepared.temporary_name, 0)
-                        .is_err()
+                    if quarantine_and_remove(
+                        &prepared.directory.file,
+                        temporary_name,
+                        prepared.identity,
+                        EntryKind::RegularFile,
+                    )
+                    .is_err()
                     {
+                        if entry_identity_at(
+                            &prepared.directory.file,
+                            &prepared.target_name,
+                            EntryKind::RegularFile,
+                        )? != prepared.identity
+                        {
+                            prepared.active = false;
+                            return Err(SecureFilesystemError::Unsafe);
+                        }
+                        prepared.active = false;
                         return Ok(SecureCommitOutcome::CommittedButUnsynced);
                     }
                 }
@@ -254,6 +329,11 @@ impl SecureFilesystem for MacosSecureFilesystem {
             }
         }
         prepared.active = false;
+        if file_identity_at(&prepared.directory.file, &prepared.target_name)?
+            != Some(prepared.identity)
+        {
+            return Err(SecureFilesystemError::Unsafe);
+        }
         match prepared.directory.file.sync_all() {
             Ok(()) => Ok(SecureCommitOutcome::Committed),
             Err(_) => Ok(SecureCommitOutcome::CommittedButUnsynced),
@@ -299,9 +379,14 @@ impl SecureFilesystem for MacosSecureFilesystem {
         name: &OsStr,
         identity_handle: &SecureEntryIdentity,
     ) -> Result<(), SecureFilesystemError> {
-        self.verify_socket(directory_handle, name, identity_handle)?;
         let directory = directory(directory_handle)?;
-        remove_at(&directory.file, name, 0).map_err(classify)
+        verify_directory_entry(&directory)?;
+        quarantine_and_remove(
+            &directory.file,
+            name,
+            *identity(identity_handle)?,
+            EntryKind::Socket,
+        )
     }
 
     #[cfg(test)]
@@ -386,11 +471,18 @@ fn ensure_private_directory(path: &Path) -> io::Result<NativeDirectory> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 match create_directory_at(&parent, name) {
                     Ok(()) => {
-                        if let Err(error) = rollback.record(&parent, name) {
-                            let _ = remove_at(&parent, name, libc::AT_REMOVEDIR);
+                        let directory = open_directory_at(&parent, name)?;
+                        let identity = metadata_identity(&directory.metadata()?);
+                        if let Err(error) = rollback.record(&parent, name, identity) {
+                            let _ = quarantine_and_remove(
+                                &parent,
+                                name,
+                                identity,
+                                EntryKind::Directory,
+                            );
                             return Err(error);
                         }
-                        (open_directory_at(&parent, name)?, true)
+                        (directory, true)
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         (open_directory_at(&parent, name)?, false)
@@ -457,18 +549,6 @@ fn open_existing_private_directory(path: &Path) -> io::Result<NativeDirectory> {
     Err(io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-fn open_private_child(parent: &NativeDirectory, name: &OsStr) -> io::Result<NativeDirectory> {
-    let file = open_directory_at(&parent.file, name)?;
-    set_file_mode(&file, PRIVATE_DIRECTORY_MODE)?;
-    let identity = private_directory_identity(&file)?;
-    Ok(NativeDirectory {
-        parent: parent.file.try_clone()?,
-        file,
-        name: name.to_os_string(),
-        identity,
-    })
-}
-
 fn verify_directory_entry(directory: &NativeDirectory) -> Result<(), SecureFilesystemError> {
     let entry = open_directory_at(&directory.parent, &directory.name).map_err(classify)?;
     let entry_identity = private_directory_identity(&entry).map_err(classify)?;
@@ -507,6 +587,34 @@ fn metadata_identity(metadata: &fs::Metadata) -> NativeIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
     }
+}
+
+#[derive(Clone, Copy)]
+enum EntryKind {
+    RegularFile,
+    Socket,
+    Directory,
+}
+
+fn entry_identity_at(
+    parent: &File,
+    name: &OsStr,
+    kind: EntryKind,
+) -> Result<NativeIdentity, SecureFilesystemError> {
+    let status = status_at(parent, name).map_err(classify)?;
+    let mode = u32::from(status.st_mode);
+    let expected_type = match kind {
+        EntryKind::RegularFile => u32::from(libc::S_IFREG),
+        EntryKind::Socket => u32::from(libc::S_IFSOCK),
+        EntryKind::Directory => u32::from(libc::S_IFDIR),
+    };
+    if mode & u32::from(libc::S_IFMT) != expected_type {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(NativeIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino,
+    })
 }
 
 fn file_identity_at(
@@ -552,6 +660,41 @@ fn socket_identity_at(
     })
 }
 
+fn quarantine_and_remove(
+    parent: &File,
+    name: &OsStr,
+    expected: NativeIdentity,
+    kind: EntryKind,
+) -> Result<(), SecureFilesystemError> {
+    let quarantine = quarantine_name(name)?;
+    let original = component_cstring(name).map_err(classify)?;
+    rename_exclusive_at(parent, name, &quarantine).map_err(classify)?;
+    let quarantine_name = OsStr::from_bytes(quarantine.as_bytes());
+    let observed = entry_identity_at(parent, quarantine_name, kind);
+    match observed {
+        Ok(observed) if observed == expected => {
+            let flags = if matches!(kind, EntryKind::Directory) {
+                libc::AT_REMOVEDIR
+            } else {
+                0
+            };
+            if let Err(error) = remove_at(parent, quarantine_name, flags) {
+                let _ = rename_exclusive_at(parent, quarantine_name, &original);
+                return Err(classify(error));
+            }
+            Ok(())
+        }
+        Ok(_) | Err(SecureFilesystemError::Unsafe) => {
+            rename_exclusive_at(parent, quarantine_name, &original).map_err(classify)?;
+            Err(SecureFilesystemError::Unsafe)
+        }
+        Err(error) => {
+            let _ = rename_exclusive_at(parent, quarantine_name, &original);
+            Err(error)
+        }
+    }
+}
+
 fn status_at(parent: &File, name: &OsStr) -> io::Result<libc::stat> {
     let name = component_cstring(name)?;
     let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -572,12 +715,29 @@ fn status_at(parent: &File, name: &OsStr) -> io::Result<libc::stat> {
     }
 }
 
-fn temporary_name(target: &OsStr, sequence: u64) -> Result<CString, SecureFilesystemError> {
+fn temporary_name(target: &OsStr, nonce: [u8; 16]) -> Result<CString, SecureFilesystemError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut name = target.as_bytes().to_vec();
-    name.extend_from_slice(b".");
-    name.extend_from_slice(sequence.to_string().as_bytes());
+    name.push(b'.');
+    for byte in nonce {
+        name.push(HEX[usize::from(byte >> 4)]);
+        name.push(HEX[usize::from(byte & 0x0f)]);
+    }
     name.extend_from_slice(b".tmp");
     CString::new(name).map_err(|_| SecureFilesystemError::Unsafe)
+}
+
+fn quarantine_name(name: &OsStr) -> Result<CString, SecureFilesystemError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| SecureFilesystemError::Unavailable)?;
+    let mut quarantine = name.as_bytes().to_vec();
+    quarantine.extend_from_slice(b".spaceterm-quarantine.");
+    for byte in nonce {
+        quarantine.push(HEX[usize::from(byte >> 4)]);
+        quarantine.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    CString::new(quarantine).map_err(|_| SecureFilesystemError::Unsafe)
 }
 
 fn component_cstring(name: &OsStr) -> io::Result<CString> {
@@ -679,6 +839,25 @@ fn swap_at(parent: &File, source: &CString, target: &OsStr) -> io::Result<()> {
     }
 }
 
+fn rename_exclusive_at(parent: &File, source: &OsStr, target: &CString) -> io::Result<()> {
+    let source = component_cstring(source)?;
+    // SAFETY: the descriptor and both NUL-terminated names remain valid for this call.
+    let result = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 fn link_at(parent: &File, source: &CString, target: &OsStr) -> io::Result<()> {
     let target = component_cstring(target)?;
     // SAFETY: the descriptor and both NUL-terminated names remain valid for this call.
@@ -715,15 +894,15 @@ fn unlink_at_cstring(parent: &File, name: &CString, flags: i32) -> io::Result<()
 
 #[derive(Default)]
 struct DirectoryRollback {
-    created: Vec<(File, OsString)>,
+    created: Vec<(File, OsString, NativeIdentity)>,
     active: bool,
 }
 
 impl DirectoryRollback {
-    fn record(&mut self, parent: &File, name: &OsStr) -> io::Result<()> {
+    fn record(&mut self, parent: &File, name: &OsStr, identity: NativeIdentity) -> io::Result<()> {
         self.active = true;
         self.created
-            .push((parent.try_clone()?, name.to_os_string()));
+            .push((parent.try_clone()?, name.to_os_string(), identity));
         Ok(())
     }
 
@@ -735,8 +914,8 @@ impl DirectoryRollback {
 impl Drop for DirectoryRollback {
     fn drop(&mut self) {
         if self.active {
-            for (parent, name) in self.created.iter().rev() {
-                let _ = remove_at(parent, name, libc::AT_REMOVEDIR);
+            for (parent, name, identity) in self.created.iter().rev() {
+                let _ = quarantine_and_remove(parent, name, *identity, EntryKind::Directory);
             }
         }
     }
@@ -766,6 +945,14 @@ mod tests {
                 "spaceterm-secure-fs-{}-{sequence}-{label}",
                 std::process::id()
             ))
+    }
+
+    fn prepared_path(root: &Path, prepared: &PreparedPrivateFile) -> PathBuf {
+        let prepared = prepared
+            .0
+            .downcast_ref::<NativePreparedFile>()
+            .expect("native prepared file");
+        root.join(OsStr::from_bytes(prepared.temporary_name.as_bytes()))
     }
 
     #[test]
@@ -824,7 +1011,7 @@ mod tests {
         let filesystem = MacosSecureFilesystem;
         let directory = filesystem.ensure_private_directory(&root).unwrap();
         let first = filesystem
-            .prepare_private_file(&directory, OsStr::new("config"), b"first", 1)
+            .prepare_private_file(&directory, OsStr::new("config"), b"first", [1; 16])
             .unwrap();
         assert_eq!(
             filesystem.commit_private_file(first, None).unwrap(),
@@ -835,10 +1022,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let stale = filesystem
-            .prepare_private_file(&directory, OsStr::new("config"), b"stale", 2)
+            .prepare_private_file(&directory, OsStr::new("config"), b"stale", [2; 16])
             .unwrap();
         let replacement = filesystem
-            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", 3)
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", [3; 16])
             .unwrap();
         assert_eq!(
             filesystem
@@ -876,6 +1063,141 @@ mod tests {
 
         assert!(!path.exists());
         drop(listener);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_cleanup_should_restore_a_regular_file_replacement() {
+        let root = test_root("prepared-regular-replacement");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"owned", [7; 16])
+            .unwrap();
+        let path = prepared_path(&root, &prepared);
+        let owned = root.join("owned-backup");
+        fs::rename(&path, &owned).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+
+        drop(prepared);
+
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::read(&owned).unwrap(), b"owned");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_should_reject_and_restore_a_replaced_prepared_path() {
+        let root = test_root("commit-prepared-replacement");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"owned", [10; 16])
+            .unwrap();
+        let path = prepared_path(&root, &prepared);
+        let owned = root.join("owned-backup");
+        fs::rename(&path, &owned).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+
+        let result = filesystem.commit_private_file(prepared, None);
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert!(!root.join("config").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_cleanup_should_restore_a_symlink_replacement() {
+        let root = test_root("prepared-symlink-replacement");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"owned", [8; 16])
+            .unwrap();
+        let path = prepared_path(&root, &prepared);
+        let owned = root.join("owned-backup");
+        let outside = root.join("outside");
+        fs::rename(&path, &owned).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, &path).unwrap();
+
+        drop(prepared);
+
+        assert_eq!(fs::read_link(&path).unwrap(), outside);
+        assert_eq!(fs::read(&owned).unwrap(), b"owned");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_cleanup_should_restore_a_hard_link_replacement() {
+        let root = test_root("prepared-hard-link-replacement");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"owned", [9; 16])
+            .unwrap();
+        let path = prepared_path(&root, &prepared);
+        let owned = root.join("owned-backup");
+        let outside = root.join("outside");
+        fs::rename(&path, &owned).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+        fs::hard_link(&outside, &path).unwrap();
+
+        drop(prepared);
+
+        assert_eq!(fs::read(&path).unwrap(), b"outside");
+        assert_eq!(fs::metadata(&outside).unwrap().nlink(), 2);
+        assert_eq!(fs::read(&owned).unwrap(), b"owned");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn socket_cleanup_should_restore_a_replacement_socket() {
+        let root = test_root("r");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let path = root.join("endpoint");
+        let original = UnixListener::bind(&path).unwrap();
+        let identity = filesystem
+            .register_socket(&directory, OsStr::new("endpoint"))
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+
+        let result = filesystem.remove_socket(&directory, OsStr::new("endpoint"), &identity);
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert!(path.exists());
+        drop(replacement);
+        drop(original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_cleanup_should_restore_a_replacement_directory() {
+        let root = test_root("directory-replacement");
+        let filesystem = MacosSecureFilesystem;
+        let parent = filesystem.ensure_private_directory(&root).unwrap();
+        let child = filesystem
+            .create_private_child(&parent, OsStr::new("owner"))
+            .unwrap();
+        fs::rename(root.join("owner"), root.join("owned-backup")).unwrap();
+        fs::create_dir(root.join("owner")).unwrap();
+        fs::set_permissions(
+            root.join("owner"),
+            fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+        )
+        .unwrap();
+
+        let result = filesystem.remove_private_child(&parent, OsStr::new("owner"), &child);
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert!(root.join("owner").is_dir());
+        assert!(root.join("owned-backup").is_dir());
         let _ = fs::remove_dir_all(root);
     }
 }

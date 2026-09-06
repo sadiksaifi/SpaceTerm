@@ -31,8 +31,7 @@ use crate::ssh::control_connection::{
 };
 use crate::ssh::destination::{SshHostAlias, resolve_destination_query};
 use crate::ssh::host_config::{
-    HostConfigRoots, HostDiscovery, HostDiscoveryLimits, NativeHostConfigFilesystem,
-    discover_ssh_hosts,
+    HostConfigFilesystem, HostConfigRoots, HostDiscovery, HostDiscoveryLimits, discover_ssh_hosts,
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, LiveConnectionBinding};
 use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore, ManagedSshHost};
@@ -57,6 +56,7 @@ pub(crate) struct RemoteWorkspaceSshRuntime<A: SshProcessAdapter> {
     pub(crate) executable: OpenSshExecutable,
     pub(crate) process_adapter: A,
     pub(crate) control_socket_probe: Arc<dyn ControlSocketProbe>,
+    pub(crate) host_config_filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
 /// Production SSH adapter for the window-independent remote Workspace flow.
@@ -95,7 +95,7 @@ impl<A: SshProcessAdapter> NativeRemoteWorkspaceFlowBackend<A> {
 
     fn fresh_discovery(&self) -> HostDiscovery {
         discover_ssh_hosts(
-            &NativeHostConfigFilesystem,
+            self.runtime.host_config_filesystem.as_ref(),
             &self.roots(),
             HostDiscoveryLimits::default(),
         )
@@ -209,6 +209,7 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
         let paths = self.runtime.paths.clone();
         let roots = self.roots();
         let aliases = self.runtime.aliases.clone();
+        let host_config_filesystem = Arc::clone(&self.runtime.host_config_filesystem);
         self.executor.spawn(async move {
             let mut mutated_aliases = vec![host.alias().clone()];
             mutated_aliases.extend(editing_alias.iter().cloned());
@@ -216,7 +217,7 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 .begin_mutation(mutated_aliases)
                 .map_err(|_| ManagedHostFormBackendError::HostInUse)?;
             let discovery = discover_ssh_hosts(
-                &NativeHostConfigFilesystem,
+                host_config_filesystem.as_ref(),
                 &roots,
                 HostDiscoveryLimits::default(),
             );
@@ -425,7 +426,7 @@ fn watch_authentication(
 
 fn map_save_error(error: ManagedHostsError) -> ManagedHostFormBackendError {
     match error {
-        ManagedHostsError::AliasCollision { .. } => ManagedHostFormBackendError::AliasCollision,
+        ManagedHostsError::AliasCollision => ManagedHostFormBackendError::AliasCollision,
         _ => ManagedHostFormBackendError::SaveFailed,
     }
 }
@@ -698,6 +699,7 @@ impl<A: SshProcessAdapter> NativeSessionControl
     fn shutdown(mut self: Box<Self>) -> NativeSessionShutdown {
         Box::pin(async move {
             let _ = OpenSshControlConnection::shutdown(&mut *self).await;
+            let _ = OpenSshControlConnection::finish_cleanup(&mut *self).await;
         })
     }
 }
@@ -717,6 +719,7 @@ mod tests {
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
     use crate::platform::macos_control_socket::MacosControlSocketProbe;
+    use crate::platform::macos_host_config_filesystem::MacosHostConfigFilesystem;
     use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
     use crate::platform::macos_ssh_process::MacOsSshProcessAdapter;
     use crate::ssh::command::{OpenSshVersion, SshUnavailableReason};
@@ -846,6 +849,7 @@ mod tests {
                 executable: OpenSshExecutable::for_test(),
                 process_adapter: MacOsSshProcessAdapter,
                 control_socket_probe: Arc::new(MacosControlSocketProbe),
+                host_config_filesystem: Arc::new(MacosHostConfigFilesystem),
             },
             Arc::new(RejectAskPassFactory),
         )
@@ -1379,9 +1383,7 @@ mod tests {
     #[test]
     fn save_error_mapping_should_keep_collision_actionable_without_exposing_io() {
         assert_eq!(
-            map_save_error(ManagedHostsError::AliasCollision {
-                alias: "work".to_owned(),
-            }),
+            map_save_error(ManagedHostsError::AliasCollision),
             ManagedHostFormBackendError::AliasCollision
         );
         assert_eq!(

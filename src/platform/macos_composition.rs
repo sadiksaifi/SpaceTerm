@@ -34,6 +34,7 @@ fn capture_startup_dependencies() -> Result<
         executable,
         super::macos_ssh_process::MacOsSshProcessAdapter,
         Arc::new(super::macos_control_socket::MacosControlSocketProbe),
+        Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
     )
 }
 

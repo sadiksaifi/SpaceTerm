@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{self, Read};
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use super::destination::SshHostAlias;
@@ -11,11 +10,17 @@ pub(crate) enum HostConfigSource {
     User,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HostConfigProvenance {
     source: HostConfigSource,
     path: PathBuf,
     line: usize,
+}
+
+impl fmt::Debug for HostConfigProvenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostConfigProvenance(<redacted>)")
+    }
 }
 
 impl HostConfigProvenance {
@@ -24,11 +29,17 @@ impl HostConfigProvenance {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct DirectSshTarget {
     user: Option<String>,
     hostname: String,
     port: Option<u16>,
+}
+
+impl fmt::Debug for DirectSshTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DirectSshTarget(<redacted>)")
+    }
 }
 
 impl DirectSshTarget {
@@ -47,13 +58,19 @@ impl DirectSshTarget {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct DiscoveredSshHost {
     alias: SshHostAlias,
     provenance: Option<HostConfigProvenance>,
     provenances: Vec<HostConfigProvenance>,
     ambiguous: bool,
     direct_target: Option<DirectSshTarget>,
+}
+
+impl fmt::Debug for DiscoveredSshHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DiscoveredSshHost(<redacted>)")
+    }
 }
 
 impl DiscoveredSshHost {
@@ -94,11 +111,17 @@ impl DiscoveredSshHost {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HostConfigRoots {
     pub(crate) managed: PathBuf,
     pub(crate) user: PathBuf,
     pub(crate) home: PathBuf,
+}
+
+impl fmt::Debug for HostConfigRoots {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostConfigRoots(<redacted>)")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,12 +169,18 @@ pub(crate) enum HostConfigIssueKind {
     MalformedLine,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HostConfigIssue {
     source: HostConfigSource,
     path: PathBuf,
     line: Option<usize>,
     kind: HostConfigIssueKind,
+}
+
+impl fmt::Debug for HostConfigIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostConfigIssue(<redacted>)")
+    }
 }
 
 impl HostConfigIssue {
@@ -181,53 +210,30 @@ pub(crate) struct HostDiscovery {
     pub(crate) issues: Vec<HostConfigIssue>,
 }
 
-pub(crate) trait HostConfigFilesystem {
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+pub(crate) trait HostConfigFilesystem: Send + Sync {
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, HostConfigFilesystemError>;
 
-    fn read_file_limited(&self, path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>>;
+    fn read_file_limited(
+        &self,
+        path: &Path,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, HostConfigFilesystemError>;
 
     fn read_directory_limited(
         &self,
         path: &Path,
         maximum_entries: usize,
-    ) -> io::Result<Vec<PathBuf>>;
+    ) -> Result<Vec<PathBuf>, HostConfigFilesystemError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NativeHostConfigFilesystem;
-
-impl HostConfigFilesystem for NativeHostConfigFilesystem {
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        std::fs::canonicalize(path)
-    }
-
-    fn read_file_limited(&self, path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
-        let file = File::open(path)?;
-        let mut contents = Vec::with_capacity(maximum_bytes.min(16 * 1024));
-        file.take(maximum_bytes.saturating_add(1) as u64)
-            .read_to_end(&mut contents)?;
-        Ok(contents)
-    }
-
-    fn read_directory_limited(
-        &self,
-        path: &Path,
-        maximum_entries: usize,
-    ) -> io::Result<Vec<PathBuf>> {
-        let mut entries = Vec::with_capacity(maximum_entries.saturating_add(1));
-        for entry in std::fs::read_dir(path)? {
-            entries.push(entry?.path());
-            if entries.len() > maximum_entries {
-                return Ok(entries);
-            }
-        }
-        entries.sort();
-        Ok(entries)
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HostConfigFilesystemError {
+    Missing,
+    Unavailable,
 }
 
 pub(crate) fn discover_ssh_hosts(
-    filesystem: &impl HostConfigFilesystem,
+    filesystem: &dyn HostConfigFilesystem,
     roots: &HostConfigRoots,
     limits: HostDiscoveryLimits,
 ) -> HostDiscovery {
@@ -306,8 +312,8 @@ impl DiscoveredHosts {
     }
 }
 
-struct SourceScanner<'a, F> {
-    filesystem: &'a F,
+struct SourceScanner<'a> {
+    filesystem: &'a dyn HostConfigFilesystem,
     roots: &'a HostConfigRoots,
     limits: HostDiscoveryLimits,
     source: HostConfigSource,
@@ -326,9 +332,9 @@ struct SourceScanner<'a, F> {
     new_results: usize,
 }
 
-impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
+impl<'a> SourceScanner<'a> {
     fn new(
-        filesystem: &'a F,
+        filesystem: &'a dyn HostConfigFilesystem,
         roots: &'a HostConfigRoots,
         limits: HostDiscoveryLimits,
         source: HostConfigSource,
@@ -366,7 +372,7 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         }
         let canonical = match self.filesystem.canonicalize(path) {
             Ok(canonical) => canonical,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(HostConfigFilesystemError::Missing) => return,
             Err(_) => {
                 self.issue(path, None, HostConfigIssueKind::Read);
                 return;
@@ -392,7 +398,7 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
             .read_file_limited(path, self.limits.file_bytes)
         {
             Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(HostConfigFilesystemError::Missing) => return,
             Err(_) => {
                 self.issue(path, None, HostConfigIssueKind::Read);
                 return;
@@ -578,7 +584,7 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                         .read_directory_limited(directory, remaining_entries)
                     {
                         Ok(entries) => entries,
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(HostConfigFilesystemError::Missing) => continue,
                         Err(_) => {
                             self.issue(directory, Some(line), HostConfigIssueKind::Read);
                             return Vec::new();
@@ -1024,23 +1030,27 @@ mod tests {
     }
 
     impl HostConfigFilesystem for MemoryFilesystem {
-        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf, HostConfigFilesystemError> {
             if let Some(canonical) = self.canonical.get(path) {
                 return Ok(canonical.clone());
             }
             if self.files.contains_key(path) {
                 return Ok(path.to_path_buf());
             }
-            Err(io::Error::new(io::ErrorKind::NotFound, "missing test file"))
+            Err(HostConfigFilesystemError::Missing)
         }
 
-        fn read_file_limited(&self, path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+        fn read_file_limited(
+            &self,
+            path: &Path,
+            maximum_bytes: usize,
+        ) -> Result<Vec<u8>, HostConfigFilesystemError> {
             let canonical = self.canonicalize(path)?;
             let contents = self
                 .files
                 .get(path)
                 .or_else(|| self.files.get(&canonical))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing test file"))?;
+                .ok_or(HostConfigFilesystemError::Missing)?;
             Ok(contents
                 .iter()
                 .copied()
@@ -1052,7 +1062,7 @@ mod tests {
             &self,
             path: &Path,
             maximum_entries: usize,
-        ) -> io::Result<Vec<PathBuf>> {
+        ) -> Result<Vec<PathBuf>, HostConfigFilesystemError> {
             let mut entries = self
                 .files
                 .keys()
@@ -1546,5 +1556,18 @@ mod tests {
         );
 
         assert_eq!(discovery, HostDiscovery::default());
+    }
+
+    #[test]
+    fn debug_should_redact_host_config_content_and_paths() {
+        let filesystem = MemoryFilesystem::default().file(
+            "/managed/ssh_config",
+            "Host sensitive-host\n  HostName sensitive.example\n",
+        );
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+
+        let debug = format!("{discovery:?} {:?}", roots());
+        assert!(!debug.contains("sensitive"));
+        assert!(!debug.contains("/managed"));
     }
 }

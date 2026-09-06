@@ -150,7 +150,7 @@ impl PreparedShellLaunch {
             .map_err(|_| ShellLaunchFailure::RemoteChannelUnavailable)?;
         let (working_directory, inherit_environment, environment_removals, mut environment) =
             if let Some(environment) = prepared_environment {
-                let (home, entries) = environment.into_launch_environment();
+                let (home, entries) = environment.into_pane_launch_environment();
                 (home, false, Vec::new(), entries)
             } else {
                 (

@@ -18,8 +18,8 @@ use super::live_connection::{
     LiveConnectionState,
 };
 use super::process::{
-    ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend, SshProcessMechanismError,
-    TransientSshErrorOutput,
+    ProcessCleanupCallback, ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend,
+    SshProcessCleanup, SshProcessMechanismError, TransientSshErrorOutput,
 };
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
@@ -166,12 +166,63 @@ pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     backend: Arc<B>,
     commands: SshCommandContext,
     child: Arc<Mutex<Option<B::Child>>>,
-    runtime_owner: Option<RuntimeOwner>,
+    runtime: Arc<ControlRuntimeCleanup>,
+    pending_cleanup: Arc<Mutex<Option<SshProcessCleanup>>>,
     authority: Option<Arc<LiveConnectionAuthority>>,
     supervisor_stop: Arc<AtomicBool>,
     supervisor: Option<JoinHandle<()>>,
     #[cfg(test)]
     control_path: PathBuf,
+}
+
+struct ControlRuntimeCleanup {
+    state: Mutex<ControlRuntimeCleanupState>,
+}
+
+struct ControlRuntimeCleanupState {
+    owner: Option<RuntimeOwner>,
+    result: Option<Result<(), AppPathsError>>,
+}
+
+impl ControlRuntimeCleanup {
+    fn new(owner: RuntimeOwner) -> Self {
+        Self {
+            state: Mutex::new(ControlRuntimeCleanupState {
+                owner: Some(owner),
+                result: None,
+            }),
+        }
+    }
+
+    fn callback(self: &Arc<Self>, supervisor: Option<JoinHandle<()>>) -> ProcessCleanupCallback {
+        let runtime = Arc::clone(self);
+        Box::new(move || {
+            if let Some(supervisor) = supervisor {
+                let _ = supervisor.join();
+            }
+            runtime.cleanup();
+        })
+    }
+
+    fn cleanup(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(owner) = state.owner.take() {
+            state.result = Some(owner.close());
+        }
+    }
+
+    fn result(&self) -> Result<(), ControlConnectionError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ControlConnectionError::Ownership)?;
+        state
+            .result
+            .unwrap_or(Ok(()))
+            .map_err(ControlConnectionError::Cleanup)
+    }
 }
 
 impl<B: SshProcessBackend> OpenSshControlConnection<B> {
@@ -240,7 +291,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 .map_err(|source| ControlConnectionError::MasterStatus { source })?
             {
                 let error_output = backend.take_error_output(child);
-                launch.child.take();
                 return Err(ControlConnectionError::MasterExited { exit, error_output });
             }
             if deadline.is_some_and(|deadline| backend.now() >= deadline) {
@@ -424,12 +474,45 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 }
             }
         }
+        self.await_pending_cleanup().await?;
         self.transition(LiveConnectionState::Closed)?;
         self.authority.take();
-        if let Some(owner) = self.runtime_owner.take() {
-            owner.close().map_err(ControlConnectionError::Cleanup)?;
-        }
+        self.runtime.result()?;
         Ok(())
+    }
+
+    /// Completes forced owned-resource cleanup after a terminal caller decides not to retry.
+    ///
+    /// Unlike `Drop`, this may wait and is intended only for an already-background shutdown task.
+    pub(crate) async fn finish_cleanup(&mut self) -> Result<(), ControlConnectionError> {
+        self.stop_supervisor();
+        if let Some(authority) = self.authority.take() {
+            authority.transition(LiveConnectionState::Closed);
+        }
+        let child = self
+            .child
+            .lock()
+            .map_err(|_| ControlConnectionError::Ownership)?
+            .take();
+        if let Some(child) = child {
+            let cleanup = self
+                .backend
+                .begin_cleanup(child, Some(self.runtime.callback(None)));
+            *self
+                .pending_cleanup
+                .lock()
+                .map_err(|_| ControlConnectionError::Ownership)? = Some(cleanup);
+        }
+        if self
+            .pending_cleanup
+            .lock()
+            .map_err(|_| ControlConnectionError::Ownership)?
+            .is_none()
+        {
+            self.runtime.cleanup();
+        }
+        self.await_pending_cleanup().await?;
+        self.runtime.result()
     }
 
     async fn wait_for_master_exit(
@@ -437,27 +520,36 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         deadline: Instant,
     ) -> Result<bool, ControlConnectionError> {
         loop {
-            let exited = {
+            let (had_child, exited_child) = {
                 let mut child_slot = self
                     .child
                     .lock()
                     .map_err(|_| ControlConnectionError::Ownership)?;
-                let Some(child) = child_slot.as_mut() else {
-                    return Ok(true);
-                };
-                if self
-                    .backend
-                    .try_wait(child)
-                    .map_err(|source| ControlConnectionError::Reap { source })?
-                    .is_some()
-                {
-                    child_slot.take();
-                    true
-                } else {
-                    false
+                match child_slot.as_mut() {
+                    Some(child) => {
+                        let exited = self
+                            .backend
+                            .try_wait(child)
+                            .map_err(|source| ControlConnectionError::Reap { source })?
+                            .is_some();
+                        (true, exited.then(|| child_slot.take()).flatten())
+                    }
+                    None => (false, None),
                 }
             };
-            if exited {
+            if !had_child {
+                self.await_pending_cleanup().await?;
+                return Ok(true);
+            }
+            if let Some(child) = exited_child {
+                let cleanup = self
+                    .backend
+                    .begin_cleanup(child, Some(self.runtime.callback(None)));
+                *self
+                    .pending_cleanup
+                    .lock()
+                    .map_err(|_| ControlConnectionError::Ownership)? = Some(cleanup.clone());
+                cleanup.wait().await;
                 return Ok(true);
             }
             let now = self.backend.now();
@@ -468,6 +560,18 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 .delay(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)))
                 .await;
         }
+    }
+
+    async fn await_pending_cleanup(&self) -> Result<(), ControlConnectionError> {
+        let cleanup = self
+            .pending_cleanup
+            .lock()
+            .map_err(|_| ControlConnectionError::Ownership)?
+            .clone();
+        if let Some(cleanup) = cleanup {
+            cleanup.wait().await;
+        }
+        Ok(())
     }
 
     fn signal_master(&mut self, signal: ProcessSignal) -> Result<(), ControlConnectionError> {
@@ -507,6 +611,8 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             Arc::clone(&self.child),
             Arc::clone(authority),
             Arc::clone(&stop),
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.pending_cleanup),
         )?;
         self.supervisor_stop = stop;
         self.supervisor = Some(supervisor);
@@ -523,15 +629,19 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
 
 impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
     fn drop(&mut self) {
-        self.stop_supervisor();
-        let child = self.child.lock().ok().and_then(|mut child| child.take());
-        if let Some(child) = child {
-            self.backend.force_cleanup(child);
-        }
+        self.supervisor_stop.store(true, Ordering::Release);
         if let Some(authority) = self.authority.take() {
             authority.transition(LiveConnectionState::Closed);
         }
-        self.runtime_owner.take();
+        let child = self.child.lock().ok().and_then(|mut child| child.take());
+        if let Some(child) = child {
+            let cleanup = self
+                .backend
+                .begin_cleanup(child, Some(self.runtime.callback(self.supervisor.take())));
+            if let Ok(mut pending) = self.pending_cleanup.lock() {
+                *pending = Some(cleanup);
+            }
+        }
     }
 }
 
@@ -558,6 +668,8 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             .take()
             .ok_or(ControlConnectionError::Ownership)?;
         let authority = LiveConnectionAuthority::new(registered_socket);
+        let runtime = Arc::new(ControlRuntimeCleanup::new(runtime_owner));
+        let pending_cleanup = Arc::new(Mutex::new(None));
         let child = Arc::new(Mutex::new(Some(child)));
         let supervisor_stop = Arc::new(AtomicBool::new(false));
         let supervisor = match spawn_supervisor(
@@ -565,13 +677,16 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             Arc::clone(&child),
             Arc::clone(&authority),
             Arc::clone(&supervisor_stop),
+            Arc::clone(&runtime),
+            Arc::clone(&pending_cleanup),
         ) {
             Ok(supervisor) => supervisor,
             Err(error) => {
                 if let Ok(mut child) = child.lock()
                     && let Some(child) = child.take()
                 {
-                    self.backend.force_cleanup(child);
+                    self.backend
+                        .begin_cleanup(child, Some(runtime.callback(None)));
                 }
                 return Err(error);
             }
@@ -582,7 +697,8 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             backend: Arc::clone(&self.backend),
             commands,
             child,
-            runtime_owner: Some(runtime_owner),
+            runtime,
+            pending_cleanup,
             authority: Some(authority),
             supervisor_stop,
             supervisor: Some(supervisor),
@@ -594,17 +710,25 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
 
 impl<B: SshProcessBackend> Drop for ConnectingControl<B> {
     fn drop(&mut self) {
-        if self.registered_socket.is_none()
-            && let Some(owner) = self.runtime_owner.as_ref()
-            && let Ok(socket) = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)
-        {
-            self.registered_socket = Some(socket);
-        }
         if let Some(child) = self.child.take() {
-            self.backend.force_cleanup(child);
+            let runtime_owner = self.runtime_owner.take();
+            let mut registered_socket = self.registered_socket.take();
+            self.backend.begin_cleanup(
+                child,
+                Some(Box::new(move || {
+                    if registered_socket.is_none()
+                        && let Some(owner) = runtime_owner.as_ref()
+                        && let Ok(socket) = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)
+                    {
+                        registered_socket = Some(socket);
+                    }
+                    drop(registered_socket);
+                    if let Some(owner) = runtime_owner {
+                        let _ = owner.close();
+                    }
+                })),
+            );
         }
-        self.registered_socket.take();
-        self.runtime_owner.take();
     }
 }
 
@@ -617,6 +741,8 @@ fn spawn_supervisor<B: SshProcessBackend>(
     child: Arc<Mutex<Option<B::Child>>>,
     authority: Arc<LiveConnectionAuthority>,
     stop: Arc<AtomicBool>,
+    runtime: Arc<ControlRuntimeCleanup>,
+    pending_cleanup: Arc<Mutex<Option<SshProcessCleanup>>>,
 ) -> Result<JoinHandle<()>, ControlConnectionError> {
     std::thread::Builder::new()
         .name("spaceterm-ssh-supervisor".to_owned())
@@ -629,11 +755,20 @@ fn spawn_supervisor<B: SshProcessBackend>(
                 let result = child.lock().map_or_else(
                     |_| Err(SshProcessMechanismError::StatusFailed),
                     |mut child| match child.as_mut() {
-                        Some(process) => backend.try_wait(process).inspect(|exit| {
-                            if exit.is_some() {
-                                child.take();
+                        Some(process) => match backend.try_wait(process) {
+                            Ok(Some(exit)) => {
+                                authority.transition(LiveConnectionState::Failed);
+                                if let Some(exited_child) = child.take() {
+                                    let cleanup = backend
+                                        .begin_cleanup(exited_child, Some(runtime.callback(None)));
+                                    if let Ok(mut pending) = pending_cleanup.lock() {
+                                        *pending = Some(cleanup);
+                                    }
+                                }
+                                Ok(Some(exit))
                             }
-                        }),
+                            result => result,
+                        },
                         None => Ok(Some(ProcessExit::unsuccessful(None))),
                     },
                 );
@@ -722,6 +857,9 @@ mod tests {
 
     struct FakeChild {
         listener: Option<UnixListener>,
+        socket_path: PathBuf,
+        create_socket_during_cleanup: bool,
+        reaped: bool,
     }
 
     struct FakeState {
@@ -839,6 +977,9 @@ mod tests {
             state.socket_path = Some(socket_path);
             Ok(FakeChild {
                 listener: Some(listener),
+                socket_path: state.socket_path.clone().unwrap(),
+                create_socket_during_cleanup: false,
+                reaped: false,
             })
         }
 
@@ -891,7 +1032,10 @@ mod tests {
             let exit = state.early_exits.pop_front().flatten();
             if exit.is_some() {
                 child.listener.take();
-                state.reaps += 1;
+                if !child.reaped {
+                    child.reaped = true;
+                    state.reaps += 1;
+                }
             }
             Ok(exit)
         }
@@ -909,9 +1053,24 @@ mod tests {
             Ok(())
         }
 
-        fn force_cleanup(&self, mut child: Self::Child) {
+        fn begin_cleanup(
+            &self,
+            mut child: Self::Child,
+            after: Option<ProcessCleanupCallback>,
+        ) -> SshProcessCleanup {
             child.listener.take();
-            self.state.lock().unwrap().reaps += 1;
+            if !child.reaped {
+                child.reaped = true;
+                self.state.lock().unwrap().reaps += 1;
+            }
+            if child.create_socket_during_cleanup {
+                let late_socket = UnixListener::bind(&child.socket_path).unwrap();
+                drop(late_socket);
+            }
+            if let Some(after) = after {
+                after();
+            }
+            SshProcessCleanup::completed()
         }
 
         fn take_error_output(&self, _child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
@@ -1233,6 +1392,34 @@ mod tests {
 
         let socket_path = backend.socket_path();
         assert!(!socket_path.exists() && unrelated.exists());
+    }
+
+    #[test]
+    fn dropped_connecting_control_should_remove_a_socket_created_during_process_cleanup() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let runtime_owner = paths
+            .create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)
+            .unwrap();
+        let socket_path = runtime_owner
+            .socket_path(CONTROL_RUNTIME_SOCKET_NAME)
+            .unwrap();
+        let backend = Arc::new(FakeBackend::default());
+        let launch = ConnectingControl {
+            backend: Arc::clone(&backend),
+            child: Some(FakeChild {
+                listener: None,
+                socket_path: socket_path.clone(),
+                create_socket_during_cleanup: true,
+                reaped: false,
+            }),
+            runtime_owner: Some(runtime_owner),
+            registered_socket: None,
+        };
+
+        drop(launch);
+
+        assert!(!socket_path.exists() && backend.reap_count() == 1);
     }
 
     #[gpui::test]
