@@ -28,8 +28,14 @@ impl Default for SelectionCopyOptions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct SelectionCopy {
     pub(crate) plain_text: String,
     pub(crate) html: Option<String>,
+}
+
+impl std::fmt::Debug for SelectionCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionCopy").finish_non_exhaustive()
+    }
 }

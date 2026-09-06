@@ -35,16 +35,18 @@ use crate::terminal::identity;
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput, PhysicalKey};
 use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
-#[cfg(test)]
-use crate::terminal::osc52::Osc52ClipboardError;
 use crate::terminal::osc52::{
     MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
-    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52Clipboard, Osc52Effect, Osc52Filter,
-    Osc52Operation,
+    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52AuthorizationSchedule,
+    Osc52Clipboard, Osc52ClipboardFactory, Osc52Effect, Osc52Filter, Osc52Operation,
+};
+#[cfg(test)]
+use crate::terminal::osc52::{
+    Osc52ClipboardError, UnavailableOsc52Clipboard, UnavailableOsc52ClipboardFactory,
 };
 use crate::terminal::paste::{
-    PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
-    PreparedPaste,
+    PasteConfirmationId, PasteConfirmationSchedule, PasteDecision, PasteRejection,
+    PasteRequestOutcome, PasteResolution, PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
@@ -52,8 +54,6 @@ use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -355,6 +355,10 @@ pub(crate) trait TerminalSessionHandle {
         decision: Osc52AuthorizationDecision,
     );
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError>;
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure);
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
@@ -483,16 +487,19 @@ pub(crate) enum TerminalLaunchPlan {
 pub(crate) struct NativeTerminalSessionFactory {
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
+    osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
 }
 
 impl NativeTerminalSessionFactory {
     pub(crate) fn new(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
+        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
     ) -> Self {
         Self {
             native_pty_adapter_factory,
             launch_planner,
+            osc52_clipboard_factory,
         }
     }
 }
@@ -512,6 +519,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                 geometry,
                 local.working_directory().path(),
                 observation,
+                Arc::clone(&self.osc52_clipboard_factory),
             )?,
             TerminalLaunchPlan::Remote(remote) => {
                 let remote = *remote;
@@ -519,11 +527,10 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                 TerminalSession::start_remote(
                     Arc::clone(&self.native_pty_adapter_factory),
                     geometry,
-                    remote.local_home.path(),
-                    remote.metadata_context,
-                    remote.fallback_title,
+                    remote,
                     command,
                     observation,
+                    Arc::clone(&self.osc52_clipboard_factory),
                 )?
             }
         };
@@ -611,39 +618,6 @@ type StartedSession = (
 );
 
 #[cfg(test)]
-#[derive(Default)]
-struct UnavailableOsc52Clipboard;
-
-#[cfg(test)]
-impl Osc52Clipboard for UnavailableOsc52Clipboard {
-    fn read(
-        &mut self,
-        _target: crate::terminal::Osc52Target,
-    ) -> Result<String, Osc52ClipboardError> {
-        Err(Osc52ClipboardError::Unavailable)
-    }
-
-    fn write(
-        &mut self,
-        _target: crate::terminal::Osc52Target,
-        _text: &str,
-    ) -> Result<(), Osc52ClipboardError> {
-        Err(Osc52ClipboardError::Unavailable)
-    }
-}
-
-fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
-    #[cfg(test)]
-    {
-        Box::<UnavailableOsc52Clipboard>::default()
-    }
-    #[cfg(not(test))]
-    {
-        Box::<crate::platform::macos_pasteboard::MacosOsc52Clipboard>::default()
-    }
-}
-
-#[cfg(test)]
 fn test_launch_planner() -> ShellLaunchPlanner {
     ShellLaunchPlanner::new(user_shell().into(), resource_root())
 }
@@ -655,6 +629,7 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
+        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
         let metadata_context = TerminalMetadataContext::local(
@@ -667,6 +642,7 @@ impl TerminalSession {
             metadata_context,
             launch_planner.fallback_title(),
             runtime_observation,
+            osc52_clipboard_factory,
             move |size, output, close_handle| {
                 let launch = launch_planner.local(&launch_directory)?;
                 let terminal_name = launch.terminal_name();
@@ -685,18 +661,18 @@ impl TerminalSession {
     fn start_remote(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
-        local_home: &Path,
-        metadata_context: RemoteTerminalMetadataContext,
-        fallback_title: String,
+        remote: RemoteTerminalLaunchPlan,
         command: crate::ssh::command::SshCommandSpec,
         runtime_observation: Option<RuntimeObservation>,
+        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
     ) -> Result<StartedSession, SessionError> {
-        let local_home = local_home.to_owned();
+        let local_home = remote.local_home.path().to_owned();
         Self::start_deferred_with_context(
             geometry,
-            TerminalMetadataContext::Remote(metadata_context),
-            fallback_title,
+            TerminalMetadataContext::Remote(remote.metadata_context),
+            remote.fallback_title,
             runtime_observation,
+            osc52_clipboard_factory,
             move |size, output, close_handle| {
                 let launch = PreparedShellLaunch::remote(&local_home, command)?;
                 let terminal_name = launch.terminal_name();
@@ -735,6 +711,7 @@ impl TerminalSession {
             metadata_context,
             test_launch_planner().fallback_title(),
             runtime_observation,
+            Arc::new(UnavailableOsc52ClipboardFactory),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
                     .map(|owner| (owner, identity::launch_identity(&resource_root()).term))
@@ -747,6 +724,7 @@ impl TerminalSession {
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
         runtime_observation: Option<RuntimeObservation>,
+        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
@@ -805,6 +783,7 @@ impl TerminalSession {
                         metadata_context,
                         fallback_title,
                         terminal_name,
+                        osc52_clipboard_factory,
                     },
                     command_rx,
                     reader_transport,
@@ -881,6 +860,7 @@ impl TerminalSession {
                         metadata_context,
                         fallback_title: "Terminal".to_owned(),
                         terminal_name,
+                        osc52_clipboard_factory: Arc::new(UnavailableOsc52ClipboardFactory),
                     },
                     command_rx,
                     reader_transport,
@@ -1075,12 +1055,26 @@ impl TerminalSession {
     }
 
     pub(crate) fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.copy_selection_query(None)
+    }
+
+    pub(crate) fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.copy_selection_query(Some(generation))
+    }
+
+    fn copy_selection_query(
+        &self,
+        generation: Option<PresentationGeneration>,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         let Some(commands) = &self.commands else {
             return Err(SelectionCopyError::WorkerStopped);
         };
         let (reply, receiver) = mpsc::sync_channel(1);
         commands
-            .send(Command::SelectionCopy(reply))
+            .send(Command::SelectionCopy(generation, reply))
             .map_err(|_| SelectionCopyError::WorkerStopped)?;
         receiver
             .recv()
@@ -1188,6 +1182,13 @@ impl TerminalSessionHandle for TerminalSession {
         Self::copy_selection(self)
     }
 
+    fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        Self::copy_selection_at(self, generation)
+    }
+
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
         if let Some(commands) = &self.commands
             && commands.send(Command::AcceptanceFailure(failure)).is_err()
@@ -1247,7 +1248,6 @@ struct ReaderEventBatch {
     reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
-#[derive(Debug)]
 enum Command {
     Key(KeyInput),
     Focus(bool),
@@ -1274,7 +1274,10 @@ enum Command {
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     ResumeOsc52Output,
-    SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    SelectionCopy(
+        Option<PresentationGeneration>,
+        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
+    ),
     AccessibilitySelection(AccessibilitySelectionRequest),
     AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
@@ -1282,6 +1285,37 @@ enum Command {
     AcceptanceFailure(AcceptanceSessionFailure),
     Shutdown,
     PollHiddenInput,
+}
+
+impl fmt::Debug for Command {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Key(..) => "Key",
+            Self::Focus(..) => "Focus",
+            Self::Resize => "Resize",
+            Self::Pointer(..) => "Pointer",
+            Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
+            Self::Wheel(..) => "Wheel",
+            Self::ScrollTo(..) => "ScrollTo",
+            Self::FindQueryChanged => "FindQueryChanged",
+            Self::NavigateFind(..) => "NavigateFind",
+            Self::RequestPaste(..) => "RequestPaste",
+            Self::ResolvePaste(..) => "ResolvePaste",
+            Self::PasteConfirmationExpired => "PasteConfirmationExpired",
+            Self::ResolveOsc52Authorization(..) => "ResolveOsc52Authorization",
+            Self::Osc52AuthorizationExpired(..) => "Osc52AuthorizationExpired",
+            Self::ResumeOsc52Output => "ResumeOsc52Output",
+            Self::SelectionCopy(..) => "SelectionCopy",
+            Self::AccessibilitySelection(..) => "AccessibilitySelection",
+            Self::AccessibilityContinue => "AccessibilityContinue",
+            Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
+            Self::ReaderReady => "ReaderReady",
+            Self::AcceptanceFailure(..) => "AcceptanceFailure",
+            Self::Shutdown => "Shutdown",
+            Self::PollHiddenInput => "PollHiddenInput",
+        };
+        formatter.write_str(name)
+    }
 }
 
 struct TerminalWorker {
@@ -1316,6 +1350,7 @@ struct TerminalWorkerContext {
     metadata_context: TerminalMetadataContext,
     fallback_title: String,
     terminal_name: &'static str,
+    osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
 }
 
 struct TerminalWorkerMailboxes {
@@ -1397,131 +1432,6 @@ impl HiddenInputSchedule {
             self.active = active;
             Some(active)
         }
-    }
-}
-
-struct PendingOsc52Authorization {
-    id: Osc52AuthorizationId,
-    operation: Osc52Operation,
-    deadline: Instant,
-}
-
-#[derive(Default)]
-struct Osc52AuthorizationSchedule {
-    next_id: u64,
-    pending: Option<PendingOsc52Authorization>,
-}
-
-impl Osc52AuthorizationSchedule {
-    fn deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|pending| pending.deadline)
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    fn create(
-        &mut self,
-        operation: Osc52Operation,
-        now: Instant,
-    ) -> Option<Osc52AuthorizationRequest> {
-        if self.pending.is_some() {
-            return None;
-        }
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = Osc52AuthorizationId::from_counter(self.next_id);
-        let request = Osc52AuthorizationRequest {
-            id,
-            access: operation.access(),
-            target: operation.target(),
-            byte_len: operation.byte_len(),
-        };
-        self.pending = Some(PendingOsc52Authorization {
-            id,
-            operation,
-            deadline: now + OSC52_AUTHORIZATION_TIMEOUT,
-        });
-        Some(request)
-    }
-
-    fn take(&mut self, id: Osc52AuthorizationId, now: Instant) -> Option<Osc52Operation> {
-        let pending = self.pending.as_ref()?;
-        if pending.id != id || now >= pending.deadline {
-            return None;
-        }
-        self.pending.take().map(|pending| pending.operation)
-    }
-
-    fn expire(&mut self, now: Instant) -> Option<Osc52AuthorizationId> {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.pending.take().map(|pending| pending.id)
-        } else {
-            None
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.pending = None;
-    }
-}
-
-struct PendingPaste {
-    id: PasteConfirmationId,
-    payload: PreparedPaste,
-    deadline: Instant,
-}
-
-#[derive(Default)]
-struct PasteConfirmationSchedule {
-    next_id: u64,
-    pending: Option<PendingPaste>,
-}
-
-impl PasteConfirmationSchedule {
-    fn deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|pending| pending.deadline)
-    }
-
-    fn create(
-        &mut self,
-        payload: PreparedPaste,
-        now: Instant,
-    ) -> Option<crate::terminal::PasteConfirmation> {
-        if self.pending.is_some() {
-            return None;
-        }
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = PasteConfirmationId::new(self.next_id);
-        let confirmation = payload.confirmation(id);
-        self.pending = Some(PendingPaste {
-            id,
-            payload,
-            deadline: now + PASTE_CONFIRMATION_TIMEOUT,
-        });
-        Some(confirmation)
-    }
-
-    fn take(&mut self, id: PasteConfirmationId, now: Instant) -> Option<PreparedPaste> {
-        let pending = self.pending.take()?;
-        if pending.id == id && now < pending.deadline {
-            Some(pending.payload)
-        } else {
-            None
-        }
-    }
-
-    fn expire(&mut self, now: Instant) -> bool {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.pending = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.pending = None;
     }
 }
 
@@ -1684,6 +1594,7 @@ impl TerminalWorker {
             metadata_context,
             fallback_title,
             terminal_name,
+            osc52_clipboard_factory,
         } = context;
         let TerminalWorkerMailboxes {
             resizes,
@@ -1733,7 +1644,7 @@ impl TerminalWorker {
             paste_confirmations: PasteConfirmationSchedule::default(),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
-            osc52_clipboard: native_osc52_clipboard(),
+            osc52_clipboard: osc52_clipboard_factory.create(),
             osc52_authorization: Osc52AuthorizationSchedule::default(),
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
@@ -1966,12 +1877,18 @@ impl TerminalWorker {
                 true
             }
             Command::ResumeOsc52Output => self.resume_osc52_output(),
-            Command::SelectionCopy(reply) => {
-                let _ = reply.send(
+            Command::SelectionCopy(generation, reply) => {
+                let selection = if generation.is_some_and(|generation| {
+                    generation != self.emulator.presentation_generation()
+                        || self.emulator.synchronized_output_deadline().is_some()
+                }) {
+                    Ok(None)
+                } else {
                     self.emulator
                         .selection_copy(SelectionCopyOptions::default())
-                        .map_err(|_| SelectionCopyError::Formatting),
-                );
+                        .map_err(|_| SelectionCopyError::Formatting)
+                };
+                let _ = reply.send(selection);
                 true
             }
             Command::AccessibilitySelection(request) => {
@@ -2688,7 +2605,11 @@ mod tests {
     }
 
     fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
-        NativeTerminalSessionFactory::new(macos_native_pty_adapter_factory(), test_launch_planner())
+        NativeTerminalSessionFactory::new(
+            macos_native_pty_adapter_factory(),
+            test_launch_planner(),
+            Arc::new(UnavailableOsc52ClipboardFactory),
+        )
     }
 
     fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteShellCommand {
@@ -2746,8 +2667,12 @@ mod tests {
     }
 
     #[test]
-    fn native_factory_routes_local_launches_through_the_injected_adapter_factory() {
-        let (factory, constructions) = recording_native_terminal_session_factory();
+    fn native_factory_routes_local_launches_and_osc52_worker_lifecycle_through_injected_factories()
+    {
+        let (clipboard_lifecycle, observed_clipboard) = mpsc::channel();
+        let (factory, constructions) = recording_native_terminal_session_factory(Arc::new(
+            LifecycleOsc52ClipboardFactory(clipboard_lifecycle),
+        ));
         let working_directory = std::env::temp_dir().join(".");
         let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
@@ -2761,6 +2686,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("Local construction should reach the injected factory");
         drop(started.handle);
+        assert_osc52_clipboard_worker_lifecycle(observed_clipboard);
 
         assert_eq!(construction.working_directory, working_directory);
         assert_eq!(construction.size, pty_size(test_geometry()));
@@ -2785,8 +2711,12 @@ mod tests {
     }
 
     #[test]
-    fn native_factory_routes_remote_launches_through_the_injected_adapter_factory() {
-        let (factory, constructions) = recording_native_terminal_session_factory();
+    fn native_factory_routes_remote_launches_and_osc52_worker_lifecycle_through_injected_factories()
+    {
+        let (clipboard_lifecycle, observed_clipboard) = mpsc::channel();
+        let (factory, constructions) = recording_native_terminal_session_factory(Arc::new(
+            LifecycleOsc52ClipboardFactory(clipboard_lifecycle),
+        ));
         let local_home = std::env::temp_dir();
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
@@ -2815,6 +2745,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("Remote construction should reach the injected factory");
         drop(started.handle);
+        assert_osc52_clipboard_worker_lifecycle(observed_clipboard);
 
         assert_eq!(construction.working_directory, local_home);
         assert_eq!(construction.executable, expected_executable);
@@ -3252,7 +3183,9 @@ mod tests {
         }
     }
 
-    fn recording_native_terminal_session_factory() -> (
+    fn recording_native_terminal_session_factory(
+        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
+    ) -> (
         NativeTerminalSessionFactory,
         mpsc::Receiver<RecordedPreparedShellLaunch>,
     ) {
@@ -3261,6 +3194,7 @@ mod tests {
             NativeTerminalSessionFactory::new(
                 Arc::new(RecordingSessionAdapterFactory { constructions }),
                 test_launch_planner(),
+                osc52_clipboard_factory,
             ),
             observed,
         )
@@ -3285,6 +3219,50 @@ mod tests {
             &NativePtyCloseHandle::default(),
         )
         .unwrap()
+    }
+
+    struct LifecycleOsc52ClipboardFactory(mpsc::Sender<(bool, thread::ThreadId)>);
+
+    impl Osc52ClipboardFactory for LifecycleOsc52ClipboardFactory {
+        fn create(&self) -> Box<dyn Osc52Clipboard> {
+            self.0.send((true, thread::current().id())).unwrap();
+            Box::new(LifecycleOsc52Clipboard(self.0.clone()))
+        }
+    }
+
+    struct LifecycleOsc52Clipboard(mpsc::Sender<(bool, thread::ThreadId)>);
+
+    impl Osc52Clipboard for LifecycleOsc52Clipboard {
+        fn read(
+            &mut self,
+            _target: crate::terminal::Osc52Target,
+        ) -> Result<String, Osc52ClipboardError> {
+            panic!("deny-by-default startup must not read clipboard contents")
+        }
+
+        fn write(
+            &mut self,
+            _target: crate::terminal::Osc52Target,
+            _text: &str,
+        ) -> Result<(), Osc52ClipboardError> {
+            panic!("deny-by-default startup must not write clipboard contents")
+        }
+    }
+
+    impl Drop for LifecycleOsc52Clipboard {
+        fn drop(&mut self) {
+            self.0.send((false, thread::current().id())).unwrap();
+        }
+    }
+
+    fn assert_osc52_clipboard_worker_lifecycle(observed: mpsc::Receiver<(bool, thread::ThreadId)>) {
+        let created = observed.recv_timeout(Duration::from_secs(1)).unwrap();
+        let dropped = observed.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(created.0);
+        assert!(!dropped.0);
+        assert_ne!(created.1, thread::current().id());
+        assert_eq!(created.1, dropped.1);
+        assert!(observed.try_recv().is_err());
     }
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3459,23 +3437,88 @@ mod tests {
     }
 
     #[test]
-    fn osc52_authorization_allows_one_pending_request_and_rejects_stale_ids() {
-        let now = Instant::now();
-        let mut schedule = Osc52AuthorizationSchedule::default();
-        let operation = Osc52Operation::Read {
-            target: crate::terminal::Osc52Target::Standard,
-            terminator: crate::terminal::osc52::Osc52Terminator::StringTerminator,
-        };
-        let request = schedule.create(operation.clone(), now).unwrap();
+    fn osc52_cancelled_authorizations_reject_late_allow_and_resume_ordered_output() {
+        enum Cancellation {
+            Deny,
+            FocusLoss,
+            Timeout,
+        }
 
-        assert!(schedule.create(operation, now).is_none());
-        assert_eq!(schedule.take(Osc52AuthorizationId::new(999), now), None);
-        assert!(schedule.is_pending());
-        assert_eq!(
-            schedule.expire(now + OSC52_AUTHORIZATION_TIMEOUT),
-            Some(request.id)
+        for cancellation in [
+            Cancellation::Deny,
+            Cancellation::FocusLoss,
+            Cancellation::Timeout,
+        ] {
+            let clipboard = RecordingOsc52Clipboard::default();
+            let (mut worker, events, records) = osc52_worker(
+                Osc52AuthorizationPolicy {
+                    read: Osc52AccessPolicy::Ask,
+                    write: Osc52AccessPolicy::Ask,
+                },
+                clipboard.clone(),
+            );
+            assert!(
+                worker
+                    .process_output_chunks(vec![b"\x1b[6n\x1b]52;c;c2VjcmV0\x07\x1b[6n".to_vec(),])
+            );
+            let SessionEvent::Osc52Authorization(request) = events.try_recv().unwrap() else {
+                panic!("ask policy must publish authorization metadata")
+            };
+            assert_eq!(records.snapshot().written, b"\x1b[1;1R");
+
+            match cancellation {
+                Cancellation::Deny => {
+                    assert!(worker.process_command(Command::ResolveOsc52Authorization(
+                        request.id,
+                        Osc52AuthorizationDecision::Deny,
+                    )));
+                }
+                Cancellation::FocusLoss => {
+                    assert!(worker.process_command(Command::Focus(false)));
+                }
+                Cancellation::Timeout => {
+                    let deadline = worker.osc52_authorization.deadline().unwrap();
+                    let expired = worker.osc52_authorization.expire(deadline).unwrap();
+                    assert!(worker.process_command(Command::Osc52AuthorizationExpired(expired)));
+                }
+            }
+            assert!(!worker.osc52_authorization.is_pending());
+            assert!(worker.process_command(Command::ResolveOsc52Authorization(
+                request.id,
+                Osc52AuthorizationDecision::Allow,
+            )));
+            if !worker.deferred_osc52_effects.is_empty() {
+                let resume = worker.receive_next_command().unwrap();
+                assert!(matches!(resume, Command::ResumeOsc52Output));
+                assert!(worker.process_command(resume));
+            }
+            assert_eq!(clipboard.snapshot(), Osc52ClipboardState::default());
+            assert_eq!(records.snapshot().written, b"\x1b[1;1R\x1b[1;1R");
+        }
+    }
+
+    #[test]
+    fn osc52_shutdown_discards_pending_content_and_deferred_output() {
+        let clipboard = RecordingOsc52Clipboard::default();
+        let (mut worker, events, records) = osc52_worker(
+            Osc52AuthorizationPolicy {
+                read: Osc52AccessPolicy::Ask,
+                write: Osc52AccessPolicy::Ask,
+            },
+            clipboard.clone(),
         );
-        assert!(!schedule.is_pending());
+        assert!(worker.process_output_chunks(vec![b"\x1b]52;c;c2VjcmV0\x07\x1b[6n".to_vec(),]));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SessionEvent::Osc52Authorization(_))
+        ));
+        assert!(worker.osc52_authorization.is_pending());
+        assert!(!worker.process_command(Command::Shutdown));
+        worker.finish();
+
+        assert_eq!(clipboard.snapshot(), Osc52ClipboardState::default());
+        assert!(records.snapshot().written.is_empty());
+        assert_eq!(records.snapshot().pty_drops, 1);
     }
 
     impl Drop for ScriptedPty {
@@ -3915,6 +3958,7 @@ mod tests {
             test_geometry(),
             &std::env::temp_dir(),
             None,
+            Arc::new(UnavailableOsc52ClipboardFactory),
         )
         .unwrap();
 
@@ -4519,6 +4563,113 @@ mod tests {
     }
 
     #[test]
+    fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events, _accessibility) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"selected".to_vec()))
+            .unwrap();
+        let SessionEvent::Screen(screen) = receive_event(
+            &events,
+            "the selectable terminal output",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        ) else {
+            unreachable!()
+        };
+        let pointer = |phase, x| PointerInput {
+            generation: screen.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position: SurfacePosition { x, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        session.pointer(pointer(PointerPhase::Press, 1.0));
+        session.pointer(pointer(PointerPhase::Motion, 63.0));
+        assert_eq!(
+            session
+                .pointer_and_copy_selection(pointer(PointerPhase::Release, 63.0))
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected",
+        );
+        let mut menu_generation = screen.generation;
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Screen(screen) = event {
+                menu_generation = screen.generation;
+            }
+        }
+        assert_eq!(
+            session
+                .copy_selection_at(menu_generation)
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected"
+        );
+
+        // Keep the UI's snapshot unread while terminal output advances the worker.
+        reader_steps
+            .send(ReaderStep::Bytes(b"\r\nnew\x1b[6n".to_vec()))
+            .unwrap();
+        records.wait_for("the worker to process later output", |state| {
+            !state.written.is_empty()
+        });
+        assert_eq!(session.copy_selection_at(menu_generation).unwrap(), None);
+        assert_eq!(
+            session.copy_selection().unwrap().unwrap().plain_text,
+            "selected"
+        );
+
+        let SessionEvent::Screen(current) = receive_event(
+            &events,
+            "the newer worker presentation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("new")),
+        ) else {
+            unreachable!()
+        };
+        assert!(current.generation > menu_generation);
+        assert_eq!(
+            session
+                .copy_selection_at(current.generation)
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected"
+        );
+        // A synchronized transaction retains its published generation while hiding mutations.
+        let replies = records.snapshot().written.len();
+        reader_steps
+            .send(ReaderStep::Bytes(
+                b"\x1b[?2026h\r\ntransaction\x1b[6n".to_vec(),
+            ))
+            .unwrap();
+        records.wait_for(
+            "the worker to process a synchronized transaction",
+            |state| state.written.len() > replies,
+        );
+        assert_eq!(session.copy_selection_at(current.generation).unwrap(), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn command_debug_never_exposes_paste_or_key_contents() {
+        let (reply, _receiver) = async_channel::bounded(1);
+        assert_eq!(
+            format!(
+                "{:?}",
+                Command::RequestPaste("private paste content".to_owned(), reply)
+            ),
+            "RequestPaste",
+        );
+        assert_eq!(
+            format!("{:?}", Command::Key(text_key(KeyAction::Press))),
+            "Key"
+        );
+    }
+
+    #[test]
     fn pointer_release_copy_should_observe_the_completed_selection_atomically() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
@@ -4967,17 +5118,6 @@ mod tests {
     }
 
     #[test]
-    fn paste_confirmation_schedule_expires_without_exposing_payload() {
-        let now = Instant::now();
-        let mut schedule = PasteConfirmationSchedule::default();
-        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
-        let confirmation = schedule.create(payload, now).unwrap();
-
-        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
-        assert_eq!(schedule.take(confirmation.id, now), None);
-    }
-
-    #[test]
     fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
         let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
             write_error: Some("write unavailable".to_owned()),
@@ -5406,6 +5546,7 @@ mod tests {
             size,
             &std::env::current_dir().unwrap(),
             None,
+            Arc::new(UnavailableOsc52ClipboardFactory),
         )
         .unwrap();
         let session = JoinedRealPtySession(session);
@@ -5468,6 +5609,7 @@ mod tests {
             size,
             &std::env::current_dir().unwrap(),
             None,
+            Arc::new(UnavailableOsc52ClipboardFactory),
         )
         .unwrap();
         let session = JoinedRealPtySession(session);

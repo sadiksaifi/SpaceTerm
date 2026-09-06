@@ -1,25 +1,29 @@
-use std::cell::Cell;
+//! AppKit Services responder registration and native pasteboard conversion.
+//!
+//! GPUI 0.2.2 can install the Services menu but exposes neither its requestor callbacks nor
+//! access to a Service's supplied pasteboard. Request policy and lifetime authority live in
+//! the portable Services owner; this adapter only connects those operations to AppKit.
+
 use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 #[cfg(not(test))]
 use cocoa::appkit::NSApp;
-use cocoa::appkit::NSPasteboardTypeString;
+use cocoa::appkit::{NSPasteboardTypeString, NSStringPboardType};
 use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInteger};
-use gpui::{AnyWindowHandle, App, AsyncApp, Window};
+use gpui::Window;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Protocol, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error;
 
-use crate::terminal::{
-    MAX_PASTE_BYTES, NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus,
-    SelectionCopy,
+use crate::terminal::native_services::services::{
+    ServiceDataType, ServiceEndpoint, ServiceOperation, ServicePasteboardIdentity, ServiceRequests,
+    bounded_service_text_byte_len, decode_service_text_bytes,
 };
-use crate::ui::WorkspaceManager;
 
 const SERVICES_RESPONDER_CLASS: &str = "SpaceTermServicesResponder";
 const SERVICES_STATE_IVAR: &str = "spaceTermServicesState";
@@ -47,165 +51,6 @@ pub(crate) enum MacosServicesError {
     ResponderAllocationFailed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ServiceDataType {
-    Absent,
-    String,
-    Unsupported,
-}
-
-impl ServiceDataType {
-    const fn is_requested(self) -> bool {
-        !matches!(self, Self::Absent)
-    }
-
-    const fn is_supported(self) -> bool {
-        !matches!(self, Self::Unsupported)
-    }
-}
-
-#[derive(Clone)]
-struct MacosServicesEndpoint {
-    app: AsyncApp,
-    window: AnyWindowHandle,
-}
-
-impl MacosServicesEndpoint {
-    fn status(&self) -> NativeServiceStatus {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return NativeServiceStatus::default();
-                    };
-                    manager.update(cx, |manager, cx| manager.native_service_status(window, cx))
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
-    }
-
-    fn selection(&self, origin: NativeServiceOrigin) -> Option<SelectionCopy> {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return None;
-                    };
-                    manager.update(cx, |manager, cx| {
-                        manager.native_service_selection(origin, window, cx)
-                    })
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-    }
-
-    fn insert_text(&self, origin: NativeServiceOrigin, text: String) -> bool {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return false;
-                    };
-                    manager.update(cx, |manager, cx| {
-                        manager.insert_native_service_text(origin, text, window, cx)
-                    })
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false)
-    }
-}
-
-struct MacosServicesState {
-    // AppKit invokes Services requestor methods on its main thread. The per-validation requestors
-    // therefore share this non-Send gate through Rc<Cell<_>>; no instance crosses that thread.
-    endpoint: MacosServicesEndpoint,
-    next_request_id: Cell<u64>,
-    active_return_request: Rc<Cell<Option<u64>>>,
-}
-
-impl MacosServicesState {
-    fn operation(&self, returns_text: bool) -> Option<MacosServicesOperationState> {
-        let request_id = self.next_request_id.get().checked_add(1)?;
-        self.next_request_id.set(request_id);
-        Some(MacosServicesOperationState {
-            endpoint: self.endpoint.clone(),
-            identity: ServiceOperationIdentity {
-                request_id,
-                returns_text,
-                active_return_request: Rc::clone(&self.active_return_request),
-                write_claimed: Cell::new(false),
-                pasteboard: Cell::new(None),
-                origin: Cell::new(None),
-            },
-        })
-    }
-}
-
-struct MacosServicesOperationState {
-    endpoint: MacosServicesEndpoint,
-    identity: ServiceOperationIdentity,
-}
-
-struct ServiceOperationIdentity {
-    request_id: u64,
-    returns_text: bool,
-    active_return_request: Rc<Cell<Option<u64>>>,
-    write_claimed: Cell<bool>,
-    pasteboard: Cell<Option<usize>>,
-    origin: Cell<Option<NativeServiceOrigin>>,
-}
-
-impl ServiceOperationIdentity {
-    fn claim_write(&self) -> bool {
-        if self.write_claimed.replace(true) || self.active_return_request.get().is_some() {
-            return false;
-        }
-        if self.returns_text {
-            self.active_return_request.set(Some(self.request_id));
-        }
-        true
-    }
-
-    fn finish_send(&self, origin: NativeServiceOrigin, pasteboard: id, succeeded: bool) {
-        if self.returns_text && succeeded {
-            self.origin.set(Some(origin));
-            self.pasteboard.set(Some(pasteboard as usize));
-        } else {
-            self.release_return();
-        }
-    }
-
-    fn take_return_origin(&self, pasteboard: id) -> Option<NativeServiceOrigin> {
-        if self.active_return_request.get() != Some(self.request_id)
-            || self.pasteboard.get() != Some(pasteboard as usize)
-        {
-            return None;
-        }
-        let origin = self.origin.take();
-        self.pasteboard.set(None);
-        self.release_return();
-        origin
-    }
-
-    fn release_return(&self) {
-        if self.active_return_request.get() == Some(self.request_id) {
-            self.active_return_request.set(None);
-        }
-    }
-}
-
-impl Drop for ServiceOperationIdentity {
-    fn drop(&mut self) {
-        self.release_return();
-    }
-}
-
 #[cfg(not(test))]
 pub(crate) fn register() -> Result<(), MacosServicesError> {
     // SAFETY: SpaceTerm initializes its application on AppKit's main thread. The array is used only
@@ -227,7 +72,10 @@ pub(crate) fn register() -> Result<(), MacosServicesError> {
     Ok(())
 }
 
-pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesError> {
+pub(crate) fn install(
+    window: &Window,
+    endpoint: Rc<dyn ServiceEndpoint>,
+) -> Result<(), MacosServicesError> {
     let native_handle = HasWindowHandle::window_handle(window)
         .map_err(|_| MacosServicesError::NativeViewUnavailable)?;
     let RawWindowHandle::AppKit(native_handle) = native_handle.as_raw() else {
@@ -252,14 +100,7 @@ pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesErro
             return Err(MacosServicesError::ResponderAllocationFailed);
         }
 
-        let state = Box::new(MacosServicesState {
-            endpoint: MacosServicesEndpoint {
-                app: cx.to_async(),
-                window: window.window_handle(),
-            },
-            next_request_id: Cell::new(0),
-            active_return_request: Rc::new(Cell::new(None)),
-        });
+        let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
         (*responder).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
 
         let previous_responder: id = msg_send![native_view, nextResponder];
@@ -274,24 +115,6 @@ pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesErro
         let _: () = msg_send![responder, release];
     }
     Ok(())
-}
-
-fn accepts_service_request(
-    capabilities: NativeServiceCapabilities,
-    send_type: ServiceDataType,
-    return_type: ServiceDataType,
-) -> bool {
-    if !send_type.is_supported() || !return_type.is_supported() {
-        return false;
-    }
-    if !send_type.is_requested() && !return_type.is_requested() {
-        return false;
-    }
-    if return_type.is_requested() && !send_type.is_requested() {
-        return false;
-    }
-    (!send_type.is_requested() || capabilities.send_text)
-        && (!return_type.is_requested() || capabilities.return_text)
 }
 
 fn services_responder_class() -> Result<&'static Class, MacosServicesError> {
@@ -359,7 +182,9 @@ extern "C" fn dealloc_services_responder(this: &Object, _: Sel) {
     unsafe {
         let state: *mut c_void = *this.get_ivar(SERVICES_STATE_IVAR);
         if !state.is_null() {
-            drop(Box::from_raw(state.cast::<MacosServicesState>()));
+            let state = Box::from_raw(state.cast::<Rc<ServiceRequests>>());
+            state.retire();
+            drop(state);
         }
         let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
     }
@@ -370,29 +195,30 @@ extern "C" fn dealloc_services_operation_responder(this: &Object, _: Sel) {
     unsafe {
         let state: *mut c_void = *this.get_ivar(SERVICES_OPERATION_STATE_IVAR);
         if !state.is_null() {
-            drop(Box::from_raw(state.cast::<MacosServicesOperationState>()));
+            drop(Box::from_raw(state.cast::<Rc<ServiceOperation>>()));
         }
         let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
     }
 }
 
 extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type: id) -> id {
+    let state = unsafe { services_state(this) };
     let operation = catch_unwind(AssertUnwindSafe(|| {
         let send_type = unsafe { service_data_type(send_type) };
         let return_type = unsafe { service_data_type(return_type) };
-        let state = (unsafe { services_state(this) })?;
-        let status = state.endpoint.status();
-        let accepted = accepts_service_request(status.capabilities, send_type, return_type);
-        if !accepted || status.origin.is_none() {
-            return None;
-        }
-        let operation = state.operation(return_type.is_requested())?;
+        let operation = state.as_ref()?.operation(send_type, return_type)?;
         unsafe { create_services_operation(operation) }
     }))
     .ok()
     .flatten();
     if let Some(operation) = operation {
         return operation;
+    }
+
+    if state.is_some_and(|state| state.is_retired()) {
+        // A callback destroyed the native responder. Its retained Rust owner remains safe, but
+        // the old Objective-C object can no longer continue the responder chain.
+        return nil;
     }
 
     // SAFETY: NSResponder's implementation continues the pre-existing responder chain when
@@ -405,14 +231,14 @@ extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type:
     }
 }
 
-unsafe fn create_services_operation(state: MacosServicesOperationState) -> Option<id> {
+unsafe fn create_services_operation(state: ServiceOperation) -> Option<id> {
     let responder_class = services_operation_responder_class().ok()?;
     let responder: id = unsafe { msg_send![responder_class, alloc] };
     let responder: id = unsafe { msg_send![responder, init] };
     if responder == nil {
         return None;
     }
-    let state = Box::new(state);
+    let state = Box::new(Rc::new(state));
     unsafe {
         (*responder).set_ivar(
             SERVICES_OPERATION_STATE_IVAR,
@@ -436,26 +262,20 @@ extern "C" fn write_selection_to_pasteboard(
         // SAFETY: AppKit supplies NSPasteboard and NSArray objects for this synchronous callback.
         let contains_string: BOOL =
             unsafe { msg_send![types, containsObject: NSPasteboardTypeString] };
-        if contains_string == NO {
+        // AppKit may validate modern text but pass the legacy type in this array (FB11838671).
+        // Both names describe the same text representation; publication remains modern UTF-8.
+        let contains_legacy_string: BOOL =
+            unsafe { msg_send![types, containsObject: NSStringPboardType] };
+        if contains_string == NO && contains_legacy_string == NO {
             return NO;
         }
         let Some(state) = (unsafe { services_operation_state(this) }) else {
             return NO;
         };
-        if !state.identity.claim_write() {
-            return NO;
-        }
-        let status = state.endpoint.status();
-        let Some(origin) = status.origin.filter(|_| status.capabilities.send_text) else {
-            state.identity.release_return();
-            return NO;
-        };
-        let Some(selection) = state.endpoint.selection(origin) else {
-            state.identity.release_return();
-            return NO;
-        };
-        let wrote = unsafe { write_service_text(pasteboard, &selection.plain_text) };
-        state.identity.finish_send(origin, pasteboard, wrote);
+        let wrote = state.write_selection(
+            ServicePasteboardIdentity::new(pasteboard as usize),
+            |text| unsafe { write_service_text(pasteboard, text) },
+        );
         if wrote { YES } else { NO }
     }))
     .unwrap_or(NO)
@@ -466,29 +286,24 @@ extern "C" fn read_selection_from_pasteboard(this: &Object, _: Sel, pasteboard: 
         let Some(state) = (unsafe { services_operation_state(this) }) else {
             return NO;
         };
-        let Some(origin) = state.identity.take_return_origin(pasteboard) else {
-            return NO;
-        };
-        let Some(text) = (unsafe { read_service_text(pasteboard) }) else {
-            return NO;
-        };
-        if state.endpoint.insert_text(origin, text) {
-            YES
-        } else {
-            NO
-        }
+        let inserted = state.read_selection(
+            ServicePasteboardIdentity::new(pasteboard as usize),
+            || unsafe { read_service_text(pasteboard) },
+        );
+        if inserted { YES } else { NO }
     }))
     .unwrap_or(NO)
 }
 
-unsafe fn services_state(this: &Object) -> Option<&MacosServicesState> {
+unsafe fn services_state(this: &Object) -> Option<Rc<ServiceRequests>> {
     let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_STATE_IVAR) };
-    unsafe { state.cast::<MacosServicesState>().as_ref() }
+    // Clone before any callback can reentrantly destroy the native responder and its ivar.
+    unsafe { state.cast::<Rc<ServiceRequests>>().as_ref() }.cloned()
 }
 
-unsafe fn services_operation_state(this: &Object) -> Option<&MacosServicesOperationState> {
+unsafe fn services_operation_state(this: &Object) -> Option<Rc<ServiceOperation>> {
     let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_OPERATION_STATE_IVAR) };
-    unsafe { state.cast::<MacosServicesOperationState>().as_ref() }
+    unsafe { state.cast::<Rc<ServiceOperation>>().as_ref() }.cloned()
 }
 
 unsafe fn service_data_type(value: id) -> ServiceDataType {
@@ -502,7 +317,8 @@ unsafe fn service_data_type(value: id) -> ServiceDataType {
         return ServiceDataType::Absent;
     }
     let is_string: BOOL = unsafe { msg_send![value, isEqualToString: NSPasteboardTypeString] };
-    if is_string == YES {
+    let is_legacy_string: BOOL = unsafe { msg_send![value, isEqualToString: NSStringPboardType] };
+    if is_string == YES || is_legacy_string == YES {
         ServiceDataType::String
     } else {
         ServiceDataType::Unsupported
@@ -543,7 +359,10 @@ unsafe fn read_nsstring_text(value: id) -> Option<String> {
     let character_len: NSUInteger = unsafe { msg_send![value, length] };
     let byte_len: NSUInteger =
         unsafe { msg_send![value, lengthOfBytesUsingEncoding: NS_UTF8_STRING_ENCODING] };
-    let byte_len = bounded_nsstring_byte_len(character_len, byte_len)?;
+    let byte_len = bounded_service_text_byte_len(
+        usize::try_from(character_len).ok()?,
+        usize::try_from(byte_len).ok()?,
+    )?;
     let utf8: *const c_char = unsafe { msg_send![value, UTF8String] };
     if utf8.is_null() {
         return None;
@@ -555,87 +374,12 @@ unsafe fn read_nsstring_text(value: id) -> Option<String> {
     decode_service_text_bytes(bytes)
 }
 
-fn bounded_nsstring_byte_len(character_len: NSUInteger, byte_len: NSUInteger) -> Option<usize> {
-    let byte_len = usize::try_from(byte_len).ok()?;
-    ((byte_len != 0 || character_len == 0) && byte_len <= MAX_PASTE_BYTES).then_some(byte_len)
-}
-
-fn decode_service_text_bytes(bytes: &[u8]) -> Option<String> {
-    if bytes.len() > MAX_PASTE_BYTES || bytes.contains(&0) {
-        return None;
-    }
-    std::str::from_utf8(bytes).ok().map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use cocoa::appkit::NSPasteboard;
 
     use super::*;
-    use crate::domain::{PaneId, TabId, WorkspaceId};
-
-    fn origin(generation: u64) -> NativeServiceOrigin {
-        NativeServiceOrigin::new(
-            WorkspaceId::new(1),
-            TabId::new(2),
-            PaneId::new(3),
-            4,
-            5,
-            generation,
-        )
-    }
-
-    fn operation_identity(
-        request_id: u64,
-        returns_text: bool,
-        active_return_request: Rc<Cell<Option<u64>>>,
-    ) -> ServiceOperationIdentity {
-        ServiceOperationIdentity {
-            request_id,
-            returns_text,
-            active_return_request,
-            write_claimed: Cell::new(false),
-            pasteboard: Cell::new(None),
-            origin: Cell::new(None),
-        }
-    }
-
-    #[test]
-    fn service_request_requires_each_requested_capability() {
-        assert!(accepts_service_request(
-            NativeServiceCapabilities::new(true, false),
-            ServiceDataType::String,
-            ServiceDataType::Absent,
-        ));
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, false),
-            ServiceDataType::String,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn string_return_requires_a_bound_send_and_terminal_input_focus_capability() {
-        assert!(accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::String,
-            ServiceDataType::String,
-        ));
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn unsupported_service_types_are_never_accepted() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Unsupported,
-            ServiceDataType::Absent,
-        ));
-    }
+    use crate::terminal::MAX_PASTE_BYTES;
 
     #[test]
     fn service_type_classifies_nil_and_empty_nsstring_as_absent() {
@@ -652,80 +396,21 @@ mod tests {
                 service_data_type(NSPasteboardTypeString),
                 ServiceDataType::String
             );
+            assert_eq!(
+                service_data_type(NSStringPboardType),
+                ServiceDataType::String
+            );
             assert_eq!(service_data_type(unsupported), ServiceDataType::Unsupported);
+            let generic_plain_text = NSString::alloc(nil)
+                .init_str("public.plain-text")
+                .autorelease();
+            assert_eq!(
+                service_data_type(generic_plain_text),
+                ServiceDataType::Unsupported
+            );
 
             pool.drain();
         }
-    }
-
-    #[test]
-    fn service_operation_keeps_the_validated_origin_through_send_and_return() {
-        let operation = operation_identity(1, true, Rc::new(Cell::new(None)));
-        let pasteboard = 0x1234usize as id;
-
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), pasteboard, true);
-
-        assert_eq!(operation.take_return_origin(pasteboard), Some(origin(6)));
-        assert_eq!(operation.take_return_origin(pasteboard), None);
-    }
-
-    #[test]
-    fn service_operation_rejects_overlap_and_wrong_pasteboard_return() {
-        let active = Rc::new(Cell::new(None));
-        let operation = operation_identity(1, true, Rc::clone(&active));
-        let overlap = operation_identity(2, true, active);
-        let first_pasteboard = 0x1234usize as id;
-        let other_pasteboard = 0x5678usize as id;
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), first_pasteboard, true);
-
-        assert!(!overlap.claim_write());
-        assert_eq!(overlap.take_return_origin(first_pasteboard), None);
-        assert_eq!(operation.take_return_origin(other_pasteboard), None);
-        assert_eq!(
-            operation.take_return_origin(first_pasteboard),
-            Some(origin(6))
-        );
-    }
-
-    #[test]
-    fn repeated_validation_produces_distinct_operation_identities() {
-        let active = Rc::new(Cell::new(None));
-        let transform = operation_identity(1, true, Rc::clone(&active));
-        let send_only = operation_identity(2, false, active);
-
-        assert_ne!(transform.request_id, send_only.request_id);
-        assert!(transform.returns_text);
-        assert!(!send_only.returns_text);
-    }
-
-    #[test]
-    fn service_operation_write_is_one_shot() {
-        let operation = operation_identity(1, false, Rc::new(Cell::new(None)));
-
-        assert!(operation.claim_write());
-        assert!(!operation.claim_write());
-    }
-
-    #[test]
-    fn return_only_service_cannot_create_an_unbound_operation() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn service_text_rejects_oversized_and_embedded_nul_payloads() {
-        assert!(decode_service_text_bytes(&vec![b'x'; MAX_PASTE_BYTES + 1]).is_none());
-        assert!(decode_service_text_bytes(b"before\0after").is_none());
-        assert_eq!(
-            decode_service_text_bytes("日本語".as_bytes()).as_deref(),
-            Some("日本語")
-        );
-        assert_eq!(bounded_nsstring_byte_len(1, 0), None);
     }
 
     #[test]
@@ -815,5 +500,463 @@ mod tests {
             pool.drain();
             assert_eq!(text.as_deref(), Some("service text\n"));
         }
+    }
+    // NSResponder objects have no window or application attachment here. Each fixture is confined
+    // to its test thread, and this lock serializes Objective-C class registration and callbacks.
+    static NATIVE_REQUESTOR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct NativePool(id);
+
+    impl NativePool {
+        fn new() -> Self {
+            // SAFETY: The pool is created and drained on the same synchronous test thread.
+            Self(unsafe { NSAutoreleasePool::new(nil) })
+        }
+    }
+
+    impl Drop for NativePool {
+        fn drop(&mut self) {
+            unsafe { self.0.drain() };
+        }
+    }
+
+    struct NativeObject(std::cell::Cell<id>);
+
+    impl NativeObject {
+        fn requestor(endpoint: Rc<dyn ServiceEndpoint>) -> Rc<Self> {
+            // SAFETY: This constructs the registered production responder with the same owned
+            // ivar representation as install, without creating an NSView or NSApplication.
+            unsafe {
+                let class = services_responder_class().unwrap();
+                let object: id = msg_send![class, alloc];
+                let object: id = msg_send![object, init];
+                assert_ne!(object, nil);
+                let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
+                (*object).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
+                Rc::new(Self(std::cell::Cell::new(object)))
+            }
+        }
+
+        fn validate(&self) -> Option<Rc<Self>> {
+            self.validate_returning(true)
+        }
+
+        fn validate_returning(&self, returns_text: bool) -> Option<Rc<Self>> {
+            let _pool = NativePool::new();
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: The receiver is live at message entry. Tests may destroy it reentrantly
+            // through the endpoint; the production callback must survive that destruction.
+            unsafe {
+                let return_type = if returns_text {
+                    NSPasteboardTypeString
+                } else {
+                    nil
+                };
+                let operation: id = msg_send![object,
+                    validRequestorForSendType: NSPasteboardTypeString
+                    returnType: return_type
+                ];
+                if operation == nil {
+                    return None;
+                }
+                let operation: id = msg_send![operation, retain];
+                Some(Rc::new(Self(std::cell::Cell::new(operation))))
+            }
+        }
+
+        fn write(&self, pasteboard: id) -> bool {
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: These are the registered production selector and an owned NSPasteboard.
+            unsafe {
+                let types = NSArray::arrayWithObject(nil, NSPasteboardTypeString);
+                let result: BOOL =
+                    msg_send![object, writeSelectionToPasteboard: pasteboard types: types];
+                result == YES
+            }
+        }
+
+        fn read(&self, pasteboard: id) -> bool {
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: The receiver is live at entry and the isolated pasteboard remains owned.
+            let result: BOOL =
+                unsafe { msg_send![object, readSelectionFromPasteboard: pasteboard] };
+            result == YES
+        }
+
+        fn release(&self) {
+            let object = self.0.replace(nil);
+            if object != nil {
+                // SAFETY: This consumes only the fixture's owned retain under normal Cocoa rules.
+                let _: () = unsafe { msg_send![object, release] };
+            }
+        }
+
+        fn deallocate(&self) {
+            let object = self.0.replace(nil);
+            assert_ne!(object, nil);
+            // SAFETY: The fixture owns the sole retain and is unattached to an NSView. AppKit's
+            // final-release scheduling does not run synchronously on the Rust harness thread.
+            // Deliberately dispatch the actual production dealloc selector here to probe
+            // reentrant callback ownership and superclass teardown. The cleared cell prevents
+            // a second release. This is no claim about native window removal or release timing.
+            unsafe {
+                let count: NSUInteger = msg_send![object, retainCount];
+                assert_eq!(count, 1);
+                let _: () = msg_send![object, dealloc];
+            }
+        }
+    }
+
+    impl Drop for NativeObject {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    struct IsolatedPasteboard(id);
+
+    impl IsolatedPasteboard {
+        fn new() -> Self {
+            // SAFETY: The test's outer pool retains the unique pasteboard through every callback.
+            Self(unsafe { NSPasteboard::pasteboardWithUniqueName(nil) })
+        }
+
+        fn set_text(&self, text: &str) {
+            assert!(unsafe { write_service_text(self.0, text) });
+        }
+
+        fn text(&self) -> Option<String> {
+            unsafe { read_service_text(self.0) }
+        }
+    }
+
+    impl Drop for IsolatedPasteboard {
+        fn drop(&mut self) {
+            // SAFETY: This fixture exclusively owns its named server-side pasteboard.
+            unsafe { self.0.releaseGlobally() };
+        }
+    }
+
+    type NativeCallback = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+    struct NativeEndpoint {
+        origin: std::cell::Cell<crate::terminal::NativeServiceOrigin>,
+        selection: &'static str,
+        inserted: std::cell::RefCell<Vec<(crate::terminal::NativeServiceOrigin, String)>>,
+        on_status: NativeCallback,
+        on_selection: NativeCallback,
+        on_insert: NativeCallback,
+    }
+
+    impl NativeEndpoint {
+        fn new(selection: &'static str) -> Rc<Self> {
+            Rc::new(Self {
+                origin: std::cell::Cell::new(native_origin(1)),
+                selection,
+                inserted: std::cell::RefCell::new(Vec::new()),
+                on_status: std::cell::RefCell::new(None),
+                on_selection: std::cell::RefCell::new(None),
+                on_insert: std::cell::RefCell::new(None),
+            })
+        }
+
+        fn invoke(callback: &NativeCallback) {
+            let callback = callback.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+
+    impl ServiceEndpoint for NativeEndpoint {
+        fn status(&self) -> crate::terminal::NativeServiceStatus {
+            Self::invoke(&self.on_status);
+            crate::terminal::NativeServiceStatus::new(
+                crate::terminal::NativeServiceCapabilities::new(true, true),
+                Some(self.origin.get()),
+            )
+        }
+
+        fn selection(
+            &self,
+            origin: crate::terminal::NativeServiceOrigin,
+        ) -> Option<crate::terminal::SelectionCopy> {
+            Self::invoke(&self.on_selection);
+            (origin == self.origin.get()).then(|| crate::terminal::SelectionCopy {
+                plain_text: self.selection.to_owned(),
+                html: None,
+            })
+        }
+
+        fn insert_text(&self, origin: crate::terminal::NativeServiceOrigin, text: String) -> bool {
+            Self::invoke(&self.on_insert);
+            if origin != self.origin.get() {
+                return false;
+            }
+            self.inserted.borrow_mut().push((origin, text));
+            true
+        }
+    }
+
+    fn native_origin(generation: u64) -> crate::terminal::NativeServiceOrigin {
+        crate::terminal::NativeServiceOrigin::new(
+            crate::domain::WorkspaceId::new(1),
+            crate::domain::TabId::new(2),
+            crate::domain::PaneId::new(3),
+            4,
+            5,
+            generation,
+        )
+    }
+
+    #[test]
+    fn native_selectors_publish_selection_and_accept_exactly_one_return() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected 日本語");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+
+        assert!(operation.write(board.0));
+        assert_eq!(board.text().as_deref(), Some("selected 日本語"));
+        assert!(!operation.write(board.0));
+        board.set_text("transformed text");
+        assert!(operation.read(board.0));
+        assert!(!operation.read(board.0));
+        assert_eq!(
+            *endpoint.inserted.borrow(),
+            vec![(native_origin(1), "transformed text".into())]
+        );
+    }
+
+    #[test]
+    fn native_selectors_reject_stale_validation_and_stale_return() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("successor selection");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let stale = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        board.set_text("untouched");
+        endpoint.origin.set(native_origin(2));
+        assert!(!stale.write(board.0));
+        assert_eq!(board.text().as_deref(), Some("untouched"));
+
+        let current = requestor.validate().unwrap();
+        assert!(current.write(board.0));
+        board.set_text("stale return");
+        endpoint.origin.set(native_origin(3));
+        assert!(!current.read(board.0));
+        endpoint.origin.set(native_origin(2));
+        assert!(!current.read(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
+    }
+
+    #[test]
+    fn native_requestors_keep_overlapping_window_equivalent_owners_isolated() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let first = NativeEndpoint::new("first selection");
+        let second = NativeEndpoint::new("second selection");
+        let first_requestor = NativeObject::requestor(first.clone());
+        let second_requestor = NativeObject::requestor(second.clone());
+        let first_operation = first_requestor.validate().unwrap();
+        let overlap = first_requestor.validate().unwrap();
+        let second_operation = second_requestor.validate().unwrap();
+        let first_board = IsolatedPasteboard::new();
+        let second_board = IsolatedPasteboard::new();
+
+        assert!(first_operation.write(first_board.0));
+        assert!(!overlap.write(first_board.0));
+        assert!(second_operation.write(second_board.0));
+        assert!(!first_operation.read(second_board.0));
+        assert!(!second_operation.read(first_board.0));
+        first_requestor.deallocate();
+        assert!(!first_operation.read(first_board.0));
+        second_board.set_text("second return");
+        assert!(second_operation.read(second_board.0));
+        assert!(first.inserted.borrow().is_empty());
+        assert_eq!(
+            *second.inserted.borrow(),
+            vec![(native_origin(1), "second return".into())]
+        );
+    }
+
+    #[test]
+    fn native_validation_survives_requestor_deallocation_inside_status() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let state = unsafe { services_state(&*requestor.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let observed_state = weak_state.clone();
+        let observed_retirement = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retirement);
+        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+            callback_requestor.deallocate();
+            callback_observation.set(
+                observed_state
+                    .upgrade()
+                    .is_some_and(|state| state.is_retired()),
+            );
+        }));
+
+        assert!(requestor.validate().is_none());
+        assert!(observed_retirement.get());
+        assert!(weak_state.upgrade().is_none());
+        let successor = NativeObject::requestor(endpoint);
+        assert!(successor.validate().is_some());
+    }
+
+    #[test]
+    fn native_selection_survives_operation_and_owner_deallocation_without_publishing() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
+        *endpoint.on_selection.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            callback_requestor.deallocate();
+            callback_observation.set(observed_state.upgrade().is_some());
+        }));
+        let board = IsolatedPasteboard::new();
+        board.set_text("untouched");
+
+        assert!(!operation.write(board.0));
+        assert!(observed_retention.get());
+        assert_eq!(board.text().as_deref(), Some("untouched"));
+        assert!(weak_state.upgrade().is_none());
+        let successor = NativeObject::requestor(endpoint.clone());
+        assert!(successor.validate().unwrap().write(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
+    }
+
+    #[test]
+    fn native_return_survives_operation_and_owner_deallocation_inside_status() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        assert!(operation.write(board.0));
+        board.set_text("returned after retirement");
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
+        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            callback_requestor.deallocate();
+            callback_observation.set(observed_state.upgrade().is_some());
+        }));
+
+        assert!(!operation.read(board.0));
+        assert!(observed_retention.get());
+        assert!(weak_state.upgrade().is_none());
+        assert!(endpoint.inserted.borrow().is_empty());
+        let successor = NativeObject::requestor(endpoint);
+        assert!(successor.validate().unwrap().write(board.0));
+    }
+
+    #[test]
+    fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        assert!(operation.write(board.0));
+        board.set_text("accepted return");
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
+        *endpoint.on_insert.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            callback_observation.set(observed_state.upgrade().is_some());
+        }));
+
+        assert!(operation.read(board.0));
+        assert!(observed_retention.get());
+        assert!(weak_state.upgrade().is_none());
+        assert_eq!(
+            *endpoint.inserted.borrow(),
+            vec![(native_origin(1), "accepted return".into())]
+        );
+        assert!(requestor.validate().unwrap().write(board.0));
+    }
+
+    #[test]
+    fn native_modern_validation_accepts_legacy_only_write_types_once() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected 日本語");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        // Stickies is a send-only service: validation supplies modern text and no return type.
+        let operation = requestor.validate_returning(false).unwrap();
+        let board = IsolatedPasteboard::new();
+        let object = operation.0.get();
+
+        // SAFETY: The real registered operation responder and isolated pasteboard are retained
+        // throughout these selector calls. This reproduces AppKit's legacy-only write array.
+        unsafe {
+            let types = NSArray::arrayWithObject(nil, NSStringPboardType);
+            let contains_modern: BOOL = msg_send![types, containsObject: NSPasteboardTypeString];
+            assert_eq!(contains_modern, NO);
+            let wrote: BOOL = msg_send![object, writeSelectionToPasteboard: board.0 types: types];
+            assert_eq!(wrote, YES);
+            assert_eq!(board.text().as_deref(), Some("selected 日本語"));
+            let legacy_text: id = msg_send![board.0, stringForType: NSStringPboardType];
+            assert_eq!(
+                read_nsstring_text(legacy_text).as_deref(),
+                Some("selected 日本語")
+            );
+            let repeated: BOOL =
+                msg_send![object, writeSelectionToPasteboard: board.0 types: types];
+            assert_eq!(repeated, NO);
+        }
+        assert!(!operation.read(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
     }
 }

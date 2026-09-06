@@ -1,4 +1,7 @@
 use libghostty_vt::paste;
+use std::time::{Duration, Instant};
+
+const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) const MAX_PASTE_BYTES: usize = 1024 * 1024;
 
@@ -82,14 +85,24 @@ pub(crate) enum PasteResolution {
     Stale,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PreparedPaste {
+#[derive(Clone, Eq, PartialEq)]
+pub(in crate::terminal) struct PreparedPaste {
     text: String,
     risk: PasteRisk,
 }
 
+impl std::fmt::Debug for PreparedPaste {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedPaste")
+            .field("byte_len", &self.text.len())
+            .field("risk", &self.risk)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PreparedPaste {
-    pub(super) fn prepare(text: String) -> Result<Self, PasteRejection> {
+    pub(in crate::terminal) fn prepare(text: String) -> Result<Self, PasteRejection> {
         if text.is_empty() {
             return Err(PasteRejection::Empty);
         }
@@ -114,11 +127,11 @@ impl PreparedPaste {
         Ok(Self { text, risk })
     }
 
-    pub(super) const fn requires_confirmation(&self, bracketed_paste: bool) -> bool {
+    pub(in crate::terminal) const fn requires_confirmation(&self, bracketed_paste: bool) -> bool {
         self.risk.requires_confirmation(bracketed_paste)
     }
 
-    pub(super) fn confirmation(&self, id: PasteConfirmationId) -> PasteConfirmation {
+    pub(in crate::terminal) fn confirmation(&self, id: PasteConfirmationId) -> PasteConfirmation {
         PasteConfirmation {
             id,
             byte_len: self.text.len(),
@@ -127,7 +140,7 @@ impl PreparedPaste {
         }
     }
 
-    pub(super) fn into_text(self) -> String {
+    pub(in crate::terminal) fn into_text(self) -> String {
         self.text
     }
 }
@@ -152,9 +165,92 @@ fn normalize_newlines(text: String) -> String {
     normalized
 }
 
+struct PendingPaste {
+    id: PasteConfirmationId,
+    payload: PreparedPaste,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+pub(in crate::terminal) struct PasteConfirmationSchedule {
+    next_id: u64,
+    pending: Option<PendingPaste>,
+}
+
+impl PasteConfirmationSchedule {
+    pub(in crate::terminal) fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    pub(in crate::terminal) fn create(
+        &mut self,
+        payload: PreparedPaste,
+        now: Instant,
+    ) -> Option<PasteConfirmation> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = PasteConfirmationId::new(self.next_id);
+        let confirmation = payload.confirmation(id);
+        self.pending = Some(PendingPaste {
+            id,
+            payload,
+            deadline: now + PASTE_CONFIRMATION_TIMEOUT,
+        });
+        Some(confirmation)
+    }
+
+    pub(in crate::terminal) fn take(
+        &mut self,
+        id: PasteConfirmationId,
+        now: Instant,
+    ) -> Option<PreparedPaste> {
+        let pending = self.pending.take()?;
+        if pending.id == id && now < pending.deadline {
+            Some(pending.payload)
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::terminal) fn expire(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(in crate::terminal) fn cancel(&mut self) {
+        self.pending = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_paste_debug_never_exposes_payload_contents() {
+        let paste = PreparedPaste::prepare("private clipboard content".to_owned()).unwrap();
+        assert_eq!(
+            format!("{paste:?}"),
+            "PreparedPaste { byte_len: 25, risk: PasteRisk { multiline: false, control_bytes: false, closing_fence: false }, .. }",
+        );
+    }
+
+    #[test]
+    fn paste_confirmation_schedule_expires_without_exposing_payload() {
+        let now = Instant::now();
+        let mut schedule = PasteConfirmationSchedule::default();
+        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
+        let confirmation = schedule.create(payload, now).unwrap();
+
+        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
+        assert_eq!(schedule.take(confirmation.id, now), None);
+    }
 
     #[test]
     fn preparation_normalizes_newlines_and_classifies_multiline_input() {

@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the next stacked context-action layer owns this injectable platform seam"
-    )
-)]
-
 use std::marker::PhantomData;
 use std::path::Path;
 use std::rc::Rc;
@@ -14,72 +6,15 @@ use cocoa::base::{NO, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use objc::{class, msg_send, sel, sel_impl};
 
-use crate::terminal::QuickLookTarget;
+use crate::terminal::native_services::quick_look::{
+    QuickLookError, QuickLookFactory, QuickLookPanel,
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QuickLookError {
-    StaleTarget,
-    OffMainThread,
-    PlatformUnavailable,
-}
+pub(crate) struct MacosQuickLookFactory;
 
-pub(crate) trait QuickLookPlatform {
-    fn preview(&mut self, target: &QuickLookTarget) -> Result<(), QuickLookError>;
-    fn dismiss(&mut self);
-}
-
-trait QuickLookPanel {
-    fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError>;
-    fn dismiss(&mut self);
-}
-
-struct QuickLookPresenter<P> {
-    panel: P,
-}
-
-impl<P> QuickLookPresenter<P> {
-    const fn new(panel: P) -> Self {
-        Self { panel }
-    }
-}
-
-impl<P: QuickLookPanel> QuickLookPlatform for QuickLookPresenter<P> {
-    fn preview(&mut self, target: &QuickLookTarget) -> Result<(), QuickLookError> {
-        let Some(path) = target.revalidated_path() else {
-            self.panel.dismiss();
-            return Err(QuickLookError::StaleTarget);
-        };
-        if let Err(error) = self.panel.preview_file(&path) {
-            self.panel.dismiss();
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn dismiss(&mut self) {
-        self.panel.dismiss();
-    }
-}
-
-pub(crate) struct MacosQuickLook {
-    presenter: QuickLookPresenter<NativeQuickLookPanel>,
-}
-
-impl Default for MacosQuickLook {
-    fn default() -> Self {
-        Self {
-            presenter: QuickLookPresenter::new(NativeQuickLookPanel::default()),
-        }
-    }
-}
-
-impl QuickLookPlatform for MacosQuickLook {
-    fn preview(&mut self, target: &QuickLookTarget) -> Result<(), QuickLookError> {
-        self.presenter.preview(target)
-    }
-
-    fn dismiss(&mut self) {
-        self.presenter.dismiss();
+impl QuickLookFactory for MacosQuickLookFactory {
+    fn create(&self) -> Box<dyn QuickLookPanel> {
+        Box::<NativeQuickLookPanel>::default()
     }
 }
 
@@ -237,145 +172,86 @@ unsafe extern "C" {}
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
 
     use super::*;
-    use crate::terminal::{HyperlinkTarget, TerminalLocalFileCapabilities};
 
-    const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
+    static RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static CLOSES: AtomicUsize = AtomicUsize::new(0);
+    static DETACHES: AtomicUsize = AtomicUsize::new(0);
 
-    #[derive(Default)]
-    struct RecordingPanel {
-        previews: Vec<PathBuf>,
-        dismissals: usize,
+    extern "C" fn close(_: &Object, _: Sel) {
+        CLOSES.fetch_add(1, Ordering::SeqCst);
     }
 
-    impl QuickLookPanel for RecordingPanel {
-        fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError> {
-            self.previews.push(path.to_path_buf());
-            Ok(())
-        }
-
-        fn dismiss(&mut self) {
-            self.dismissals += 1;
+    extern "C" fn detach(_: &Object, _: Sel, view: id) {
+        if view == nil {
+            DETACHES.fetch_add(1, Ordering::SeqCst);
         }
     }
 
-    #[test]
-    fn presenter_submits_exactly_one_revalidated_regular_file() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        fs::write(&file, b"preview").unwrap();
-        let link =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
+    extern "C" fn deallocate(this: &Object, _: Sel) {
+        RELEASES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: This NSObject subclass owns no additional storage.
+        unsafe {
+            let _: () = msg_send![super(this, class!(NSObject)), dealloc];
+        }
+    }
 
-        let result = presenter.preview(&target);
+    fn resource_class() -> &'static Class {
+        static CLASS: OnceLock<&'static Class> = OnceLock::new();
+        CLASS.get_or_init(|| {
+            let mut class =
+                ClassDecl::new("SpaceTermPreviewOwnershipProbe", class!(NSObject)).unwrap();
+            // SAFETY: The probe implements the exact selectors used by the production owner.
+            unsafe {
+                class.add_method(sel!(close), close as extern "C" fn(&Object, Sel));
+                class.add_method(
+                    sel!(setContentView:),
+                    detach as extern "C" fn(&Object, Sel, id),
+                );
+                class.add_method(sel!(dealloc), deallocate as extern "C" fn(&Object, Sel));
+            }
+            class.register()
+        })
+    }
 
-        assert_eq!(result, Ok(()));
-        assert_eq!(presenter.panel.previews, vec![file.canonicalize().unwrap()]);
-        fs::remove_dir_all(directory).unwrap();
+    fn owned_resources() -> OwnedQuickLookWindow {
+        // SAFETY: Both probe objects transfer one alloc/init retain into the production owner.
+        unsafe {
+            OwnedQuickLookWindow {
+                panel: msg_send![resource_class(), new],
+                preview: msg_send![resource_class(), new],
+            }
+        }
     }
 
     #[test]
-    fn presenter_rejects_a_replaced_file_before_calling_the_platform() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-replaced-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        let replacement = directory.join("replacement.txt");
-        fs::write(&file, b"preview").unwrap();
-        let link =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
-        fs::write(&replacement, b"replacement").unwrap();
-        fs::rename(replacement, &file).unwrap();
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
-
-        let result = presenter.preview(&target);
-
-        assert_eq!(result, Err(QuickLookError::StaleTarget));
+    fn native_preview_ownership_releases_replaced_and_final_resources_once() {
+        // NSObject probes exercise production Objective-C teardown without opening a test window.
+        // QLPreviewView visual presentation still requires an AppKit main-thread application host.
+        let mut current = Some(owned_resources());
+        drop(current.replace(owned_resources()));
         assert_eq!(
-            (presenter.panel.previews.len(), presenter.panel.dismissals),
-            (0, 1)
+            (
+                RELEASES.load(Ordering::SeqCst),
+                CLOSES.load(Ordering::SeqCst),
+                DETACHES.load(Ordering::SeqCst)
+            ),
+            (2, 1, 1)
         );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn quick_look_target_rejects_web_links_before_the_platform_boundary() {
-        let link = HyperlinkTarget::url("https://example.test/file.txt").unwrap();
-
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
-
-        assert_eq!(target, None);
-    }
-
-    #[test]
-    fn quick_look_target_rejects_a_missing_file_before_the_platform_boundary() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-missing-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        fs::write(&file, b"preview").unwrap();
-        let link =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        fs::remove_file(file).unwrap();
-
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
-
-        assert_eq!(target, None);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn quick_look_target_rejects_a_directory_before_the_platform_boundary() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-directory-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-
-        let target = HyperlinkTarget::osc8("file:.", &directory, None, LOCAL_FILES)
-            .and_then(|link| QuickLookTarget::from_link(&link, LOCAL_FILES));
-
-        assert_eq!(target, None);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn platform_error_identifiers_carry_no_target_content() {
+        drop(current);
         assert_eq!(
-            [
-                QuickLookError::StaleTarget,
-                QuickLookError::OffMainThread,
-                QuickLookError::PlatformUnavailable,
-            ]
-            .map(|error| format!("{error:?}")),
-            [
-                "StaleTarget".to_owned(),
-                "OffMainThread".to_owned(),
-                "PlatformUnavailable".to_owned(),
-            ]
+            (
+                RELEASES.load(Ordering::SeqCst),
+                CLOSES.load(Ordering::SeqCst),
+                DETACHES.load(Ordering::SeqCst)
+            ),
+            (4, 2, 2)
         );
-    }
-
-    #[test]
-    fn presenter_dismissal_is_explicit_and_injectable() {
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
-
-        presenter.dismiss();
-
-        assert_eq!(presenter.panel.dismissals, 1);
     }
 }

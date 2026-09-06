@@ -74,6 +74,7 @@ pub(crate) enum RecordedSessionCommand {
     ResolvePaste(PasteConfirmationId, PasteDecision),
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
+    RequestSelectionCopyAt(PresentationGeneration),
     InjectAcceptanceFailure(AcceptanceSessionFailure),
 }
 
@@ -405,6 +406,14 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopy);
+        self.selection_response.clone()
+    }
+
+    fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.record(RecordedSessionCommand::RequestSelectionCopyAt(generation));
         self.selection_response.clone()
     }
 

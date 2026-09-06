@@ -16,8 +16,8 @@ use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
-    NativeTerminalSessionFactory, OptionAsAltPolicy, TerminalKeyInputAdapterFactory,
-    TerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, NativeTerminalSessionFactory, OptionAsAltPolicy,
+    SelectionCopy, TerminalKeyInputAdapterFactory, TerminalSessionFactory,
 };
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
@@ -239,6 +239,7 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                 crate::platform::launch_host::user_shell().into(),
                 crate::platform::launch_host::resource_root(),
             ),
+            Arc::new(crate::platform::macos_pasteboard::MacosOsc52ClipboardFactory),
         ));
     let key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory> = Rc::new(
         MacosTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::default()),
@@ -260,6 +261,11 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                     Rc::clone(&session_factory),
                     Rc::clone(&key_input_adapter_factory),
                     Rc::new(crate::platform::macos_accessibility::MacosTerminalAccessibilityAdapterFactory),
+                    crate::terminal::native_services::NativeServiceAdapters {
+                        selection_clipboard: Rc::new(crate::platform::macos_pasteboard::MacosSelectionClipboard),
+                        file_clipboard: Rc::new(crate::platform::macos_pasteboard::MacosFileClipboard),
+                        quick_look: Rc::new(crate::platform::macos_quick_look::MacosQuickLookFactory),
+                    },
                     home_directory.clone(),
                     Arc::clone(&remote_backend_factory),
                     window,
@@ -275,7 +281,10 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                     .update(cx, |manager, cx| manager.should_close_window(window, cx))
                     .unwrap_or(true)
             });
-            if let Err(error) = crate::platform::macos_services::install(window, cx) {
+            if let Err(error) = crate::platform::macos_services::install(window, Rc::new(WorkspaceServicesEndpoint {
+                app: cx.to_async(),
+                window: window.window_handle(),
+            })) {
                 eprintln!("failed to install the macOS Services responder: {error}");
             }
             workspace_manager
@@ -403,5 +412,62 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("native command copy".to_owned())
         );
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceServicesEndpoint {
+    app: gpui::AsyncApp,
+    window: gpui::AnyWindowHandle,
+}
+
+impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceServicesEndpoint {
+    fn status(&self) -> NativeServiceStatus {
+        self.app
+            .update(|cx| {
+                self.window.update(cx, |root, window, cx| {
+                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
+                        return NativeServiceStatus::default();
+                    };
+                    manager.update(cx, |manager, cx| manager.native_service_status(window, cx))
+                })
+            })
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    }
+
+    fn selection(&self, origin: NativeServiceOrigin) -> Option<SelectionCopy> {
+        self.app
+            .update(|cx| {
+                self.window.update(cx, |root, window, cx| {
+                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
+                        return None;
+                    };
+                    manager.update(cx, |manager, cx| {
+                        manager.native_service_selection(origin, window, cx)
+                    })
+                })
+            })
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+    }
+
+    fn insert_text(&self, origin: NativeServiceOrigin, text: String) -> bool {
+        self.app
+            .update(|cx| {
+                self.window.update(cx, |root, window, cx| {
+                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
+                        return false;
+                    };
+                    manager.update(cx, |manager, cx| {
+                        manager.insert_native_service_text(origin, text, window, cx)
+                    })
+                })
+            })
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
     }
 }

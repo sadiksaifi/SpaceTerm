@@ -1,4 +1,5 @@
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
+use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -228,11 +229,13 @@ struct TabManagerCreation {
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+    native_service_adapters: NativeServiceAdapters,
 }
 
 struct WorkspaceManagerAdapters {
     key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
+    native_services: NativeServiceAdapters,
     finder: Rc<dyn FinderFallback>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
@@ -272,6 +275,7 @@ pub(crate) struct WorkspaceManager {
     session_factory: Rc<dyn TerminalSessionFactory>,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+    native_service_adapters: NativeServiceAdapters,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
     finder_fallback: Rc<dyn FinderFallback>,
@@ -304,10 +308,15 @@ pub(crate) struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit capability injection follows hierarchy ownership"
+    )]
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+        native_service_adapters: NativeServiceAdapters,
         default_workspace_root: PathBuf,
         remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -321,6 +330,7 @@ impl WorkspaceManager {
             WorkspaceManagerAdapters {
                 key_input: key_input_adapter_factory,
                 accessibility: accessibility_adapter_factory,
+                native_services: native_service_adapters,
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -344,6 +354,7 @@ impl WorkspaceManager {
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                native_services: crate::terminal::native_services::testing::adapters(),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -368,6 +379,7 @@ impl WorkspaceManager {
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                native_services: crate::terminal::native_services::testing::adapters(),
                 finder: finder_fallback,
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -392,6 +404,7 @@ impl WorkspaceManager {
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                native_services: crate::terminal::native_services::testing::adapters(),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
@@ -411,6 +424,7 @@ impl WorkspaceManager {
         let WorkspaceManagerAdapters {
             key_input: key_input_adapter_factory,
             accessibility: accessibility_adapter_factory,
+            native_services: native_service_adapters,
             finder: finder_fallback,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
@@ -445,6 +459,7 @@ impl WorkspaceManager {
                         accessibility_adapter_factory: Rc::clone(
                             &initial_accessibility_adapter_factory,
                         ),
+                        native_service_adapters: native_service_adapters.clone(),
                     },
                     window,
                     cx,
@@ -541,6 +556,7 @@ impl WorkspaceManager {
             session_factory,
             key_input_adapter_factory,
             accessibility_adapter_factory,
+            native_service_adapters,
             default_workspace_root,
             default_workspace_identity,
             finder_fallback,
@@ -615,6 +631,7 @@ impl WorkspaceManager {
             operating_system_window_drag_platform,
             key_input_adapter_factory,
             accessibility_adapter_factory,
+            native_service_adapters,
         } = creation;
         let manager = cx.new(|cx| {
             let mut manager = TabManager::new_with_prepared_initial_launch(
@@ -623,6 +640,7 @@ impl WorkspaceManager {
                 operating_system_window_drag_platform,
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
+                native_service_adapters,
                 window,
                 cx,
             );
@@ -1324,6 +1342,7 @@ impl WorkspaceManager {
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
+        let native_service_adapters = self.native_service_adapters.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -1348,6 +1367,7 @@ impl WorkspaceManager {
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
+                        native_service_adapters,
                     },
                     window,
                     cx,
@@ -1716,6 +1736,7 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
+        let native_service_adapters = self.native_service_adapters.clone();
         let result = self.workspaces.create_remote_project_workspace(
             key,
             completion.directory().clone(),
@@ -1732,6 +1753,7 @@ impl WorkspaceManager {
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
+                        native_service_adapters,
                     },
                     window,
                     cx,
@@ -2489,6 +2511,7 @@ impl WorkspaceManager {
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
+        let native_service_adapters = self.native_service_adapters.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2511,6 +2534,7 @@ impl WorkspaceManager {
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
+                        native_service_adapters,
                     },
                     window,
                     cx,
@@ -2860,6 +2884,7 @@ impl WorkspaceManager {
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
+        let native_service_adapters = self.native_service_adapters.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2885,6 +2910,7 @@ impl WorkspaceManager {
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
+                        native_service_adapters,
                     },
                     window,
                     cx,
@@ -5020,6 +5046,70 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::native_services::quick_look::{QuickLookFactory, QuickLookPanel};
+
+        struct CountingQuickLookFactory {
+            created: Rc<std::cell::Cell<usize>>,
+            delegate: Rc<dyn QuickLookFactory>,
+        }
+
+        impl QuickLookFactory for CountingQuickLookFactory {
+            fn create(&self) -> Box<dyn QuickLookPanel> {
+                self.created.set(self.created.get() + 1);
+                self.delegate.create()
+            }
+        }
+
+        cx.update(crate::ui::init).unwrap();
+        let created = Rc::new(std::cell::Cell::new(0));
+        let mut native_services = crate::terminal::native_services::testing::adapters();
+        native_services.quick_look = Rc::new(CountingQuickLookFactory {
+            created: Rc::clone(&created),
+            delegate: Rc::clone(&native_services.quick_look),
+        });
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+        );
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WorkspaceManager::new_with_adapters(
+                session_factory,
+                std::env::temp_dir(),
+                WorkspaceManagerAdapters {
+                    key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                    accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                    native_services,
+                    finder: Rc::new(NativeFinderFallback),
+                    window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                    remote_workspace: test_remote_backend_factory(),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(created.get(), 1);
+        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            assert_eq!(created.get(), expected, "{shortcut}");
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let workspace_id = manager.workspaces.active_workspace_id();
+                manager.close_workspace(workspace_id, window, cx);
+                let final_workspace_id = manager.workspaces.active_workspace_id();
+                manager.close_workspace(final_workspace_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(created.get(), 5, "replacement Workspace");
+    }
+
+    #[gpui::test]
     fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes(
         cx: &mut TestAppContext,
     ) {
@@ -5035,6 +5125,7 @@ mod tests {
                 WorkspaceManagerAdapters {
                     key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                     accessibility: factory.clone(),
+                    native_services: crate::terminal::native_services::testing::adapters(),
                     finder: Rc::new(NativeFinderFallback),
                     window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),

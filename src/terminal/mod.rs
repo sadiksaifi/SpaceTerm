@@ -4,21 +4,22 @@ pub(crate) mod attention;
 mod conformance;
 mod emulator;
 mod failure;
-mod file_insertion;
+#[cfg(test)]
+pub(crate) use native_services::file_insertion;
 mod find;
 pub(crate) mod geometry;
 mod graphics;
-mod hyperlink;
+pub(crate) use native_services::hyperlink;
 pub(crate) mod identity;
 mod key;
 mod key_input;
 mod keyboard_protocol;
 pub(crate) mod metadata;
-mod native_services;
-pub(crate) mod osc52;
-mod paste;
+pub(crate) mod native_services;
+pub(crate) use native_services::osc52;
+pub(crate) use native_services::paste;
 mod runtime_observation;
-mod selection;
+pub(crate) use native_services::selection;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
