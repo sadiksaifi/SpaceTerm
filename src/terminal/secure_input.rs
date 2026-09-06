@@ -137,8 +137,9 @@ impl SecureInputCoordinator {
         // that release before accepting fresh eligibility, even if focus has returned.
         if self.release_pending {
             self.owner = None;
-            self.transition(false);
-            return;
+            if !self.transition(false) {
+                return;
+            }
         }
         let desired_owner = self.eligible_owner();
         let desired = desired_owner.is_some();
@@ -313,9 +314,7 @@ mod tests {
         pane.update(true, true);
         assert_eq!(handle.0.borrow().owner, None);
         pane.update(true, true);
-        assert!(!handle.0.borrow().enabled);
-        assert_eq!(handle.0.borrow().owner, None);
-        pane.update(true, true);
+        assert!(handle.0.borrow().enabled);
         assert_eq!(handle.0.borrow().owner, pane.id.get());
         assert_eq!(recording.borrow().calls, [true, false, false, false, true]);
     }

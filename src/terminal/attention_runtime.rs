@@ -306,14 +306,18 @@ impl<D: NotificationDriver> NotificationCoordinator<D> {
             return Some(schedule);
         }
         self.scheduled = None;
+        for (pane, count) in std::mem::take(&mut self.pending_by_pane) {
+            self.delivered_by_pane
+                .entry(pane)
+                .and_modify(|delivered| *delivered = delivered.saturating_add(count))
+                .or_insert(count);
+        }
         let aggregate_count = self
-            .pending_by_pane
+            .delivered_by_pane
             .values()
             .copied()
             .fold(0_u32, u32::saturating_add);
-        let delivered_by_pane = std::mem::take(&mut self.pending_by_pane);
         if aggregate_count > 0 {
-            self.delivered_by_pane = delivered_by_pane;
             self.driver
                 .deliver(NotificationDelivery { aggregate_count });
         }
@@ -853,6 +857,33 @@ mod tests {
             coordinator.driver.deliveries,
             vec![NotificationDelivery { aggregate_count: 2 }]
         );
+    }
+
+    #[test]
+    fn successive_notification_batches_preserve_all_unread_owners() {
+        let epoch = Instant::now();
+        let first = AttentionPaneId::test(1);
+        let second = AttentionPaneId::test(2);
+        let mut coordinator = NotificationCoordinator::new(RecordingNotificationDriver::default());
+        let first_batch = coordinator.request(first, false, epoch).unwrap();
+        coordinator.reconcile_scheduled(first_batch, first_batch.deadline, false);
+        let second_batch = coordinator
+            .request(second, false, epoch + Duration::from_secs(6))
+            .unwrap();
+        coordinator.request(first, false, epoch + Duration::from_secs(7));
+        coordinator.reconcile_scheduled(second_batch, second_batch.deadline, false);
+        coordinator.clear(second);
+        assert_eq!(
+            coordinator.driver.deliveries,
+            [
+                NotificationDelivery { aggregate_count: 1 },
+                NotificationDelivery { aggregate_count: 3 },
+                NotificationDelivery { aggregate_count: 2 },
+            ]
+        );
+        assert_eq!(coordinator.driver.clears, 0);
+        coordinator.clear(first);
+        assert_eq!(coordinator.driver.clears, 1);
     }
 
     #[test]

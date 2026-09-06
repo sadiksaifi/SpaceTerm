@@ -1137,6 +1137,7 @@ impl TerminalPane {
         self._accessibility_task.take();
         self._runtime_visibility_task.take();
         self._visibility_task.take();
+        self._failure_action_task.take();
         self.secure_input_pane.retire();
         if let Some(id) = self.native_attention_pane.take() {
             self.lifecycle_dependencies.attention.remove_pane(id);
@@ -1166,7 +1167,6 @@ impl TerminalPane {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
         }
-        self._failure_action_task.take();
         self.failure_actions.take();
     }
 
