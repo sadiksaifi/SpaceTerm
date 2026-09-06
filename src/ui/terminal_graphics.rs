@@ -259,6 +259,12 @@ impl TerminalGraphicsCache {
         self.presented = PreparedGraphics::default();
     }
 
+    pub(crate) fn cancel_injected_failure(&mut self) {
+        self.fail_next_sync = false;
+        self.fail_after_staging = false;
+        self.injected_rollback = None;
+    }
+
     pub(crate) fn fail_next_sync(&mut self) {
         self.fail_next_sync = true;
     }

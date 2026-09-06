@@ -222,6 +222,7 @@ impl WorkspaceTerminalSessionFactory {
     }
 
     /// Transfers a prepared launch token into one newly started Terminal Session.
+    #[cfg(test)]
     pub(crate) fn start(
         &self,
         geometry: TerminalGeometry,
@@ -229,6 +230,16 @@ impl WorkspaceTerminalSessionFactory {
     ) -> Result<StartedTerminalSession, SessionError> {
         self.session_factory
             .start(geometry, prepared_launch.launch_plan)
+    }
+
+    pub(crate) fn start_observed(
+        &self,
+        geometry: TerminalGeometry,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        observation: Option<crate::observation::SessionObservationLease>,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        self.session_factory
+            .start_observed(geometry, prepared_launch.launch_plan, observation)
     }
 
     pub(crate) fn fallback_title(&self) -> String {

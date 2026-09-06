@@ -378,6 +378,16 @@ pub(crate) trait TerminalSessionFactory {
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError>;
 
+    fn start_observed(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        observation: Option<crate::observation::SessionObservationLease>,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        drop(observation);
+        self.start(geometry, launch_plan)
+    }
+
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
     }
@@ -514,8 +524,18 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
+        self.start_observed(geometry, launch_plan, None)
+    }
+
+    fn start_observed(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        observation: Option<crate::observation::SessionObservationLease>,
+    ) -> Result<StartedTerminalSession, SessionError> {
         let observation =
-            crate::platform::acceptance_observation::take_runtime_session_observation();
+            observation.and_then(crate::observation::SessionObservationLease::consume);
+
         let (session, events, accessibility) = match launch_plan {
             TerminalLaunchPlan::Local(local) => TerminalSession::start(
                 Arc::clone(&self.native_pty_adapter_factory),
@@ -2550,16 +2570,12 @@ fn send_session_event(
     event: SessionEvent,
     observation: Option<&RuntimeObservation>,
 ) -> bool {
-    if let Some(observation) = observation {
-        match &event {
-            SessionEvent::Exited(exit) => observation.session_exited(exit_class_code(exit)),
-            SessionEvent::Failed(failure) => {
-                observation.session_failed(failure_class_code(failure));
-            }
-            _ => {}
-        }
-    }
-    match events.try_send(event) {
+    let terminal = match &event {
+        SessionEvent::Exited(exit) => Some((false, exit_class_code(exit))),
+        SessionEvent::Failed(failure) => Some((true, failure_class_code(failure))),
+        _ => None,
+    };
+    let sent = match events.try_send(event) {
         Ok(()) => {
             if let Some(observation) = observation {
                 observation.event_enqueued(events.len(), false, false);
@@ -2588,7 +2604,17 @@ fn send_session_event(
             }
             false
         }
+    };
+    if let Some(observation) = observation
+        && let Some((failed, class)) = terminal
+    {
+        if failed {
+            observation.session_failed(class);
+        } else {
+            observation.session_exited(class);
+        }
     }
+    sent
 }
 
 #[cfg(test)]

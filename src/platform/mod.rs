@@ -1,7 +1,11 @@
-pub(crate) mod acceptance_observation;
 pub(crate) mod app_paths;
 pub(crate) mod application_activity;
 pub(crate) mod control_socket;
+pub(crate) mod macos_observation;
+pub(crate) mod macos_observation_clock;
+pub(crate) mod macos_observation_environment;
+pub(crate) mod macos_observation_package;
+pub(crate) mod macos_observation_transport;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
 

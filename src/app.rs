@@ -135,13 +135,6 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
-    cx.on_app_quit(|_| {
-        if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
-            eprintln!("acceptance runtime observation did not complete");
-        }
-        async {}
-    })
-    .detach();
     cx.set_menus(vec![
         Menu {
             name: "SpaceTerm".into(),
@@ -582,8 +575,6 @@ pub(crate) enum RuntimeError {
     Initialization,
     #[error("Operating-System Window creation failed")]
     WindowOpen,
-    #[error("Runtime Observation configuration failed")]
-    Observation,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -617,8 +608,7 @@ pub(crate) fn launch<A: SshProcessAdapter>(
 }
 
 pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
-    crate::platform::acceptance_observation::configure_from_environment()
-        .map_err(|_| RuntimeError::Observation)?;
+    let observation = host.adapters.lifecycle.observation.clone();
     let failure = Rc::new(std::cell::Cell::new(None));
     let reported_failure = Rc::clone(&failure);
     gpui::Application::new().run(move |cx| {
@@ -627,7 +617,10 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
         }
     });
-    if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
+    if observation
+        .as_ref()
+        .is_some_and(|owner| owner.finish().is_err())
+    {
         eprintln!("acceptance runtime observation did not complete");
     }
     failure.get().map_or(Ok(()), Err)
@@ -646,6 +639,17 @@ fn start_application(
                 eprintln!("failed to register Services: {error}");
             }
             init(cx);
+            if let Some(observation) = host.adapters.lifecycle.observation.clone() {
+                cx.on_app_quit(move |cx| {
+                    let observation = observation.clone();
+                    cx.background_executor().spawn(async move {
+                        if observation.finish().is_err() {
+                            eprintln!("acceptance runtime observation did not complete");
+                        }
+                    })
+                })
+                .detach();
+            }
             open(cx, host)
         },
     )
@@ -857,6 +861,100 @@ mod runtime_tests {
             (Err(RuntimeError::WindowOpen), vec!["initialize", "open"])
         );
     }
+    struct ObservationRecordingFactory {
+        inner: crate::terminal::testing::TestTerminalSessionFactory,
+        observations: RefCell<Vec<Option<crate::terminal::RuntimeObservation>>>,
+    }
+    impl TerminalSessionFactory for ObservationRecordingFactory {
+        fn start(
+            &self,
+            geometry: crate::terminal::geometry::TerminalGeometry,
+            plan: crate::terminal::TerminalLaunchPlan,
+        ) -> Result<crate::terminal::StartedTerminalSession, crate::terminal::SessionError>
+        {
+            self.inner.start(geometry, plan)
+        }
+        fn start_observed(
+            &self,
+            geometry: crate::terminal::geometry::TerminalGeometry,
+            plan: crate::terminal::TerminalLaunchPlan,
+            lease: Option<crate::observation::SessionObservationLease>,
+        ) -> Result<crate::terminal::StartedTerminalSession, crate::terminal::SessionError>
+        {
+            let observation = lease.and_then(crate::observation::SessionObservationLease::consume);
+            if let Some(observation) = &observation {
+                observation.worker_started(geometry);
+            }
+            self.observations.borrow_mut().push(observation);
+            self.start(geometry, plan)
+        }
+    }
+    #[gpui::test]
+    fn observation_flows_from_host_through_workspaces_into_exactly_one_session_across_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (owner, peer) = crate::observation::tests::configured();
+        let factory = Rc::new(ObservationRecordingFactory {
+            inner: crate::terminal::testing::TestTerminalSessionFactory::new(Default::default()),
+            observations: RefCell::default(),
+        });
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.session_factory = factory.clone();
+        wiring.adapters.lifecycle.observation = Some(owner.clone());
+        let host = HostComposition::new(wiring).unwrap();
+        let (first, second) = cx.update(|cx| {
+            (
+                start_application(cx, &host).unwrap(),
+                open(cx, &host).unwrap(),
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(factory.observations.borrow().len(), 2);
+        assert_eq!(
+            factory
+                .observations
+                .borrow()
+                .iter()
+                .filter(|value| value.is_some())
+                .count(),
+            1
+        );
+        let session = factory.observations.borrow()[0].clone().unwrap();
+        session.session_exited(4);
+        let before = session.sample().screens_enqueued;
+        session.screen_enqueued(1, false, false);
+        assert_eq!(session.sample().screens_enqueued, before);
+        cx.update(|cx| {
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            second
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        drop(peer);
+        assert!(owner.finish().is_err());
+    }
+    #[gpui::test]
+    fn ordinary_host_passes_no_observation_lease_to_any_window_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let factory = Rc::new(ObservationRecordingFactory {
+            inner: crate::terminal::testing::TestTerminalSessionFactory::new(Default::default()),
+            observations: RefCell::default(),
+        });
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.session_factory = factory.clone();
+        let host = HostComposition::new(wiring).unwrap();
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+            open(cx, &host).unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(factory.observations.borrow().len(), 2);
+        assert!(factory.observations.borrow().iter().all(Option::is_none));
+    }
+
     #[gpui::test]
     fn runtime_registers_once_and_installs_distinct_exact_window_endpoints(
         cx: &mut gpui::TestAppContext,

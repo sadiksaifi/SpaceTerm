@@ -5,14 +5,26 @@ use std::sync::{Arc, Mutex};
 use super::geometry::TerminalGeometry;
 
 pub(crate) const RUNTIME_TRANSITION_CAPACITY: usize = 64;
+const PRODUCERS_CLOSED: u64 = 1 << 63;
+
+struct ProducerGuard<'a>(&'a AtomicU64);
+impl Drop for ProducerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeObservation {
     state: Arc<RuntimeObservationState>,
+    producer_live: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug)]
 struct RuntimeObservationState {
+    clock: Arc<dyn crate::observation::ContinuousClock>,
+    last_sample_ns: AtomicU64,
+    last_transition_ns: AtomicU64,
     worker_generation: AtomicU64,
     screens_published: AtomicU64,
     screens_enqueued: AtomicU64,
@@ -52,6 +64,7 @@ struct RuntimeObservationState {
     observer_drops: AtomicU64,
     observer_failed: AtomicBool,
     sealed: AtomicBool,
+    producers: AtomicU64,
     ui_attached: AtomicBool,
     presentable_known: AtomicU8,
     restore_pending_generation: AtomicU64,
@@ -174,9 +187,18 @@ pub(crate) struct RuntimeVisibility {
 }
 
 impl RuntimeObservation {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_clock(Arc::new(crate::observation::TestClock::default()))
+    }
+
+    pub(crate) fn with_clock(clock: Arc<dyn crate::observation::ContinuousClock>) -> Self {
         Self {
+            producer_live: None,
             state: Arc::new(RuntimeObservationState {
+                clock,
+                last_sample_ns: AtomicU64::new(0),
+                last_transition_ns: AtomicU64::new(0),
                 worker_generation: AtomicU64::new(0),
                 screens_published: AtomicU64::new(0),
                 screens_enqueued: AtomicU64::new(0),
@@ -216,6 +238,7 @@ impl RuntimeObservation {
                 observer_drops: AtomicU64::new(0),
                 observer_failed: AtomicBool::new(false),
                 sealed: AtomicBool::new(false),
+                producers: AtomicU64::new(0),
                 ui_attached: AtomicBool::new(true),
                 presentable_known: AtomicU8::new(2),
                 restore_pending_generation: AtomicU64::new(0),
@@ -226,6 +249,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn worker_started(&self, geometry: TerminalGeometry) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.store_pty_geometry(geometry);
         self.state
             .lifecycle
@@ -233,6 +259,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn screen_published(&self, generation: u64) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         if self
             .state
             .worker_generation
@@ -253,6 +282,9 @@ impl RuntimeObservation {
         evicted_event: bool,
         superseded_screen: bool,
     ) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.increment(&self.state.screens_enqueued);
         if superseded_screen {
             self.increment(&self.state.screens_superseded);
@@ -266,6 +298,9 @@ impl RuntimeObservation {
         evicted_event: bool,
         superseded_screen: bool,
     ) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         if superseded_screen {
             self.increment(&self.state.screens_superseded);
         }
@@ -273,12 +308,18 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn event_send_failed(&self) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         if self.state.ui_attached.load(Ordering::Acquire) {
             self.mark_failed();
         }
     }
 
     pub(crate) fn ui_dispatch(&self, drain_count: usize, queue_length: usize) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.increment(&self.state.ui_dispatches);
         self.update_high_water(&self.state.ui_drain_high_water, drain_count as u64);
         self.state
@@ -287,6 +328,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn ui_screen_received(&self) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.increment(&self.state.ui_screen_events);
     }
 
@@ -298,15 +342,24 @@ impl RuntimeObservation {
         offset_rows: u64,
         selection_present: bool,
     ) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.store_nondecreasing(&self.state.ui_latest_generation, generation);
         self.store_viewport(total_rows, visible_rows, offset_rows, selection_present);
     }
 
     pub(crate) fn render_started(&self, generation: u64) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.store_nondecreasing(&self.state.render_latest_generation, generation);
     }
 
     pub(crate) fn next_frame(&self, generation: u64) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         if !self.state.presentable.load(Ordering::Acquire) {
             return;
         }
@@ -330,6 +383,13 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn visibility(&self, visibility: RuntimeVisibility) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
+        self.store_visibility(visibility);
+    }
+
+    fn store_visibility(&self, visibility: RuntimeVisibility) {
         let Some(base_version) = self.begin_fact_update(&self.state.visibility_version) else {
             return;
         };
@@ -380,6 +440,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn product_visibility(&self, workspace_visible: bool, pane_visible: bool) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         let visibility = RuntimeVisibility {
             presentable: !self.state.minimized.load(Ordering::Relaxed)
                 && !self.state.occluded.load(Ordering::Relaxed)
@@ -391,10 +454,13 @@ impl RuntimeObservation {
             pane_visible,
             live_resize: self.state.live_resize.load(Ordering::Relaxed),
         };
-        self.visibility(visibility);
+        self.store_visibility(visibility);
     }
 
     pub(crate) fn resize_requested(&self, notified: bool, coalesced: bool) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.increment(&self.state.resize_requests);
         if notified {
             self.increment(&self.state.resize_notifications);
@@ -405,17 +471,26 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn resize_applied(&self, geometry: TerminalGeometry) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.store_pty_geometry(geometry);
         self.increment(&self.state.resize_applied);
     }
 
     pub(crate) fn terminal_input_accepted(&self) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.increment(&self.state.terminal_inputs_accepted);
     }
 
     pub(crate) fn pane_released(&self) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.state.ui_attached.store(false, Ordering::Release);
-        self.visibility(RuntimeVisibility {
+        self.store_visibility(RuntimeVisibility {
             presentable: false,
             minimized: self.state.minimized.load(Ordering::Relaxed),
             occluded: self.state.occluded.load(Ordering::Relaxed),
@@ -426,19 +501,27 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn session_exited(&self, class_code: u64) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.push_terminal_transition(
             RuntimeLifecycle::Exited,
             RuntimeEventKind::SessionExited,
             class_code,
         );
+        self.revoke_handle();
     }
 
     pub(crate) fn session_failed(&self, class_code: u64) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.push_terminal_transition(
             RuntimeLifecycle::Failed,
             RuntimeEventKind::SessionFailed,
             class_code,
         );
+        self.revoke_handle();
     }
 
     pub(crate) fn sample(&self) -> RuntimeSample {
@@ -462,10 +545,15 @@ impl RuntimeObservation {
         let resize_coalesced = self.state.resize_coalesced.load(Ordering::Relaxed);
         let resize_requests = self.state.resize_requests.load(Ordering::Relaxed);
         RuntimeSample {
-            continuous_ns: continuous_time_ns().unwrap_or_else(|| {
-                self.mark_failed();
-                0
-            }),
+            continuous_ns: self
+                .state
+                .clock
+                .now_ns()
+                .filter(|now| *now >= self.state.last_sample_ns.fetch_max(*now, Ordering::AcqRel))
+                .unwrap_or_else(|| {
+                    self.mark_failed();
+                    0
+                }),
             worker_generation,
             screens_published,
             screens_enqueued,
@@ -511,7 +599,59 @@ impl RuntimeObservation {
         transitions.drain(..).collect()
     }
 
+    pub(crate) fn scoped(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            producer_live: Some(Arc::new(AtomicBool::new(true))),
+        }
+    }
+
+    pub(crate) fn revoke_handle(&self) {
+        if let Some(live) = &self.producer_live {
+            live.store(false, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn revoke_producers(&self) {
+        self.state
+            .producers
+            .fetch_or(PRODUCERS_CLOSED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.producers.load(Ordering::Acquire) & PRODUCERS_CLOSED == 0
+            && self
+                .producer_live
+                .as_ref()
+                .is_none_or(|live| live.load(Ordering::Acquire))
+    }
+
+    fn begin_production(&self) -> Option<ProducerGuard<'_>> {
+        if !self.is_active() {
+            return None;
+        }
+        let previous = self.state.producers.fetch_add(1, Ordering::AcqRel);
+        let guard = ProducerGuard(&self.state.producers);
+        if previous & PRODUCERS_CLOSED != 0 {
+            return None;
+        }
+        Some(guard)
+    }
+
+    /// Only the background writer waits for admitted producers before taking its final snapshot.
     pub(crate) fn seal_and_drain_transitions(&self) -> Vec<RuntimeTransition> {
+        self.revoke_producers();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.state.producers.load(Ordering::Acquire) != PRODUCERS_CLOSED {
+            if std::time::Instant::now() >= deadline {
+                self.state.observer_failed.store(true, Ordering::Release);
+                self.state
+                    .lifecycle
+                    .store(RuntimeLifecycle::ObserverFailed as u8, Ordering::Release);
+                return Vec::new();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let Ok(mut transitions) = self.state.transitions.lock() else {
             self.mark_failed();
             return Vec::new();
@@ -525,6 +665,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn fail(&self) {
+        let Some(_producer) = self.begin_production() else {
+            return;
+        };
         self.mark_failed();
     }
 
@@ -690,11 +833,7 @@ impl RuntimeObservation {
             self.mark_failed();
             return;
         };
-        if self.state.sealed.load(Ordering::Acquire) {
-            drop(transitions);
-            self.mark_failed();
-            return;
-        }
+
         if transitions.len() == RUNTIME_TRANSITION_CAPACITY {
             drop(transitions);
             self.increment_drop();
@@ -710,7 +849,12 @@ impl RuntimeObservation {
             self.mark_failed();
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             drop(transitions);
             self.mark_failed();
             return;
@@ -742,11 +886,7 @@ impl RuntimeObservation {
         if current == RuntimeLifecycle::Exited as u8 || current == RuntimeLifecycle::Failed as u8 {
             return;
         }
-        if self.state.sealed.load(Ordering::Acquire) {
-            drop(transitions);
-            self.mark_failed();
-            return;
-        }
+
         if transitions.len() == RUNTIME_TRANSITION_CAPACITY {
             drop(transitions);
             self.increment_drop();
@@ -762,7 +902,12 @@ impl RuntimeObservation {
             self.mark_failed();
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             drop(transitions);
             self.mark_failed();
             return;
@@ -851,6 +996,7 @@ impl RuntimeObservation {
                 .store(RuntimeLifecycle::ObserverFailed as u8, Ordering::Release);
             self.push_observer_failure_transition();
         }
+        self.revoke_producers();
     }
 
     fn push_observer_failure_transition(&self) {
@@ -870,7 +1016,12 @@ impl RuntimeObservation {
         ) else {
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             return;
         };
         transitions.push_back(RuntimeTransition {
@@ -884,38 +1035,90 @@ impl RuntimeObservation {
     }
 }
 
-#[repr(C)]
-struct MachTimebaseInfo {
-    numer: u32,
-    denom: u32,
-}
-
-unsafe extern "C" {
-    fn mach_continuous_time() -> u64;
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
-}
-
-fn continuous_time_ns() -> Option<u64> {
-    static TIMEBASE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
-    let &(numer, denom) = TIMEBASE
-        .get_or_init(|| {
-            let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-            // SAFETY: `info` is writable for the duration of this synchronous system call.
-            let status = unsafe { mach_timebase_info(&raw mut info) };
-            (status == 0 && info.numer != 0 && info.denom != 0).then_some((info.numer, info.denom))
-        })
-        .as_ref()?;
-    // SAFETY: `mach_continuous_time` has no arguments and is available on the supported macOS.
-    let ticks = unsafe { mach_continuous_time() };
-    let nanoseconds = u128::from(ticks)
-        .checked_mul(u128::from(numer))?
-        .checked_div(u128::from(denom))?;
-    u64::try_from(nanoseconds).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exercise_producers(observation: &RuntimeObservation) {
+        let geometry = TerminalGeometry::from_grid(
+            crate::terminal::geometry::CellGridSize::new(80, 24),
+            crate::terminal::geometry::LogicalCellSize::new(10.0, 20.0),
+            crate::terminal::geometry::BackingScale::new(1.0).unwrap(),
+        );
+        observation.worker_started(geometry);
+        observation.screen_published(99);
+        observation.screen_enqueued(2, true, true);
+        observation.event_enqueued(2, true, true);
+        observation.event_send_failed();
+        observation.ui_dispatch(2, 1);
+        observation.ui_screen_received();
+        observation.ui_screen_applied(99, 100, 24, 2, true);
+        observation.render_started(99);
+        observation.visibility(RuntimeVisibility {
+            presentable: true,
+            minimized: false,
+            occluded: false,
+            workspace_visible: true,
+            pane_visible: true,
+            live_resize: true,
+        });
+        observation.next_frame(99);
+        observation.product_visibility(false, false);
+        observation.resize_requested(true, true);
+        observation.resize_applied(geometry);
+        observation.terminal_input_accepted();
+        observation.pane_released();
+        observation.session_exited(4);
+        observation.session_failed(5);
+        observation.fail();
+    }
+
+    #[test]
+    fn observation_should_revoke_every_producer_after_sealing_or_handle_release() {
+        for seal in [false, true] {
+            let owner = RuntimeObservation::new();
+            let producer = owner.scoped();
+            if seal {
+                owner.seal_and_drain_transitions();
+            } else {
+                producer.revoke_handle();
+            }
+            let mut before = owner.sample();
+            exercise_producers(&producer);
+            let after = owner.sample();
+            before.continuous_ns = after.continuous_ns;
+            assert_eq!(before, after);
+            assert!(owner.drain_transitions().is_empty());
+        }
+    }
+
+    #[test]
+    fn observation_sealing_should_wait_for_admitted_work_and_reject_later_producers() {
+        let owner = RuntimeObservation::new();
+        let admitted = owner.begin_production().unwrap();
+        let finalizer = owner.clone();
+        let (done, completion) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            finalizer.seal_and_drain_transitions();
+            done.send(finalizer.sample()).unwrap();
+        });
+        while owner.state.producers.load(Ordering::Acquire) & PRODUCERS_CLOSED == 0 {
+            std::thread::yield_now();
+        }
+        assert!(owner.begin_production().is_none());
+        assert!(completion.try_recv().is_err());
+        owner.state.screens_enqueued.store(7, Ordering::Relaxed);
+        drop(admitted);
+        let final_sample = completion
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(final_sample.screens_enqueued, 7);
+        exercise_producers(&owner);
+        let mut after = owner.sample();
+        after.continuous_ns = final_sample.continuous_ns;
+        assert_eq!(after, final_sample);
+        writer.join().unwrap();
+    }
 
     #[test]
     fn transition_queue_is_fifo_bounded_and_fails_closed() {
