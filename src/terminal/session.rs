@@ -29,6 +29,7 @@ use crate::terminal::emulator::{
     EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
+#[cfg(test)]
 use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
@@ -655,7 +656,6 @@ impl TerminalSession {
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
     ) -> Result<StartedSession, SessionError> {
-        let terminal_name = launch_planner.terminal_name();
         let initial_directory = working_directory.to_string_lossy();
         let metadata_context = TerminalMetadataContext::local(
             &initial_directory,
@@ -666,16 +666,18 @@ impl TerminalSession {
             geometry,
             metadata_context,
             launch_planner.fallback_title(),
-            terminal_name,
             runtime_observation,
             move |size, output, close_handle| {
-                NativePtyOwner::start(
+                let launch = launch_planner.local(&launch_directory)?;
+                let terminal_name = launch.terminal_name();
+                let owner = NativePtyOwner::start(
                     native_pty_adapter_factory.as_ref(),
-                    launch_planner.local(&launch_directory)?,
+                    launch,
                     size,
                     output,
                     close_handle,
-                )
+                )?;
+                Ok((owner, terminal_name))
             },
         )
     }
@@ -694,16 +696,18 @@ impl TerminalSession {
             geometry,
             TerminalMetadataContext::Remote(metadata_context),
             fallback_title,
-            identity::TERM_FALLBACK,
             runtime_observation,
             move |size, output, close_handle| {
-                NativePtyOwner::start(
+                let launch = PreparedShellLaunch::remote(&local_home, command)?;
+                let terminal_name = launch.terminal_name();
+                let owner = NativePtyOwner::start(
                     native_pty_adapter_factory.as_ref(),
-                    PreparedShellLaunch::remote(&local_home, command)?,
+                    launch,
                     size,
                     output,
                     close_handle,
-                )
+                )?;
+                Ok((owner, terminal_name))
             },
         )
     }
@@ -730,9 +734,11 @@ impl TerminalSession {
             geometry,
             metadata_context,
             test_launch_planner().fallback_title(),
-            identity::launch_identity(&resource_root()).term,
             runtime_observation,
-            start_native_pty,
+            move |size, output, close_handle| {
+                start_native_pty(size, output, close_handle)
+                    .map(|owner| (owner, identity::launch_identity(&resource_root()).term))
+            },
         )
     }
 
@@ -740,13 +746,13 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
-        terminal_name: &'static str,
         runtime_observation: Option<RuntimeObservation>,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
             &NativePtyCloseHandle,
-        ) -> Result<NativePtyOwner, NativePtyStartupFailure>
+        )
+            -> Result<(NativePtyOwner, &'static str), NativePtyStartupFailure>
         + Send
         + 'static,
     ) -> Result<StartedSession, SessionError> {
@@ -767,7 +773,7 @@ impl TerminalSession {
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
-                let native_pty = match start_native_pty(
+                let (native_pty, terminal_name) = match start_native_pty(
                     pty_size(geometry),
                     native_pty_output,
                     &worker_native_pty_close,

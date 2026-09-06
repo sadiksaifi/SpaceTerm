@@ -55,21 +55,11 @@ const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
 pub(crate) struct ShellLaunchPlanner {
     shell: PathBuf,
     resources: PathBuf,
-    identity: identity::LaunchIdentity,
 }
 
 impl ShellLaunchPlanner {
     pub(crate) fn new(shell: PathBuf, resources: PathBuf) -> Self {
-        let identity = identity::launch_identity(&resources);
-        Self {
-            shell,
-            resources,
-            identity,
-        }
-    }
-
-    pub(crate) fn terminal_name(&self) -> &'static str {
-        self.identity.term
+        Self { shell, resources }
     }
 
     pub(crate) fn fallback_title(&self) -> String {
@@ -99,7 +89,7 @@ impl ShellLaunchPlanner {
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
         validate_working_directory(working_directory)?;
         let integration = plan_shell_integration(&self.shell, &self.resources, mode, inherited);
-        let terminal_identity = &self.identity;
+        let terminal_identity = identity::launch_identity(&self.resources);
         let mut arguments = integration.arguments;
         arguments.push(OsString::from("-l"));
         let mut environment = integration.environment;
@@ -189,6 +179,10 @@ impl PreparedShellLaunch {
         })
     }
 
+    pub(crate) fn terminal_name(&self) -> &'static str {
+        self.terminal_name
+    }
+
     pub(crate) fn executable(&self) -> &OsStr {
         self.executable.as_os_str()
     }
@@ -206,9 +200,6 @@ impl PreparedShellLaunch {
     }
     pub(crate) fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
-    }
-    pub(crate) fn terminal_name(&self) -> &'static str {
-        self.terminal_name
     }
 
     #[cfg(test)]
@@ -403,15 +394,20 @@ mod tests {
         std::fs::write(&entry, b"compiled fixture").unwrap();
         let planner = ShellLaunchPlanner::new("/bin/zsh".into(), root.clone());
         let launch = planner.local(&std::env::temp_dir()).unwrap();
-        assert_eq!(launch.terminal_name(), "xterm-spaceterm");
+        assert_eq!(
+            env_value(&launch, "TERM"),
+            Some(OsStr::new("xterm-spaceterm"))
+        );
         assert_eq!(
             env_value(&launch, "TERMINFO"),
             Some(root.join("terminfo").as_os_str())
         );
         std::fs::remove_dir_all(&root).unwrap();
-        let planner = ShellLaunchPlanner::new("/bin/zsh".into(), root);
         let launch = planner.local(&std::env::temp_dir()).unwrap();
-        assert_eq!(launch.terminal_name(), "xterm-256color");
+        assert_eq!(
+            env_value(&launch, "TERM"),
+            Some(OsStr::new("xterm-256color"))
+        );
         assert_eq!(env_value(&launch, "TERMINFO"), None);
     }
 
