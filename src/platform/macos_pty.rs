@@ -14,9 +14,9 @@ use portable_pty::{
 use thiserror::Error;
 
 use crate::platform::native_pty::{
-    NativePtyAdapter, NativePtyAdapterParts, NativePtyExit, NativePtyLaunch,
-    NativePtyOperationFailure, NativePtySize, NativePtyTermination, NativePtyWaitFailure,
-    user_shell,
+    NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
+    NativePtyAdapterParts, NativePtyExit, NativePtyLaunch, NativePtyOperationFailure,
+    NativePtySize, NativePtyTermination, NativePtyWaitFailure, user_shell,
 };
 use crate::platform::shell_integration::{
     ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
@@ -773,7 +773,48 @@ fn spawn_remote_pane_channel(
     spawn_command_in_pty(size, command, "/usr/bin/ssh")
 }
 
-pub(super) fn spawn_native_pty(
+#[derive(Clone, Copy, Debug, Default)]
+/// The application-selected macOS Native PTY construction implementation.
+pub(crate) struct MacosNativePtyAdapterFactory;
+
+impl NativePtyAdapterFactory for MacosNativePtyAdapterFactory {
+    fn create(
+        &self,
+        launch: NativePtyLaunch,
+        size: NativePtySize,
+    ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+        spawn_native_pty(launch, size).map_err(classify_pty_construction_failure)
+    }
+}
+
+fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstructionFailure {
+    match error {
+        PtyError::WorkingDirectory { .. } => {
+            NativePtyAdapterConstructionFailure::LaunchDirectoryUnavailable
+        }
+        PtyError::Open(_) => NativePtyAdapterConstructionFailure::ResourceCreationFailed,
+        PtyError::MissingDescriptor
+        | PtyError::ReadTermios(_)
+        | PtyError::ConfigureTermios(_)
+        | PtyError::InitialResize(_) => {
+            NativePtyAdapterConstructionFailure::ResourceConfigurationFailed
+        }
+        PtyError::SpawnShell { .. } => NativePtyAdapterConstructionFailure::ProcessStartFailed,
+        PtyError::MissingProcessGroup
+        | PtyError::InspectSession(_)
+        | PtyError::UnisolatedSession => {
+            NativePtyAdapterConstructionFailure::ProcessOwnershipFailed
+        }
+        PtyError::CloneReader(_) | PtyError::TakeWriter(_) => {
+            NativePtyAdapterConstructionFailure::InputOutputUnavailable
+        }
+        PtyError::SshChannelUnavailable => {
+            NativePtyAdapterConstructionFailure::RemoteChannelUnavailable
+        }
+    }
+}
+
+fn spawn_native_pty(
     launch: NativePtyLaunch,
     size: NativePtySize,
 ) -> Result<NativePtyAdapterParts, PtyError> {
