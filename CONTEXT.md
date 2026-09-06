@@ -1180,9 +1180,14 @@ proof and every later socket operation. GPUI's quit hook returns a background co
 post-event-loop completion serializes against the same owner and retains its original result.
 Foreground frame delivery only transfers prepared ownership to that writer. Dropping the owner
 revokes authority and disconnects shutdown, allowing the existing writer to clean up off-thread.
-Worker and UI producers publish only bounded atomic and fixed-capacity queue facts and become inert
-after sealing. The result channel has eight slots, the request channel one, and portable request
-policy rejects overlap, foreign receipts, and illegal phase ordering before publication.
+Worker and UI producers publish only bounded atomic and fixed-capacity queue facts. Separate scoped
+handles become inert when their Pane is removed or their Terminal Session publishes its terminal
+lifecycle. Final sealing closes atomic producer admission and waits off the foreground for admitted
+updates before sampling; a bounded quiescence failure is NOT-RUN. Quit waits for a real worker
+lifecycle and does not manufacture a successful exit. The result channel has eight slots, the
+request channel one, and portable request policy rejects overlap, foreign receipts, illegal phase
+ordering, and invalid typed failure, generation, recovery, session, or rollback evidence before
+publication. Duplicate Retry activation cannot publish another retry receipt.
 
 The native audit retains independent private-owner filesystem, packaged-executable authentication,
 local byte transport, and continuous-clock capabilities. The current macOS filesystem capability

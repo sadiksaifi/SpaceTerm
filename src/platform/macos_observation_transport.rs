@@ -12,9 +12,7 @@ use std::{
     time::Duration,
 };
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) fn connect(
-    path: &Path,
-) -> Result<Box<dyn ObservationTransport>, AcceptanceObservationError> {
+pub(crate) fn connect(path: &Path) -> Result<Transport, AcceptanceObservationError> {
     if !path.is_absolute() {
         return Err(AcceptanceObservationError::InvalidSocket);
     }
@@ -35,7 +33,7 @@ pub(crate) fn connect(
     stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
     set_close_on_exec(&stream)?;
-    Ok(Box::new(Transport(stream)))
+    Ok(Transport(stream))
 }
 
 fn set_close_on_exec(stream: &UnixStream) -> io::Result<()> {
@@ -108,7 +106,7 @@ mod tests {
         let client = connect(&path).unwrap();
         let (server, _) = listener.accept().unwrap();
         assert_ne!(
-            unsafe { libc::fcntl(server.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            unsafe { libc::fcntl(client.0.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
         drop(client);

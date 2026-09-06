@@ -226,6 +226,7 @@ pub(crate) struct TerminalPane {
     failure_actions: Option<FailureActionController>,
     failure_action_request: Option<FailureActionRequest>,
     failure_action_trigger_pending: bool,
+    failure_action_retry_requested: bool,
     failure_action_recovery_frame: Option<(u64, crate::terminal::PresentationGeneration)>,
     failure_action_resource_rollback: GraphicsRollbackProof,
     native_service_session_identity: u64,
@@ -483,6 +484,7 @@ impl TerminalPane {
             failure_actions: None,
             failure_action_request: None,
             failure_action_trigger_pending: false,
+            failure_action_retry_requested: false,
             failure_action_recovery_frame: None,
             failure_action_resource_rollback: GraphicsRollbackProof::default(),
             native_service_session_identity: 0,
@@ -1657,7 +1659,14 @@ impl TerminalPane {
         let Some(pending) = self.pending_recovery else {
             return;
         };
+        if self.recovery_retry_requested == Some(pending)
+            || (self.failure_action_request.is_some() && self.failure_action_retry_requested)
+        {
+            return;
+        }
         if self.failure_action_request.is_some() {
+            self.failure_action_retry_requested = true;
+            self.recovery_retry_requested = Some(pending);
             self.emit_failure_action(
                 FailureActionPhase::RetryRequested,
                 FailureActionResult::Accepted,
@@ -1933,6 +1942,7 @@ impl TerminalPane {
         }
         let case = request.case;
         self.failure_action_request = Some(request);
+        self.failure_action_retry_requested = false;
         self.failure_action_trigger_pending = true;
         self.failure_action_recovery_frame = None;
         self.failure_action_resource_rollback = GraphicsRollbackProof::default();
@@ -2048,6 +2058,7 @@ impl TerminalPane {
     fn complete_failure_action(&mut self, result: FailureActionResult) {
         self.emit_failure_action(FailureActionPhase::Completed, result);
         self.failure_action_request = None;
+        self.failure_action_retry_requested = false;
         self.failure_action_trigger_pending = false;
         self.failure_action_recovery_frame = None;
     }
@@ -9431,6 +9442,9 @@ mod tests {
         assert!(pane.read_with(cx, |pane, _| {
             pane.failure_actions.is_none()
                 && pane._failure_action_task.is_none()
+                && pane._runtime_visibility_task.is_none()
+                && pane.runtime_observation.is_none()
+                && pane.observation_lease.is_none()
                 && pane.failure_action_request.is_none()
                 && pane.failure_action_recovery_frame.is_none()
                 && pane.paint_fault.is_none()
@@ -10116,6 +10130,7 @@ mod tests {
                     Some(RecoveryAction::CopySelection),
                 );
                 pane.emit_injected_failure_if_matching();
+                pane.retry_recovery(window, cx);
                 pane.retry_recovery(window, cx);
             });
         });

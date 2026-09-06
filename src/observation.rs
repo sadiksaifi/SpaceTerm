@@ -31,7 +31,6 @@ const MAX_FRAME_BYTES: usize = 16 * 1024;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
-const NORMAL_QUIT_CLASS_CODE: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ObservationGeometry {
@@ -243,7 +242,6 @@ pub(crate) struct FailureActionEvent {
 
 #[derive(Debug)]
 struct RuntimeWriter {
-    observation: RuntimeObservation,
     shutdown: mpsc::Sender<()>,
     thread: JoinHandle<Result<(), RuntimeWriterError>>,
 }
@@ -343,11 +341,7 @@ fn spawn_runtime_writer(
             move || run_runtime_writer(stream.as_mut(), &observation, &receiver, failure)
         })
         .map_err(|_| AcceptanceObservationError::Transport)?;
-    Ok(RuntimeWriter {
-        observation,
-        shutdown,
-        thread,
-    })
+    Ok(RuntimeWriter { shutdown, thread })
 }
 
 fn run_runtime_writer(
@@ -499,7 +493,12 @@ fn run_runtime_writer(
         format!("schema\t{RUNTIME_CLOSED_SCHEMA}\nstatus\tconfirmed\n").as_bytes(),
     )
     .map_err(|_| RuntimeWriterError::Transport)?;
-    stream.close().map_err(|_| RuntimeWriterError::Transport)
+    stream.close().map_err(|_| RuntimeWriterError::Transport)?;
+    if observation.is_failed() {
+        Err(RuntimeWriterError::Protocol)
+    } else {
+        Ok(())
+    }
 }
 
 fn format_runtime_tick(
@@ -1152,6 +1151,7 @@ impl std::fmt::Debug for AuthenticatedObservation {
 #[derive(Debug)]
 pub(crate) struct ObservationLease {
     owner: Weak<ObservationOwner>,
+    runtime: RuntimeObservation,
 }
 #[derive(Debug)]
 pub(crate) struct SessionObservationLease {
@@ -1238,8 +1238,9 @@ impl AuthenticatedObservation {
             selected_font: selected_font.to_owned(),
             geometry,
         });
+        let pane_runtime = request.runtime.scoped();
         Some(ClaimedObservation {
-            runtime: request.runtime.clone(),
+            runtime: pane_runtime.clone(),
             failure_actions: request
                 .failure_action_receiver
                 .take()
@@ -1251,9 +1252,10 @@ impl AuthenticatedObservation {
                 }),
             lease: ObservationLease {
                 owner: Arc::downgrade(&self.0),
+                runtime: pane_runtime,
             },
             session: SessionObservationLease {
-                runtime: Some(request.runtime.clone()),
+                runtime: Some(request.runtime.scoped()),
                 live: Arc::clone(&self.0.live),
             },
         })
@@ -1302,6 +1304,7 @@ impl Drop for ObservationOwner {
         {
             self.runtime.fail();
         }
+        self.runtime.revoke_producers();
         // Dropping the shutdown sender transfers bounded cleanup to the existing writer thread.
     }
 }
@@ -1343,6 +1346,7 @@ impl ObservationLease {
 }
 impl Drop for ObservationLease {
     fn drop(&mut self) {
+        self.runtime.revoke_handle();
         if let Some(owner) = self.owner.upgrade() {
             owner.live.store(false, Ordering::Release);
         }
@@ -1356,8 +1360,8 @@ impl PreparedObservation {
             .ok_or(AcceptanceObservationError::InvalidChallenge)?;
         let mut slot = owner
             .writer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .try_lock()
+            .map_err(|_| AcceptanceObservationError::InvalidChallenge)?;
         if owner.finishing.load(Ordering::Acquire)
             || !owner.live.load(Ordering::Acquire)
             || slot.is_some()
@@ -1409,16 +1413,11 @@ impl PreparedObservation {
                 result
             })
             .map_err(|_| AcceptanceObservationError::Transport)?;
-        *slot = Some(RuntimeWriter {
-            observation,
-            shutdown,
-            thread,
-        });
+        *slot = Some(RuntimeWriter { shutdown, thread });
         Ok(())
     }
 }
 fn finish_runtime_writer(writer: RuntimeWriter) -> Result<(), AcceptanceObservationError> {
-    writer.observation.session_exited(NORMAL_QUIT_CLASS_CODE);
     let _ = writer.shutdown.send(());
     match writer.thread.join() {
         Ok(Ok(())) => Ok(()),
@@ -1436,7 +1435,7 @@ impl ContinuousClock for TestClock {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 impl std::fmt::Debug for FailureActionRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1448,41 +1447,51 @@ impl std::fmt::Debug for FailureActionRequest {
 }
 #[derive(Default)]
 struct FailureAuthority {
-    pending: Option<(
-        FailureActionRequest,
-        Option<FailureActionPhase>,
-        Option<u64>,
-    )>,
+    pending: Option<PendingFailure>,
+}
+struct PendingFailure {
+    request: FailureActionRequest,
+    previous: Option<FailureActionEvent>,
+    injected: Option<FailureActionEvent>,
 }
 impl FailureAuthority {
     fn request(&mut self, request: FailureActionRequest) -> Result<(), RuntimeWriterError> {
         if self.pending.is_some() {
             return Err(RuntimeWriterError::Protocol);
         }
-        self.pending = Some((request, None, None));
+        self.pending = Some(PendingFailure {
+            request,
+            previous: None,
+            injected: None,
+        });
         Ok(())
     }
     fn event(&mut self, event: &FailureActionEvent) -> Result<(), RuntimeWriterError> {
-        let Some((request, phase, pane)) = self.pending.as_mut() else {
-            return Err(RuntimeWriterError::Protocol);
-        };
-        if request != &event.request || pane.is_some_and(|pane| pane != event.pane_identity) {
+        let pending = self.pending.as_mut().ok_or(RuntimeWriterError::Protocol)?;
+        if pending.request != event.request
+            || pending.previous.as_ref().is_some_and(|previous| {
+                previous.pane_identity != event.pane_identity
+                    || event.state_revision < previous.state_revision
+            })
+            || !event.valid_evidence(pending.injected.as_ref())
+        {
             return Err(RuntimeWriterError::Protocol);
         }
-        let fatal = matches!(
-            request.case,
-            FailureActionCase::PtyFatal | FailureActionCase::EmulatorFatal
-        );
-        let normal = request.case == FailureActionCase::NormalExitControl;
-        let valid = match (*phase, event.phase, event.result) {
+        let fatal = event.request.case.is_fatal();
+        let normal = event.request.case == FailureActionCase::NormalExitControl;
+        let valid = match (
+            pending.previous.as_ref().map(|event| event.phase),
+            event.phase,
+            event.result,
+        ) {
             (None, FailureActionPhase::Armed, FailureActionResult::Accepted) => true,
             (
                 Some(FailureActionPhase::Armed),
                 FailureActionPhase::Injected,
                 FailureActionResult::FailedState,
-            ) => !normal && event.pane_state == FailurePaneState::Failed,
+            ) => !normal,
             (
-                Some(FailureActionPhase::Injected | FailureActionPhase::RetryRequested),
+                Some(FailureActionPhase::Injected),
                 FailureActionPhase::RetryRequested,
                 FailureActionResult::Accepted,
             ) => !normal && !fatal,
@@ -1490,28 +1499,213 @@ impl FailureAuthority {
                 Some(FailureActionPhase::RetryRequested),
                 FailureActionPhase::Completed,
                 FailureActionResult::Recovered,
-            ) => !fatal && !normal && event.pane_state == FailurePaneState::Running,
+            ) => !normal && !fatal,
             (
                 Some(FailureActionPhase::Injected),
                 FailureActionPhase::Completed,
                 FailureActionResult::Closed,
-            ) => fatal && event.pane_state == FailurePaneState::Failed && !event.session_attached,
+            ) => fatal,
             (
                 Some(FailureActionPhase::Armed),
                 FailureActionPhase::Completed,
                 FailureActionResult::Exited,
-            ) => normal && event.pane_state == FailurePaneState::Exited,
+            ) => normal,
             _ => false,
         };
         if !valid {
             return Err(RuntimeWriterError::Protocol);
         }
-        *phase = Some(event.phase);
-        *pane = Some(event.pane_identity);
+        if event.phase == FailureActionPhase::Injected {
+            pending.injected = Some(event.clone());
+        }
+        pending.previous = Some(event.clone());
         if event.phase == FailureActionPhase::Completed {
             self.pending = None;
         }
         Ok(())
+    }
+}
+impl FailureActionCase {
+    const fn is_fatal(self) -> bool {
+        matches!(self, Self::PtyFatal | Self::EmulatorFatal)
+    }
+    const fn failure_evidence(
+        self,
+    ) -> Option<(
+        FailureClass,
+        Recoverability,
+        &'static str,
+        FailurePendingRecovery,
+    )> {
+        Some(match self {
+            Self::PresentationInvalidScale => (
+                FailureClass::Presentation,
+                Recoverability::Recoverable,
+                "update-backing-scale",
+                FailurePendingRecovery::Presentation,
+            ),
+            Self::PresentationGlyph => (
+                FailureClass::Presentation,
+                Recoverability::Recoverable,
+                "paint-terminal-presentation",
+                FailurePendingRecovery::Presentation,
+            ),
+            Self::RendererImagePreflight => (
+                FailureClass::Resource,
+                Recoverability::Recoverable,
+                "paint-terminal-graphics",
+                FailurePendingRecovery::RendererResources,
+            ),
+            Self::RendererResourceBeforeSync | Self::RendererResourceAfterStaging => (
+                FailureClass::Resource,
+                Recoverability::Recoverable,
+                "prepare-terminal-graphics",
+                FailurePendingRecovery::RendererResources,
+            ),
+            Self::PasteboardWrite => (
+                FailureClass::Platform,
+                Recoverability::Recoverable,
+                "write-selection-pasteboard",
+                FailurePendingRecovery::CopySelection,
+            ),
+            Self::PtyFatal => (
+                FailureClass::Pty,
+                Recoverability::Fatal,
+                "read-shell-output",
+                FailurePendingRecovery::None,
+            ),
+            Self::EmulatorFatal => (
+                FailureClass::Emulator,
+                Recoverability::Fatal,
+                "session-runtime",
+                FailurePendingRecovery::None,
+            ),
+            Self::NormalExitControl => return None,
+        })
+    }
+}
+impl FailureActionEvent {
+    fn valid_evidence(&self, injected: Option<&Self>) -> bool {
+        let case = self.request.case;
+        let fatal = case.is_fatal();
+        let armed = self.phase == FailureActionPhase::Armed;
+        let completed = self.phase == FailureActionPhase::Completed;
+        let pasteboard = case == FailureActionCase::PasteboardWrite;
+        if self.latest_generation < self.last_valid_generation
+            || self
+                .visible_generation
+                .is_some_and(|visible| visible > self.latest_generation)
+            || self.resource_staged_count > 65536
+            || self.resource_rolled_back_count > 65536
+            || self.resource_staged_bytes > 402653184
+            || self.resource_rolled_back_bytes > 402653184
+        {
+            return false;
+        }
+        let expected = if armed || (completed && !fatal) {
+            None
+        } else {
+            case.failure_evidence()
+        };
+        let typed = match expected {
+            None => {
+                self.failure_class.is_none()
+                    && self.recoverability.is_none()
+                    && self.failure_operation.is_none()
+                    && self.pending_recovery == FailurePendingRecovery::None
+            }
+            Some((class, recoverability, operation, pending)) => {
+                self.failure_class == Some(class)
+                    && self.recoverability == Some(recoverability)
+                    && self.failure_operation == Some(operation)
+                    && self.pending_recovery == pending
+            }
+        };
+        if !typed {
+            return false;
+        }
+        let state = match (self.phase, self.result) {
+            (FailureActionPhase::Armed, FailureActionResult::Accepted)
+            | (FailureActionPhase::Completed, FailureActionResult::Recovered) => {
+                self.pane_state == FailurePaneState::Running && self.session_attached
+            }
+            (FailureActionPhase::Injected, FailureActionResult::FailedState) => {
+                self.pane_state == FailurePaneState::Failed
+                    && self.session_attached
+                    && (!fatal || !self.terminal_input_usable)
+                    && (!pasteboard || self.terminal_input_usable)
+            }
+            (FailureActionPhase::RetryRequested, FailureActionResult::Accepted) => {
+                self.pane_state == FailurePaneState::Failed && self.session_attached
+            }
+            (FailureActionPhase::Completed, FailureActionResult::Closed) => {
+                self.pane_state == FailurePaneState::Failed
+                    && !self.session_attached
+                    && !self.terminal_input_usable
+            }
+            (FailureActionPhase::Completed, FailureActionResult::Exited) => {
+                self.pane_state == FailurePaneState::Exited && self.session_attached
+            }
+            _ => false,
+        };
+        if !state {
+            return false;
+        }
+        if self.phase == FailureActionPhase::Injected
+            && !fatal
+            && self.visible_generation != Some(self.last_valid_generation)
+        {
+            return false;
+        }
+        if case != FailureActionCase::RendererResourceAfterStaging || armed {
+            if self.resource_staged_count != 0
+                || self.resource_staged_bytes != 0
+                || self.resource_rolled_back_count != 0
+                || self.resource_rolled_back_bytes != 0
+            {
+                return false;
+            }
+        } else if self.resource_staged_count == 0
+            || self.resource_staged_bytes == 0
+            || self.resource_staged_count != self.resource_rolled_back_count
+            || self.resource_staged_bytes != self.resource_rolled_back_bytes
+            || injected.is_some_and(|injected| {
+                self.resource_staged_count != injected.resource_staged_count
+                    || self.resource_staged_bytes != injected.resource_staged_bytes
+            })
+        {
+            return false;
+        }
+        let retry = self.phase == FailureActionPhase::RetryRequested;
+        let recovered = completed && self.result == FailureActionResult::Recovered;
+        if retry || recovered {
+            let Some(injected) = injected else {
+                return false;
+            };
+            let Some(visible) = self.visible_generation else {
+                return false;
+            };
+            if pasteboard {
+                return self.latest_generation >= injected.latest_generation
+                    && self.last_valid_generation >= injected.last_valid_generation
+                    && injected
+                        .visible_generation
+                        .is_some_and(|old| visible >= old)
+                    && visible == self.last_valid_generation
+                    && self.terminal_input_usable
+                    && self.session_attached;
+            }
+            if self.latest_generation != injected.latest_generation {
+                return false;
+            }
+            if retry {
+                return self.last_valid_generation == injected.last_valid_generation
+                    && Some(visible) == injected.visible_generation;
+            }
+            return self.last_valid_generation == self.latest_generation
+                && visible == self.latest_generation;
+        }
+        true
     }
 }
 

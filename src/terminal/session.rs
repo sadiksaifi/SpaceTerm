@@ -2570,16 +2570,12 @@ fn send_session_event(
     event: SessionEvent,
     observation: Option<&RuntimeObservation>,
 ) -> bool {
-    if let Some(observation) = observation {
-        match &event {
-            SessionEvent::Exited(exit) => observation.session_exited(exit_class_code(exit)),
-            SessionEvent::Failed(failure) => {
-                observation.session_failed(failure_class_code(failure));
-            }
-            _ => {}
-        }
-    }
-    match events.try_send(event) {
+    let terminal = match &event {
+        SessionEvent::Exited(exit) => Some((false, exit_class_code(exit))),
+        SessionEvent::Failed(failure) => Some((true, failure_class_code(failure))),
+        _ => None,
+    };
+    let sent = match events.try_send(event) {
         Ok(()) => {
             if let Some(observation) = observation {
                 observation.event_enqueued(events.len(), false, false);
@@ -2608,7 +2604,17 @@ fn send_session_event(
             }
             false
         }
+    };
+    if let Some(observation) = observation
+        && let Some((failed, class)) = terminal
+    {
+        if failed {
+            observation.session_failed(class);
+        } else {
+            observation.session_exited(class);
+        }
     }
+    sent
 }
 
 #[cfg(test)]

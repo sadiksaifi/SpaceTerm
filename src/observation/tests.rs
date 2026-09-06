@@ -17,7 +17,7 @@ impl PackagedExecutable for TestPackage {
     }
 }
 
-struct MemoryTransport {
+pub(crate) struct MemoryTransport {
     sender: Option<mpsc::Sender<Vec<u8>>>,
     receiver: mpsc::Receiver<Vec<u8>>,
     buffered: std::collections::VecDeque<u8>,
@@ -176,9 +176,11 @@ fn accept_runtime_closure(peer: &mut MemoryTransport) -> Vec<String> {
 
 #[test]
 fn normal_app_quit_should_close_the_runtime_stream_before_process_teardown() {
-    let (slot, mut peer) = runtime_writer_fixture(running_observation());
+    let observation = running_observation();
+    let (slot, mut peer) = runtime_writer_fixture(observation.clone());
     let initial = read_text_frame(&mut peer);
     assert!(initial.contains("\trunning\t0\n"));
+    observation.session_exited(4);
 
     let finalizer_slot = Arc::clone(&slot);
     let finalizer = thread::spawn(move || finish_runtime_writer_slot(&finalizer_slot));
@@ -200,8 +202,10 @@ fn normal_app_quit_should_close_the_runtime_stream_before_process_teardown() {
 
 #[test]
 fn duplicate_runtime_finalization_should_be_inert() {
-    let (slot, mut peer) = runtime_writer_fixture(running_observation());
+    let observation = running_observation();
+    let (slot, mut peer) = runtime_writer_fixture(observation.clone());
     let _ = read_text_frame(&mut peer);
+    observation.session_exited(4);
     let finalizer_slot = Arc::clone(&slot);
     let finalizer = thread::spawn(move || finish_runtime_writer_slot(&finalizer_slot));
     let _ = accept_runtime_closure(&mut peer);
@@ -463,7 +467,7 @@ fn challenge() -> String {
         "b".repeat(64)
     )
 }
-fn configured() -> (AuthenticatedObservation, MemoryTransport) {
+pub(crate) fn configured() -> (AuthenticatedObservation, MemoryTransport) {
     let (stream, peer) = MemoryTransport::pair().unwrap();
     let authentication = parse_challenge(challenge().as_bytes()).unwrap();
     (
@@ -532,6 +536,7 @@ fn scoped_writer_should_publish_once_and_preserve_completion_on_fallback() {
     claim.lease.prepare_once(24, 80).unwrap().emit().unwrap();
     assert!(claim.lease.prepare_once(24, 80).is_none());
     assert!(read_text_frame(&mut peer).starts_with(&format!("schema\t{OBSERVATION_SCHEMA}\n")));
+    runtime.session_exited(4);
     let finalizer_owner = owner.clone();
     let finalizer = thread::spawn(move || finalizer_owner.finish());
     let frames = accept_runtime_closure(&mut peer);
@@ -672,4 +677,189 @@ fn expired_frame_deadline_should_refuse_even_an_available_frame() {
     let (mut reader, mut writer) = MemoryTransport::pair().unwrap();
     write_frame(&mut writer, b"available").unwrap();
     assert!(read_frame_before(&mut reader, Instant::now() - Duration::from_secs(1)).is_err());
+}
+
+fn receipt(case: FailureActionCase, phase: FailureActionPhase) -> FailureActionEvent {
+    let fatal = case.is_fatal();
+    let completed = phase == FailureActionPhase::Completed;
+    let typed = if phase == FailureActionPhase::Armed || (completed && !fatal) {
+        None
+    } else {
+        case.failure_evidence()
+    };
+    let staged = case == FailureActionCase::RendererResourceAfterStaging
+        && phase != FailureActionPhase::Armed;
+    FailureActionEvent {
+        request: FailureActionRequest {
+            id: "c".repeat(64),
+            sequence: 0,
+            case,
+        },
+        phase,
+        result: match phase {
+            FailureActionPhase::Armed | FailureActionPhase::RetryRequested => {
+                FailureActionResult::Accepted
+            }
+            FailureActionPhase::Injected => FailureActionResult::FailedState,
+            FailureActionPhase::Completed if fatal => FailureActionResult::Closed,
+            FailureActionPhase::Completed if case == FailureActionCase::NormalExitControl => {
+                FailureActionResult::Exited
+            }
+            FailureActionPhase::Completed => FailureActionResult::Recovered,
+        },
+        pane_identity: 1,
+        pane_state: if completed && case == FailureActionCase::NormalExitControl {
+            FailurePaneState::Exited
+        } else if phase == FailureActionPhase::Armed || (completed && !fatal) {
+            FailurePaneState::Running
+        } else {
+            FailurePaneState::Failed
+        },
+        failure_class: typed.map(|v| v.0),
+        recoverability: typed.map(|v| v.1),
+        failure_operation: typed.map(|v| v.2),
+        pending_recovery: typed.map_or(FailurePendingRecovery::None, |v| v.3),
+        state_revision: match phase {
+            FailureActionPhase::Armed => 1,
+            FailureActionPhase::Completed => 3,
+            _ => 2,
+        },
+        latest_generation: 9,
+        last_valid_generation: if completed { 9 } else { 8 },
+        visible_generation: Some(if completed { 9 } else { 8 }),
+        terminal_input_usable: !fatal,
+        session_attached: !(fatal && completed),
+        resource_staged_count: u64::from(staged),
+        resource_staged_bytes: if staged { 64 } else { 0 },
+        resource_rolled_back_count: u64::from(staged),
+        resource_rolled_back_bytes: if staged { 64 } else { 0 },
+    }
+}
+fn cases() -> [FailureActionCase; 9] {
+    use FailureActionCase::*;
+    [
+        PresentationInvalidScale,
+        PresentationGlyph,
+        RendererImagePreflight,
+        RendererResourceBeforeSync,
+        RendererResourceAfterStaging,
+        PasteboardWrite,
+        PtyFatal,
+        EmulatorFatal,
+        NormalExitControl,
+    ]
+}
+fn phases(case: FailureActionCase) -> Vec<FailureActionPhase> {
+    use FailureActionPhase::*;
+    if case == FailureActionCase::NormalExitControl {
+        vec![Armed, Completed]
+    } else if case.is_fatal() {
+        vec![Armed, Injected, Completed]
+    } else {
+        vec![Armed, Injected, RetryRequested, Completed]
+    }
+}
+#[test]
+fn failure_authority_should_accept_every_exact_case_and_reject_duplicate_or_foreign_receipts() {
+    for case in cases() {
+        let mut authority = FailureAuthority::default();
+        authority
+            .request(receipt(case, FailureActionPhase::Armed).request)
+            .unwrap();
+        for phase in phases(case) {
+            let event = receipt(case, phase);
+            let mut foreign = event.clone();
+            foreign.request.id = "d".repeat(64);
+            assert!(authority.event(&foreign).is_err());
+            if phase != FailureActionPhase::Armed {
+                foreign = event.clone();
+                foreign.pane_identity += 1;
+                assert!(authority.event(&foreign).is_err());
+                foreign = event.clone();
+                foreign.state_revision = 0;
+                assert!(authority.event(&foreign).is_err());
+            }
+            authority.event(&event).unwrap();
+            assert!(
+                authority.event(&event).is_err(),
+                "duplicate {case:?} {phase:?}"
+            );
+        }
+        assert!(authority.pending.is_none());
+    }
+}
+#[test]
+fn failure_authority_should_reject_invalid_typed_generation_session_and_rollback_evidence() {
+    let mutations: &[fn(&mut FailureActionEvent)] = &[
+        |event| event.failure_class = Some(FailureClass::Emulator),
+        |event| event.recoverability = Some(Recoverability::Fatal),
+        |event| event.failure_operation = Some("wrong-operation"),
+        |event| event.pending_recovery = FailurePendingRecovery::CopySelection,
+        |event| event.visible_generation = None,
+        |event| event.visible_generation = Some(0),
+        |event| event.latest_generation = 10,
+        |event| event.session_attached = false,
+        |event| event.resource_rolled_back_bytes += 1,
+    ];
+    for case in [
+        FailureActionCase::PresentationGlyph,
+        FailureActionCase::RendererResourceAfterStaging,
+    ] {
+        for mutate in mutations {
+            let mut authority = FailureAuthority::default();
+            authority
+                .request(receipt(case, FailureActionPhase::Armed).request)
+                .unwrap();
+            for phase in [
+                FailureActionPhase::Armed,
+                FailureActionPhase::Injected,
+                FailureActionPhase::RetryRequested,
+            ] {
+                authority.event(&receipt(case, phase)).unwrap();
+            }
+            let valid = receipt(case, FailureActionPhase::Completed);
+            let mut invalid = valid.clone();
+            mutate(&mut invalid);
+            assert!(authority.event(&invalid).is_err(), "{invalid:?}");
+            assert!(authority.pending.is_some());
+            authority.event(&valid).unwrap();
+        }
+    }
+    let case = FailureActionCase::PtyFatal;
+    let mut authority = FailureAuthority::default();
+    authority
+        .request(receipt(case, FailureActionPhase::Armed).request)
+        .unwrap();
+    authority
+        .event(&receipt(case, FailureActionPhase::Armed))
+        .unwrap();
+    authority
+        .event(&receipt(case, FailureActionPhase::Injected))
+        .unwrap();
+    let mut invalid = receipt(case, FailureActionPhase::Completed);
+    invalid.failure_class = Some(FailureClass::Emulator);
+    assert!(authority.event(&invalid).is_err());
+    authority
+        .event(&receipt(case, FailureActionPhase::Completed))
+        .unwrap();
+}
+
+#[test]
+fn observation_finalization_without_a_real_terminal_exit_should_remain_not_run() {
+    let (slot, mut peer) = runtime_writer_fixture(running_observation());
+    let _ = read_text_frame(&mut peer);
+    let finalizer = thread::spawn(move || finish_runtime_writer_slot(&slot));
+    let frames = accept_runtime_closure(&mut peer);
+    assert!(
+        frames
+            .last()
+            .unwrap()
+            .contains("observer.status\tnot-run\n")
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.contains("\tsession-exited\t"))
+    );
+    assert!(finalizer.join().unwrap().is_err());
 }

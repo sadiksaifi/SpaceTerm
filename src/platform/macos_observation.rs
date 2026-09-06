@@ -11,9 +11,9 @@ pub(crate) fn discover() -> Result<Option<AuthenticatedObservation>, AcceptanceO
     sanitize_acceptance_process_environment()?;
     let package = super::macos_observation_package::capture()?;
     let mut transport = super::macos_observation_transport::connect(&socket)?;
-    let authentication = package.authenticate(transport.as_mut())?;
+    let authentication = package.authenticate(&mut transport)?;
     AuthenticatedObservation::configure(
-        transport,
+        Box::new(transport),
         authentication,
         Box::new(package),
         Arc::new(super::macos_observation_clock::ContinuousClock),
