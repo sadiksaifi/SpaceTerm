@@ -476,9 +476,11 @@ protection, mutation sequencing, and retry decisions. The secure-filesystem Inte
 closed operations and identities needed by those policies. The macOS Adapter privately retains
 descriptor-relative no-follow traversal, native identity and ownership checks, permission
 enforcement, unpredictable temporary allocation, and race-resistant replacement and deletion.
-Deletion first moves the named entry into a private unpredictable quarantine and removes it only
-after its exact identity is revalidated there. Raw descriptors, inode fields, mode bits, and native
-errors never cross the Interface.
+Publication retains the prepared file identity through commit, rolls back any post-publication
+validation failure, and removes only the exact retained temporary link. Deletion first moves the
+named entry into a private unpredictable quarantine and removes it only after its exact identity is
+revalidated there. Raw descriptors, inode fields, mode bits, and native errors never cross the
+Interface.
 
 Portable process supervision owns cancellation, deadlines, graceful and forced escalation,
 descendant cleanup decisions, stale observation rejection, and exactly-once cleanup. The process
@@ -487,7 +489,9 @@ process groups, or raw errors. The macOS Adapter privately retains process-group
 delivery, nonblocking status collection, and final reap. A dropped or cancelled operation transfers
 cleanup to retained background ownership, and GPUI never waits for process termination or reap.
 Runtime sockets, owner namespaces, and active alias leases remain owned until the background
-completion observes descendant termination, leader reap, and diagnostic-reader completion.
+completion observes descendant termination, leader reap, and diagnostic-reader completion. Cleanup
+removes only a socket registered before that transfer; an unregistered replacement is never claimed
+or deleted during post-reap cleanup.
 
 The portable AskPass broker owns bounded versioned framing, constant-time capability comparison,
 request and reply validation, prompt classification, single-prompt authority, cancellation,

@@ -219,121 +219,96 @@ impl SecureFilesystem for MacosSecureFilesystem {
             return Err(SecureFilesystemError::Unsafe);
         }
         let temporary_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
-        if entry_identity_at(
-            &prepared.directory.file,
-            temporary_name,
-            EntryKind::RegularFile,
-        )? != prepared.identity
-        {
+        if file_identity_at(&prepared.directory.file, temporary_name)? != Some(prepared.identity) {
             return Err(SecureFilesystemError::Unsafe);
         }
         let actual = file_identity_at(&prepared.directory.file, &prepared.target_name)?;
-        let expected = expected.map(identity).transpose()?;
-        if actual.as_ref() != expected {
+        let expected = expected.map(identity).transpose()?.copied();
+        if actual != expected {
             return Ok(SecureCommitOutcome::Conflict);
         }
-        if expected.is_some() {
+        if let Some(expected) = expected {
+            validate_prepared_file(&prepared)?;
+            run_before_private_file_publish_hook();
             swap_at(
                 &prepared.directory.file,
                 &prepared.temporary_name,
                 &prepared.target_name,
             )
             .map_err(classify)?;
-            if file_identity_at(&prepared.directory.file, &prepared.target_name)?
-                != Some(prepared.identity)
-            {
-                return Err(SecureFilesystemError::Unsafe);
+
+            if let Err(error) = validate_prepared_file(&prepared) {
+                rollback_prepared_swap(&mut prepared)?;
+                return Err(error);
             }
-            let displaced_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
-            let displaced = match file_identity_at(&prepared.directory.file, displaced_name) {
-                Ok(displaced) => displaced,
-                Err(error) => {
-                    if swap_at(
-                        &prepared.directory.file,
-                        &prepared.temporary_name,
-                        &prepared.target_name,
-                    )
-                    .is_err()
-                    {
-                        prepared.active = false;
-                        return Err(SecureFilesystemError::Unavailable);
-                    }
-                    return Err(error);
-                }
-            };
-            if displaced.as_ref() != expected {
-                if swap_at(
-                    &prepared.directory.file,
-                    &prepared.temporary_name,
-                    &prepared.target_name,
-                )
-                .is_err()
-                {
-                    prepared.active = false;
-                    return Err(SecureFilesystemError::Unavailable);
-                }
-                return Ok(SecureCommitOutcome::Conflict);
-            }
-            if quarantine_and_remove(
-                &prepared.directory.file,
-                displaced_name,
-                expected.copied().ok_or(SecureFilesystemError::Unsafe)?,
-                EntryKind::RegularFile,
-            )
-            .is_err()
-            {
-                if entry_identity_at(
-                    &prepared.directory.file,
-                    &prepared.target_name,
-                    EntryKind::RegularFile,
-                )? != prepared.identity
-                {
-                    prepared.active = false;
+            match file_identity_at(&prepared.directory.file, &prepared.target_name) {
+                Ok(Some(installed)) if installed == prepared.identity => {}
+                Ok(_) => {
+                    rollback_prepared_swap(&mut prepared)?;
                     return Err(SecureFilesystemError::Unsafe);
                 }
-                prepared.active = false;
-                return Ok(SecureCommitOutcome::CommittedButUnsynced);
+                Err(error) => {
+                    rollback_prepared_swap(&mut prepared)?;
+                    return Err(error);
+                }
+            }
+            let displaced_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
+            match file_identity_at(&prepared.directory.file, displaced_name) {
+                Ok(Some(displaced)) if displaced == expected => {}
+                Ok(_) => {
+                    rollback_prepared_swap(&mut prepared)?;
+                    return Ok(SecureCommitOutcome::Conflict);
+                }
+                Err(error) => {
+                    rollback_prepared_swap(&mut prepared)?;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = verify_directory_entry(&prepared.directory) {
+                rollback_prepared_swap(&mut prepared)?;
+                return Err(error);
+            }
+            if let Err(error) = quarantine_and_remove(
+                &prepared.directory.file,
+                displaced_name,
+                expected,
+                EntryKind::RegularFile,
+            ) {
+                rollback_prepared_swap(&mut prepared)?;
+                return Err(error);
             }
         } else {
-            match link_at(
-                &prepared.directory.file,
-                &prepared.temporary_name,
-                &prepared.target_name,
-            ) {
-                Ok(()) => {
-                    if quarantine_and_remove(
-                        &prepared.directory.file,
-                        temporary_name,
-                        prepared.identity,
-                        EntryKind::RegularFile,
-                    )
-                    .is_err()
-                    {
-                        if entry_identity_at(
-                            &prepared.directory.file,
-                            &prepared.target_name,
-                            EntryKind::RegularFile,
-                        )? != prepared.identity
-                        {
-                            prepared.active = false;
-                            return Err(SecureFilesystemError::Unsafe);
-                        }
-                        prepared.active = false;
-                        return Ok(SecureCommitOutcome::CommittedButUnsynced);
-                    }
-                }
+            validate_prepared_file(&prepared)?;
+            let target_name = component_cstring(&prepared.target_name).map_err(classify)?;
+            run_before_private_file_publish_hook();
+            match rename_exclusive_at(&prepared.directory.file, temporary_name, &target_name) {
+                Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     return Ok(SecureCommitOutcome::Conflict);
                 }
                 Err(error) => return Err(classify(error)),
             }
+            if let Err(error) = validate_prepared_file(&prepared) {
+                rollback_exclusive_publish(&mut prepared)?;
+                return Err(error);
+            }
+            match file_identity_at(&prepared.directory.file, &prepared.target_name) {
+                Ok(Some(installed)) if installed == prepared.identity => {}
+                Ok(_) => {
+                    rollback_exclusive_publish(&mut prepared)?;
+                    return Err(SecureFilesystemError::Unsafe);
+                }
+                Err(error) => {
+                    rollback_exclusive_publish(&mut prepared)?;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = verify_directory_entry(&prepared.directory) {
+                rollback_exclusive_publish(&mut prepared)?;
+                return Err(error);
+            }
         }
         prepared.active = false;
-        if file_identity_at(&prepared.directory.file, &prepared.target_name)?
-            != Some(prepared.identity)
-        {
-            return Err(SecureFilesystemError::Unsafe);
-        }
         match prepared.directory.file.sync_all() {
             Ok(()) => Ok(SecureCommitOutcome::Committed),
             Err(_) => Ok(SecureCommitOutcome::CommittedButUnsynced),
@@ -582,6 +557,87 @@ fn private_file_identity(metadata: &fs::Metadata) -> Result<NativeIdentity, Secu
     Ok(metadata_identity(metadata))
 }
 
+fn validate_prepared_file(prepared: &NativePreparedFile) -> Result<(), SecureFilesystemError> {
+    let open_identity = private_file_identity(&prepared.file.metadata().map_err(classify)?)?;
+    if open_identity != prepared.identity {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_PRIVATE_FILE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn install_before_private_file_publish_hook(hook: impl FnOnce() + 'static) {
+    BEFORE_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_private_file_publish_hook() {
+    BEFORE_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_private_file_publish_hook() {}
+
+fn rollback_prepared_swap(prepared: &mut NativePreparedFile) -> Result<(), SecureFilesystemError> {
+    if swap_at(
+        &prepared.directory.file,
+        &prepared.temporary_name,
+        &prepared.target_name,
+    )
+    .is_err()
+    {
+        prepared.active = false;
+        return Err(SecureFilesystemError::Unavailable);
+    }
+    prepared.active = false;
+    quarantine_and_remove_retained_file(
+        &prepared.directory.file,
+        OsStr::from_bytes(prepared.temporary_name.as_bytes()),
+        prepared.identity,
+    )
+    .map_err(|_| SecureFilesystemError::Unavailable)
+}
+
+fn rollback_exclusive_publish(
+    prepared: &mut NativePreparedFile,
+) -> Result<(), SecureFilesystemError> {
+    if rename_exclusive_at(
+        &prepared.directory.file,
+        &prepared.target_name,
+        &prepared.temporary_name,
+    )
+    .is_ok()
+    {
+        prepared.active = false;
+        return quarantine_and_remove_retained_file(
+            &prepared.directory.file,
+            OsStr::from_bytes(prepared.temporary_name.as_bytes()),
+            prepared.identity,
+        )
+        .map_err(|_| SecureFilesystemError::Unavailable);
+    }
+
+    let cleanup = quarantine_and_remove_retained_file(
+        &prepared.directory.file,
+        &prepared.target_name,
+        prepared.identity,
+    );
+    prepared.active = false;
+    cleanup.map_err(|_| SecureFilesystemError::Unavailable)
+}
+
 fn metadata_identity(metadata: &fs::Metadata) -> NativeIdentity {
     NativeIdentity {
         device: metadata.dev(),
@@ -603,12 +659,26 @@ fn entry_identity_at(
 ) -> Result<NativeIdentity, SecureFilesystemError> {
     let status = status_at(parent, name).map_err(classify)?;
     let mode = u32::from(status.st_mode);
-    let expected_type = match kind {
-        EntryKind::RegularFile => u32::from(libc::S_IFREG),
-        EntryKind::Socket => u32::from(libc::S_IFSOCK),
-        EntryKind::Directory => u32::from(libc::S_IFDIR),
+    let is_private_entry = match kind {
+        EntryKind::RegularFile => {
+            mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+                && status.st_uid == effective_user_id()
+                && mode & 0o7777 == PRIVATE_FILE_MODE
+                && status.st_nlink == 1
+        }
+        EntryKind::Socket => {
+            mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFSOCK)
+                && status.st_uid == effective_user_id()
+                && mode & 0o777 == PRIVATE_FILE_MODE
+                && status.st_nlink == 1
+        }
+        EntryKind::Directory => {
+            mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
+                && status.st_uid == effective_user_id()
+                && mode & 0o7777 == PRIVATE_DIRECTORY_MODE
+        }
     };
-    if mode & u32::from(libc::S_IFMT) != expected_type {
+    if !is_private_entry {
         return Err(SecureFilesystemError::Unsafe);
     }
     Ok(NativeIdentity {
@@ -693,6 +763,54 @@ fn quarantine_and_remove(
             Err(error)
         }
     }
+}
+
+fn quarantine_and_remove_retained_file(
+    parent: &File,
+    name: &OsStr,
+    expected: NativeIdentity,
+) -> Result<(), SecureFilesystemError> {
+    let quarantine = quarantine_name(name)?;
+    let original = component_cstring(name).map_err(classify)?;
+    rename_exclusive_at(parent, name, &quarantine).map_err(classify)?;
+    let quarantine_name = OsStr::from_bytes(quarantine.as_bytes());
+    let observed = retained_private_file_identity_at(parent, quarantine_name);
+    match observed {
+        Ok(observed) if observed == expected => {
+            if let Err(error) = remove_at(parent, quarantine_name, 0) {
+                let _ = rename_exclusive_at(parent, quarantine_name, &original);
+                return Err(classify(error));
+            }
+            Ok(())
+        }
+        Ok(_) | Err(SecureFilesystemError::Unsafe) => {
+            rename_exclusive_at(parent, quarantine_name, &original).map_err(classify)?;
+            Err(SecureFilesystemError::Unsafe)
+        }
+        Err(error) => {
+            let _ = rename_exclusive_at(parent, quarantine_name, &original);
+            Err(error)
+        }
+    }
+}
+
+fn retained_private_file_identity_at(
+    parent: &File,
+    name: &OsStr,
+) -> Result<NativeIdentity, SecureFilesystemError> {
+    let status = status_at(parent, name).map_err(classify)?;
+    let mode = u32::from(status.st_mode);
+    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG)
+        || status.st_uid != effective_user_id()
+        || mode & 0o7777 != PRIVATE_FILE_MODE
+        || status.st_nlink < 1
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(NativeIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino,
+    })
 }
 
 fn status_at(parent: &File, name: &OsStr) -> io::Result<libc::stat> {
@@ -849,25 +967,6 @@ fn rename_exclusive_at(parent: &File, source: &OsStr, target: &CString) -> io::R
             parent.as_raw_fd(),
             target.as_ptr(),
             libc::RENAME_EXCL,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn link_at(parent: &File, source: &CString, target: &OsStr) -> io::Result<()> {
-    let target = component_cstring(target)?;
-    // SAFETY: the descriptor and both NUL-terminated names remain valid for this call.
-    let result = unsafe {
-        libc::linkat(
-            parent.as_raw_fd(),
-            source.as_ptr(),
-            parent.as_raw_fd(),
-            target.as_ptr(),
-            0,
         )
     };
     if result == 0 {
@@ -1040,6 +1139,67 @@ mod tests {
 
         assert_eq!(result, SecureCommitOutcome::Conflict);
         assert_eq!(fs::read(root.join("config")).unwrap(), b"replacement");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_should_not_publish_a_hard_linked_prepared_inode() {
+        let root = test_root("create-hard-linked-prepared");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"new", [4; 16])
+            .unwrap();
+        let prepared_path = prepared_path(&root, &prepared);
+        let hook_prepared_path = prepared_path.clone();
+        let attacker_link = root.join("attacker-link");
+        let hook_attacker_link = attacker_link.clone();
+        install_before_private_file_publish_hook(move || {
+            fs::hard_link(hook_prepared_path, hook_attacker_link).unwrap();
+        });
+
+        let result = filesystem.commit_private_file(prepared, None);
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert!(!root.join("config").exists());
+        assert!(!prepared_path.exists());
+        assert_eq!(fs::read(&attacker_link).unwrap(), b"new");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_should_restore_target_when_prepared_inode_is_hard_linked() {
+        let root = test_root("update-hard-linked-prepared");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let original = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"original", [5; 16])
+            .unwrap();
+        assert_eq!(
+            filesystem.commit_private_file(original, None).unwrap(),
+            SecureCommitOutcome::Committed
+        );
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", [6; 16])
+            .unwrap();
+        let prepared_path = prepared_path(&root, &prepared);
+        let hook_prepared_path = prepared_path.clone();
+        let attacker_link = root.join("attacker-link");
+        let hook_attacker_link = attacker_link.clone();
+        install_before_private_file_publish_hook(move || {
+            fs::hard_link(hook_prepared_path, hook_attacker_link).unwrap();
+        });
+
+        let result = filesystem.commit_private_file(prepared, Some(&snapshot.identity));
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"original");
+        assert!(!prepared_path.exists());
+        assert_eq!(fs::read(&attacker_link).unwrap(), b"replacement");
         let _ = fs::remove_dir_all(root);
     }
 

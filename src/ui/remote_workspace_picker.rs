@@ -6,7 +6,7 @@
     )
 )]
 
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, fmt, sync::Arc};
 
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, Render, Task, Window, div, px};
@@ -34,11 +34,17 @@ pub(crate) enum RemoteWorkspaceAccountError {
 }
 
 /// Account facts discovered from the connected destination before remote path navigation begins.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RemoteWorkspaceAccount {
     user: String,
     home_identity: RemoteDirectoryIdentity,
     login_shell: ValidatedRemoteLoginShell,
+}
+
+impl fmt::Debug for RemoteWorkspaceAccount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceAccount(<redacted>)")
+    }
 }
 
 impl RemoteWorkspaceAccount {
@@ -141,7 +147,7 @@ pub(super) enum RemoteWorkspacePathFormatError {
     InvalidControlCharacter,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct ParsedRemoteWorkspacePath {
     display: String,
     exact_directory: RemoteWorkspaceDirectory,
@@ -149,6 +155,12 @@ pub(super) struct ParsedRemoteWorkspacePath {
     descend_prefix: String,
     leaf_filter: String,
     trailing_separator: bool,
+}
+
+impl fmt::Debug for ParsedRemoteWorkspacePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ParsedRemoteWorkspacePath(<redacted>)")
+    }
 }
 
 impl ParsedRemoteWorkspacePath {
@@ -230,16 +242,28 @@ pub(crate) enum RemoteWorkspaceDirectoryRowError {
     InvalidName,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RemoteWorkspaceDirectoryRow {
     name: String,
 }
 
 /// A defensively bounded one-level directory result from a remote provider.
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for RemoteWorkspaceDirectoryRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceDirectoryRow(<redacted>)")
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RemoteWorkspaceDirectoryListing {
     rows: Vec<RemoteWorkspaceDirectoryRow>,
     truncated: bool,
+}
+
+impl fmt::Debug for RemoteWorkspaceDirectoryListing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceDirectoryListing(<redacted>)")
+    }
 }
 
 impl RemoteWorkspaceDirectoryListing {
@@ -339,11 +363,17 @@ pub(super) fn remote_workspace_confirmation(
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct RemoteWorkspaceSelection {
     directory: RemoteWorkspaceDirectory,
     physical_directory: RemoteDirectoryIdentity,
     account: RemoteWorkspaceAccount,
+}
+
+impl fmt::Debug for RemoteWorkspaceSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteWorkspaceSelection(<redacted>)")
+    }
 }
 
 impl RemoteWorkspaceSelection {
@@ -1219,6 +1249,35 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
+        let parsed = parse_remote_workspace_path("/sensitive/project").unwrap();
+        let row = RemoteWorkspaceDirectoryRow::new("sensitive-child".to_owned()).unwrap();
+        let listing = RemoteWorkspaceDirectoryListing::new(vec![row.clone()]);
+        let account = RemoteWorkspaceAccount::new(
+            "sensitive-user".to_owned(),
+            RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
+            "/bin/zsh".to_owned(),
+        )
+        .unwrap();
+        let selection = RemoteWorkspaceSelection::new(
+            RemoteWorkspaceDirectory::new("/sensitive/project".to_owned()).unwrap(),
+            RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
+            account.clone(),
+        );
+        let event = RemoteWorkspacePickerEvent::Confirmed(selection);
+
+        for debug in [
+            format!("{parsed:?}"),
+            format!("{row:?}"),
+            format!("{listing:?}"),
+            format!("{account:?}"),
+            format!("{event:?}"),
+        ] {
+            assert!(!debug.contains("sensitive"));
+        }
+    }
 
     #[derive(Default)]
     struct ScriptedRemoteWorkspaceProviderState {

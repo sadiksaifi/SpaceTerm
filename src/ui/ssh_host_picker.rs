@@ -7,6 +7,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -31,6 +32,7 @@ const ADD_HOST_ACTION: &str = "ssh-host-picker-add";
 const EDIT_HOST_ACTION: &str = "ssh-host-picker-edit";
 const DELETE_HOST_ACTION: &str = "ssh-host-picker-delete";
 const DISCOVERY_WARNING_SELECTOR: &str = "ssh-host-picker-discovery-warning";
+const HOST_ROW_SELECTOR: &str = "ssh-host-picker-row";
 const MAXIMUM_DISCOVERY_WARNING_BYTES: usize = 256;
 const HOST_DISCOVERY_ISSUE_CLASS_COUNT: usize = 4;
 const HOST_ICON_SIZE: f32 = 14.0;
@@ -143,7 +145,7 @@ fn no_results_text(discovery: &HostDiscovery, query: &str) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct HostPickerRow {
     id: SshHostPickerItemId,
     destination: SshDestination,
@@ -151,6 +153,12 @@ struct HostPickerRow {
     subtitle: String,
     managed: bool,
     synthetic: bool,
+}
+
+impl fmt::Debug for HostPickerRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostPickerRow(<redacted>)")
+    }
 }
 
 impl HostPickerRow {
@@ -172,7 +180,7 @@ impl HostPickerRow {
                 Icon::new(IconName::Server, px(HOST_ICON_SIZE), foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Status(status.into()))
-            .debug_selector(format!("ssh-host-picker-row-{}", self.destination.as_str()))
+            .debug_selector(HOST_ROW_SELECTOR)
     }
 }
 
@@ -621,6 +629,26 @@ mod tests {
         HostConfigFilesystem, HostConfigFilesystemError, HostConfigRoots, HostDiscoveryLimits,
         discover_ssh_hosts,
     };
+
+    #[test]
+    fn row_and_event_debug_should_redact_destination_and_display_values() {
+        let destination = SshDestination::new("user@sensitive-host".to_owned()).unwrap();
+        let row = HostPickerRow {
+            id: SshHostPickerItemId::Configured(
+                SshHostAlias::new("sensitive-host".to_owned()).unwrap(),
+            ),
+            destination: destination.clone(),
+            label: "sensitive-host".to_owned(),
+            subtitle: "/sensitive/config".to_owned(),
+            managed: false,
+            synthetic: false,
+        };
+        let event = SshHostPickerEvent::SelectDestination(destination);
+
+        let debug = format!("{row:?} {event:?}");
+        assert!(!debug.contains("sensitive"));
+        assert_eq!(HOST_ROW_SELECTOR, "ssh-host-picker-row");
+    }
 
     struct MemoryHostConfigFilesystem {
         files: BTreeMap<PathBuf, Vec<u8>>,

@@ -238,8 +238,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
 
     /// Launches and supervises a fresh master using a bounded private control socket.
     ///
-    /// Cancellation retains no child, socket, or runtime owner. Readiness never falls back to a
-    /// direct SSH connection when the registered control socket is unavailable.
+    /// Cancellation retains no child authority. An endpoint that was never authenticated and
+    /// registered may remain in its private owner namespace rather than being claimed during
+    /// cleanup. Readiness never falls back to a direct SSH connection when the registered control
+    /// socket is unavailable.
     pub(crate) async fn connect(
         paths: &AppPaths,
         executable: OpenSshExecutable,
@@ -712,16 +714,10 @@ impl<B: SshProcessBackend> Drop for ConnectingControl<B> {
     fn drop(&mut self) {
         if let Some(child) = self.child.take() {
             let runtime_owner = self.runtime_owner.take();
-            let mut registered_socket = self.registered_socket.take();
+            let registered_socket = self.registered_socket.take();
             self.backend.begin_cleanup(
                 child,
                 Some(Box::new(move || {
-                    if registered_socket.is_none()
-                        && let Some(owner) = runtime_owner.as_ref()
-                        && let Ok(socket) = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)
-                    {
-                        registered_socket = Some(socket);
-                    }
                     drop(registered_socket);
                     if let Some(owner) = runtime_owner {
                         let _ = owner.close();
@@ -1372,7 +1368,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn failed_connect_should_remove_only_its_registered_stale_socket(cx: &mut TestAppContext) {
+    fn failed_connect_should_preserve_its_unregistered_socket(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::default());
@@ -1391,11 +1387,11 @@ mod tests {
         ));
 
         let socket_path = backend.socket_path();
-        assert!(!socket_path.exists() && unrelated.exists());
+        assert!(socket_path.exists() && unrelated.exists());
     }
 
     #[test]
-    fn dropped_connecting_control_should_remove_a_socket_created_during_process_cleanup() {
+    fn dropped_connecting_control_should_preserve_an_unregistered_replacement_socket() {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let runtime_owner = paths
@@ -1405,12 +1401,13 @@ mod tests {
             .socket_path(CONTROL_RUNTIME_SOCKET_NAME)
             .unwrap();
         let backend = Arc::new(FakeBackend::default());
+        let replacement = UnixListener::bind(&socket_path).unwrap();
         let launch = ConnectingControl {
             backend: Arc::clone(&backend),
             child: Some(FakeChild {
                 listener: None,
                 socket_path: socket_path.clone(),
-                create_socket_during_cleanup: true,
+                create_socket_during_cleanup: false,
                 reaped: false,
             }),
             runtime_owner: Some(runtime_owner),
@@ -1419,7 +1416,8 @@ mod tests {
 
         drop(launch);
 
-        assert!(!socket_path.exists() && backend.reap_count() == 1);
+        assert!(socket_path.exists() && backend.reap_count() == 1);
+        drop(replacement);
     }
 
     #[gpui::test]
@@ -1679,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_pending_connect_future_should_reap_and_cleanup() {
+    fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socket() {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::default());
@@ -1704,7 +1702,7 @@ mod tests {
         drop(future);
 
         let socket_path = backend.socket_path();
-        assert!(backend.reap_count() == 1 && !socket_path.exists());
+        assert!(backend.reap_count() == 1 && socket_path.exists());
     }
 
     struct NoopWake;
