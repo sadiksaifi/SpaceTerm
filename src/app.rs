@@ -3,12 +3,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, px, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
 };
-use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+use crate::platform::application_menu::{ApplicationMenuAdapter, ApplicationMenuCommand};
 use crate::platform::control_socket::ControlSocketProbe;
 use crate::platform::secure_filesystem::SecureFilesystem;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
@@ -22,10 +21,8 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
 };
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
-    ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
-    NewWorkspace, OpenLocalProject, OpenTerminalFind, RemoteWorkspaceSshRuntime, SearchWorkspaces,
-    WorkspaceManager,
+    CreateScratchWorkspace, NativeRemoteWorkspaceFlowBackendFactory, NewWorkspace,
+    RemoteWorkspaceSshRuntime, WorkspaceManager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -123,83 +120,62 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
 actions!(
     spaceterm,
     [
+        ShowAboutApplication,
+        OpenApplicationHelp,
         QuitApplication,
         HideApplication,
         HideOtherApplications,
         ShowAllApplications,
         MinimizeWindow,
+        ZoomActiveWindow,
+        BringAllWindowsToFront,
         ToggleFullScreen
     ]
 );
 
-pub(crate) fn init(cx: &mut App) {
+pub(crate) fn init(cx: &mut App, application_menu: Rc<dyn ApplicationMenuAdapter>) {
+    install_application_menu_actions(cx, Rc::clone(&application_menu));
     cx.on_action(request_application_quit);
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
-    cx.set_menus(vec![
-        Menu {
-            name: "SpaceTerm".into(),
-            items: vec![
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Hide SpaceTerm", HideApplication),
-                MenuItem::action("Hide Others", HideOtherApplications),
-                MenuItem::action("Show All", ShowAllApplications),
-                MenuItem::separator(),
-                MenuItem::action("Quit SpaceTerm", QuitApplication),
-            ],
-        },
-        file_menu(),
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::action("Undo", EditUndo),
-                MenuItem::action("Redo", EditRedo),
-                MenuItem::separator(),
-                MenuItem::action("Cut", EditCut),
-                MenuItem::action("Copy", EditCopy),
-                MenuItem::action("Paste", EditPaste),
-                MenuItem::action("Select All", EditSelectAll),
-                MenuItem::separator(),
-                MenuItem::submenu(Menu {
-                    name: "Find".into(),
-                    items: vec![
-                        MenuItem::action("Find…", OpenTerminalFind),
-                        MenuItem::action("Find Next", FindNext),
-                        MenuItem::action("Find Previous", FindPrevious),
-                    ],
-                }),
-            ],
-        },
-        Menu {
-            name: "Window".into(),
-            items: vec![
-                MenuItem::action("Minimize", MinimizeWindow),
-                MenuItem::action("Toggle Full Screen", ToggleFullScreen),
-            ],
-        },
-    ]);
+    if let Err(error) = application_menu.install(cx) {
+        eprintln!("failed to install the application menu: {error}");
+    }
 }
 
-fn file_menu() -> Menu {
-    Menu {
-        name: "File".into(),
-        items: vec![
-            MenuItem::action("New Workspace…", NewWorkspace),
-            MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
-            MenuItem::action("Open Local Project…", OpenLocalProject),
-            MenuItem::action("Search Workspaces…", SearchWorkspaces),
-            MenuItem::action("New Tab", CreateTab),
-            MenuItem::separator(),
-            MenuItem::action("Close Pane", ClosePane),
-            MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Close Workspace", CloseWorkspace),
-            MenuItem::separator(),
-            MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-        ],
+fn install_application_menu_actions(
+    cx: &mut App,
+    application_menu: Rc<dyn ApplicationMenuAdapter>,
+) {
+    let about = Rc::clone(&application_menu);
+    cx.on_action(move |_: &ShowAboutApplication, _| {
+        perform_application_menu_command(about.as_ref(), ApplicationMenuCommand::ShowAbout);
+    });
+    let help = Rc::clone(&application_menu);
+    cx.on_action(move |_: &OpenApplicationHelp, _| {
+        perform_application_menu_command(help.as_ref(), ApplicationMenuCommand::OpenHelp);
+    });
+    let zoom = Rc::clone(&application_menu);
+    cx.on_action(move |_: &ZoomActiveWindow, _| {
+        perform_application_menu_command(zoom.as_ref(), ApplicationMenuCommand::ZoomActiveWindow);
+    });
+    cx.on_action(move |_: &BringAllWindowsToFront, _| {
+        perform_application_menu_command(
+            application_menu.as_ref(),
+            ApplicationMenuCommand::BringAllWindowsToFront,
+        );
+    });
+}
+
+fn perform_application_menu_command(
+    application_menu: &dyn ApplicationMenuAdapter,
+    command: ApplicationMenuCommand,
+) {
+    if let Err(error) = application_menu.perform(command) {
+        eprintln!("failed to perform an application menu command: {error}");
     }
 }
 
@@ -346,17 +322,23 @@ fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, ClipboardItem, Keystroke, OwnedMenuItem, TestAppContext};
+    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
 
     use super::*;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
     use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
     use crate::ui::TerminalPane;
 
+    fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
+        Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        )
+    }
+
     #[gpui::test]
     fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init).expect("UI initialization");
-        cx.update(init);
+        cx.update(|cx| init(cx, application_menu()));
         let expected = [
             ("cmd-q", QuitApplication.name()),
             ("cmd-h", HideApplication.name()),
@@ -388,44 +370,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_menu_should_use_the_workspace_directory_action_order(cx: &mut TestAppContext) {
-        let labels = cx.update(|_| {
-            let file = file_menu().owned();
-            file.items
-                .iter()
-                .map(|item| match item {
-                    OwnedMenuItem::Action { name, .. } => name.clone(),
-                    OwnedMenuItem::Separator => "|".to_owned(),
-                    OwnedMenuItem::Submenu(_) | OwnedMenuItem::SystemMenu(_) => {
-                        "submenu".to_owned()
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(
-            labels,
-            vec![
-                "New Workspace…",
-                "New Scratch Workspace",
-                "Open Local Project…",
-                "Search Workspaces…",
-                "New Tab",
-                "|",
-                "Close Pane",
-                "Close Tab",
-                "Close Workspace",
-                "|",
-                "Export Terminal Diagnostics…",
-            ]
-        );
-    }
-
-    #[gpui::test]
     fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        cx.update(init);
+        cx.update(|cx| init(cx, application_menu()));
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
@@ -456,6 +404,34 @@ mod tests {
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("native command copy".to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn native_application_actions_should_dispatch_through_the_application_menu_adapter(
+        cx: &mut TestAppContext,
+    ) {
+        let menu = Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        );
+        let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
+        cx.update(|cx| init(cx, adapter));
+
+        cx.update(|cx| {
+            cx.dispatch_action(&ShowAboutApplication);
+            cx.dispatch_action(&OpenApplicationHelp);
+            cx.dispatch_action(&ZoomActiveWindow);
+            cx.dispatch_action(&BringAllWindowsToFront);
+        });
+
+        assert_eq!(
+            menu.commands(),
+            [
+                ApplicationMenuCommand::ShowAbout,
+                ApplicationMenuCommand::OpenHelp,
+                ApplicationMenuCommand::ZoomActiveWindow,
+                ApplicationMenuCommand::BringAllWindowsToFront,
+            ]
         );
     }
 }
@@ -530,6 +506,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 /// Application-scoped capabilities shared by every Operating-System Window.
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
+    pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility:
@@ -650,7 +627,7 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
-    init(cx);
+    init(cx, Rc::clone(&host.adapters.application_menu));
     open(cx, host)
 }
 
@@ -724,6 +701,9 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
             adapters: ApplicationCapabilities {
+                application_menu: Rc::new(
+                    crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+                ),
                 local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
@@ -1005,32 +985,6 @@ mod runtime_tests {
                     ))
                     .unwrap()
             );
-        });
-    }
-
-    #[gpui::test]
-    fn menus_and_shortcuts_share_the_three_semantic_actions(cx: &mut gpui::TestAppContext) {
-        use gpui::{Action, Keystroke, OwnedMenuItem};
-        cx.update(|cx| {
-            crate::ui::init(cx).unwrap();
-            let file = file_menu().owned();
-            for (item, shortcut, action) in [
-                (&file.items[0], "cmd-n", NewWorkspace.name()),
-                (&file.items[1], "cmd-shift-n", CreateScratchWorkspace.name()),
-                (&file.items[2], "cmd-o", OpenLocalProject.name()),
-            ] {
-                let OwnedMenuItem::Action {
-                    action: menu_action,
-                    ..
-                } = item
-                else {
-                    panic!("expected action");
-                };
-                assert_eq!(menu_action.name(), action);
-                let bindings = cx.all_bindings_for_input(&[Keystroke::parse(shortcut).unwrap()]);
-                assert_eq!(bindings.len(), 1);
-                assert_eq!(bindings[0].action().name(), action);
-            }
         });
     }
 }

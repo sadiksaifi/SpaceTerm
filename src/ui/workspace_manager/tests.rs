@@ -755,7 +755,14 @@ fn workspace_manager_with_application_actions(
 ) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    cx.update(crate::app::init);
+    cx.update(|cx| {
+        crate::app::init(
+            cx,
+            Rc::new(
+                crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+            ),
+        );
+    });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));

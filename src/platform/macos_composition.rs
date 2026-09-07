@@ -142,6 +142,9 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
+            application_menu: Rc::new(
+                super::macos_application_menu::MacosApplicationMenuAdapter,
+            ),
             local_filesystem,
             key_input: Rc::new(
                 super::macos_keyboard::MacosTerminalKeyInputAdapterFactory::new(
