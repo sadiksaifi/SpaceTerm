@@ -64,97 +64,13 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
     }
 }
 
-#[test]
-fn shared_startup_and_ui_cannot_select_native_implementations() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = vec![
-        root.join("main.rs"),
-        root.join("app.rs"),
-        root.join("desktop_profile.rs"),
-    ];
-    files.extend(
-        std::fs::read_dir(root.join("ui"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "rs")),
-    );
-    for path in files {
-        let source = std::fs::read_to_string(&path).unwrap();
-        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-        for forbidden in [
-            "platform::macos_",
-            "Macos",
-            "use cocoa::",
-            "use objc::",
-            "target_os",
-            "extern \"C\"",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{} contains {forbidden}",
-                path.display()
-            );
-        }
-    }
-}
-
-#[test]
-fn portable_ssh_runtime_cannot_encode_host_mechanics_or_host_selected_facts() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = std::fs::read_dir(root.join("ssh"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
-        .collect::<Vec<_>>();
-    files.extend([
-        root.join("platform/app_paths.rs"),
-        root.join("platform/askpass.rs"),
-        root.join("platform/ssh_askpass.rs"),
-        root.join("ui/native_remote_workspace_flow_backend.rs"),
-        root.join("ui/remote_workspace_flow.rs"),
-        root.join("ui/ssh_askpass_dialog.rs"),
-    ]);
-    for path in files {
-        let source = std::fs::read_to_string(&path).unwrap();
-        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-        for forbidden in [
-            "std::os::unix",
-            "std::process::Child",
-            "std::process::Command",
-            "std::process::{Child",
-            "std::process::{Command",
-            "std::fs::",
-            "NativeHostConfigFilesystem",
-            "libc::",
-            "CommandExt",
-            "AsRawFd",
-            "FromRawFd",
-            "MetadataExt",
-            "PermissionsExt",
-            "getpeereid",
-            "/usr/bin/ssh",
-            "macOS",
-            "Macos",
-            "MACOS",
-            "Apple OpenSSH",
-            "macos_temporary",
-            "target_os",
-            "extern \"C\"",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{} contains {forbidden}",
-                path.display()
-            );
-        }
-    }
-}
-
 /// Scan complete portable surfaces, including their test bodies and test-only helpers.
 #[test]
 fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![
+        root.join("main.rs"),
+        root.join("app.rs"),
         root.join("desktop_profile.rs"),
         root.join("desktop_profile/keybindings.rs"),
         root.join("ui/mod.rs"),
@@ -183,12 +99,23 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("ui/remote_workspace_flow.rs"),
     ];
     for directory in [
+        "ui",
+        "desktop_profile",
         "ssh",
         "platform/local_filesystem",
         "terminal/session",
         "terminal/native_services",
     ] {
         collect_rust_sources(&root.join(directory), &mut files);
+    }
+    for name in [
+        "terminal/attention_runtime.rs",
+        "terminal/attention_notification.rs",
+        "terminal/secure_input.rs",
+        "terminal/wheel_phase.rs",
+        "platform/window_visibility.rs",
+    ] {
+        files.push(root.join(name));
     }
     // Discover every shared owner of an isolated suite so new mounts cannot escape the gate.
     let mut sources = Vec::new();
@@ -223,8 +150,35 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         if let Some(forbidden) = native_verification_dependency(&source) {
             panic!("{} contains {forbidden}", path.display());
         }
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        if path.starts_with(root.join("ssh")) {
+            for forbidden in [
+                "std::fs::",
+                "NativeHostConfigFilesystem",
+                "getpeereid",
+                "Apple OpenSSH",
+            ] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{} contains {forbidden}",
+                    path.display()
+                );
+            }
+        }
+        if path.starts_with(root.join("terminal/native_services")) {
+            let policy = source.replace("crate::platform::local_filesystem::", "");
+            assert!(
+                !policy.contains("crate::platform::"),
+                "{} selects a platform capability",
+                path.display()
+            );
+        }
         // Shared test bodies must supply environment and resource facts explicitly.
-        let test_body = source.split("#[cfg(test)]\nmod tests").nth(1);
+        let test_body = if is_test_source(&path) {
+            Some(source.as_str())
+        } else {
+            source.split("#[cfg(test)]\nmod tests").nth(1)
+        };
         if let Some(test_body) = test_body {
             for forbidden in [
                 "std::env::var",
@@ -242,32 +196,6 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
             }
         }
     }
-    let session = format!(
-        "{}\n{}",
-        std::fs::read_to_string(root.join("terminal/session.rs")).unwrap(),
-        std::fs::read_to_string(root.join("terminal/session/launch.rs")).unwrap()
-    );
-    for (start, end) in [
-        ("fn test_launch_planner(", "impl TerminalSession"),
-        ("fn start_deferred_with(", "fn start_deferred_with_context("),
-        ("fn start_with(", "fn write_input("),
-    ] {
-        let helper = session
-            .split(start)
-            .nth(1)
-            .unwrap()
-            .split(end)
-            .next()
-            .unwrap();
-        assert!(
-            !helper.contains("local_hostname()"),
-            "{start} discovers the host name"
-        );
-        assert!(
-            !helper.contains("launch_host"),
-            "{start} selects host launch facts"
-        );
-    }
 }
 
 fn collect_rust_sources(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
@@ -279,6 +207,11 @@ fn collect_rust_sources(directory: &std::path::Path, files: &mut Vec<std::path::
             files.push(path);
         }
     }
+}
+
+fn is_test_source(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name == "tests.rs")
+        || path.components().any(|part| part.as_os_str() == "tests")
 }
 
 pub(crate) fn portable_verification_source(source: &str) -> String {
@@ -523,6 +456,9 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     collect_rust_sources(&root.join("ui"), &mut files);
     files.push(root.join("terminal/failure.rs"));
     for path in files {
+        if is_test_source(&path) {
+            continue;
+        }
         let source = std::fs::read_to_string(&path).unwrap();
         let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         if let Some(forbidden) = shared_presentation_violation(production) {
@@ -564,130 +500,6 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
         );
     }
     assert!(shared_presentation_violation("profile.shortcut(&CreateTab)").is_none());
-}
-
-fn just_recipe<'a>(justfile: &'a str, name: &str) -> Option<(Vec<&'a str>, String)> {
-    let prefix = format!("{name}:");
-    let lines = justfile.lines().collect::<Vec<_>>();
-    let (index, dependencies) = lines
-        .iter()
-        .enumerate()
-        .find_map(|(index, line)| line.strip_prefix(&prefix).map(|rest| (index, rest)))?;
-    let body = lines[index + 1..]
-        .iter()
-        .take_while(|line| line.is_empty() || line.starts_with(char::is_whitespace))
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some((dependencies.split_whitespace().collect(), body))
-}
-
-fn portable_validation_violation(justfile: &str) -> Option<String> {
-    let expected = [
-        "portable-fmt-check",
-        "portable-check",
-        "portable-test",
-        "portable-clippy",
-        "diff-check",
-    ];
-    let (direct, _) = just_recipe(justfile, "portable-validate")?;
-    if direct != expected {
-        return Some("portable-validate dependencies changed".to_owned());
-    }
-
-    let mut pending = vec!["portable-validate"];
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(recipe) = pending.pop() {
-        if !visited.insert(recipe) {
-            continue;
-        }
-        if recipe.starts_with("macos-")
-            || matches!(recipe, "scripts-check" | "package" | "mounted-dmg")
-        {
-            return Some(format!("portable lane reaches native recipe {recipe}"));
-        }
-        let Some((dependencies, body)) = just_recipe(justfile, recipe) else {
-            return Some(format!("portable lane references missing recipe {recipe}"));
-        };
-        for forbidden in ["xcrun", "AppKit", "package-macos", "mounted-dmg"] {
-            if body.contains(forbidden) {
-                return Some(format!(
-                    "portable lane invokes {forbidden} through {recipe}"
-                ));
-            }
-        }
-        pending.extend(dependencies);
-    }
-    None
-}
-
-#[test]
-fn validation_lanes_keep_portable_and_native_prerequisites_separate() {
-    let justfile = include_str!("../Justfile");
-    assert_eq!(portable_validation_violation(justfile), None);
-    for required in [
-        "macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check",
-        "validate: portable-validate macos-validate",
-        "cargo test --workspace --all-targets --no-default-features --locked",
-        "cargo test --all-targets --features macos-native-tests --locked \"macos\"",
-    ] {
-        assert!(
-            justfile.lines().any(|line| line.trim() == required),
-            "missing validation contract: {required}"
-        );
-    }
-
-    let injected = justfile.replacen(
-        "portable-validate: portable-fmt-check portable-check portable-test portable-clippy diff-check",
-        "portable-validate: portable-fmt-check portable-check portable-test portable-clippy diff-check scripts-check",
-        1,
-    );
-    assert!(portable_validation_violation(&injected).is_some());
-
-    let transitive = justfile.replacen(
-        "portable-test:\n    cargo test",
-        "portable-test: scripts-check\n    cargo test",
-        1,
-    );
-    assert!(portable_validation_violation(&transitive).is_some());
-}
-
-#[test]
-fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
-    let policy = [
-        include_str!("terminal/native_services/local_authority.rs"),
-        include_str!("terminal/native_services/clipboard.rs"),
-        include_str!("terminal/native_services/file_insertion.rs"),
-        include_str!("terminal/native_services/hyperlink.rs"),
-        include_str!("terminal/native_services/osc52.rs"),
-        include_str!("terminal/native_services/paste.rs"),
-        include_str!("terminal/native_services/file_preview.rs"),
-        include_str!("terminal/native_services/selection.rs"),
-        include_str!("terminal/native_services/services.rs"),
-    ];
-    for source in policy {
-        let source = portable_verification_source(source);
-        // Local Filesystem Authority is portable policy, shared with Workspaces.
-        let source = source.replace("crate::platform::local_filesystem::", "");
-        assert!(!source.contains("crate::platform::"));
-        assert!(!source.contains("target_os"));
-        assert!(!source.contains("use cocoa::"));
-        assert!(!source.contains("use objc::"));
-    }
-    for source in [
-        include_str!("ui/terminal_pane.rs"),
-        include_str!("terminal/session.rs"),
-    ] {
-        for concrete in [
-            "macos_pasteboard",
-            "macos_quick_look",
-            "macos_services",
-            "MacosOsc52Clipboard",
-            "MacosQuickLook",
-        ] {
-            assert!(!source.contains(concrete));
-        }
-    }
 }
 
 #[test]

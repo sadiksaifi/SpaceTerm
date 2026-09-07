@@ -29,10 +29,7 @@ use super::metadata::{
 use super::native_services::{
     FilePreviewTarget, NativeContextActions, PasteIntakeError, PastePayload,
 };
-use super::osc52::{
-    Osc52AccessPolicy, Osc52AuthorizationPolicy, Osc52Effect, Osc52Filter, Osc52Operation,
-    Osc52Rejection, Osc52Target,
-};
+use super::osc52::{Osc52Effect, Osc52Filter, Osc52Operation, Osc52Rejection, Osc52Target};
 use super::paste::{MAX_PASTE_BYTES, PasteRejection, PreparedPaste};
 use super::pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
@@ -1460,14 +1457,6 @@ fn check_file_insertion() -> Result<(), String> {
 }
 
 fn check_osc52() -> Result<(), String> {
-    require_eq(
-        "osc52-policy",
-        Osc52AuthorizationPolicy::default(),
-        Osc52AuthorizationPolicy {
-            read: Osc52AccessPolicy::Deny,
-            write: Osc52AccessPolicy::Deny,
-        },
-    )?;
     let mut filter = Osc52Filter::default();
     let effects = filter.feed(b"\x1b]52;s;aGVsbG8=\x07");
     require(

@@ -168,14 +168,12 @@ pub(crate) struct NativeTerminalSessionFactory {
     local_hostname: Option<String>,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
-    osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
 }
 
 impl NativeTerminalSessionFactory {
     pub(crate) fn new(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
         local_hostname: Option<String>,
     ) -> Self {
@@ -184,7 +182,6 @@ impl NativeTerminalSessionFactory {
             local_hostname,
             native_pty_adapter_factory,
             launch_planner,
-            osc52_clipboard_factory,
         }
     }
 }
@@ -208,7 +205,6 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
             launch,
-            Arc::clone(&self.osc52_clipboard_factory),
             self.local_filesystem.clone(),
         )?;
         Ok(StartedTerminalSession {
@@ -231,7 +227,6 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         local_hostname: Option<&str>,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         let launch = SessionLaunch::local(
@@ -244,7 +239,6 @@ impl TerminalSession {
             native_pty_adapter_factory,
             geometry,
             launch,
-            osc52_clipboard_factory,
             local_filesystem,
         )
     }
@@ -253,14 +247,12 @@ impl TerminalSession {
         factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
         launch: SessionLaunch,
-        clipboard: Arc<dyn Osc52ClipboardFactory>,
         filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         Self::start_deferred_with_context(
             geometry,
             launch.metadata,
             launch.fallback_title,
-            clipboard,
             filesystem,
             move |size, output, close_handle| {
                 let prepared = launch.process.prepare()?;
@@ -294,7 +286,6 @@ impl TerminalSession {
             geometry,
             metadata_context,
             test_launch_planner().fallback_title(),
-            Arc::new(UnavailableOsc52ClipboardFactory),
             LocalFilesystemAuthority::testing(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
@@ -307,7 +298,6 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
         start_native_pty: impl FnOnce(
             NativePtySize,
@@ -363,7 +353,6 @@ impl TerminalSession {
                         metadata_context,
                         fallback_title,
                         terminal_name,
-                        osc52_clipboard_factory,
                         local_filesystem,
                     },
                     command_rx,
@@ -434,7 +423,6 @@ impl TerminalSession {
                         metadata_context,
                         fallback_title: "Terminal".to_owned(),
                         terminal_name,
-                        osc52_clipboard_factory: Arc::new(UnavailableOsc52ClipboardFactory),
                         local_filesystem: LocalFilesystemAuthority::testing(),
                     },
                     command_rx,

@@ -6,9 +6,6 @@ use objc::{msg_send, sel, sel_impl};
 use std::ffi::CStr;
 use std::path::PathBuf;
 
-use crate::terminal::Osc52Target;
-use crate::terminal::osc52::{Osc52Clipboard, Osc52ClipboardError};
-
 #[cfg(all(test, feature = "macos-native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
@@ -145,54 +142,6 @@ fn write_selection_to_pasteboard(
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct MacosOsc52Clipboard;
-
-pub(crate) struct MacosOsc52ClipboardFactory;
-impl crate::terminal::osc52::Osc52ClipboardFactory for MacosOsc52ClipboardFactory {
-    fn create(&self) -> Box<dyn Osc52Clipboard> {
-        Box::new(MacosOsc52Clipboard)
-    }
-}
-
-impl Osc52Clipboard for MacosOsc52Clipboard {
-    fn read(&mut self, target: Osc52Target) -> Result<String, Osc52ClipboardError> {
-        if target != Osc52Target::Standard {
-            return Err(Osc52ClipboardError::UnsupportedTarget);
-        }
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let value = NSPasteboard::generalPasteboard(nil).stringForType(NSPasteboardTypeString);
-            let result = if value == nil {
-                Ok(String::new())
-            } else {
-                let length: usize = msg_send![value, lengthOfBytesUsingEncoding: 4_usize];
-                if length > crate::terminal::osc52::MAX_OSC52_CONTENT_BYTES {
-                    pool.drain();
-                    return Err(Osc52ClipboardError::Unavailable);
-                }
-                let pointer = value.UTF8String();
-                if pointer.is_null() {
-                    Err(Osc52ClipboardError::Unavailable)
-                } else {
-                    std::str::from_utf8(std::slice::from_raw_parts(pointer.cast::<u8>(), length))
-                        .map(str::to_owned)
-                        .map_err(|_| Osc52ClipboardError::Unavailable)
-                }
-            };
-            pool.drain();
-            result
-        }
-    }
-
-    fn write(&mut self, target: Osc52Target, text: &str) -> Result<(), Osc52ClipboardError> {
-        if target != Osc52Target::Standard {
-            return Err(Osc52ClipboardError::UnsupportedTarget);
-        }
-        write_selection(text, None).map_err(|_| Osc52ClipboardError::Unavailable)
-    }
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]

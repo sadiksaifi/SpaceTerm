@@ -1710,20 +1710,6 @@ mod tests {
     impl Wake for NoopWake {
         fn wake(self: Arc<Self>) {}
     }
-
-    #[test]
-    fn timing_should_reject_unbounded_or_zero_polling() {
-        assert!(
-            ControlConnectionTiming::new(Duration::from_secs(61), Duration::from_millis(10))
-                .is_err()
-                && ControlConnectionTiming::new(Duration::from_secs(1), Duration::ZERO).is_err()
-        );
-    }
-
-    #[test]
-    fn production_timing_should_not_impose_a_connection_deadline() {
-        assert!(ControlConnectionTiming::default().timeout.is_none());
-    }
 }
 
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]

@@ -35,10 +35,10 @@ fn unavailable_replacement_preview_dismisses_the_previous_presentation(cx: &mut 
     let dismissals = Rc::new(Cell::new(0));
     let (pane, cx, _) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.file_preview = Box::new(RecordingFilePreviewPresenter {
+        pane.file_preview = FilePreviewPresenter::new(Box::new(RecordingFilePreviewPanel {
             previews: previews.clone(),
             dismissals: dismissals.clone(),
-        });
+        }));
         pane.preview_context_link(&first_link, cx);
         assert_eq!(previews.get(), 1);
         std::fs::remove_file(&second).unwrap();

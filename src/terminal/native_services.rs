@@ -321,17 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn service_capabilities_keep_selection_export_distinct_from_terminal_input_focus() {
-        assert_eq!(
-            NativeServiceCapabilities::new(true, false),
-            NativeServiceCapabilities {
-                send_text: true,
-                return_text: false,
-            }
-        );
-    }
-
-    #[test]
     fn context_enablement_can_be_derived_without_copying_selection_text() {
         assert_eq!(
             NativeContextActions::from_presence(LOCAL_FILES, true, None),

@@ -70,3 +70,6 @@ just install-macos
 ```
 
 Run `just` to see the complete command list.
+
+Run `just validate` for the full validation suite, including SpaceTerm's patched terminal library.
+Inside a SpaceTerm Pane, `just kitty-graphics-smoke` displays image layering and scaling checks.

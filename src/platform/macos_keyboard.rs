@@ -355,8 +355,6 @@ fn option_is_alt(policy: OptionAsAltPolicy, modifiers: InputModifiers) -> bool {
         && match policy {
             OptionAsAltPolicy::None => false,
             OptionAsAltPolicy::Both => true,
-            OptionAsAltPolicy::Left => !modifiers.alt_right,
-            OptionAsAltPolicy::Right => modifiers.alt_right,
         }
 }
 
@@ -635,13 +633,8 @@ mod tests {
     }
 
     #[test]
-    fn option_as_alt_policy_is_carried_per_event_for_each_side() {
-        for policy in [
-            OptionAsAltPolicy::None,
-            OptionAsAltPolicy::Both,
-            OptionAsAltPolicy::Left,
-            OptionAsAltPolicy::Right,
-        ] {
+    fn option_as_alt_policy_is_carried_per_event() {
+        for policy in [OptionAsAltPolicy::None, OptionAsAltPolicy::Both] {
             let bridge = MacosKeyboardBridge::new(policy);
             let input = encoded(bridge.translate(native(0, "a")));
             assert_eq!(input.option_as_alt, policy);
@@ -790,16 +783,12 @@ mod tests {
     }
 
     #[test]
-    fn option_policy_selects_layout_text_and_consumption_by_side() {
+    fn option_policy_selects_layout_text_and_consumption() {
         let cases = [
             (OptionAsAltPolicy::None, false, "å", true),
             (OptionAsAltPolicy::Both, false, "a", false),
-            (OptionAsAltPolicy::Left, false, "a", false),
-            (OptionAsAltPolicy::Right, false, "å", true),
             (OptionAsAltPolicy::None, true, "å", true),
             (OptionAsAltPolicy::Both, true, "a", false),
-            (OptionAsAltPolicy::Left, true, "å", true),
-            (OptionAsAltPolicy::Right, true, "a", false),
         ];
 
         for (policy, alt_right, expected_text, consumed_alt) in cases {

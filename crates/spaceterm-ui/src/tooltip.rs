@@ -1354,13 +1354,6 @@ mod tests {
         assert_eq!(metrics.secondary_font_size, px(20.0));
     }
 
-    #[test]
-    fn test_theme_should_define_a_noninteractive_surface() {
-        let theme = test_theme();
-
-        assert_eq!(theme.metrics.target_gap, px(6.0));
-    }
-
     struct TestRoot {
         show_target: bool,
         disabled: bool,

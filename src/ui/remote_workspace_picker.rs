@@ -1,15 +1,9 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Remote Workspace Picker is wired into Workspace Manager in the next slice"
-    )
-)]
-
 use std::{cmp::Ordering, fmt, sync::Arc};
 
+#[cfg(test)]
+use gpui::App;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, Render, Task, Window, div, px};
+use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div, px};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
@@ -30,6 +24,7 @@ pub(super) const MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS: usize = 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteWorkspaceAccountError {
     InvalidUser,
+    #[cfg(test)]
     InvalidLoginShell,
 }
 
@@ -48,6 +43,7 @@ impl fmt::Debug for RemoteWorkspaceAccount {
 }
 
 impl RemoteWorkspaceAccount {
+    #[cfg(test)]
     pub(crate) fn new(
         user: String,
         home_identity: RemoteDirectoryIdentity,
@@ -88,6 +84,7 @@ impl RemoteWorkspaceAccount {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn user(&self) -> &str {
         &self.user
     }
@@ -176,10 +173,12 @@ impl ParsedRemoteWorkspacePath {
         &self.enumeration_directory
     }
 
+    #[cfg(test)]
     pub(super) fn leaf_filter(&self) -> &str {
         &self.leaf_filter
     }
 
+    #[cfg(test)]
     pub(super) const fn trailing_separator(&self) -> bool {
         self.trailing_separator
     }
@@ -267,6 +266,7 @@ impl fmt::Debug for RemoteWorkspaceDirectoryListing {
 }
 
 impl RemoteWorkspaceDirectoryListing {
+    #[cfg(test)]
     pub(crate) fn new(rows: Vec<RemoteWorkspaceDirectoryRow>) -> Self {
         Self::from_remote(rows, false)
     }
@@ -341,26 +341,6 @@ pub(super) fn descend_remote_workspace_query(
 pub(crate) enum RemoteWorkspaceExactPathState {
     ReadableDirectory,
     Missing,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceConfirmation {
-    OpenRemoteProject(RemoteWorkspaceDirectory),
-    CreateFolder(RemoteWorkspaceDirectory),
-}
-
-pub(super) fn remote_workspace_confirmation(
-    parsed: &ParsedRemoteWorkspacePath,
-    state: RemoteWorkspaceExactPathState,
-) -> RemoteWorkspaceConfirmation {
-    match state {
-        RemoteWorkspaceExactPathState::ReadableDirectory => {
-            RemoteWorkspaceConfirmation::OpenRemoteProject(parsed.exact_directory.clone())
-        }
-        RemoteWorkspaceExactPathState::Missing => {
-            RemoteWorkspaceConfirmation::CreateFolder(parsed.exact_directory.clone())
-        }
-    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -583,6 +563,7 @@ impl RemoteWorkspacePicker {
         true
     }
 
+    #[cfg(test)]
     pub(super) const fn is_open(&self) -> bool {
         self.open
     }
@@ -591,6 +572,7 @@ impl RemoteWorkspacePicker {
         self.open || self.opening
     }
 
+    #[cfg(test)]
     pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.palette.read(cx).editor_is_focused(window, cx)
     }
@@ -614,23 +596,6 @@ impl RemoteWorkspacePicker {
             self.finish_close(CommandPaletteCloseReason::Programmatic, cx);
         }
         dismissed
-    }
-
-    #[expect(
-        dead_code,
-        reason = "the retained parent flow owns this symmetrical focus-transfer seam"
-    )]
-    pub(super) fn dismiss_for_replacement(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<CommandPaletteReplacementFocus> {
-        if !self.open || self.busy.is_some() {
-            return None;
-        }
-        self.palette.update(cx, |palette, cx| {
-            palette.dismiss_for_replacement(window, cx)
-        })
     }
 
     pub(super) fn complete_activation(
@@ -2077,27 +2042,6 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "~//Projects//SpaceTerm/"
-        );
-    }
-
-    #[test]
-    fn exact_path_state_should_choose_open_or_create_without_rewriting_the_path() {
-        let parsed = parse_remote_workspace_path("~/Projects//SpaceTerm").unwrap();
-
-        assert_eq!(
-            remote_workspace_confirmation(
-                &parsed,
-                RemoteWorkspaceExactPathState::ReadableDirectory
-            ),
-            RemoteWorkspaceConfirmation::OpenRemoteProject(
-                RemoteWorkspaceDirectory::new("~/Projects//SpaceTerm".to_owned()).unwrap()
-            )
-        );
-        assert_eq!(
-            remote_workspace_confirmation(&parsed, RemoteWorkspaceExactPathState::Missing),
-            RemoteWorkspaceConfirmation::CreateFolder(
-                RemoteWorkspaceDirectory::new("~/Projects//SpaceTerm".to_owned()).unwrap()
-            )
         );
     }
 

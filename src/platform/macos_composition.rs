@@ -10,11 +10,10 @@ use gpui::{TitlebarOptions, point, px};
 use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
-    let code = crate::app::dispatch_or_prepare_application(
-        super::macos_askpass_transport::dispatch_helper_from_environment,
-        || crate::app::launch(capture_startup_dependencies(), compose),
-    )
-    .unwrap_or_else(|code| code);
+    let code = match super::macos_askpass_transport::dispatch_helper_from_environment() {
+        Some(code) => code,
+        None => crate::app::launch(capture_startup_dependencies(), compose),
+    };
     if code != 0 {
         std::process::exit(code);
     }
@@ -129,7 +128,6 @@ fn compose(
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
         Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
         super::launch_host::shell_launch_planner(),
-        Arc::new(super::macos_pasteboard::MacosOsc52ClipboardFactory),
         local_filesystem.clone(),
         super::launch_host::local_hostname(),
     ));
@@ -170,8 +168,8 @@ fn compose(
             )),
             remote_workspace,
         },
-        services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
-        window_movement: Some(Rc::new(super::macos_window_drag::WindowMovementFactory)),
+        services: Rc::new(super::macos_services::NativeServicesRegistration),
+        window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,

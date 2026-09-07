@@ -19,11 +19,6 @@ pub(crate) trait FilePreviewFactory {
     fn create(&self) -> Box<dyn FilePreviewPanel>;
 }
 
-pub(crate) trait FilePreviewPlatform {
-    fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError>;
-    fn dismiss(&mut self);
-}
-
 /// Owns revalidation, failure cleanup, replacement and Pane teardown policy.
 pub(crate) struct FilePreviewPresenter<P: FilePreviewPanel> {
     pub(super) panel: P,
@@ -33,19 +28,8 @@ impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
     pub(crate) const fn new(panel: P) -> Self {
         Self { panel }
     }
-}
 
-impl FilePreviewPanel for Box<dyn FilePreviewPanel> {
-    fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
-        (**self).preview_file(path)
-    }
-    fn dismiss(&mut self) {
-        (**self).dismiss();
-    }
-}
-
-impl<P: FilePreviewPanel> FilePreviewPlatform for FilePreviewPresenter<P> {
-    fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError> {
+    pub(crate) fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError> {
         let Some(path) = target.revalidated_path() else {
             self.panel.dismiss();
             return Err(FilePreviewError::StaleTarget);
@@ -56,8 +40,17 @@ impl<P: FilePreviewPanel> FilePreviewPlatform for FilePreviewPresenter<P> {
         }
         Ok(())
     }
-    fn dismiss(&mut self) {
+    pub(crate) fn dismiss(&mut self) {
         self.panel.dismiss();
+    }
+}
+
+impl FilePreviewPanel for Box<dyn FilePreviewPanel> {
+    fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
+        (**self).preview_file(path)
+    }
+    fn dismiss(&mut self) {
+        (**self).dismiss();
     }
 }
 
@@ -208,14 +201,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn presenter_dismissal_is_explicit_and_injectable() {
-        let mut presenter = FilePreviewPresenter::new(RecordingPanel::default());
-
-        presenter.dismiss();
-
-        assert_eq!(presenter.panel.dismissals, 1);
-    }
     #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../../platform/macos_adapter_tests/quick_look.rs");

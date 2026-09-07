@@ -78,10 +78,10 @@ escape	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::Cancel
 tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusNext
 shift-tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusPrevious
 ctrl-cmd-space	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::ShowCharacterPalette
-cmd-n	None	terminal::CreateScratchWorkspace
+cmd-shift-n	None	terminal::CreateScratchWorkspace
 cmd-p	None	terminal::SearchWorkspaces
-cmd-o	None	terminal::ShowNewWorkspacePanel
-cmd-shift-o	None	terminal::OpenLocalProject
+cmd-n	None	terminal::ShowNewWorkspacePanel
+cmd-o	None	terminal::OpenLocalProject
 cmd-t	None	terminal::CreateTab
 cmd-w	None	terminal::ClosePane
 cmd-shift-w	None	terminal::CloseTab
@@ -99,8 +99,6 @@ tab	Some(Identifier("TerminalFind"))	terminal::FocusNextTerminalFindControl
 shift-tab	Some(Identifier("TerminalFind"))	terminal::FocusPreviousTerminalFindControl
 enter	Some(Identifier("TerminalPasteConfirmation"))	terminal::ConfirmUnsafePaste
 escape	Some(Identifier("TerminalPasteConfirmation"))	terminal::CancelUnsafePaste
-cmd-enter	Some(Identifier("TerminalOsc52Authorization"))	terminal::AllowOsc52Clipboard
-escape	Some(Identifier("TerminalOsc52Authorization"))	terminal::DenyOsc52Clipboard
 cmd-=	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd-+	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd--	Some(Identifier("TerminalPane"))	terminal::DecreaseTerminalFontSize

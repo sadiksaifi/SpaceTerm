@@ -1,10 +1,7 @@
-use super::pane_lifecycle::PaneLifecycleDependencies;
+use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::remote_project::RemoteRestartBatch;
-use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
-use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use thiserror::Error;
 
@@ -44,12 +41,9 @@ use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TabId, TerminalTab, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
-#[cfg(test)]
-use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
-    TerminalKeyInputAdapterFactory, WorkspaceChildLaunchValidation,
-    WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
+    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -127,10 +121,7 @@ impl std::fmt::Debug for PaneHostEvent {
 pub(crate) struct PaneHost {
     terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
-    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-    native_service_adapters: NativeServiceAdapters,
-    lifecycle_dependencies: PaneLifecycleDependencies,
+    pane_construction: PaneConstruction,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -142,8 +133,7 @@ pub(crate) struct PaneHost {
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_tab_requested: bool,
-    remote_disconnected_generation: Option<u64>,
-    child_launch_generation: u64,
+    remote_lifecycle: RemoteHierarchyLifecycle,
 }
 
 impl PaneHost {
@@ -162,27 +152,17 @@ impl PaneHost {
             tab_id,
             session_factory,
             prepared_launch,
-            Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-            Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-            crate::terminal::native_services::testing::adapters(),
-            PaneLifecycleDependencies::testing(),
+            PaneConstruction::testing(),
             window,
             cx,
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
     pub(crate) fn new_with_prepared_launch(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
-        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
+        pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -197,10 +177,7 @@ impl PaneHost {
                 pane_id,
                 session_factory.clone(),
                 prepared_launch,
-                Rc::clone(&key_input_adapter_factory),
-                Rc::clone(&accessibility_adapter_factory),
-                native_service_adapters.clone(),
-                lifecycle_dependencies.clone(),
+                pane_construction.clone(),
                 window,
                 cx,
             )
@@ -214,10 +191,7 @@ impl PaneHost {
         Self {
             terminal_tab,
             session_factory,
-            key_input_adapter_factory,
-            accessibility_adapter_factory,
-            native_service_adapters,
-            lifecycle_dependencies,
+            pane_construction,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -229,38 +203,20 @@ impl PaneHost {
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
             close_tab_requested: false,
-            remote_disconnected_generation: None,
-            child_launch_generation: 0,
+            remote_lifecycle: RemoteHierarchyLifecycle::default(),
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
     fn create_terminal(
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
-        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
+        pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal = cx.new(|cx| {
-            TerminalPane::new_with_prepared_launch(
-                session_factory,
-                prepared_launch,
-                key_input_adapter_factory.create(),
-                accessibility_adapter_factory.as_ref(),
-                native_service_adapters,
-                lifecycle_dependencies,
-                window,
-                cx,
-            )
-        });
+        let terminal =
+            cx.new(|cx| pane_construction.create(session_factory, prepared_launch, window, cx));
         cx.subscribe_in(
             &terminal,
             window,
@@ -329,44 +285,17 @@ impl PaneHost {
         })
     }
 
-    pub(crate) fn native_service_selection(
+    pub(crate) fn native_service_target(
         &self,
         origin: NativeServiceOrigin,
-        window: &Window,
-        cx: &mut App,
-    ) -> Option<SelectionCopy> {
+    ) -> Option<Entity<TerminalPane>> {
         if self.terminal_tab.id() != origin.tab_id()
             || self.terminal_tab.focused_pane_id() != origin.pane_id()
             || self.native_service_hierarchy_generation != origin.hierarchy_generation()
         {
             return None;
         }
-        self.terminal_tab
-            .terminal(origin.pane_id())?
-            .update(cx, |terminal, cx| {
-                terminal.native_service_selection(origin, window, cx)
-            })
-    }
-
-    pub(crate) fn insert_native_service_text(
-        &self,
-        origin: NativeServiceOrigin,
-        text: String,
-        window: &Window,
-        cx: &mut App,
-    ) -> bool {
-        if self.terminal_tab.id() != origin.tab_id()
-            || self.terminal_tab.focused_pane_id() != origin.pane_id()
-            || self.native_service_hierarchy_generation != origin.hierarchy_generation()
-        {
-            return false;
-        }
-        let Some(terminal) = self.terminal_tab.terminal(origin.pane_id()) else {
-            return false;
-        };
-        terminal.update(cx, |terminal, cx| {
-            terminal.insert_native_service_text(origin, text, window, cx)
-        })
+        self.terminal_tab.terminal(origin.pane_id()).cloned()
     }
 
     pub(crate) const fn tab_id(&self) -> TabId {
@@ -488,8 +417,7 @@ impl PaneHost {
                     .expect("prevalidated remote disconnect must remain legal")
             });
         }
-        self.remote_disconnected_generation = Some(generation);
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.remote_lifecycle.disconnect(generation);
         self.sync_terminal_focus(cx);
         Ok(())
     }
@@ -559,22 +487,29 @@ impl PaneHost {
             self.terminal_tab.pane_count(),
             || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
             |(pane_id, terminal, pane_restart)| {
-                let Some(current) = self.terminal_tab.terminal(*pane_id) else {
-                    return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
-                };
-                if current.entity_id() != terminal.entity_id() {
-                    return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
-                }
-                terminal
-                    .read(cx)
-                    .can_commit_remote_restart(pane_restart)
-                    .map_err(|source| RemotePaneHostLifecycleError::Pane {
-                        pane_id: *pane_id,
-                        source,
-                    })?;
-                Ok(())
+                self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
             },
         )
+    }
+
+    fn validate_restart_pane(
+        &self,
+        pane_id: PaneId,
+        terminal: &Entity<TerminalPane>,
+        pane_restart: &PreparedRemotePaneRestart,
+        cx: &App,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        let Some(current) = self.terminal_tab.terminal(pane_id) else {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(pane_id));
+        };
+        if current.entity_id() != terminal.entity_id() {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(pane_id));
+        }
+        terminal
+            .read(cx)
+            .can_commit_remote_restart(pane_restart)
+            .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+        Ok(())
     }
 
     /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
@@ -589,19 +524,18 @@ impl PaneHost {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        self.can_commit_remote_restart(&prepared, cx)?;
+        if self.terminal_tab.id() != prepared.tab_id {
+            return Err(RemotePaneHostLifecycleError::TabChanged {
+                prepared: prepared.tab_id,
+                current: self.terminal_tab.id(),
+            });
+        }
         prepared.panes.commit(
             self.terminal_tab.pane_count(),
             || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
             cx,
-            |(_, terminal, pane_restart), cx| {
-                terminal
-                    .read(cx)
-                    .can_commit_remote_restart(pane_restart)
-                    .map_err(|source| RemotePaneHostLifecycleError::Pane {
-                        pane_id: self.terminal_tab.focused_pane_id(),
-                        source,
-                    })
+            |(pane_id, terminal, pane_restart), cx| {
+                self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
             },
             |(pane_id, terminal, pane_restart), cx| {
                 terminal.update(cx, |terminal, cx| {
@@ -614,8 +548,7 @@ impl PaneHost {
             },
         )?;
         self.session_factory = session_factory;
-        self.remote_disconnected_generation = None;
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.remote_lifecycle.restarted();
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
             tab_id: self.terminal_tab.id(),
@@ -667,7 +600,7 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) const fn remote_disconnected_generation(&self) -> Option<u64> {
-        self.remote_disconnected_generation
+        self.remote_lifecycle.disconnected_generation()
     }
 
     #[cfg(test)]
@@ -762,7 +695,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_disconnected_generation.is_some() {
+        if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
@@ -800,17 +733,19 @@ impl PaneHost {
             }
         }
         if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
-            self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
-            let child_launch_generation = self.child_launch_generation;
+            let child_launch_generation = self.remote_lifecycle.begin_child_launch();
             let session_factory = self.session_factory.clone();
             cx.spawn_in(window, async move |host, cx| {
                 let revalidation = revalidation.await;
                 let _ = host.update_in(cx, |host, window, cx| {
-                    if host.remote_disconnected_generation.is_some() {
+                    if host.remote_lifecycle.disconnected_generation().is_some() {
                         cx.emit(RemoteChildLaunchUnavailable::Cancelled);
                         return;
                     }
-                    if host.child_launch_generation != child_launch_generation {
+                    if !host
+                        .remote_lifecycle
+                        .is_current_child_launch(child_launch_generation)
+                    {
                         cx.emit(RemoteChildLaunchUnavailable::Stale);
                         return;
                     }
@@ -875,10 +810,7 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         let session_factory = self.session_factory.clone();
-        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
-        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
-        let native_service_adapters = self.native_service_adapters.clone();
-        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
+        let pane_construction = self.pane_construction.clone();
         let result = self.terminal_tab.split_pane(
             target_pane_id,
             axis,
@@ -889,10 +821,7 @@ impl PaneHost {
                     new_pane_id,
                     session_factory,
                     prepared_launch,
-                    key_input_adapter_factory,
-                    accessibility_adapter_factory,
-                    native_service_adapters,
-                    lifecycle_dependencies,
+                    pane_construction,
                     window,
                     cx,
                 )
@@ -1969,7 +1898,7 @@ mod tests {
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
                 host.split_pane(before.1, SplitAxis::Horizontal, window, cx);
-                host.child_launch_generation = host.child_launch_generation.wrapping_add(1);
+                host.remote_lifecycle.begin_child_launch();
             });
         });
         cx.run_until_parked();
@@ -2435,7 +2364,16 @@ mod tests {
                 host.focus_pane(PaneId::new(2), cx);
                 host.focus_pane(PaneId::new(1), cx);
                 host.focus(window, cx);
-                host.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
+                host.native_service_target(origin).is_some_and(|terminal| {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.insert_native_service_text(
+                            origin,
+                            "stale return".to_owned(),
+                            window,
+                            cx,
+                        )
+                    })
+                })
             })
         });
 
@@ -2483,7 +2421,16 @@ mod tests {
         let accepted = cx.update(|window, cx| {
             host.update(cx, |host, cx| {
                 host.close_pane(PaneId::new(2), window, cx);
-                host.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
+                host.native_service_target(origin).is_some_and(|terminal| {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.insert_native_service_text(
+                            origin,
+                            "stale return".to_owned(),
+                            window,
+                            cx,
+                        )
+                    })
+                })
             })
         });
 

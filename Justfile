@@ -2,6 +2,7 @@ app_bundle := "dist/SpaceTerm.app"
 disk_image := "dist/SpaceTerm.dmg"
 packager_version := "0.11.8"
 minimum_xcode_major := "26"
+first_party := "--package spaceterm --package spaceterm-ui"
 
 # List project commands.
 default:
@@ -38,20 +39,20 @@ run:
 
 # Check every target and feature.
 check:
-    cargo check --workspace --all-targets --all-features --locked
+    cargo check {{ first_party }} --all-targets --all-features --locked
 
 # Check shared targets without native features.
 portable-check:
-    cargo check --workspace --all-targets --no-default-features --locked
+    cargo check {{ first_party }} --all-targets --no-default-features --locked
 
 # Format all Rust sources.
 fmt:
-    cargo fmt --all
+    cargo fmt {{ first_party }}
     rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs
 
 # Check workspace Rust formatting.
 portable-fmt-check:
-    cargo fmt --all -- --check
+    cargo fmt {{ first_party }} -- --check
 
 # Check isolated macOS Adapter formatting.
 macos-fmt-check:
@@ -62,35 +63,38 @@ fmt-check: portable-fmt-check macos-fmt-check
 
 # Run all tests with every feature.
 test:
-    cargo test --workspace --all-targets --all-features --locked
+    cargo test {{ first_party }} --all-targets --all-features --locked
 
 # Run shared tests without native features.
 portable-test:
-    cargo test --workspace --all-targets --no-default-features --locked
+    cargo test {{ first_party }} --all-targets --no-default-features --locked
 
 # Run tests matching a filter.
 test-one filter:
-    cargo test --workspace --all-targets --all-features --locked "{{ filter }}"
+    cargo test {{ first_party }} --all-targets --all-features --locked "{{ filter }}"
+
+# Test SpaceTerm's terminal-library patches with the application's feature set.
+vendor-patch-tests:
+    cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked
 
 # Run terminal protocol conformance tests.
 conformance:
-    cargo test --all-targets --no-default-features --locked "terminal::conformance"
+    cargo test --package spaceterm --all-targets --no-default-features --locked "terminal::conformance"
 
 # Run native macOS Adapter tests.
 macos-adapter-tests:
-    cargo test --all-targets --features macos-native-tests --locked "macos"
+    cargo test --package spaceterm --all-targets --features macos-native-tests --locked "macos"
 
 # Lint every target and feature.
 clippy:
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo clippy {{ first_party }} --all-targets --all-features --locked --no-deps -- -D warnings
 
 # Lint shared targets without native features.
 portable-clippy:
-    cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
+    cargo clippy {{ first_party }} --all-targets --no-default-features --locked --no-deps -- -D warnings
 
 # Lint with native features.
-macos-clippy:
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+alias macos-clippy := clippy
 
 # Check macOS scripts and package metadata.
 scripts-check:
@@ -108,10 +112,14 @@ diff-check:
 portable-validate: portable-fmt-check portable-check portable-test portable-clippy diff-check
 
 # Run macOS-specific checks.
-macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check
+macos-validate: macos-fmt-check macos-adapter-tests clippy scripts-check
 
 # Run the full pre-push or handoff gate.
-validate: portable-validate macos-validate
+validate: portable-validate macos-validate vendor-patch-tests
+
+# Display Kitty graphics checks inside a running SpaceTerm Pane.
+kitty-graphics-smoke:
+    ./scripts/kitty-graphics-smoke.sh
 
 # Build the optimized executable.
 release:

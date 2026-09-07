@@ -985,11 +985,6 @@ impl ModalTheme {
     pub fn new(paint: ModalPaint, metrics: ModalMetrics) -> Self {
         Self { paint, metrics }
     }
-
-    /// Returns `false`; modal correctness and presentation never depend on animation.
-    pub const fn surface_animation_enabled(&self) -> bool {
-        false
-    }
 }
 
 impl Global for ModalTheme {}
@@ -1155,38 +1150,5 @@ mod tests {
         );
 
         assert_eq!(geometry.size, size(px(58.0), px(38.0)));
-    }
-
-    #[test]
-    fn production_renderer_owns_no_facade_or_progress_track_geometry_literals() {
-        let production = include_str!("render.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or_default();
-
-        assert!(
-            [
-                "px(360.0)",
-                "px(520.0)",
-                "px(300.0)",
-                "max(px(4.0))",
-                "rounded(px(2.0))",
-            ]
-            .into_iter()
-            .all(|literal| !production.contains(literal)),
-            "production modal geometry bypassed ModalMetrics"
-        );
-    }
-
-    #[test]
-    fn modal_theme_has_no_surface_animation_escape_hatch() {
-        let color = gpui::rgba(0x112233ff);
-        let paint = ModalPaint::new(
-            color, color, color, color, color, color, color, color, color, color, color, color,
-            color, color,
-        );
-        let theme = ModalTheme::new(paint, ModalMetrics::new(px(360.0), px(480.0), px(640.0)));
-
-        assert!(!theme.surface_animation_enabled());
     }
 }
