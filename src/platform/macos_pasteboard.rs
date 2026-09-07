@@ -2,14 +2,14 @@ use cocoa::appkit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
 use cocoa::base::{YES, nil};
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString};
 use objc::{msg_send, sel, sel_impl};
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 use std::ffi::CStr;
 use std::path::PathBuf;
 
 use crate::terminal::Osc52Target;
 use crate::terminal::osc52::{Osc52Clipboard, Osc52ClipboardError};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard,
@@ -195,7 +195,7 @@ impl Osc52Clipboard for MacosOsc52Clipboard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
 

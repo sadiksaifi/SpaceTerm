@@ -2401,6 +2401,7 @@ fn ghostty_color(color: Color) -> RgbColor {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "macos-native-tests")]
     use std::fs;
 
     use super::*;
@@ -5598,6 +5599,7 @@ mod tests {
                 .is_empty()
         );
     }
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/emulator.rs");
     }

@@ -35,7 +35,7 @@ impl crate::observation::ContinuousClock for ContinuousClock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     #[test]

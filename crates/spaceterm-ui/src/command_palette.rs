@@ -36,22 +36,35 @@ actions!(
     ]
 );
 
+/// A platform-selected complete Command Palette keybinding set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandPaletteKeybindingProfile {
+    /// The shipped macOS navigation, confirmation, dismissal, and focus bindings.
+    MacOs,
+}
+
+/// Installs the platform-specific key equivalents for `profile`.
+pub fn install_command_palette_keybindings(cx: &mut App, profile: CommandPaletteKeybindingProfile) {
+    match profile {
+        CommandPaletteKeybindingProfile::MacOs => cx.bind_keys([
+            KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-enter", Confirm, Some(KEY_CONTEXT)),
+            KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
+        ]),
+    }
+}
+
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-enter", Confirm, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
-        KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
-    ]);
     if !cx.has_global::<CommandPaletteCoordinator>() {
         cx.set_global(CommandPaletteCoordinator::default());
     }
@@ -605,9 +618,9 @@ pub enum CommandPaletteActivationPolicy {
 /// It is primary by placement and by owning the confirm key, not by weight: the palette renders it
 /// as low-emphasis text so the result list stays the loudest thing on the surface.
 ///
-/// The caller owns the label, the enabled state, and the identity of the operation; the palette
-/// owns the control's size, paint, placement, and shortcut presentation. Activating it, by pointer
-/// or by the palette's confirm key, emits [`CommandPaletteEvent::Confirmed`].
+/// The caller owns the label, displayed shortcut, enabled state, and operation identity; the
+/// palette owns the control's size, paint, placement, and shortcut rendering. Activating it, by
+/// pointer or by the palette's confirm key, emits [`CommandPaletteEvent::Confirmed`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandPaletteConfirm {
     label: SharedString,
@@ -617,11 +630,11 @@ pub struct CommandPaletteConfirm {
 }
 
 impl CommandPaletteConfirm {
-    /// Creates an enabled confirm control labelled for the operation it performs.
-    pub fn new(label: impl Into<SharedString>) -> Self {
+    /// Creates an enabled confirm control with caller-selected label and shortcut presentation.
+    pub fn new(label: impl Into<SharedString>, shortcut: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
-            shortcut: "\u{2318}\u{21a9}".into(),
+            shortcut: shortcut.into(),
             disabled: false,
             debug_selector: None,
         }
@@ -3698,6 +3711,9 @@ mod tests {
         install_control_themes(cx);
         cx.update(crate::text_input::init);
         cx.update(super::init);
+        cx.update(|cx| {
+            install_command_palette_keybindings(cx, CommandPaletteKeybindingProfile::MacOs)
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         let underlay = Rc::new(RefCell::new(0));
         let root_events = events.clone();
@@ -3801,6 +3817,9 @@ mod tests {
         install_control_themes(cx);
         cx.update(crate::text_input::init);
         cx.update(super::init);
+        cx.update(|cx| {
+            install_command_palette_keybindings(cx, CommandPaletteKeybindingProfile::MacOs)
+        });
         let offscreen_clones = Rc::new(Cell::new(0));
         let tracked_clones = Rc::clone(&offscreen_clones);
         let (root, cx) = cx.add_window_view(move |window, cx| {
@@ -4067,7 +4086,10 @@ mod tests {
                 cx,
             );
             palette.set_confirm(
-                Some(CommandPaletteConfirm::new("Add").debug_selector("footer-confirm")),
+                Some(
+                    CommandPaletteConfirm::new("Add", "Primary+Enter")
+                        .debug_selector("footer-confirm"),
+                ),
                 cx,
             );
         });
@@ -4114,7 +4136,10 @@ mod tests {
                 cx,
             );
             palette.set_confirm(
-                Some(CommandPaletteConfirm::new("Add").debug_selector("footer-confirm")),
+                Some(
+                    CommandPaletteConfirm::new("Add", "Primary+Enter")
+                        .debug_selector("footer-confirm"),
+                ),
                 cx,
             );
         });
@@ -4214,7 +4239,10 @@ mod tests {
 
         palette.update(cx, |palette, cx| {
             palette.set_confirm(
-                Some(CommandPaletteConfirm::new("Add").debug_selector("palette-confirm")),
+                Some(
+                    CommandPaletteConfirm::new("Add", "Primary+Enter")
+                        .debug_selector("palette-confirm"),
+                ),
                 cx,
             );
         });
@@ -4251,7 +4279,10 @@ mod tests {
         open_palette(&root, &palette, cx);
 
         palette.update(cx, |palette, cx| {
-            palette.set_confirm(Some(CommandPaletteConfirm::new("Add").disabled(true)), cx);
+            palette.set_confirm(
+                Some(CommandPaletteConfirm::new("Add", "Primary+Enter").disabled(true)),
+                cx,
+            );
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-enter");
@@ -4711,7 +4742,7 @@ mod tests {
     fn shift_tab_from_query_should_reach_a_confirm_only_footer(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         palette.update(cx, |palette, cx| {
-            palette.set_confirm(Some(CommandPaletteConfirm::new("Add")), cx);
+            palette.set_confirm(Some(CommandPaletteConfirm::new("Add", "Primary+Enter")), cx);
         });
         open_palette(&root, &palette, cx);
 
@@ -5301,6 +5332,9 @@ mod tests {
         cx.update(crate::text_input::init);
         cx.update(crate::menu::init);
         cx.update(super::init);
+        cx.update(|cx| {
+            install_command_palette_keybindings(cx, CommandPaletteKeybindingProfile::MacOs)
+        });
         cx.update(crate::tooltip::init);
         cx.update(crate::modal::init);
         cx.update(|cx| {

@@ -26,9 +26,9 @@ pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteGeneration, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching,
-    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
-    CommandPaletteReplacementFocus, CommandPaletteTheme,
+    CommandPaletteItem, CommandPaletteKeybindingProfile, CommandPaletteLifecycleEvent,
+    CommandPaletteMatching, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
+    CommandPaletteReplacementFocus, CommandPaletteTheme, install_command_palette_keybindings,
 };
 pub use icon::{Icon, IconName};
 pub use menu::{
@@ -51,7 +51,8 @@ pub use modal::{
     ModalUpdateError, ModalValidationError, ProgressCancelDecision, ProgressCancellation,
     ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
     ProgressDialogUpdate, ProgressState, ProgressValueError, TextDirection,
-    install_modal_keybindings, install_modal_policy, install_modal_theme, window_modal_is_open,
+    install_modal_keybindings, install_modal_policy, install_modal_theme,
+    install_portable_modal_keybindings, window_modal_is_open,
 };
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarTheme,
@@ -122,10 +123,12 @@ impl ControlThemeCatalog {
     }
 }
 
-/// Installs the complete shared control catalog and platform-neutral control behavior.
+/// Installs the shared control catalog and initializes control-owned state.
 ///
-/// Applications install desktop policy, modal key equivalents, and text-input keybindings
-/// explicitly with [`install_modal_policy`], [`install_modal_keybindings`], and
+/// Applications install desktop policy, portable modal behavior, modal key equivalents,
+/// Command Palette key equivalents, and text-input keybindings explicitly with
+/// [`install_modal_policy`], [`install_portable_modal_keybindings`],
+/// [`install_modal_keybindings`], [`install_command_palette_keybindings`], and
 /// [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     icon::register_font(cx)?;
@@ -142,6 +145,6 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     menu::init(cx);
     command_palette::init(cx);
     tooltip::init(cx);
-    modal::init(cx);
+    modal::init_core(cx);
     Ok(())
 }

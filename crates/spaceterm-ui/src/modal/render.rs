@@ -51,9 +51,9 @@ pub enum ModalKeybindingProfile {
 
 /// Installs the platform-specific key equivalents for `profile`.
 ///
-/// Generic control initialization already installs portable Tab, Shift-Tab, Return, and Escape
-/// behavior. Applications call this separately to opt into desktop-specific equivalents without
-/// requiring host-platform detection in the reusable library.
+/// Applications explicitly install portable Tab, Shift-Tab, Return, and Escape behavior before
+/// calling this function to opt into desktop-specific equivalents. Neither installation requires
+/// host-platform detection in the reusable library.
 pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) {
     match profile {
         ModalKeybindingProfile::MacOs => cx.bind_keys([KeyBinding::new(
@@ -64,13 +64,19 @@ pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) 
     }
 }
 
-pub(super) fn init(cx: &mut App) {
+/// Installs platform-neutral modal traversal, activation, and cancellation bindings.
+pub fn install_portable_modal_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", TraverseForward, Some(MODAL_KEY_CONTEXT)),
         KeyBinding::new("shift-tab", TraverseBackward, Some(MODAL_KEY_CONTEXT)),
         KeyBinding::new("enter", ActivateDefault, Some(MODAL_KEY_CONTEXT)),
         KeyBinding::new("escape", ActivateCancel, Some(MODAL_KEY_CONTEXT)),
     ]);
+}
+
+#[cfg(test)]
+pub(super) fn init(cx: &mut App) {
+    install_portable_modal_keybindings(cx);
 }
 
 /// Final Operating-System Window layer for shared window-modal controls.
@@ -1668,22 +1674,36 @@ mod tests {
     };
 
     #[gpui::test]
-    fn generic_modal_initialization_does_not_install_command_period(cx: &mut TestAppContext) {
-        cx.update(super::init);
-        let command_period = Keystroke::parse("cmd-.").expect("test key should parse");
+    fn portable_modal_keybindings_install_without_a_platform_profile(cx: &mut TestAppContext) {
+        cx.update(install_portable_modal_keybindings);
 
+        for (key, action) in [
+            ("tab", TraverseForward.name()),
+            ("shift-tab", TraverseBackward.name()),
+            ("enter", ActivateDefault.name()),
+            ("escape", ActivateCancel.name()),
+        ] {
+            let keystroke = Keystroke::parse(key).expect("test key should parse");
+            let installed = cx.update(|cx| {
+                cx.all_bindings_for_input(&[keystroke])
+                    .iter()
+                    .any(|binding| binding.action().name() == action)
+            });
+            assert!(installed, "missing portable {key} binding for {action}");
+        }
+
+        let command_period = Keystroke::parse("cmd-.").expect("test key should parse");
         let has_platform_cancel = cx.update(|cx| {
             cx.all_bindings_for_input(&[command_period])
                 .iter()
                 .any(|binding| binding.action().name() == ActivatePlatformCancel.name())
         });
-
         assert!(!has_platform_cancel);
     }
 
     #[gpui::test]
     fn alternate_modal_policy_does_not_install_command_period(cx: &mut TestAppContext) {
-        cx.update(super::init);
+        cx.update(install_portable_modal_keybindings);
         cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::win_ui_for_tests()));
         let command_period = Keystroke::parse("cmd-.").expect("test key should parse");
 

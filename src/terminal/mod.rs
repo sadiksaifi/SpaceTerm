@@ -55,7 +55,7 @@ pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 pub(crate) use key_input::assert_common_adapter_contract;
 pub(crate) use key_input::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, KeyTranslation,

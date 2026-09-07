@@ -343,12 +343,12 @@ impl<P> SpawnedSshProcess<P> {
         Self { process, pipes }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "macos-native-tests"))]
     pub(crate) fn process_mut(&mut self) -> &mut P {
         &mut self.process
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "macos-native-tests"))]
     pub(crate) fn into_process(self) -> P {
         self.process
     }

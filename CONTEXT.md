@@ -125,9 +125,12 @@ and Secure Event Input coordinators are constructed once for the GPUI applicatio
 every Operating-System Window. Window movement state is constructed separately for each window;
 Workspace, Tab, Pane, split, replacement, Local, and Remote creation retain their injected
 capabilities. WorkspaceManager receives directory selection and optional permission recovery and
-never constructs a native desktop default. Shared UI test setup constructs its Desktop Profile
-from explicit policy and locale facts without calling macOS composition. Application shortcuts
-are portable policy data shared with the production-selected profile.
+never constructs a native desktop default. The selected Desktop Profile also owns displayed Action
+shortcuts and host-specific wording. Shared UI requests those values by semantic Action and never
+embeds modifier glyphs, native product names, or host-local phrases. Shared UI test setup constructs
+its Desktop Profile from explicit policy, presentation, and locale facts without calling macOS
+composition. Application shortcuts are portable policy data shared with the production-selected
+profile.
 
 GPUI initializes the native application before the injected Locale Direction capability samples
 its application locale. The runtime then installs the selected desktop profile, registers Services,
@@ -158,12 +161,14 @@ against pinned GPUI 0.2.2 is:
 | Remote Project SSH and AskPass | Rust owns host-fact validation, OpenSSH policy, process supervision, paths, managed hosts, protocol framing, prompt authority, cancellation, zeroization, and cleanup ordering; GPUI presents Authentication Prompts | Composition supplies the executable, runtime fallback, socket constraint, and independent process, secure-filesystem, local-IPC, and peer mechanics described in the completed SSH audit below. |
 
 One explicit macOS Keybinding Profile selects the application mappings and existing reusable
-Text Input and Modal profiles. Semantic Actions remain independent of their shortcuts. Show New
+Text Input, Modal, and Command Palette profiles. Semantic Actions remain independent of their
+shortcuts. Show New
 Workspace Panel uses `cmd-n`; Create Scratch Workspace uses `cmd-shift-n`; Open Local Project uses
 `cmd-o`. The other 141 installed binding/action/context pairs are unchanged and guarded by the
 original 144-binding GPUI baseline. Native menus dispatch the same Actions and obtain their key
-equivalents from that installed profile; the sidebar's displayed New Workspace shortcut agrees.
-This is not user-configurable and defines no other Operating System's keymap.
+equivalents from that installed profile. The same Desktop Profile supplies the shipped modifier
+glyphs and Finder, Quick Look, and local-Mac wording used by shared UI surfaces. This is not
+user-configurable and defines no other Operating System's keymap.
 
 This application remains macOS-only with its existing compile guard and packaging. No Linux or
 Windows Adapter, placeholder implementation, CI job, packaging, or compilation claim is added.
@@ -275,9 +280,9 @@ is never repainted as a second focus stroke, and the ring radius expands with it
 concentric corners. This transient focus indication is distinct from a persistent outlined Button
 style. The global Outline variant remains available to non-modal controls.
 Indeterminate progress uses a static repeated-segment treatment rather than a determinate fill or
-motion-only cue. Generic
-Modal initialization installs only portable traversal, Return, and Escape behavior; the explicit
-macOS profile adds Command-Period. The library performs no platform detection and accepts no
+motion-only cue. Application composition installs portable Modal traversal, Return, and Escape
+behavior independently from the explicit macOS profile, which adds only Command-Period. The
+library performs no platform detection and accepts no
 call-site paint or layout escape hatch. The macOS policy owns installed locale direction,
 validation, logical leading/trailing placement, right-to-left mirroring, action axis, focus entry,
 default-action presentation, and the private programmatic-only deadline maximum. One shared action
@@ -660,13 +665,18 @@ and animated or host-file Kitty media remain outside the corpus. The fixture mat
 catalog, audit revision, and maintenance rules are canonical in `docs/CONFORMANCE.md`. `just test`
 and therefore `just validate` run the corpus; `just conformance` provides the focused loop.
 
-The separate macOS Adapter integration suites under `src/platform/macos_adapter_tests` and the
+`just portable-validate` runs formatting, compilation, shared tests, the Conformance Corpus,
+structural architecture tests, Clippy, and diff checks without enabling native Adapter suites or
+requiring Xcode, AppKit tooling, packaging, mounted acceptance evidence, or native performance
+evidence. The separate macOS Adapter integration suites under `src/platform/macos_adapter_tests` and the
 existing `src/platform/macos_*` capability modules preserve native PTY initialization and shutdown,
 key-event enrichment, real SSH and shell process lifecycle, local socket behavior, secure filesystem
 identity and permissions, and shipped-resource evidence. Native suites may use shared portable
 recorders, but shared test facilities never select native Adapters. Tests needing private owner
-state mount those isolated files within their owner's test scope. `just macos-adapter-tests` runs
-this native evidence; `just validate` includes both layers. Structural regression tests inspect
+state mount those isolated files within their owner's test scope. Their modules and evidence mounts
+require both the macOS target and the explicit `macos-native-tests` feature. `just
+macos-adapter-tests` runs this native evidence, `just macos-validate` owns the full native lane, and
+`just validate` aggregates the portable and native lanes. Structural regression tests inspect
 shared test bodies and helpers, not just production code, to prevent native dependencies returning.
 Fixture identities prove policy and bounds only; they never claim retained native object identity.
 This verification split adds no Operating-System Adapter, target, packaging, or compilation claim.

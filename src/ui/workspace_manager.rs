@@ -3656,6 +3656,7 @@ impl WorkspaceManager {
         &self,
         row: WorkspaceRowViewModel,
         manager: WeakEntity<Self>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
     ) -> AnyElement {
         let WorkspaceRowViewModel {
             workspace_id,
@@ -3936,7 +3937,7 @@ impl WorkspaceManager {
                     ("workspace-menu-controls", workspace_id.get()),
                     accessibility_name,
                     row,
-                    workspace_menu_entries(remote_connection_phase),
+                    workspace_menu_entries(remote_connection_phase, presentation),
                 )
                 .size(MenuSize::Small)
                 .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
@@ -3963,6 +3964,8 @@ impl WorkspaceManager {
     }
 
     fn render_sidebar(&self, manager: WeakEntity<Self>, cx: &App) -> AnyElement {
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let shortcuts = workspace_surface_presentation(presentation);
         let scroll_manager = manager.clone();
         let mut rows = div()
             .id("workspace-list")
@@ -4014,6 +4017,7 @@ impl WorkspaceManager {
                         active: workspace.id() == active_workspace_id,
                     },
                     manager.clone(),
+                    presentation,
                 ),
             );
         }
@@ -4021,6 +4025,7 @@ impl WorkspaceManager {
         let scrollbar = self.scrollbar.clone();
         let panel_manager = manager.clone();
         let search_manager = manager.clone();
+        let new_workspace_shortcut = shortcuts.new_workspace_button;
         let header = div()
             .id("workspace-sidebar-header")
             .debug_selector(|| "workspace-sidebar-header".to_owned())
@@ -4059,7 +4064,7 @@ impl WorkspaceManager {
                 .debug_selector("search-workspaces-button")
                 .tooltip(
                     Tooltip::new("search-workspaces-tooltip", "Search Workspaces")
-                        .keyboard_equivalent("⌘P")
+                        .keyboard_equivalent(shortcuts.search_tooltip)
                         .debug_selector("search-workspaces-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
@@ -4101,11 +4106,11 @@ impl WorkspaceManager {
                             .leading(|foreground| {
                                 Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
                             })
-                            .trailing(|_| {
+                            .trailing(move |_| {
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(gpui_color(ACTIVE_THEME.icon))
-                                    .child("⌘N")
+                                    .child(new_workspace_shortcut)
                                     .into_any_element()
                             })
                             .on_activate(move |_, window, cx| {
@@ -4299,10 +4304,12 @@ impl Render for WorkspaceManager {
 
 fn workspace_menu_entries(
     remote_connection_phase: Option<RemoteConnectionPhase>,
+    presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<WorkspaceMenuCommand>> {
+    let shortcuts = workspace_surface_presentation(presentation);
     let mut entries = vec![
         MenuEntry::action("New Tab", WorkspaceMenuCommand::NewTab)
-            .shortcut("⌘T")
+            .shortcut(shortcuts.new_tab_menu)
             .icon(|foreground| {
                 Icon::new(IconName::SquarePlus, px(14.0), foreground).into_any_element()
             })
@@ -4332,6 +4339,23 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-close"),
     ]);
     entries
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspaceSurfacePresentation {
+    search_tooltip: &'static str,
+    new_workspace_button: &'static str,
+    new_tab_menu: &'static str,
+}
+
+fn workspace_surface_presentation(
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> WorkspaceSurfacePresentation {
+    WorkspaceSurfacePresentation {
+        search_tooltip: presentation.shortcut(&SearchWorkspaces),
+        new_workspace_button: presentation.shortcut(&ShowNewWorkspacePanel),
+        new_tab_menu: presentation.shortcut(&CreateTab),
+    }
 }
 
 fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
@@ -4568,6 +4592,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn workspace_surfaces_should_use_host_neutral_profile_shortcuts() {
+        assert_eq!(
+            workspace_surface_presentation(&crate::desktop_profile::testing_presentation()),
+            WorkspaceSurfacePresentation {
+                search_tooltip: "Primary+P",
+                new_workspace_button: "Primary+N",
+                new_tab_menu: "Primary+T",
+            }
+        );
+    }
 
     type RemoteCompletionFixture = (
         RemoteWorkspaceFlowCompletion,
@@ -10437,6 +10473,7 @@ mod tests {
         });
         assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
     }
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/workspace_manager.rs");
     }

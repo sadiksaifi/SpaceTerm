@@ -4027,7 +4027,7 @@ impl Render for TerminalPane {
         let context_menu_available = self.context_menu_available();
         let context_menu_entries = terminal_context_menu_entries(
             context_menu_actions,
-            crate::desktop_profile::FileInteractionLabels::get(cx),
+            crate::desktop_profile::DesktopPresentation::get(cx),
         );
         let context_open_pane = pane.clone();
         let context_activation_pane = pane.clone();
@@ -10408,6 +10408,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.did_prompt_for_new_path());
     }
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/terminal_pane.rs");
     }

@@ -772,7 +772,9 @@ impl WorkspacePicker {
     fn actions_menu(&self, cx: &App) -> Vec<MenuEntry<SharedString>> {
         let mut entries = vec![
             MenuEntry::action(
-                crate::desktop_profile::FileInteractionLabels::get(cx).directory_selection,
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .directory_selection,
                 DIRECTORY_SELECTION_ACTION.into(),
             )
             .disabled(self.busy.is_some())
@@ -796,9 +798,13 @@ impl WorkspacePicker {
     }
 
     fn sync_palette(&self, cx: &mut Context<Self>) {
-        let confirm = CommandPaletteConfirm::new(self.confirmation_label())
-            .disabled(!self.can_confirm())
-            .debug_selector("workspace-picker-confirm");
+        let confirm = CommandPaletteConfirm::new(
+            self.confirmation_label(),
+            cx.global::<crate::desktop_profile::DesktopPresentation>()
+                .command_palette_confirm_shortcut(),
+        )
+        .disabled(!self.can_confirm())
+        .debug_selector("workspace-picker-confirm");
         let empty_text = self.empty_text();
         let actions = self.actions_menu(cx);
         let loading = self.busy.is_some();

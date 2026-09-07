@@ -116,7 +116,7 @@ fn from_native(minimized: bool, occlusion_state: u64, live_resize: bool) -> Wind
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
 

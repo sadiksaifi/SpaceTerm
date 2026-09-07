@@ -17,14 +17,39 @@ pub(crate) enum CloseTarget {
     Tab,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PaneActionMenuPresentation {
+    split_right: &'static str,
+    split_down: &'static str,
+    toggle_zoom: &'static str,
+    close: &'static str,
+}
+
+fn pane_action_menu_presentation(
+    close_target: CloseTarget,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> PaneActionMenuPresentation {
+    PaneActionMenuPresentation {
+        split_right: presentation.shortcut(&crate::ui::SplitRight),
+        split_down: presentation.shortcut(&crate::ui::SplitDown),
+        toggle_zoom: presentation.shortcut(&crate::ui::TogglePaneZoom),
+        close: match close_target {
+            CloseTarget::Pane => presentation.shortcut(&crate::ui::ClosePane),
+            CloseTarget::Tab => presentation.shortcut(&crate::ui::CloseTab),
+        },
+    }
+}
+
 pub(crate) fn pane_action_menu_entries(
     debug_prefix: &'static str,
     zoomed: bool,
     zoom_enabled: bool,
     close_target: CloseTarget,
+    presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<PaneActionMenuCommand>> {
     let (zoom_icon, zoom_label) = zoom_presentation(zoomed);
-    let (close_label, close_shortcut, close_selector) = close_presentation(close_target);
+    let (close_label, close_selector) = close_presentation(close_target);
+    let shortcuts = pane_action_menu_presentation(close_target, presentation);
 
     vec![
         MenuEntry::action("Split Right", PaneActionMenuCommand::SplitRight)
@@ -32,18 +57,18 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::SplitRight,
                 zoomed,
             )))
-            .shortcut("⌘D")
+            .shortcut(shortcuts.split_right)
             .debug_selector(format!("{debug_prefix}-row-split-right")),
         MenuEntry::action("Split Down", PaneActionMenuCommand::SplitDown)
             .icon(menu_icon(pane_action_icon(
                 PaneActionMenuCommand::SplitDown,
                 zoomed,
             )))
-            .shortcut("⇧⌘D")
+            .shortcut(shortcuts.split_down)
             .debug_selector(format!("{debug_prefix}-row-split-down")),
         MenuEntry::action(zoom_label, PaneActionMenuCommand::ToggleZoom)
             .icon(menu_icon(zoom_icon))
-            .shortcut("⇧⌘↩")
+            .shortcut(shortcuts.toggle_zoom)
             .disabled(!zoom_enabled)
             .debug_selector(format!("{debug_prefix}-row-toggle-zoom")),
         MenuEntry::separator(),
@@ -52,7 +77,7 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::Close,
                 zoomed,
             )))
-            .shortcut(close_shortcut)
+            .shortcut(shortcuts.close)
             .destructive(true)
             .debug_selector(format!("{debug_prefix}-row-{close_selector}")),
     ]
@@ -76,10 +101,10 @@ fn zoom_presentation(zoomed: bool) -> (IconName, &'static str) {
     )
 }
 
-fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str, &'static str) {
+fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str) {
     match close_target {
-        CloseTarget::Pane => ("Close Pane", "⌘W", "close-pane"),
-        CloseTarget::Tab => ("Close Tab", "⇧⌘W", "close-tab"),
+        CloseTarget::Pane => ("Close Pane", "close-pane"),
+        CloseTarget::Tab => ("Close Tab", "close-tab"),
     }
 }
 
@@ -111,6 +136,7 @@ mod tests {
                         self.zoomed,
                         self.zoom_enabled,
                         self.close_target,
+                        &crate::desktop_profile::testing_presentation(),
                     ),
                 )
                 .size(MenuSize::Wide)
@@ -170,11 +196,29 @@ mod tests {
     fn close_entry_should_use_target_specific_label_and_shortcut() {
         assert_eq!(
             close_presentation(CloseTarget::Pane),
-            ("Close Pane", "⌘W", "close-pane")
+            ("Close Pane", "close-pane")
         );
         assert_eq!(
             close_presentation(CloseTarget::Tab),
-            ("Close Tab", "⇧⌘W", "close-tab")
+            ("Close Tab", "close-tab")
+        );
+    }
+
+    #[test]
+    fn menu_surfaces_should_use_host_neutral_profile_shortcuts() {
+        let profile = crate::desktop_profile::testing_presentation();
+        assert_eq!(
+            pane_action_menu_presentation(CloseTarget::Pane, &profile),
+            PaneActionMenuPresentation {
+                split_right: "Primary+D",
+                split_down: "Primary+Shift+D",
+                toggle_zoom: "Primary+Shift+Enter",
+                close: "Primary+W",
+            }
+        );
+        assert_eq!(
+            pane_action_menu_presentation(CloseTarget::Tab, &profile).close,
+            "Primary+Shift+W"
         );
     }
 

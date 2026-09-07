@@ -92,7 +92,7 @@ impl PackagedExecutable for PackageIdentity {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     #[test]

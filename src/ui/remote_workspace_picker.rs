@@ -1144,9 +1144,13 @@ impl RemoteWorkspacePicker {
 
     fn sync_palette(&self, cx: &mut Context<Self>) {
         let loading = self.busy.is_some();
-        let confirm = CommandPaletteConfirm::new(self.confirmation_label())
-            .disabled(!self.can_confirm())
-            .debug_selector("remote-workspace-picker-confirm");
+        let confirm = CommandPaletteConfirm::new(
+            self.confirmation_label(),
+            cx.global::<crate::desktop_profile::DesktopPresentation>()
+                .command_palette_confirm_shortcut(),
+        )
+        .disabled(!self.can_confirm())
+        .debug_selector("remote-workspace-picker-confirm");
         self.palette.update(cx, |palette, cx| {
             palette.set_confirm(Some(confirm), cx);
             palette.set_no_results_text(self.empty_text(), cx);

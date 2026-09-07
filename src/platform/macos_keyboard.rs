@@ -522,7 +522,7 @@ fn physical_key(native_key_code: u16) -> PhysicalKey {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
 

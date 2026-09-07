@@ -1357,7 +1357,13 @@ impl TabManager {
                 .h(px(TAB_BAR_HEIGHT))
                 .flex_none()
                 .child(item),
-            pane_action_menu_entries("tab-menu", zoomed, zoom_enabled, CloseTarget::Tab),
+            pane_action_menu_entries(
+                "tab-menu",
+                zoomed,
+                zoom_enabled,
+                CloseTarget::Tab,
+                crate::desktop_profile::DesktopPresentation::get(cx),
+            ),
         )
         .size(MenuSize::Wide)
         .placement(
@@ -1452,7 +1458,9 @@ impl TabManager {
                 .debug_selector("create-tab-button")
                 .tooltip(
                     Tooltip::new("create-tab-tooltip", "Create Tab")
-                        .keyboard_equivalent("⌘T")
+                        .keyboard_equivalent(create_tab_shortcut(
+                            crate::desktop_profile::DesktopPresentation::get(cx),
+                        ))
                         .debug_selector("create-tab-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
@@ -1475,6 +1483,7 @@ impl TabManager {
                                 zoomed,
                                 zoom_enabled,
                                 CloseTarget::Tab,
+                                crate::desktop_profile::DesktopPresentation::get(cx),
                             ),
                         )
                         .icon_trigger(menu_icon(IconName::Ellipsis))
@@ -1607,6 +1616,10 @@ fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
+fn create_tab_shortcut(presentation: &crate::desktop_profile::DesktopPresentation) -> &'static str {
+    presentation.shortcut(&crate::ui::CreateTab)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -1621,6 +1634,14 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn create_tab_tooltip_should_use_the_host_neutral_profile_shortcut() {
+        assert_eq!(
+            create_tab_shortcut(&crate::desktop_profile::testing_presentation()),
+            "Primary+T"
+        );
+    }
     use crate::domain::PaneId;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};

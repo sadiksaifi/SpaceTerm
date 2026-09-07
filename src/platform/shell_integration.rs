@@ -401,6 +401,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 #[path = "macos_adapter_tests/shell_integration.rs"]
 mod macos_adapter_tests;

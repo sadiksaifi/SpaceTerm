@@ -79,5 +79,11 @@ Settings → Privacy & Security** before its first launch.
 ## Validate
 
 ```sh
+just portable-validate
+just macos-validate
 just validate
 ```
+
+The portable lane verifies shared policy without native tooling or evidence. The macOS lane verifies
+native Adapter suites, native linting, scripts, and performance tooling. The aggregate command runs
+both.

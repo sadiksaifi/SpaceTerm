@@ -83,7 +83,7 @@ impl ObservationTransport for Transport {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     use std::{
