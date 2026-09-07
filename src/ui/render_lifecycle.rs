@@ -130,12 +130,9 @@ impl RenderLifecycle {
         self.visibility.presentable() && !self.released
     }
 
+    #[cfg(test)]
     pub(crate) fn is_presented(&self, generation: PresentationGeneration) -> bool {
         !self.released && self.presented == Some(generation)
-    }
-
-    pub(crate) const fn presented_generation(&self) -> Option<PresentationGeneration> {
-        self.presented
     }
 
     pub(crate) fn update_scale(&mut self, scale: f32) -> ScaleChange {

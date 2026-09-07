@@ -1,17 +1,17 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    AcceptanceSessionFailure, FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy,
-    Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
-    SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
-    TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, Osc52AuthorizationDecision,
+    Osc52AuthorizationId, PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution,
+    PointerInput, PresentationGeneration, SelectionCopy, SelectionCopyError, SessionError,
+    SessionEvent, StartedTerminalSession, TerminalAccessibilityModel, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
@@ -144,7 +144,6 @@ pub(crate) enum RecordedSessionCommand {
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
-    InjectAcceptanceFailure(AcceptanceSessionFailure),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,7 +155,6 @@ pub(crate) struct RecordedSessionCall {
 #[derive(Clone, Default)]
 pub(crate) struct TestTerminalSessionRecords {
     starts: Rc<RefCell<Vec<RecordedSessionStart>>>,
-    selection_copies: Rc<RefCell<VecDeque<Option<SelectionCopy>>>>,
     selection_receivers:
         Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
@@ -167,9 +165,6 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
-    pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
-        self.selection_copies.borrow_mut().push_back(copy);
-    }
     pub(crate) fn accessibility_selection_requests(
         &self,
         session_id: usize,
@@ -479,11 +474,7 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopy);
-        self.records
-            .selection_copies
-            .borrow_mut()
-            .pop_front()
-            .map_or_else(|| self.selection_response.clone(), Ok)
+        self.selection_response.clone()
     }
 
     fn copy_selection_at(
@@ -492,10 +483,6 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopyAt(generation));
         self.selection_response.clone()
-    }
-
-    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
-        self.record(RecordedSessionCommand::InjectAcceptanceFailure(failure));
     }
 }
 

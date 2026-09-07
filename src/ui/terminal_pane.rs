@@ -14,14 +14,13 @@ use std::time::{Duration, Instant};
 
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
+#[cfg(test)]
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
-use super::terminal_graphics::{
-    GraphicsAttemptToken, GraphicsRollbackProof, TerminalGraphicsCache,
-};
+use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
@@ -33,10 +32,6 @@ use super::{
 };
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
-use crate::observation::{
-    FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
-    FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
-};
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
@@ -99,7 +94,6 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
-const RUNTIME_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurfaceActivity {
@@ -203,15 +197,6 @@ pub(crate) struct TerminalPane {
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
     remote_restart_start_pending: bool,
-    observation_lease: Option<crate::observation::ObservationLease>,
-    acceptance_observation_claimed: bool,
-    runtime_observation: Option<crate::terminal::RuntimeObservation>,
-    failure_actions: Option<FailureActionController>,
-    failure_action_request: Option<FailureActionRequest>,
-    failure_action_trigger_pending: bool,
-    failure_action_retry_requested: bool,
-    failure_action_recovery_frame: Option<(u64, crate::terminal::PresentationGeneration)>,
-    failure_action_resource_rollback: GraphicsRollbackProof,
     native_service_session_identity: u64,
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
@@ -268,6 +253,7 @@ pub(crate) struct TerminalPane {
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: Entity<TerminalGridCache>,
     fallback_render_cache: Entity<TerminalGridCache>,
+    #[cfg(test)]
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPublication,
@@ -297,8 +283,6 @@ pub(crate) struct TerminalPane {
     _accessibility_task: Option<Task<()>>,
     visibility_source: Option<Box<dyn WindowVisibilitySource>>,
     _visibility_task: Option<Task<()>>,
-    _runtime_visibility_task: Option<Task<()>>,
-    _failure_action_task: Option<Task<()>>,
 }
 
 impl TerminalPane {
@@ -462,15 +446,6 @@ impl TerminalPane {
             remote_connection_generation: None,
             remote_input_blocked: false,
             remote_restart_start_pending: false,
-            observation_lease: None,
-            acceptance_observation_claimed: false,
-            runtime_observation: None,
-            failure_actions: None,
-            failure_action_request: None,
-            failure_action_trigger_pending: false,
-            failure_action_retry_requested: false,
-            failure_action_recovery_frame: None,
-            failure_action_resource_rollback: GraphicsRollbackProof::default(),
             native_service_session_identity: 0,
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
@@ -527,6 +502,7 @@ impl TerminalPane {
             scrollbar,
             render_cache,
             fallback_render_cache,
+            #[cfg(test)]
             paint_fault: None,
             graphics_cache,
             selection_pasteboard: SelectionPublication::new(
@@ -557,8 +533,6 @@ impl TerminalPane {
             _accessibility_task: None,
             visibility_source,
             _visibility_task: Some(visibility_task),
-            _runtime_visibility_task: None,
-            _failure_action_task: None,
         }
     }
 
@@ -621,9 +595,6 @@ impl TerminalPane {
             .update_product_visibility(product_focus.active_workspace, pane_visible);
         if !self.render_lifecycle.effects().animations_active {
             self.stop_surface_animations();
-        }
-        if let Some(observation) = &self.runtime_observation {
-            observation.product_visibility(product_focus.active_workspace, pane_visible);
         }
         if native_service_blocked {
             self.apply_terminal_input_focus(false);
@@ -983,69 +954,6 @@ impl TerminalPane {
         self.preedit_layout_key = None;
     }
 
-    fn observe_presented_frame(
-        &mut self,
-        generation: crate::terminal::PresentationGeneration,
-        rows: u16,
-        columns: u16,
-    ) {
-        if !self.acceptance_observation_claimed || !self.render_lifecycle.is_presented(generation) {
-            return;
-        }
-        if let Some(observation) = &self.runtime_observation {
-            observation.next_frame(generation.as_u64());
-        }
-        if self.failure_action_request.as_ref().is_some_and(|request| {
-            self.failure_action_recovery_frame == Some((request.sequence, generation))
-                && !self.failure_action_trigger_pending
-                && matches!(
-                    request.case,
-                    FailureActionCase::PresentationInvalidScale
-                        | FailureActionCase::PresentationGlyph
-                        | FailureActionCase::RendererImagePreflight
-                        | FailureActionCase::RendererResourceBeforeSync
-                        | FailureActionCase::RendererResourceAfterStaging
-                )
-        }) {
-            self.complete_failure_action(FailureActionResult::Recovered);
-        }
-        if let Some(observation) = self
-            .observation_lease
-            .as_ref()
-            .and_then(|lease| lease.prepare_once(rows, columns))
-            && let Err(error) = observation.emit()
-        {
-            eprintln!("failed to emit acceptance observation: {error}");
-        }
-    }
-
-    fn schedule_presented_frame_observation(
-        &self,
-        generation: crate::terminal::PresentationGeneration,
-        rows: u16,
-        columns: u16,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.acceptance_observation_claimed {
-            return;
-        }
-        #[cfg(not(test))]
-        {
-            let pane = cx.entity().downgrade();
-            window.on_next_frame(move |_, cx| {
-                let _ = pane.update(cx, |pane, _| {
-                    pane.observe_presented_frame(generation, rows, columns);
-                });
-            });
-            cx.notify();
-        }
-        #[cfg(test)]
-        cx.defer_in(window, move |pane, _, _| {
-            pane.observe_presented_frame(generation, rows, columns);
-        });
-    }
-
     pub(crate) fn title(&self) -> SharedString {
         self.title.clone()
     }
@@ -1102,9 +1010,6 @@ impl TerminalPane {
             return;
         }
         self.end_find_state();
-        if let Some(observation) = &self.runtime_observation {
-            observation.pane_released();
-        }
         if let Some(confirmation) = self.pending_paste.take()
             && let Some(session) = &self.session
         {
@@ -1121,9 +1026,7 @@ impl TerminalPane {
         self._attention_task.take();
         self._event_task.take();
         self._accessibility_task.take();
-        self._runtime_visibility_task.take();
         self._visibility_task.take();
-        self._failure_action_task.take();
         self.secure_input_pane.retire();
         if let Some(id) = self.native_attention_pane.take() {
             self.lifecycle_dependencies.attention.remove_pane(id);
@@ -1133,28 +1036,10 @@ impl TerminalPane {
         self.context_menu = None;
         self.file_preview.dismiss();
         self.accessibility_element.set_hierarchy(false, usize::MAX);
-        let session_was_attached = self.session.take().is_some();
-        if self.failure_action_request.as_ref().is_some_and(|request| {
-            matches!(
-                request.case,
-                FailureActionCase::PtyFatal | FailureActionCase::EmulatorFatal
-            )
-        }) && self
-            .pane_state
-            .failure()
-            .is_some_and(TerminalFailure::is_fatal)
-        {
-            self.emit_failure_action(FailureActionPhase::Completed, FailureActionResult::Closed);
-            self.failure_action_request = None;
-            self.failure_action_trigger_pending = false;
-            self.failure_action_recovery_frame = None;
-        }
-        if session_was_attached {
+        if self.session.take().is_some() {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
         }
-        self.failure_actions.take();
-        self.observation_lease.take();
     }
 
     fn remote_facts(&self) -> RemotePaneFacts {
@@ -1263,12 +1148,6 @@ impl TerminalPane {
         self.session_epoch = self.session_epoch.wrapping_add(1);
         self._event_task.take();
         self._accessibility_task.take();
-        if let Some(observation) = self.runtime_observation.take() {
-            observation.pane_released();
-        }
-        self._runtime_visibility_task.take();
-        self.observation_lease.take();
-        self.acceptance_observation_claimed = false;
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
         self.session_factory = prepared.session_factory;
@@ -1492,7 +1371,7 @@ impl TerminalPane {
         operation: OperationToken,
         graphics_attempt: GraphicsAttemptToken,
         screen: Arc<ScreenSnapshot>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let generation = screen.generation;
@@ -1508,8 +1387,6 @@ impl TerminalPane {
             self.renderer_resource_failed(operation, graphics_attempt, cx);
             return;
         }
-        let rows = screen.size.rows;
-        let columns = screen.size.cols;
         self.render_lifecycle.mark_presented(generation);
         self.record_successfully_presented_screen(screen);
         if let Some(recovery) = operation.recovery
@@ -1520,14 +1397,8 @@ impl TerminalPane {
             )
             && self.clear_recovery(recovery)
         {
-            if !self.failure_action_trigger_pending
-                && let Some(request) = &self.failure_action_request
-            {
-                self.failure_action_recovery_frame = Some((request.sequence, generation));
-            }
             cx.notify();
         }
-        self.schedule_presented_frame_observation(generation, rows, columns, window, cx);
     }
 
     fn record_successfully_presented_screen(&mut self, screen: Arc<ScreenSnapshot>) {
@@ -1560,7 +1431,6 @@ impl TerminalPane {
             Some(RecoveryAction::Presentation),
             operation.generation,
         ) {
-            self.emit_injected_failure_if_matching();
             cx.notify();
         }
     }
@@ -1583,7 +1453,6 @@ impl TerminalPane {
             Some(RecoveryAction::RendererResources),
             operation.generation,
         ) {
-            self.emit_injected_failure_if_matching();
             cx.notify();
         }
     }
@@ -1594,13 +1463,6 @@ impl TerminalPane {
         };
         if self.recovery_retry_requested == Some(pending) {
             return;
-        }
-        if self.failure_action_request.is_some() && !self.failure_action_retry_requested {
-            self.failure_action_retry_requested = true;
-            self.emit_failure_action(
-                FailureActionPhase::RetryRequested,
-                FailureActionResult::Accepted,
-            );
         }
         match pending.action {
             RecoveryAction::Presentation => {
@@ -1648,9 +1510,6 @@ impl TerminalPane {
             return;
         }
         self.last_geometry = Some(geometry);
-        if let Some(lease) = &self.observation_lease {
-            lease.update_geometry(observation_geometry(geometry));
-        }
         self.sync_scrollbar(cx);
 
         if let Some(session) = &self.session {
@@ -1666,26 +1525,6 @@ impl TerminalPane {
             return;
         }
         self.session_start_attempted = true;
-
-        let claimed = self
-            .lifecycle_dependencies
-            .observation
-            .as_ref()
-            .and_then(|owner| {
-                owner.claim_session(self.font_family.as_ref(), observation_geometry(geometry))
-            });
-        let mut session_observation = None;
-        if let Some(claimed) = claimed {
-            self.runtime_observation = Some(claimed.runtime);
-            self.failure_actions = claimed.failure_actions;
-            self.observation_lease = Some(claimed.lease);
-            session_observation = Some(claimed.session);
-        }
-        self.acceptance_observation_claimed = self.runtime_observation.is_some();
-        if self.acceptance_observation_claimed {
-            self.start_runtime_visibility_monitor(cx);
-            self.start_failure_action_monitor(cx);
-        }
 
         let prepared_launch = match self.prepared_launch.take() {
             Some(prepared_launch) => prepared_launch,
@@ -1714,10 +1553,7 @@ impl TerminalPane {
                 return;
             }
         };
-        match self
-            .session_factory
-            .start_observed(geometry, prepared_launch, session_observation)
-        {
+        match self.session_factory.start(geometry, prepared_launch) {
             Ok(started) => {
                 self.remote_restart_start_pending = false;
                 if self
@@ -1738,21 +1574,13 @@ impl TerminalPane {
                 self.session = Some(started.handle);
                 self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
-                let observation = self.runtime_observation.clone();
                 let accessibility_receiver = started.accessibility;
                 let session_epoch = self.session_epoch;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
-                        if let Some(observation) = &observation {
-                            if let Ok(event) = receiver.try_recv() {
-                                events.push(event);
-                            }
-                            observation.ui_dispatch(events.len(), receiver.len());
-                        } else {
-                            while let Ok(event) = receiver.try_recv() {
-                                events.push(event);
-                            }
+                        while let Ok(event) = receiver.try_recv() {
+                            events.push(event);
                         }
                         if this
                             .update(cx, |this, cx| {
@@ -1766,11 +1594,6 @@ impl TerminalPane {
                             .is_err()
                         {
                             break;
-                        }
-                        if observation.is_some() {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1))
-                                .await;
                         }
                     }
                 }));
@@ -1811,299 +1634,6 @@ impl TerminalPane {
         }
     }
 
-    fn start_runtime_visibility_monitor(&mut self, cx: &mut Context<Self>) {
-        if self.runtime_observation.is_none() {
-            return;
-        }
-        if self.visibility_source.is_none() {
-            if let Some(observation) = &self.runtime_observation {
-                observation.fail();
-            }
-            return;
-        }
-        self._runtime_visibility_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(RUNTIME_VISIBILITY_POLL_INTERVAL)
-                    .await;
-                let keep_polling = this.update(cx, |pane, cx| {
-                    if pane
-                        .runtime_observation
-                        .as_ref()
-                        .is_none_or(|observation| !observation.is_active())
-                    {
-                        pane.cancel_inactive_failure_action(cx);
-                        return false;
-                    }
-                    let Some(native) = pane
-                        .visibility_source
-                        .as_ref()
-                        .map(|source| source.current())
-                    else {
-                        return false;
-                    };
-                    pane.update_runtime_visibility(native, cx);
-                    true
-                });
-                if !matches!(keep_polling, Ok(true)) {
-                    break;
-                }
-            }
-        }));
-    }
-
-    fn start_failure_action_monitor(&mut self, cx: &mut Context<Self>) {
-        let Some(controller) = self.failure_actions.clone() else {
-            return;
-        };
-        self._failure_action_task = Some(cx.spawn(async move |this, cx| {
-            while let Some(request) = controller.receive().await {
-                if this
-                    .update(cx, |pane, cx| {
-                        pane.arm_failure_action(request, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            let _ = this.update(cx, |pane, cx| pane.cancel_inactive_failure_action(cx));
-        }));
-    }
-
-    fn cancel_inactive_failure_action(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.failure_action_request.as_ref() else {
-            return;
-        };
-        if self
-            .failure_actions
-            .as_ref()
-            .is_some_and(FailureActionController::is_active)
-            && self
-                .runtime_observation
-                .as_ref()
-                .is_none_or(crate::terminal::RuntimeObservation::is_active)
-        {
-            return;
-        }
-        match request.case {
-            FailureActionCase::PresentationGlyph | FailureActionCase::RendererImagePreflight => {
-                self.paint_fault = None
-            }
-            FailureActionCase::RendererResourceBeforeSync
-            | FailureActionCase::RendererResourceAfterStaging => self
-                .graphics_cache
-                .update(cx, |cache, _| cache.cancel_injected_failure()),
-            FailureActionCase::PasteboardWrite => {
-                self.selection_pasteboard.cancel_injected_failure()
-            }
-            _ => {}
-        }
-        self.failure_action_request = None;
-        self.failure_action_trigger_pending = false;
-        self.failure_action_retry_requested = false;
-        self.failure_action_recovery_frame = None;
-        cx.notify();
-    }
-
-    fn arm_failure_action(&mut self, request: FailureActionRequest, cx: &mut Context<Self>) {
-        if self
-            .failure_actions
-            .as_ref()
-            .is_none_or(|controller| !controller.is_active())
-            || self
-                .runtime_observation
-                .as_ref()
-                .is_some_and(|observation| !observation.is_active())
-        {
-            return;
-        }
-        if self.failure_action_request.is_some() {
-            if let Some(observation) = &self.runtime_observation {
-                observation.fail();
-            }
-            return;
-        }
-        let case = request.case;
-        self.failure_action_request = Some(request);
-        self.failure_action_retry_requested = false;
-        self.failure_action_trigger_pending = true;
-        self.failure_action_recovery_frame = None;
-        self.failure_action_resource_rollback = GraphicsRollbackProof::default();
-        self.emit_failure_action(FailureActionPhase::Armed, FailureActionResult::Accepted);
-        self.cancel_inactive_failure_action(cx);
-        if self.failure_action_request.is_none() {
-            return;
-        }
-        match case {
-            FailureActionCase::PresentationInvalidScale => {
-                self.failure_action_trigger_pending = true;
-            }
-            FailureActionCase::PresentationGlyph => {
-                self.paint_fault = Some(PaintPreflightFault::Glyph(0));
-                self.failure_action_trigger_pending = true;
-            }
-            FailureActionCase::RendererImagePreflight => {
-                self.paint_fault = Some(PaintPreflightFault::Image(0));
-                self.failure_action_trigger_pending = true;
-            }
-            FailureActionCase::RendererResourceBeforeSync => {
-                self.graphics_cache
-                    .update(cx, |cache, _| cache.fail_next_sync());
-                self.failure_action_trigger_pending = true;
-            }
-            FailureActionCase::RendererResourceAfterStaging => {
-                self.graphics_cache
-                    .update(cx, |cache, _| cache.fail_after_staging());
-                self.failure_action_trigger_pending = true;
-            }
-            FailureActionCase::PasteboardWrite => {
-                self.selection_pasteboard.fail_next_write();
-            }
-            FailureActionCase::PtyFatal => {
-                if let Some(session) = &self.session {
-                    session
-                        .inject_acceptance_failure(crate::terminal::AcceptanceSessionFailure::Pty);
-                } else if let Some(observation) = &self.runtime_observation {
-                    observation.fail();
-                }
-            }
-            FailureActionCase::EmulatorFatal => {
-                if let Some(session) = &self.session {
-                    session.inject_acceptance_failure(
-                        crate::terminal::AcceptanceSessionFailure::Emulator,
-                    );
-                } else if let Some(observation) = &self.runtime_observation {
-                    observation.fail();
-                }
-            }
-            FailureActionCase::NormalExitControl => {}
-        }
-        cx.notify();
-    }
-
-    fn trigger_immediate_failure_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_inactive_failure_action(cx);
-        let Some(request) = self.failure_action_request.as_ref() else {
-            return;
-        };
-        if request.case != FailureActionCase::PresentationInvalidScale
-            || !self.failure_action_trigger_pending
-        {
-            return;
-        }
-        self.apply_backing_scale(f32::NAN, false, window, cx);
-        self.emit_injected_failure_if_matching();
-    }
-
-    fn emit_injected_failure_if_matching(&mut self) {
-        let Some(request) = self.failure_action_request.as_ref() else {
-            return;
-        };
-        let Some(failure) = self.pane_state.failure() else {
-            return;
-        };
-        let matches = match request.case {
-            FailureActionCase::PresentationInvalidScale => {
-                failure.class() == crate::terminal::FailureClass::Presentation
-                    && failure.operation() == "update-backing-scale"
-            }
-            FailureActionCase::PresentationGlyph => {
-                failure.class() == crate::terminal::FailureClass::Presentation
-                    && failure.operation() == "paint-terminal-presentation"
-            }
-            FailureActionCase::RendererImagePreflight => {
-                failure.class() == crate::terminal::FailureClass::Resource
-                    && failure.operation() == "paint-terminal-graphics"
-            }
-            FailureActionCase::RendererResourceBeforeSync
-            | FailureActionCase::RendererResourceAfterStaging => {
-                failure.class() == crate::terminal::FailureClass::Resource
-                    && failure.operation() == "prepare-terminal-graphics"
-            }
-            FailureActionCase::PasteboardWrite => {
-                failure.class() == crate::terminal::FailureClass::Platform
-                    && failure.operation() == "write-selection-pasteboard"
-            }
-            FailureActionCase::PtyFatal => {
-                failure.class() == crate::terminal::FailureClass::Pty
-                    && failure.operation() == "read-shell-output"
-            }
-            FailureActionCase::EmulatorFatal => {
-                failure.class() == crate::terminal::FailureClass::Emulator
-                    && failure.operation() == "session-runtime"
-            }
-            FailureActionCase::NormalExitControl => false,
-        };
-        if matches && self.failure_action_trigger_pending {
-            self.failure_action_trigger_pending = false;
-            self.emit_failure_action(
-                FailureActionPhase::Injected,
-                FailureActionResult::FailedState,
-            );
-        }
-    }
-
-    fn complete_failure_action(&mut self, result: FailureActionResult) {
-        self.emit_failure_action(FailureActionPhase::Completed, result);
-        self.failure_action_request = None;
-        self.failure_action_retry_requested = false;
-        self.failure_action_trigger_pending = false;
-        self.failure_action_recovery_frame = None;
-    }
-
-    fn emit_failure_action(&self, phase: FailureActionPhase, result: FailureActionResult) {
-        let (Some(controller), Some(request)) =
-            (&self.failure_actions, &self.failure_action_request)
-        else {
-            return;
-        };
-        let failure = self.pane_state.failure();
-        let session_attached = self.session.is_some();
-        let pane_state = match &self.pane_state {
-            PaneTerminalState::Running => FailurePaneState::Running,
-            PaneTerminalState::Failed { .. } => FailurePaneState::Failed,
-            PaneTerminalState::Exited(_) => FailurePaneState::Exited,
-        };
-        let pending_recovery = match self.pending_recovery.map(|pending| pending.action) {
-            Some(RecoveryAction::Presentation) => FailurePendingRecovery::Presentation,
-            Some(RecoveryAction::RendererResources) => FailurePendingRecovery::RendererResources,
-            Some(RecoveryAction::CopySelection) => FailurePendingRecovery::CopySelection,
-            Some(RecoveryAction::StartSession | RecoveryAction::ExportDiagnostics) | None => {
-                FailurePendingRecovery::None
-            }
-        };
-        let emitted = controller.emit(FailureActionEvent {
-            request: request.clone(),
-            phase,
-            result,
-            pane_identity: self.native_service_session_identity,
-            pane_state,
-            failure_class: failure.map(TerminalFailure::class),
-            recoverability: failure.map(TerminalFailure::recoverability),
-            failure_operation: failure.map(TerminalFailure::operation),
-            state_revision: self.state_revision,
-            latest_generation: self.screen.generation.as_u64(),
-            last_valid_generation: self.last_valid_screen.generation.as_u64(),
-            visible_generation: self
-                .render_lifecycle
-                .presented_generation()
-                .map(crate::terminal::PresentationGeneration::as_u64),
-            pending_recovery,
-            terminal_input_usable: self.terminal_input_focus
-                && session_attached
-                && failure.is_none_or(|failure| !failure.is_fatal()),
-            session_attached,
-            resource_staged_count: self.failure_action_resource_rollback.staged_count,
-            resource_staged_bytes: self.failure_action_resource_rollback.staged_bytes,
-            resource_rolled_back_count: self.failure_action_resource_rollback.rolled_back_count,
-            resource_rolled_back_bytes: self.failure_action_resource_rollback.rolled_back_bytes,
-        });
-        if !emitted && let Some(observation) = &self.runtime_observation {
-            observation.fail();
-        }
-    }
-
     fn update_runtime_visibility(&mut self, native: WindowVisibility, cx: &mut Context<Self>) {
         let was_presentable = self.render_lifecycle.can_present();
         let surface = SurfaceVisibility {
@@ -2120,19 +1650,6 @@ impl TerminalPane {
             self.stop_surface_animations();
         }
         self.sync_presentation_blink(effects.animations_active, self.terminal_input_focus, cx);
-        if let Some(observation) = &self.runtime_observation {
-            observation.visibility(crate::terminal::RuntimeVisibility {
-                presentable: !surface.minimized
-                    && !surface.occluded
-                    && surface.workspace_visible
-                    && surface.pane_visible,
-                minimized: surface.minimized,
-                occluded: surface.occluded,
-                workspace_visible: surface.workspace_visible,
-                pane_visible: surface.pane_visible,
-                live_resize: surface.live_resize,
-            });
-        }
         let accessibility_restored = !was_presentable
             && self.render_lifecycle.can_present()
             && (self.accessibility_needs_presentation
@@ -2168,9 +1685,6 @@ impl TerminalPane {
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
-                if let Some(observation) = &self.runtime_observation {
-                    observation.ui_screen_received();
-                }
                 if self
                     .accepted_screen_generation
                     .is_some_and(|generation| screen.generation < generation)
@@ -2196,15 +1710,6 @@ impl TerminalPane {
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.accepted_screen_generation = Some(screen.generation);
-                if let Some(observation) = &self.runtime_observation {
-                    observation.ui_screen_applied(
-                        screen.generation.as_u64(),
-                        screen.scrollbar.total_rows,
-                        screen.scrollbar.visible_rows,
-                        screen.scrollbar.offset_rows,
-                        screen.selection_present,
-                    );
-                }
                 self.screen = screen;
                 self.screen_session_epoch = self.session_epoch;
                 self.sync_scrollbar(cx);
@@ -2265,15 +1770,7 @@ impl TerminalPane {
                 self.pending_recovery = None;
                 self.recovery_retry_requested = None;
                 self.status = None;
-                let normal_exit_control =
-                    self.failure_action_request.as_ref().is_some_and(|request| {
-                        request.case == FailureActionCase::NormalExitControl
-                            && matches!(status, crate::terminal::SessionExit::Success)
-                    });
                 self.pane_state = PaneTerminalState::exited(status);
-                if normal_exit_control {
-                    self.complete_failure_action(FailureActionResult::Exited);
-                }
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
@@ -2285,9 +1782,7 @@ impl TerminalPane {
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
-                if self.present_failure(failure, true, None) {
-                    self.emit_injected_failure_if_matching();
-                }
+                self.present_failure(failure, true, None);
             }
         }
     }
@@ -2769,26 +2264,24 @@ impl TerminalPane {
         recovery: Option<RecoveryToken>,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_inactive_failure_action(cx);
-        if let Some(copy) = self.selection_copy_from_result(result, cx) {
-            if let Err(error) = self.selection_pasteboard.write(copy, cx) {
-                let _ = error;
-                self.present_failure(
-                    TerminalFailure::platform("write-selection-pasteboard"),
-                    true,
-                    Some(RecoveryAction::CopySelection),
-                );
-                self.emit_injected_failure_if_matching();
-                cx.notify();
-            } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
-                if self
-                    .failure_action_request
-                    .as_ref()
-                    .is_some_and(|request| request.case == FailureActionCase::PasteboardWrite)
-                {
-                    self.complete_failure_action(FailureActionResult::Recovered);
+        match self.selection_copy_from_result(result, cx) {
+            Some(copy) => {
+                if let Err(error) = self.selection_pasteboard.write(copy, cx) {
+                    let _ = error;
+                    self.present_failure(
+                        TerminalFailure::platform("write-selection-pasteboard"),
+                        true,
+                        Some(RecoveryAction::CopySelection),
+                    );
+                    cx.notify();
+                } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                    cx.notify();
                 }
-                cx.notify();
+            }
+            None => {
+                if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                    cx.notify();
+                }
             }
         }
     }
@@ -3700,7 +3193,6 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.trigger_immediate_failure_action(window, cx);
         let native_activity = self.current_activity(window, cx);
         self.update_application_activity(native_activity, cx);
         let pane = cx.entity().downgrade();
@@ -3735,20 +3227,6 @@ impl Render for TerminalPane {
             self.stop_surface_animations();
         }
         self.sync_scrollbar(cx);
-        if let Some(observation) = &self.runtime_observation {
-            observation.visibility(crate::terminal::RuntimeVisibility {
-                presentable: !surface_visibility.minimized
-                    && !surface_visibility.occluded
-                    && surface_visibility.workspace_visible
-                    && surface_visibility.pane_visible,
-                minimized: surface_visibility.minimized,
-                occluded: surface_visibility.occluded,
-                workspace_visible: surface_visibility.workspace_visible,
-                pane_visible: surface_visibility.pane_visible,
-                live_resize: surface_visibility.live_resize,
-            });
-            observation.render_started(self.screen.generation.as_u64());
-        }
         if lifecycle_effects.request_redraw {
             cx.notify();
         }
@@ -3785,36 +3263,15 @@ impl Render for TerminalPane {
                     RecoveryAction::Presentation | RecoveryAction::RendererResources
                 )
             });
-        let acceptance_retry = self
-            .failure_action_request
-            .as_ref()
-            .filter(|_| self.failure_action_trigger_pending)
-            .is_some_and(|request| {
-                matches!(
-                    request.case,
-                    FailureActionCase::PresentationGlyph
-                        | FailureActionCase::RendererImagePreflight
-                        | FailureActionCase::RendererResourceBeforeSync
-                        | FailureActionCase::RendererResourceAfterStaging
-                )
-            });
-        let presentation_generation = self
-            .render_lifecycle
-            .take_frame()
-            .or_else(|| {
-                recovery.and_then(|_| self.render_lifecycle.retry_frame(display_screen.generation))
-            })
-            .or_else(|| {
-                acceptance_retry
-                    .then(|| self.render_lifecycle.retry_frame(display_screen.generation))
-                    .flatten()
-            });
+        let presentation_generation = self.render_lifecycle.take_frame().or_else(|| {
+            recovery.and_then(|_| self.render_lifecycle.retry_frame(display_screen.generation))
+        });
         let graphics_attempt_allowed = !recovery_holds_presentation
             && presentation_generation == Some(display_screen.generation);
-        let (graphics, graphics_attempt, graphics_attempted, injected_rollback) =
+        let (graphics, graphics_attempt, graphics_attempted) =
             self.graphics_cache.update(cx, |cache, cx| {
                 if !graphics_attempt_allowed {
-                    return (cache.last_presented(), None, false, None);
+                    return (cache.last_presented(), None, false);
                 }
                 match cache.sync(
                     display_screen.active_screen,
@@ -3822,25 +3279,16 @@ impl Render for TerminalPane {
                     window,
                     cx,
                 ) {
-                    Ok(preparation) => (preparation.graphics, Some(preparation.token), true, None),
-                    Err(_) => (
-                        cache.last_presented(),
-                        None,
-                        true,
-                        cache.take_injected_rollback(),
-                    ),
+                    Ok(preparation) => (preparation.graphics, Some(preparation.token), true),
+                    Err(_) => (cache.last_presented(), None, true),
                 }
             });
-        if let Some(proof) = injected_rollback {
-            self.failure_action_resource_rollback = proof;
-        }
         if graphics_attempted && graphics_attempt.is_none() {
             if self.present_failure(
                 TerminalFailure::resource("prepare-terminal-graphics"),
                 true,
                 Some(RecoveryAction::RendererResources),
             ) {
-                self.emit_injected_failure_if_matching();
                 cx.notify();
             }
             display_screen = Arc::clone(&self.last_valid_screen);
@@ -3939,7 +3387,16 @@ impl Render for TerminalPane {
                         fallback_graphics,
                     )
                 }),
-                paint_fault: self.paint_fault.take(),
+                paint_fault: {
+                    #[cfg(test)]
+                    {
+                        self.paint_fault.take()
+                    }
+                    #[cfg(not(test))]
+                    {
+                        None
+                    }
+                },
             },
             cx,
         );
@@ -4343,20 +3800,6 @@ fn terminal_geometry(
         backing_scale,
         CellGridSize::new(MIN_COLS, MIN_ROWS),
     )
-}
-
-fn observation_geometry(geometry: TerminalGeometry) -> crate::observation::ObservationGeometry {
-    let grid = geometry.grid();
-    let logical = geometry.logical_grid_size();
-    let backing = geometry.backing_grid_size();
-    crate::observation::ObservationGeometry {
-        rows: grid.rows,
-        columns: grid.cols,
-        logical_width: logical.width,
-        logical_height: logical.height,
-        backing_pixel_width: backing.width,
-        backing_pixel_height: backing.height,
-    }
 }
 
 fn ime_candidate_bounds(
@@ -4832,7 +4275,6 @@ mod tests {
         cx.run_until_parked();
         let window_id = cx.update(|window, _| window.window_handle().window_id());
         assert_eq!(factory.captured_windows(), vec![window_id]);
-        assert!(pane.read_with(cx, |pane, _| pane._runtime_visibility_task.is_none()));
         let sender = records.last_event_sender().unwrap();
         sender
             .try_send(SessionEvent::Screen(text_screen(1, &["fixture"])))
@@ -4936,8 +4378,7 @@ mod tests {
             pane.close();
         });
         assert_eq!(factory.drop_count(), 1);
-        assert!(pane.read_with(cx, |pane, _| pane._visibility_task.is_none()
-            && pane._runtime_visibility_task.is_none()));
+        assert!(pane.read_with(cx, |pane, _| pane._visibility_task.is_none()));
         factory.set_visibility(
             window_id,
             WindowVisibility {
@@ -9348,305 +8789,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn failed_candidate_is_unobserved_and_retry_observes_the_committed_generation_once(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, records) = connected_terminal_pane(cx);
-        let events = records.last_event_sender().unwrap();
-        events
-            .try_send(SessionEvent::Screen(text_screen(1, &["old"])))
-            .unwrap();
-        cx.run_until_parked();
-        let observation = crate::terminal::RuntimeObservation::new();
-        pane.update(cx, |pane, _| {
-            pane.acceptance_observation_claimed = true;
-            pane.runtime_observation = Some(observation.clone());
-            pane.paint_fault = Some(PaintPreflightFault::Row(0));
-        });
-        let before = observation.sample();
-
-        events
-            .try_send(SessionEvent::Screen(text_screen(2, &["new"])))
-            .unwrap();
-        cx.run_until_parked();
-
-        let failed = observation.sample();
-        assert_eq!(failed.next_frame_count, before.next_frame_count);
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
-            crate::terminal::PresentationGeneration::test(1)
-        );
-
-        let retry = cx
-            .debug_bounds("retry-terminal-recovery")
-            .expect("failed candidate should expose Retry");
-        cx.simulate_click(retry.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let retried = observation.sample();
-        assert_eq!(retried.next_frame_count, before.next_frame_count + 1);
-        assert_eq!(retried.next_frame_generation, 2);
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
-            crate::terminal::PresentationGeneration::test(2)
-        );
-    }
-
-    #[gpui::test]
-    fn observation_revocation_should_cancel_deferred_presentation_renderer_and_copy_faults(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, records) = terminal_pane_with_selection_copy(
-            cx,
-            SelectionCopy {
-                plain_text: "ordinary selection".into(),
-                html: None,
-            },
-        );
-        for (index, case) in [
-            FailureActionCase::PresentationInvalidScale,
-            FailureActionCase::PresentationGlyph,
-            FailureActionCase::RendererImagePreflight,
-            FailureActionCase::RendererResourceBeforeSync,
-            FailureActionCase::RendererResourceAfterStaging,
-            FailureActionCase::PasteboardWrite,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let (controller, _requests, events) = FailureActionController::test_channel();
-            cx.update(|window, cx| {
-                pane.update(cx, |pane, cx| {
-                    pane.failure_actions = Some(controller.clone());
-                    pane.arm_failure_action(
-                        FailureActionRequest {
-                            id: "a".repeat(64),
-                            sequence: 0,
-                            case,
-                        },
-                        cx,
-                    );
-                    assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
-                    controller.test_revoke();
-                    // Both entry points consume cancellation before any deferred seam can fire.
-                    pane.trigger_immediate_failure_action(window, cx);
-                    pane.copy_selection_with_recovery(None, window, cx);
-                    assert!(pane.failure_action_request.is_none());
-                    assert!(pane.paint_fault.is_none());
-                    assert!(matches!(pane.pane_state, PaneTerminalState::Running));
-                    cx.notify();
-                });
-            });
-            records
-                .last_event_sender()
-                .unwrap()
-                .try_send(SessionEvent::Screen(graphics_screen(
-                    index as u64 + 1,
-                    index as u32 + 1,
-                )))
-                .unwrap();
-            cx.run_until_parked();
-            assert!(pane.read_with(cx, |pane, _| matches!(
-                pane.pane_state,
-                PaneTerminalState::Running
-            )));
-            assert!(events.try_recv().is_err());
-        }
-    }
-
-    #[gpui::test]
-    fn observation_request_received_before_revocation_should_not_arm_a_stale_failure(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        let (controller, requests, events) = FailureActionController::test_channel();
-        requests
-            .try_send(FailureActionRequest {
-                id: "f".repeat(64),
-                sequence: 0,
-                case: FailureActionCase::PresentationGlyph,
-            })
-            .unwrap();
-        let mut receive = std::pin::pin!(controller.receive());
-        let std::task::Poll::Ready(Some(request)) = std::future::Future::poll(
-            receive.as_mut(),
-            &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        ) else {
-            panic!("queued request must be received");
-        };
-        controller.test_revoke();
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller.clone());
-            pane.arm_failure_action(request, cx);
-        });
-        assert!(
-            pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()
-                && pane.paint_fault.is_none()
-                && !pane.failure_action_trigger_pending)
-        );
-        assert!(events.try_recv().is_err());
-    }
-
-    #[gpui::test]
-    fn failed_observation_should_stop_authenticated_visibility_polling(cx: &mut TestAppContext) {
-        struct CountingVisibility(Rc<Cell<usize>>);
-        impl crate::platform::window_visibility::WindowVisibilitySource for CountingVisibility {
-            fn current(&self) -> WindowVisibility {
-                self.0.set(self.0.get() + 1);
-                WindowVisibility {
-                    minimized: true,
-                    occluded: true,
-                    live_resize: false,
-                }
-            }
-        }
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        let calls = Rc::new(Cell::new(0));
-        let observation = crate::terminal::RuntimeObservation::new();
-        pane.update(cx, |pane, cx| {
-            pane.stop_surface_animations();
-            pane.visibility_source = Some(Box::new(CountingVisibility(calls.clone())));
-            pane.runtime_observation = Some(observation.clone());
-            pane.start_runtime_visibility_monitor(cx);
-        });
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(RUNTIME_VISIBILITY_POLL_INTERVAL);
-        cx.run_until_parked();
-        assert!(calls.get() > 0);
-        observation.fail();
-        let before = calls.get();
-        for _ in 0..3 {
-            cx.executor()
-                .advance_clock(RUNTIME_VISIBILITY_POLL_INTERVAL);
-            cx.run_until_parked();
-        }
-        assert_eq!(calls.get(), before);
-    }
-
-    #[gpui::test]
-    fn ordinary_pane_has_no_failure_action_monitor_or_armed_seam(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        assert!(pane.read_with(cx, |pane, _| {
-            pane.failure_actions.is_none()
-                && pane._failure_action_task.is_none()
-                && pane._runtime_visibility_task.is_none()
-                && pane.runtime_observation.is_none()
-                && pane.observation_lease.is_none()
-                && pane.failure_action_request.is_none()
-                && pane.failure_action_recovery_frame.is_none()
-                && pane.paint_fault.is_none()
-                && pane.failure_action_resource_rollback == GraphicsRollbackProof::default()
-        }));
-    }
-
-    #[gpui::test]
-    fn failure_action_monitor_holds_one_request_until_matching_presented_frame(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        let (controller, requests, events) = FailureActionController::test_channel();
-        let first = FailureActionRequest {
-            id: "a".repeat(64),
-            sequence: 0,
-            case: FailureActionCase::PresentationGlyph,
-        };
-        let second = FailureActionRequest {
-            id: "b".repeat(64),
-            sequence: 1,
-            case: FailureActionCase::NormalExitControl,
-        };
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller);
-            pane.acceptance_observation_claimed = true;
-            pane.start_failure_action_monitor(cx);
-        });
-        requests.try_send(first.clone()).unwrap();
-        cx.run_until_parked();
-        assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane.failure_action_request.clone()),
-            Some(first.clone())
-        );
-
-        pane.update(cx, |pane, cx| {
-            pane.present_failure_at(
-                TerminalFailure::presentation("paint-terminal-presentation"),
-                true,
-                Some(RecoveryAction::Presentation),
-                crate::terminal::PresentationGeneration::test(2),
-            );
-            pane.emit_injected_failure_if_matching();
-            pane.failure_action_recovery_frame =
-                Some((0, crate::terminal::PresentationGeneration::test(2)));
-            pane.render_lifecycle
-                .observe_snapshot(crate::terminal::PresentationGeneration::test(2));
-            pane.render_lifecycle
-                .mark_presented(crate::terminal::PresentationGeneration::test(2));
-            pane.pane_state = PaneTerminalState::Running;
-            pane.pending_recovery = None;
-            pane.observe_presented_frame(crate::terminal::PresentationGeneration::test(1), 24, 80);
-            assert!(pane.failure_action_request.is_some());
-            pane.observe_presented_frame(crate::terminal::PresentationGeneration::test(2), 24, 80);
-            cx.notify();
-        });
-        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(
-            emitted.iter().map(|event| event.phase).collect::<Vec<_>>(),
-            vec![FailureActionPhase::Injected, FailureActionPhase::Completed]
-        );
-        requests.try_send(second.clone()).unwrap();
-        cx.run_until_parked();
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane.failure_action_request.clone()),
-            Some(second)
-        );
-        assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
-    }
-
-    #[gpui::test]
-    fn fatal_failure_action_close_is_detached_once_and_stops_monitor(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        let (controller, requests, events) = FailureActionController::test_channel();
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller);
-            pane.start_failure_action_monitor(cx);
-        });
-        requests
-            .try_send(FailureActionRequest {
-                id: "c".repeat(64),
-                sequence: 0,
-                case: FailureActionCase::PtyFatal,
-            })
-            .unwrap();
-        cx.run_until_parked();
-        pane.update(cx, |pane, cx| {
-            pane.handle_event(
-                SessionEvent::Failed(crate::terminal::SessionFailure::PtyRead {
-                    read_error: "acceptance-injected".to_owned(),
-                    exit_status: "acceptance-injected".to_owned(),
-                }),
-                cx,
-            );
-            pane.close();
-            pane.close();
-        });
-        cx.run_until_parked();
-        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(
-            emitted.iter().map(|event| event.phase).collect::<Vec<_>>(),
-            vec![
-                FailureActionPhase::Armed,
-                FailureActionPhase::Injected,
-                FailureActionPhase::Completed,
-            ]
-        );
-        assert!(!emitted.last().unwrap().session_attached);
-        assert!(!emitted.last().unwrap().terminal_input_usable);
-        assert!(requests.is_closed());
-    }
-
-    #[gpui::test]
     fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
         let (pane, cx, _records) = connected_terminal_pane(cx);
 
@@ -9770,16 +8912,6 @@ mod tests {
                 })
             });
             assert!(result.is_err());
-            let rollback = cache.update(cx, |cache, _| cache.take_injected_rollback());
-            assert_eq!(
-                rollback,
-                Some(GraphicsRollbackProof {
-                    staged_count: 1,
-                    staged_bytes: 4,
-                    rolled_back_count: 1,
-                    rolled_back_bytes: 4,
-                })
-            );
             assert_eq!(
                 cache.read_with(cx, |cache, _| (
                     cache.cached_image_keys(),
@@ -9796,50 +8928,6 @@ mod tests {
                 )
             );
         }
-    }
-
-    #[gpui::test]
-    fn after_staging_failure_action_reports_actual_bounded_rollback(cx: &mut TestAppContext) {
-        let (pane, cx, records) = connected_terminal_pane(cx);
-        let session_events = records.last_event_sender().unwrap();
-        session_events
-            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
-            .unwrap();
-        cx.run_until_parked();
-        let (controller, requests, action_events) = FailureActionController::test_channel();
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller);
-            pane.start_failure_action_monitor(cx);
-        });
-        requests
-            .try_send(FailureActionRequest {
-                id: "f".repeat(64),
-                sequence: 0,
-                case: FailureActionCase::RendererResourceAfterStaging,
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let armed = action_events.try_recv().unwrap();
-        assert_eq!(armed.phase, FailureActionPhase::Armed);
-        assert_eq!(armed.resource_staged_count, 0);
-        assert_eq!(armed.resource_rolled_back_count, 0);
-
-        session_events
-            .try_send(SessionEvent::Screen(graphics_screen(2, 2)))
-            .unwrap();
-        cx.run_until_parked();
-        let injected = action_events.try_recv().unwrap();
-        assert_eq!(injected.phase, FailureActionPhase::Injected);
-        assert!(injected.resource_staged_count > 0);
-        assert!(injected.resource_staged_bytes > 0);
-        assert_eq!(
-            injected.resource_rolled_back_count,
-            injected.resource_staged_count
-        );
-        assert_eq!(
-            injected.resource_rolled_back_bytes,
-            injected.resource_staged_bytes
-        );
     }
 
     #[gpui::test]
@@ -10139,122 +9227,6 @@ mod tests {
                 Some("recovered selection".to_owned()),
                 2,
             )
-        );
-    }
-
-    #[gpui::test]
-    fn pasteboard_failure_action_completes_only_after_a_real_retry_write(cx: &mut TestAppContext) {
-        let (pane, cx, _) = terminal_pane_with_selection_copy(
-            cx,
-            SelectionCopy {
-                plain_text: "acceptance selection".to_owned(),
-                html: None,
-            },
-        );
-        let (controller, requests, events) = FailureActionController::test_channel();
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller);
-            pane.start_failure_action_monitor(cx);
-        });
-        requests
-            .try_send(FailureActionRequest {
-                id: "d".repeat(64),
-                sequence: 0,
-                case: FailureActionCase::PasteboardWrite,
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-c");
-        cx.run_until_parked();
-        let before_retry = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(
-            before_retry
-                .iter()
-                .map(|event| event.phase)
-                .collect::<Vec<_>>(),
-            vec![FailureActionPhase::Armed, FailureActionPhase::Injected]
-        );
-        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_some()));
-
-        let retry = cx
-            .debug_bounds("retry-terminal-recovery")
-            .expect("pasteboard failure action should expose Retry");
-        cx.simulate_click(retry.center(), Modifiers::none());
-        cx.run_until_parked();
-        let retried = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(
-            retried.iter().map(|event| event.phase).collect::<Vec<_>>(),
-            vec![
-                FailureActionPhase::RetryRequested,
-                FailureActionPhase::Completed,
-            ]
-        );
-        assert!(retried.last().unwrap().terminal_input_usable);
-        assert!(retried.last().unwrap().session_attached);
-        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()));
-    }
-
-    #[gpui::test]
-    fn pasteboard_failure_action_should_allow_retry_after_missing_selection_without_duplicate_receipt(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, records) = terminal_pane_with_selection_copy(
-            cx,
-            SelectionCopy {
-                plain_text: "restored selection".into(),
-                html: None,
-            },
-        );
-        let (controller, requests, events) = FailureActionController::test_channel();
-        pane.update(cx, |pane, cx| {
-            pane.failure_actions = Some(controller);
-            pane.start_failure_action_monitor(cx);
-        });
-        requests
-            .try_send(FailureActionRequest {
-                id: "e".repeat(64),
-                sequence: 0,
-                case: FailureActionCase::PasteboardWrite,
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-c");
-        cx.run_until_parked();
-        records.queue_selection_copy(None);
-        records.queue_selection_copy(None);
-        cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| {
-                pane.retry_recovery(window, cx);
-                pane.retry_recovery(window, cx);
-            });
-        });
-        let phases = std::iter::from_fn(|| events.try_recv().ok())
-            .map(|event| event.phase)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            phases,
-            vec![
-                FailureActionPhase::Armed,
-                FailureActionPhase::Injected,
-                FailureActionPhase::RetryRequested
-            ]
-        );
-        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_some()));
-        cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.retry_recovery(window, cx));
-        });
-        let completed = events.try_recv().unwrap();
-        assert_eq!(
-            (completed.phase, completed.result),
-            (
-                FailureActionPhase::Completed,
-                FailureActionResult::Recovered
-            )
-        );
-        assert!(events.try_recv().is_err());
-        assert!(
-            pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()
-                && pane.pending_recovery.is_none())
         );
     }
 

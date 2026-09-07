@@ -198,10 +198,6 @@ impl PresentationGeneration {
     pub(crate) const fn test(value: u64) -> Self {
         Self(value)
     }
-
-    pub(crate) const fn as_u64(self) -> u64 {
-        self.0
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

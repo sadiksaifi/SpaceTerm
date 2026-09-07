@@ -1,16 +1,6 @@
 pub(crate) mod app_paths;
 pub(crate) mod application_activity;
 pub(crate) mod control_socket;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos_observation;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos_observation_clock;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos_observation_environment;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos_observation_package;
-#[cfg(target_os = "macos")]
-pub(crate) mod macos_observation_transport;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
 

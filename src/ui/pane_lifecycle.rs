@@ -10,7 +10,6 @@ use crate::terminal::wheel_phase::WheelPhaseEnrichment;
 /// This value defines no platform operations or surface policy.
 #[derive(Clone)]
 pub(crate) struct PaneLifecycleDependencies {
-    pub(crate) observation: Option<crate::observation::AuthenticatedObservation>,
     pub(crate) activity: Rc<dyn ApplicationActivity>,
     pub(crate) visibility: Rc<dyn WindowVisibilityFactory>,
     pub(crate) wheel: Rc<dyn WheelPhaseEnrichment>,
@@ -24,7 +23,6 @@ impl PaneLifecycleDependencies {
         let activity: Rc<dyn ApplicationActivity> =
             Rc::new(crate::platform::application_activity::TestApplicationActivity);
         Self {
-            observation: None,
             attention: AttentionRuntime::testing(Rc::clone(&activity)),
             secure_input: SecureInputHandle::testing(),
             activity,

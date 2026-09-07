@@ -1,4 +1,4 @@
-//! Exact-window visibility facts. Rendering and observation scheduling remain caller-owned.
+//! Exact-window visibility facts. Rendering and update scheduling remain caller-owned.
 
 use gpui::Window;
 
@@ -9,7 +9,7 @@ pub(crate) struct WindowVisibility {
     pub(crate) live_resize: bool,
 }
 
-/// Owns observation of one exact window until dropped.
+/// Tracks one exact window until dropped.
 pub(crate) trait WindowVisibilitySource {
     fn current(&self) -> WindowVisibility;
 }

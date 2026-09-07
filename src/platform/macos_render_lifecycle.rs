@@ -84,7 +84,7 @@ struct MacosWindowVisibilitySource {
 impl WindowVisibilitySource for MacosWindowVisibilitySource {
     fn current(&self) -> WindowVisibility {
         // SAFETY: this source retains the exact NSWindow and is !Send/!Sync. All queries run
-        // synchronously on GPUI's AppKit thread, including observation-only bounded sampling.
+        // synchronously on GPUI's AppKit thread, including bounded visibility sampling.
         unsafe {
             let minimized: bool = msg_send![self.window, isMiniaturized];
             let occlusion_state: u64 = msg_send![self.window, occlusionState];
