@@ -60,9 +60,9 @@ use crate::terminal::{
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, Edges, Entity, EntityId, FocusHandle,
+    Action, AnyElement, App, Context, DispatchPhase, Edges, Entity, EntityId, FocusHandle, Font,
     MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent,
-    SharedString, Task, WeakEntity, Window, canvas, div, point, px, rgba,
+    SharedString, Task, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu,
@@ -91,6 +91,7 @@ const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 /// Clearance for the native traffic lights that share the top-left chrome strip.
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
 const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
+const WORKSPACE_CHIP_GAP: f32 = 5.0;
 const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 12.0;
@@ -98,6 +99,47 @@ const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
+
+fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str) {
+    if sidebar_visible {
+        (IconName::PanelLeft, "Close Sidebar")
+    } else {
+        (IconName::PanelRight, "Open Sidebar")
+    }
+}
+
+fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
+    let text_style = window.text_style();
+    let run = TextRun {
+        len: name.len(),
+        font: Font {
+            family: text_style.font_family,
+            features: text_style.font_features,
+            fallbacks: text_style.font_fallbacks,
+            weight: text_style.font_weight,
+            style: text_style.font_style,
+        },
+        color: text_style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let name_width = window
+        .text_system()
+        .shape_line(
+            name.to_owned().into(),
+            px(WORKSPACE_CHIP_TEXT_SIZE),
+            &[run],
+            None,
+        )
+        .width;
+    let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
+        + WORKSPACE_CHIP_ICON_SIZE
+        + WORKSPACE_CHIP_GAP
+        + TRAFFIC_LIGHT_CLEARANCE / 2.0);
+    (fixed_width + name_width).min(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceMenuCommand {
     NewTab,
@@ -700,7 +742,7 @@ impl WorkspaceManager {
                 window,
                 cx,
             );
-            manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
+            manager.set_sidebar_layout(sidebar_visible, sidebar_width, sidebar_width, cx);
             manager
         });
         cx.subscribe_in(
@@ -1158,15 +1200,47 @@ impl WorkspaceManager {
         eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
-    fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
+    fn synchronize_tab_manager_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
+            return;
+        };
+        let top_chrome_width = if self.sidebar.visible {
+            self.sidebar.width
+        } else {
+            collapsed_top_chrome_width(workspace.name(), window)
+        };
+        workspace.payload().update(cx, |manager, cx| {
+            manager.set_sidebar_layout(
+                self.sidebar.visible,
+                self.sidebar.width,
+                top_chrome_width,
+                cx,
+            );
+        });
+    }
+
+    fn synchronize_tab_manager_layouts(&self, window: &Window, cx: &mut Context<Self>) {
+        for workspace_id in self.workspaces.iter().map(|workspace| workspace.id()) {
+            self.synchronize_tab_manager_layout(workspace_id, window, cx);
+        }
+    }
+
+    fn set_sidebar_layout(
+        &mut self,
+        visible: bool,
+        width: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.sidebar.set_layout(visible, width, cx) {
             return;
         }
-        for workspace in self.workspaces.iter() {
-            workspace.payload().update(cx, |manager, cx| {
-                manager.set_sidebar_layout(visible, width, cx);
-            });
-        }
+        self.synchronize_tab_manager_layouts(window, cx);
         cx.notify();
     }
 
@@ -1181,7 +1255,7 @@ impl WorkspaceManager {
             let was_sidebar_focused =
                 self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
             self.sidebar.rename = None;
-            self.set_sidebar_layout(false, minimum_width, cx);
+            self.set_sidebar_layout(false, minimum_width, window, cx);
             if was_sidebar_focused {
                 self.focus(window, cx);
             }
@@ -1195,6 +1269,7 @@ impl WorkspaceManager {
         self.set_sidebar_layout(
             true,
             requested_width.clamp(minimum_width, maximum_width),
+            window,
             cx,
         );
     }
@@ -1308,6 +1383,7 @@ impl WorkspaceManager {
             unreachable!("a newly created Workspace must remain owned by its collection")
         };
 
+        self.synchronize_tab_manager_layout(workspace_id, window, cx);
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.sidebar.rename = None;
@@ -1744,6 +1820,7 @@ impl WorkspaceManager {
         else {
             unreachable!("an activated Remote Workspace must remain in its collection")
         };
+        self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         }
@@ -2454,6 +2531,7 @@ impl WorkspaceManager {
         else {
             unreachable!("a newly opened Local Project must remain owned by its collection")
         };
+        self.synchronize_tab_manager_layout(workspace_id, window, cx);
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.sync_terminal_focus_blocker(window, cx);
@@ -2537,6 +2615,7 @@ impl WorkspaceManager {
             return false;
         }
 
+        self.synchronize_tab_manager_layout(workspace_id, window, cx);
         let preserve_sidebar_focus =
             self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
         if previous_workspace_id != workspace_id {
@@ -2814,6 +2893,7 @@ impl WorkspaceManager {
         self.debug_assert_remote_runtime_invariants();
 
         if was_active {
+            self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
             let active_manager = self.workspaces.active_workspace().payload().clone();
             if self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window) {
                 active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
@@ -2937,7 +3017,7 @@ impl WorkspaceManager {
             self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
         let sidebar_visible = !self.sidebar.visible;
         self.sidebar.rename = None;
-        self.set_sidebar_layout(sidebar_visible, self.sidebar.width, cx);
+        self.set_sidebar_layout(sidebar_visible, self.sidebar.width, window, cx);
         if !sidebar_visible && was_sidebar_focused {
             self.focus(window, cx);
         }
@@ -2954,7 +3034,7 @@ impl WorkspaceManager {
         }
 
         if !self.sidebar.visible {
-            self.set_sidebar_layout(true, self.sidebar.width, cx);
+            self.set_sidebar_layout(true, self.sidebar.width, window, cx);
             cx.defer_in(window, |manager, window, cx| {
                 manager.sidebar.focus.focus(window);
                 manager.sync_terminal_focus_blocker(window, cx);
@@ -3148,6 +3228,7 @@ impl WorkspaceManager {
         {
             Self::report_workspace_error("rename", error);
         }
+        self.synchronize_tab_manager_layout(workspace_id, window, cx);
         self.sidebar.rename = None;
         if restore_sidebar_focus {
             self.sidebar.focus.focus(window);
@@ -3356,7 +3437,7 @@ impl WorkspaceManager {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(5.0))
+            .gap(px(WORKSPACE_CHIP_GAP))
             .min_w_0()
             .child(Icon::new(
                 workspace_icon,
@@ -3380,6 +3461,12 @@ impl WorkspaceManager {
     }
 
     fn render_top_left_chrome(&self, manager: WeakEntity<Self>, window: &Window) -> AnyElement {
+        let width = if self.sidebar.visible {
+            self.sidebar.width
+        } else {
+            collapsed_top_chrome_width(self.workspaces.active_workspace().name(), window)
+        };
+        let (toggle_icon, toggle_label) = sidebar_toggle_presentation(self.sidebar.visible);
         let drag_manager = manager.clone();
         let toggle_manager = manager;
         let content = div()
@@ -3416,14 +3503,14 @@ impl WorkspaceManager {
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
                     .child(
-                        IconButton::new("toggle-sidebar-button", "Toggle Sidebar", |foreground| {
-                            Icon::new(IconName::PanelLeft, px(14.0), foreground).into_any_element()
+                        IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
+                            Icon::new(toggle_icon, px(14.0), foreground).into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
                         .debug_selector("toggle-sidebar-button")
                         .tooltip(
-                            Tooltip::new("toggle-sidebar-tooltip", "Toggle Sidebar")
+                            Tooltip::new("toggle-sidebar-tooltip", toggle_label)
                                 .debug_selector("toggle-sidebar-tooltip"),
                         )
                         .on_activate(move |_, window, cx| {
@@ -3459,7 +3546,7 @@ impl WorkspaceManager {
             .absolute()
             .top_0()
             .left_0()
-            .w(self.sidebar.width)
+            .w(width)
             .h(px(TOP_CHROME_HEIGHT))
             .bg(gpui_color(if window.is_window_active() {
                 ACTIVE_THEME.title_bar_background
@@ -3928,9 +4015,18 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_sidebar_resize_handle(&self, manager: WeakEntity<Self>) -> AnyElement {
+    fn render_sidebar_resize_handle(
+        &self,
+        manager: WeakEntity<Self>,
+        window: &Window,
+    ) -> AnyElement {
         let selector = "workspace-sidebar-resize-handle";
-        let current_width = f32::from(self.sidebar.width);
+        let handle_width = if self.sidebar.visible {
+            self.sidebar.width
+        } else {
+            collapsed_top_chrome_width(self.workspaces.active_workspace().name(), window)
+        };
+        let current_width = f32::from(handle_width);
         let handle = ResizeHandle::new(
             selector,
             "Resize Workspace sidebar",
@@ -3950,7 +4046,7 @@ impl WorkspaceManager {
         let wrapper = div()
             .absolute()
             .top_0()
-            .left(self.sidebar.width - px(CHROME_DIVIDER_SIZE / 2.0))
+            .left(handle_width - px(CHROME_DIVIDER_SIZE / 2.0))
             .w(px(CHROME_DIVIDER_SIZE));
         if self.sidebar.visible {
             wrapper.bottom_0().child(handle).into_any_element()
@@ -4086,7 +4182,7 @@ impl Render for WorkspaceManager {
             .when(self.sidebar.visible, |root| {
                 root.child(self.render_sidebar(manager.clone(), window, cx))
             })
-            .child(self.render_sidebar_resize_handle(manager));
+            .child(self.render_sidebar_resize_handle(manager, window));
         let content = content
             .child(self.transient.search.clone())
             .child(self.transient.new_workspace.clone())
