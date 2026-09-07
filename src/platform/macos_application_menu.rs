@@ -429,14 +429,19 @@ mod native {
         TOGGLE_PANE_ZOOM_TITLE,
     };
 
+    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer built with Rust, GPUI, and libghostty-vt.";
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
     #[link(name = "AppKit", kind = "framework")]
     unsafe extern "C" {
+        #[link_name = "NSAboutPanelOptionApplicationIcon"]
+        static ABOUT_APPLICATION_ICON: id;
         #[link_name = "NSAboutPanelOptionApplicationName"]
         static ABOUT_APPLICATION_NAME: id;
         #[link_name = "NSAboutPanelOptionApplicationVersion"]
         static ABOUT_APPLICATION_VERSION: id;
+        #[link_name = "NSAboutPanelOptionCredits"]
+        static ABOUT_CREDITS: id;
     }
 
     pub(super) fn decorate() -> Result<(), ApplicationMenuError> {
@@ -486,8 +491,27 @@ mod native {
                 .init_str(env!("CARGO_PKG_VERSION"))
                 .autorelease()
         };
-        let values = [name, version];
-        let keys = unsafe { [ABOUT_APPLICATION_NAME, ABOUT_APPLICATION_VERSION] };
+        let description = unsafe {
+            NSString::alloc(nil)
+                .init_str(ABOUT_DESCRIPTION)
+                .autorelease()
+        };
+        let credits: id = unsafe { msg_send![class!(NSAttributedString), alloc] };
+        let credits: id = unsafe { msg_send![credits, initWithString: description] };
+        let credits: id = unsafe { msg_send![credits, autorelease] };
+        let icon: id = unsafe { msg_send![application, applicationIconImage] };
+        if icon == nil {
+            return Err(ApplicationMenuError::Unavailable);
+        }
+        let values = [name, version, credits, icon];
+        let keys = unsafe {
+            [
+                ABOUT_APPLICATION_NAME,
+                ABOUT_APPLICATION_VERSION,
+                ABOUT_CREDITS,
+                ABOUT_APPLICATION_ICON,
+            ]
+        };
         let options = unsafe {
             NSDictionary::dictionaryWithObjects_forKeys_count_(
                 nil,
