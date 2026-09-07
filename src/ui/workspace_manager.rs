@@ -291,7 +291,14 @@ struct WorkspaceSidebar {
     menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     resizing: bool,
+    resize_origin: Option<WorkspaceSidebarResizeOrigin>,
     suppress_pointer_until_release: bool,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceSidebarResizeOrigin {
+    visible: bool,
+    width: Pixels,
 }
 
 impl WorkspaceSidebar {
@@ -305,6 +312,7 @@ impl WorkspaceSidebar {
             menu: None,
             rename: None,
             resizing: false,
+            resize_origin: None,
             suppress_pointer_until_release: false,
         }
     }
@@ -331,20 +339,32 @@ impl WorkspaceSidebar {
     }
 
     fn begin_resize(&mut self, source: ResizeInputSource) {
+        self.resize_origin = Some(WorkspaceSidebarResizeOrigin {
+            visible: self.visible,
+            width: self.width,
+        });
         self.resizing = true;
         if source == ResizeInputSource::Pointer {
             self.suppress_pointer_until_release = false;
         }
     }
 
-    fn finish_resize(&mut self, source: ResizeInputSource, reason: ResizeFinishReason) -> bool {
+    fn finish_resize(
+        &mut self,
+        source: ResizeInputSource,
+        reason: ResizeFinishReason,
+    ) -> (bool, Option<WorkspaceSidebarResizeOrigin>) {
         if source == ResizeInputSource::Pointer {
             self.suppress_pointer_until_release = !matches!(
                 reason,
                 ResizeFinishReason::Completed | ResizeFinishReason::PointerButtonLost
             );
         }
-        std::mem::take(&mut self.resizing)
+        let restore = (reason == ResizeFinishReason::Escape)
+            .then(|| self.resize_origin.take())
+            .flatten();
+        self.resize_origin = None;
+        (std::mem::take(&mut self.resizing), restore)
     }
 
     fn rename_is_focused(&self, window: &Window) -> bool {
@@ -796,6 +816,7 @@ impl WorkspaceManager {
                     workspace_id,
                     DirectoryAuthority::new(*tab_id, *pane_id),
                     path,
+                    window,
                     cx,
                 ),
                 TabManagerEvent::PaneClosed {
@@ -808,6 +829,7 @@ impl WorkspaceManager {
                     DirectoryAuthority::new(*tab_id, *pane_id),
                     DirectoryAuthority::new(*tab_id, *promoted_pane_id),
                     promoted_directory.as_deref(),
+                    window,
                     cx,
                 ),
                 TabManagerEvent::TabClosed {
@@ -820,12 +842,21 @@ impl WorkspaceManager {
                     *tab_id,
                     DirectoryAuthority::new(*promoted_tab_id, *promoted_pane_id),
                     promoted_directory.as_deref(),
+                    window,
                     cx,
                 ),
                 TabManagerEvent::DirectoryAvailable { identity } => {
-                    let _ = workspace_manager
+                    if workspace_manager
                         .workspaces
-                        .set_directory_available(workspace_id, identity.clone());
+                        .set_directory_available(workspace_id, identity.clone())
+                        .is_ok()
+                    {
+                        workspace_manager.synchronize_tab_manager_layout(
+                            workspace_manager.workspaces.active_workspace_id(),
+                            window,
+                            cx,
+                        );
+                    }
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
@@ -891,12 +922,14 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         authority: DirectoryAuthority,
         path: &std::path::Path,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.apply_directory_change(
             workspace_id,
             crate::domain::DirectoryChange::Report(authority),
             Some(path),
+            window,
             cx,
         );
     }
@@ -907,12 +940,14 @@ impl WorkspaceManager {
         removed: DirectoryAuthority,
         successor: DirectoryAuthority,
         report: Option<&std::path::Path>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.apply_directory_change(
             workspace_id,
             crate::domain::DirectoryChange::PaneClosed { removed, successor },
             report,
+            window,
             cx,
         );
     }
@@ -923,12 +958,14 @@ impl WorkspaceManager {
         removed: TabId,
         successor: DirectoryAuthority,
         report: Option<&std::path::Path>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.apply_directory_change(
             workspace_id,
             crate::domain::DirectoryChange::TabClosed { removed, successor },
             report,
+            window,
             cx,
         );
     }
@@ -938,6 +975,7 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         change: crate::domain::DirectoryChange,
         report: Option<&std::path::Path>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let filesystem = &self.local_filesystem;
@@ -957,6 +995,7 @@ impl WorkspaceManager {
             },
         );
         if changed {
+            self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
             self.refresh_workspace_search(cx);
             cx.notify();
         }
@@ -1288,7 +1327,11 @@ impl WorkspaceManager {
             }
             ResizeHandleEvent::ResizeRequested {
                 requested_value, ..
-            } => self.resize_sidebar(px(requested_value), window, cx),
+            } => {
+                if self.sidebar.visible || requested_value >= WORKSPACE_SIDEBAR_MINIMUM_WIDTH {
+                    self.resize_sidebar(px(requested_value), window, cx);
+                }
+            }
             ResizeHandleEvent::ResetRequested { source } => {
                 self.resize_sidebar(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), window, cx);
                 if source == ResizeInputSource::Pointer {
@@ -1296,7 +1339,11 @@ impl WorkspaceManager {
                 }
             }
             ResizeHandleEvent::InteractionFinished { source, reason, .. } => {
-                if !self.sidebar.finish_resize(source, reason) {
+                let (finished, restore) = self.sidebar.finish_resize(source, reason);
+                if let Some(origin) = restore {
+                    self.set_sidebar_layout(origin.visible, origin.width, window, cx);
+                }
+                if !finished {
                     return;
                 }
                 self.sync_terminal_focus_blocker(window, cx);
@@ -2891,9 +2938,9 @@ impl WorkspaceManager {
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
         self.remote_workspace_runtimes.remove(&workspace_id);
         self.debug_assert_remote_runtime_invariants();
+        self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
 
         if was_active {
-            self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
             let active_manager = self.workspaces.active_workspace().payload().clone();
             if self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window) {
                 active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
@@ -2942,6 +2989,11 @@ impl WorkspaceManager {
                 payload.update(cx, |manager, cx| manager.close_all(cx));
                 self.remote_workspace_runtimes.remove(&workspace_id);
                 self.debug_assert_remote_runtime_invariants();
+                self.synchronize_tab_manager_layout(
+                    self.workspaces.active_workspace_id(),
+                    window,
+                    cx,
+                );
 
                 if was_active {
                     let active_manager = self.workspaces.active_workspace().payload().clone();
