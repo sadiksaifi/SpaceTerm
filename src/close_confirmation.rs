@@ -385,6 +385,44 @@ mod tests {
     }
 
     #[test]
+    fn finished_commands_are_safe_to_close_only_while_metadata_is_live() {
+        let screen =
+            crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+        let mut metadata = (*screen.metadata).clone();
+        metadata.prompt_zone = PromptZone::CommandOutput;
+        metadata.command = Some(crate::terminal::metadata::CommandMetadata {
+            line: "cargo test".into(),
+            state: CommandState::Finished {
+                exit_status: Some(0),
+                duration: std::time::Duration::from_secs(1),
+            },
+        });
+        for (freshness, expected) in [
+            (MetadataFreshness::Live, false),
+            (MetadataFreshness::Stale, true),
+        ] {
+            metadata.freshness = freshness;
+            let mut hierarchy = CloseHierarchy::default();
+            hierarchy.insert(
+                WorkspaceId::new(1),
+                TabId::new(1),
+                PaneId::new(1),
+                PaneCloseFacts {
+                    live_session: true,
+                    state: &PaneTerminalState::Running,
+                    disconnected: false,
+                    metadata: &metadata,
+                },
+            );
+            assert_eq!(hierarchy.requires_confirmation(target(1)), Some(expected));
+            assert_eq!(
+                hierarchy.requires_confirmation(CloseTarget::Window),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn close_confirmation_aggregates_exact_scopes_and_rejects_stale_settlement() {
         let mut hierarchy = CloseHierarchy {
             panes: vec![

@@ -1,6 +1,6 @@
 use super::native_services::PastePayload;
 mod schedules;
-use schedules::*;
+use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
 mod launch;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
@@ -15,8 +15,8 @@ use std::mem;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,24 +47,22 @@ use crate::terminal::key::{KeyInput, PhysicalKey};
 use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
 use crate::terminal::osc52::{
     MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
-    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52AuthorizationSchedule,
-    Osc52Clipboard, Osc52ClipboardFactory, Osc52Effect, Osc52Filter, Osc52Operation,
+    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52Clipboard, Osc52ClipboardFactory,
+    Osc52Effect, Osc52Filter, Osc52Operation,
 };
 #[cfg(test)]
 use crate::terminal::osc52::{
     Osc52ClipboardError, UnavailableOsc52Clipboard, UnavailableOsc52ClipboardFactory,
 };
 use crate::terminal::paste::{
-    PasteConfirmationId, PasteConfirmationSchedule, PasteDecision, PasteRejection,
-    PasteRequestOutcome, PasteResolution, PreparedPaste,
+    PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
+    PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
-const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 
 fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
     let grid = geometry.grid();
@@ -326,68 +324,11 @@ pub(crate) trait TerminalSessionFactory {
     }
 }
 
-#[derive(Clone, Default)]
-struct ResizeMailbox {
-    pending: Arc<Mutex<Option<TerminalGeometry>>>,
-}
-
-impl ResizeMailbox {
-    fn replace(&self, geometry: TerminalGeometry) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(geometry);
-        should_notify
-    }
-
-    fn take(&self) -> Option<TerminalGeometry> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<TerminalGeometry>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal resize mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
-#[derive(Debug)]
-enum FindQueryUpdate {
-    Set(FindQueryGeneration, String),
-    End(FindQueryGeneration),
-}
-
-#[derive(Clone, Default)]
-struct FindQueryMailbox {
-    pending: Arc<Mutex<Option<FindQueryUpdate>>>,
-}
-
-impl FindQueryMailbox {
-    fn replace(&self, update: FindQueryUpdate) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(update);
-        should_notify
-    }
-
-    fn take(&self) -> Option<FindQueryUpdate> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal Find mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
-    resizes: ResizeMailbox,
-    find_queries: FindQueryMailbox,
+    schedule_input: ScheduleInput,
     runtime_observation: Option<RuntimeObservation>,
 }
 
@@ -428,7 +369,7 @@ impl TerminalSession {
 
     pub(crate) fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands {
-            let should_notify = self.resizes.replace(geometry);
+            let should_notify = self.schedule_input.enqueue_resize(geometry);
             let notification_delivered = should_notify && commands.send(Command::Resize).is_ok();
             if let Some(observation) = &self.runtime_observation {
                 observation.resize_requested(notification_delivered, !should_notify);
@@ -483,9 +424,7 @@ impl TerminalSession {
 
     pub(crate) fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
         if let Some(commands) = &self.commands
-            && self
-                .find_queries
-                .replace(FindQueryUpdate::Set(generation, query))
+            && self.schedule_input.enqueue_find_query(generation, query)
             && commands.send(Command::FindQueryChanged).is_err()
         {
             eprintln!("terminal Find query was dropped because the worker has stopped");
@@ -504,7 +443,7 @@ impl TerminalSession {
 
     pub(crate) fn end_find(&self, generation: FindQueryGeneration) {
         if let Some(commands) = &self.commands
-            && self.find_queries.replace(FindQueryUpdate::End(generation))
+            && self.schedule_input.enqueue_find_end(generation)
             && commands.send(Command::FindQueryChanged).is_err()
         {
             eprintln!("terminal Find close was dropped because the worker has stopped");
@@ -833,8 +772,6 @@ struct TerminalWorker {
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
-    resizes: ResizeMailbox,
-    find_queries: FindQueryMailbox,
     pending_command: Option<Command>,
     terminal_input_focused: bool,
     focus_reporting_enabled: bool,
@@ -856,11 +793,6 @@ struct TerminalWorkerContext {
     fallback_title: String,
     terminal_name: &'static str,
     osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-}
-
-struct TerminalWorkerMailboxes {
-    resizes: ResizeMailbox,
-    find_queries: FindQueryMailbox,
 }
 
 struct TerminalWorkerPublishers {
@@ -988,7 +920,7 @@ impl TerminalWorker {
         context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
-        mailboxes: TerminalWorkerMailboxes,
+        schedule_input: ScheduleInput,
         publishers: TerminalWorkerPublishers,
         startup: StartupReporter,
     ) {
@@ -1000,10 +932,6 @@ impl TerminalWorker {
             osc52_clipboard_factory,
             local_filesystem,
         } = context;
-        let TerminalWorkerMailboxes {
-            resizes,
-            find_queries,
-        } = mailboxes;
         let TerminalWorkerPublishers {
             events,
             accessibility,
@@ -1038,13 +966,11 @@ impl TerminalWorker {
             reader_events: reader_event_rx,
             events,
             accessibility,
-            resizes,
-            find_queries,
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            schedules: WorkerSchedules::new(Instant::now()),
+            schedules: WorkerSchedules::new(Instant::now(), schedule_input),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: osc52_clipboard_factory.create(),
@@ -1084,22 +1010,22 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
-        if self.schedules.accessibility_continuation.must_continue() {
+        if self.schedules.must_continue_accessibility() {
             return self.take_accessibility_continuation();
         }
         if let Some(command) = self.pending_command.take() {
             return Some(self.note_normal_command(command));
         }
-        if !self.schedules.osc52_authorization.is_pending()
+        if !self.schedules.osc52_pending()
             && (!self.deferred_osc52_effects.is_empty() || !self.deferred_output_chunks.is_empty())
         {
             return Some(self.note_normal_command(Command::ResumeOsc52Output));
         }
-        if !self.schedules.osc52_authorization.is_pending() && self.deferred_reader_ready {
+        if !self.schedules.osc52_pending() && self.deferred_reader_ready {
             self.deferred_reader_ready = false;
             return Some(self.note_normal_command(Command::ReaderReady));
         }
-        if self.schedules.accessibility_continuation.pending {
+        if self.schedules.accessibility_pending() {
             return match self.commands.try_recv() {
                 Ok(command) => Some(self.note_normal_command(command)),
                 Err(mpsc::TryRecvError::Empty) => self.take_accessibility_continuation(),
@@ -1135,17 +1061,14 @@ impl TerminalWorker {
 
     fn note_normal_command(&mut self, command: Command) -> Command {
         if !matches!(&command, Command::AccessibilityContinue) {
-            self.schedules
-                .accessibility_continuation
-                .note_normal_command();
+            self.schedules.note_normal_command();
         }
         command
     }
 
     fn take_accessibility_continuation(&mut self) -> Option<Command> {
         self.schedules
-            .accessibility_continuation
-            .take()
+            .take_accessibility_continuation()
             .then_some(Command::AccessibilityContinue)
     }
 
@@ -1153,13 +1076,13 @@ impl TerminalWorker {
         match command {
             Command::Key(input) => self.process_key(input),
             Command::Focus(focused) => self.process_focus(focused),
-            Command::ReaderReady if self.schedules.osc52_authorization.is_pending() => {
+            Command::ReaderReady if self.schedules.osc52_pending() => {
                 self.deferred_reader_ready = true;
                 true
             }
             Command::ReaderReady => self.process_reader_events(),
             Command::Resize => {
-                let Some(geometry) = self.resizes.take() else {
+                let Some(geometry) = self.schedules.take_resize() else {
                     return true;
                 };
                 let result = self
@@ -1225,7 +1148,7 @@ impl TerminalWorker {
                 self.apply_emulator_action(action)
             }
             Command::FindQueryChanged => {
-                let Some(update) = self.find_queries.take() else {
+                let Some(update) = self.schedules.take_find_query() else {
                     return true;
                 };
                 let action = match update {
@@ -1314,8 +1237,7 @@ impl TerminalWorker {
             Command::PollHiddenInput => {
                 if let Some(active) = self
                     .schedules
-                    .hidden_input
-                    .update(Instant::now(), self.native_pty.hidden_input())
+                    .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
                 {
                     send_session_event(
                         &self.events,
@@ -1359,8 +1281,7 @@ impl TerminalWorker {
         if payload.requires_confirmation(bracketed_paste) {
             let outcome = self
                 .schedules
-                .paste_confirmations
-                .create(payload, Instant::now())
+                .request_paste_confirmation(payload, Instant::now())
                 .map(PasteRequestOutcome::ConfirmationRequired)
                 .unwrap_or(PasteRequestOutcome::Rejected(
                     PasteRejection::ConfirmationPending,
@@ -1378,7 +1299,10 @@ impl TerminalWorker {
         decision: PasteDecision,
         reply: async_channel::Sender<Result<PasteResolution, String>>,
     ) -> bool {
-        let Some(payload) = self.schedules.paste_confirmations.take(id, Instant::now()) else {
+        let Some(payload) = self
+            .schedules
+            .resolve_paste_confirmation(id, Instant::now())
+        else {
             let _ = reply.try_send(Ok(PasteResolution::Stale));
             return true;
         };
@@ -1428,7 +1352,7 @@ impl TerminalWorker {
     fn refresh_selection_autoscroll(&mut self) -> bool {
         match self.emulator.selection_autoscroll_interval() {
             Ok(interval) => {
-                self.schedules.selection_autoscroll.update(
+                self.schedules.update_selection_autoscroll(
                     Instant::now(),
                     interval,
                     self.emulator.presentation_generation(),
@@ -1558,8 +1482,7 @@ impl TerminalWorker {
                         Osc52AccessPolicy::Ask => {
                             let Some(request) = self
                                 .schedules
-                                .osc52_authorization
-                                .create(operation, Instant::now())
+                                .request_osc52_authorization(operation, Instant::now())
                             else {
                                 continue;
                             };
@@ -1621,7 +1544,10 @@ impl TerminalWorker {
         id: Osc52AuthorizationId,
         decision: Osc52AuthorizationDecision,
     ) -> bool {
-        let Some(operation) = self.schedules.osc52_authorization.take(id, Instant::now()) else {
+        let Some(operation) = self
+            .schedules
+            .resolve_osc52_authorization(id, Instant::now())
+        else {
             return true;
         };
         if decision == Osc52AuthorizationDecision::Allow && !self.perform_osc52_operation(operation)
@@ -1675,8 +1601,7 @@ impl TerminalWorker {
         }
 
         if !focused {
-            self.schedules.paste_confirmations.cancel();
-            self.schedules.osc52_authorization.cancel();
+            self.schedules.cancel_authorizations();
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
@@ -1793,7 +1718,7 @@ impl TerminalWorker {
                     return false;
                 }
             };
-        self.schedules.accessibility_continuation.update(more);
+        self.schedules.update_accessibility(more);
         if let Some(accessibility) = accessibility {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
@@ -1843,7 +1768,6 @@ impl TerminalWorker {
             commands: _commands,
             reader_events,
             events: _events,
-            resizes: _resizes,
             pending_command: _pending_command,
             terminal_input_focused: _terminal_input_focused,
             focus_reporting_enabled: _focus_reporting_enabled,
@@ -2154,50 +2078,6 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_continuation_runs_after_eight_normal_commands() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-
-        for command in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
-            assert!(!schedule.must_continue());
-            schedule.note_normal_command();
-            assert_eq!(
-                schedule.must_continue(),
-                command + 1 == ACCESSIBILITY_NORMAL_COMMAND_BURST
-            );
-        }
-
-        assert!(schedule.take());
-        assert!(!schedule.pending);
-        assert_eq!(schedule.normal_commands, 0);
-    }
-
-    #[test]
-    fn accessibility_continuation_is_cancelled_by_a_complete_update() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-        schedule.note_normal_command();
-        schedule.update(false);
-
-        assert!(!schedule.pending);
-        assert!(!schedule.must_continue());
-        assert!(!schedule.take());
-    }
-
-    #[test]
-    fn repeated_incomplete_observations_do_not_starve_continuation_fairness() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-
-        for _ in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
-            schedule.note_normal_command();
-            schedule.update(true);
-        }
-
-        assert!(schedule.must_continue());
-    }
-
-    #[test]
     fn bounded_accessibility_lane_retains_only_the_latest_snapshot() {
         let (sender, receiver) = async_channel::bounded(1);
         let first = Arc::new(TerminalAccessibilityModel::new(
@@ -2225,25 +2105,6 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
-    #[test]
-    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
-        let start = Instant::now();
-        let mut schedule = HiddenInputSchedule::new(start);
-
-        assert_eq!(schedule.update(start, Ok(false)), None);
-        assert_eq!(schedule.update(start, Ok(true)), Some(true));
-        assert_eq!(schedule.update(start, Ok(true)), None);
-        assert_eq!(
-            schedule.update(
-                start,
-                Err(NativePtyOperationFailure::new(
-                    "descriptor closed".to_owned()
-                ))
-            ),
-            Some(false)
-        );
-        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_POLL_INTERVAL);
-    }
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
 
@@ -2712,13 +2573,11 @@ mod tests {
             reader_events: reader_event_rx,
             events,
             accessibility,
-            resizes: ResizeMailbox::default(),
-            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            schedules: WorkerSchedules::new(Instant::now()),
+            schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: policy,
             osc52_clipboard: Box::new(clipboard),
@@ -2798,7 +2657,7 @@ mod tests {
         );
         assert!(clipboard.snapshot().writes.is_empty());
         assert!(records.snapshot().written.is_empty());
-        assert!(worker.schedules.osc52_authorization.is_pending());
+        assert!(worker.schedules.osc52_pending());
 
         assert!(worker.process_osc52_authorization(request.id, Osc52AuthorizationDecision::Allow,));
         assert_eq!(
@@ -2849,16 +2708,15 @@ mod tests {
                     assert!(worker.process_command(Command::Focus(false)));
                 }
                 Cancellation::Timeout => {
-                    let deadline = worker.schedules.osc52_authorization.deadline().unwrap();
-                    let expired = worker
+                    let command = worker
                         .schedules
-                        .osc52_authorization
-                        .expire(deadline)
+                        .take_due(Instant::now() + Duration::from_secs(31))
                         .unwrap();
-                    assert!(worker.process_command(Command::Osc52AuthorizationExpired(expired)));
+                    assert!(matches!(command, Command::Osc52AuthorizationExpired(_)));
+                    assert!(worker.process_command(command));
                 }
             }
-            assert!(!worker.schedules.osc52_authorization.is_pending());
+            assert!(!worker.schedules.osc52_pending());
             assert!(worker.process_command(Command::ResolveOsc52Authorization(
                 request.id,
                 Osc52AuthorizationDecision::Allow,
@@ -2888,7 +2746,7 @@ mod tests {
             events.try_recv(),
             Ok(SessionEvent::Osc52Authorization(_))
         ));
-        assert!(worker.schedules.osc52_authorization.is_pending());
+        assert!(worker.schedules.osc52_pending());
         assert!(!worker.process_command(Command::Shutdown));
         worker.finish();
 
@@ -3804,13 +3662,11 @@ mod tests {
             reader_events: reader_event_rx,
             events,
             accessibility,
-            resizes: ResizeMailbox::default(),
-            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            schedules: WorkerSchedules::new(Instant::now()),
+            schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
@@ -3849,13 +3705,11 @@ mod tests {
             reader_events: reader_event_rx,
             events,
             accessibility,
-            resizes: ResizeMailbox::default(),
-            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            schedules: WorkerSchedules::new(Instant::now()),
+            schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
@@ -4188,13 +4042,13 @@ mod tests {
     #[test]
     fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geometry() {
         let (commands, receiver) = mpsc::channel();
-        let resizes = ResizeMailbox::default();
+        let schedule_input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
             native_pty_close: None,
-            resizes: resizes.clone(),
-            find_queries: FindQueryMailbox::default(),
+            schedule_input,
             runtime_observation: None,
         };
         let pixel_only = TerminalGeometry::from_grid(
@@ -4211,7 +4065,7 @@ mod tests {
             (
                 matches!(receiver.try_recv(), Ok(Command::Resize)),
                 receiver.try_recv().is_err(),
-                resizes.take(),
+                schedules.take_resize(),
             ),
             (true, true, Some(latest))
         );
@@ -4221,13 +4075,13 @@ mod tests {
     #[test]
     fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_query() {
         let (commands, receiver) = mpsc::channel();
-        let find_queries = FindQueryMailbox::default();
+        let schedule_input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
             native_pty_close: None,
-            resizes: ResizeMailbox::default(),
-            find_queries: find_queries.clone(),
+            schedule_input,
             runtime_observation: None,
         };
 
@@ -4236,7 +4090,7 @@ mod tests {
 
         assert!(matches!(receiver.try_recv(), Ok(Command::FindQueryChanged)));
         assert!(matches!(
-            find_queries.take(),
+            schedules.take_find_query(),
             Some(FindQueryUpdate::Set(generation, query))
                 if generation == FindQueryGeneration::test(2) && query == "needle"
         ));
@@ -4250,13 +4104,13 @@ mod tests {
     #[test]
     fn find_close_should_supersede_a_pending_query_update() {
         let (commands, receiver) = mpsc::channel();
-        let find_queries = FindQueryMailbox::default();
+        let schedule_input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
             native_pty_close: None,
-            resizes: ResizeMailbox::default(),
-            find_queries: find_queries.clone(),
+            schedule_input,
             runtime_observation: None,
         };
 
@@ -4265,7 +4119,7 @@ mod tests {
 
         assert!(matches!(receiver.try_recv(), Ok(Command::FindQueryChanged)));
         assert!(matches!(
-            find_queries.take(),
+            schedules.take_find_query(),
             Some(FindQueryUpdate::End(generation))
                 if generation == FindQueryGeneration::test(2)
         ));
@@ -4841,8 +4695,7 @@ mod tests {
             commands: Some(commands),
             worker: None,
             native_pty_close: None,
-            resizes: ResizeMailbox::default(),
-            find_queries: FindQueryMailbox::default(),
+            schedule_input: ScheduleInput::default(),
             runtime_observation: None,
         };
         let handle: &dyn TerminalSessionHandle = &session;
@@ -4898,8 +4751,7 @@ mod tests {
             commands: None,
             worker: None,
             native_pty_close: None,
-            resizes: ResizeMailbox::default(),
-            find_queries: FindQueryMailbox::default(),
+            schedule_input: ScheduleInput::default(),
             runtime_observation: None,
         };
 
@@ -4907,26 +4759,6 @@ mod tests {
             session.copy_selection(),
             Err(SelectionCopyError::WorkerStopped)
         );
-    }
-
-    #[test]
-    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
-        let epoch = Instant::now();
-        let generation = PresentationGeneration::default();
-        let mut schedule = SelectionAutoscrollSchedule::default();
-
-        schedule.update(epoch, Some(Duration::from_millis(100)), generation);
-
-        assert_eq!(schedule.take_due(epoch + Duration::from_millis(99)), None);
-        assert_eq!(
-            schedule.take_due(epoch + Duration::from_millis(100)),
-            Some(generation)
-        );
-        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
-
-        schedule.update(epoch, Some(Duration::from_millis(25)), generation);
-        schedule.update(epoch, None, generation);
-        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
     }
 
     #[test]

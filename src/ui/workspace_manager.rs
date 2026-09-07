@@ -1717,8 +1717,9 @@ impl WorkspaceManager {
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         }
+        let blocker = self.non_modal_terminal_focus_blocker(window, cx);
         next_manager.update(cx, |manager, cx| {
-            manager.set_parent_focus_blocker(Some(TerminalFocusBlocker::CommandPalette), cx);
+            manager.set_parent_focus_blocker(blocker, cx);
             manager.activate(window, cx);
         });
     }
@@ -2962,12 +2963,12 @@ impl WorkspaceManager {
         &mut self,
         workspace_id: WorkspaceId,
         event: MenuLifecycleEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let blocker = match event {
+        match event {
             MenuLifecycleEvent::Opened => {
                 self.workspace_menu = Some(WorkspaceMenuState { workspace_id });
-                Some(TerminalFocusBlocker::ContextMenu)
             }
             MenuLifecycleEvent::Closed(_)
                 if self
@@ -2975,20 +2976,10 @@ impl WorkspaceManager {
                     .is_some_and(|menu| menu.workspace_id == workspace_id) =>
             {
                 self.workspace_menu = None;
-                Some(if self.rename.is_some() {
-                    TerminalFocusBlocker::RenameField
-                } else {
-                    TerminalFocusBlocker::Sidebar
-                })
             }
             MenuLifecycleEvent::Closed(_) => return,
-        };
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .update(cx, |manager, cx| {
-                manager.set_parent_focus_blocker(blocker, cx);
-            });
+        }
+        self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
@@ -3474,6 +3465,7 @@ impl WorkspaceManager {
         row: WorkspaceRowViewModel,
         manager: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
+        window: &Window,
     ) -> AnyElement {
         let WorkspaceRowViewModel {
             workspace_id,
@@ -3743,6 +3735,7 @@ impl WorkspaceManager {
 
         let open_manager = manager.clone();
         let lifecycle_manager = manager.clone();
+        let lifecycle_window = window.window_handle();
         let activate_manager = manager;
         div()
             .id(("workspace-menu", workspace_id.get()))
@@ -3766,8 +3759,21 @@ impl WorkspaceManager {
                         .unwrap_or(false)
                 })
                 .on_lifecycle(move |event, cx| {
-                    let _ = lifecycle_manager.update(cx, |manager, cx| {
-                        manager.handle_workspace_menu_lifecycle(workspace_id, *event, cx);
+                    let manager = lifecycle_manager.clone();
+                    let event = *event;
+                    // Menu lifecycle delivery can occur while its Window is borrowed.
+                    // Resolve ownership after that delivery, using the current Window facts.
+                    cx.defer(move |cx| {
+                        let _ = lifecycle_window.update(cx, |_, window, cx| {
+                            let _ = manager.update(cx, |manager, cx| {
+                                manager.handle_workspace_menu_lifecycle(
+                                    workspace_id,
+                                    event,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        });
                     });
                 })
                 .on_activate(move |activation, window, cx| {
@@ -3780,7 +3786,7 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_sidebar(&self, manager: WeakEntity<Self>, cx: &App) -> AnyElement {
+    fn render_sidebar(&self, manager: WeakEntity<Self>, window: &Window, cx: &App) -> AnyElement {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let shortcuts = workspace_surface_presentation(presentation);
         let scroll_manager = manager.clone();
@@ -3835,6 +3841,7 @@ impl WorkspaceManager {
                     },
                     manager.clone(),
                     presentation,
+                    window,
                 ),
             );
         }
@@ -4108,7 +4115,7 @@ impl Render for WorkspaceManager {
             .children(self.remote_workspace_flow.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone()))
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(manager.clone(), cx))
+                root.child(self.render_sidebar(manager.clone(), window, cx))
             })
             .child(self.render_sidebar_resize_handle(manager));
         let content = content
@@ -9893,6 +9900,43 @@ mod tests {
             )
         });
         assert_eq!(dismissed, (None, true, Some(TerminalFocusBlocker::Sidebar)));
+    }
+
+    #[gpui::test]
+    fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let workspace_id = manager.workspaces.active_workspace_id();
+                for resizing in [true, false] {
+                    manager.sidebar_resize_interaction = resizing;
+                    manager.handle_workspace_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Opened,
+                        window,
+                        cx,
+                    );
+                    manager.handle_workspace_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(
+                        manager
+                            .workspaces
+                            .active_workspace()
+                            .payload()
+                            .read(cx)
+                            .focused_terminal_has_input_focus(window, cx),
+                        !resizing,
+                        "menu closure must immediately preserve only remaining owners"
+                    );
+                }
+            });
+        });
     }
 
     #[gpui::test]

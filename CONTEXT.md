@@ -1533,7 +1533,10 @@ remains a distinct outgoing formatted value, never an insertion authorization.
 
 The Terminal Session's private `launch` Module owns Local and Remote launch descriptions, channel
 consumption, process preparation, and the common production worker handoff. Its private `schedules`
-Module owns deadline arbitration and worker schedule state. Pointer and wheel values belong to the
+Module owns resize/Find coalescing, deadline arbitration, and worker schedule state. A cloned input
+handle enqueues coalesced updates; the worker consumes them through the schedule owner. Schedule
+fields stay private, including authorization cancellation and accessibility fairness state. Pointer
+and wheel values belong to the
 lower `pointer_input` Module shared by Session and Emulator, so the Emulator does not import the
 Session Interface. These changes add no platform capability or new Adapter.
 

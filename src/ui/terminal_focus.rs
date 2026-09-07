@@ -176,6 +176,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closing_a_workspace_menu_preserves_other_owners_and_does_not_invent_sidebar_focus() {
+        let mut owners = WorkspaceFocusOwners {
+            search: true,
+            context_menu: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(owners),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+        owners = WorkspaceFocusOwners {
+            search: true,
+            context_menu: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(owners),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners::default()),
+            None
+        );
+    }
+
+    #[test]
     fn nested_ownership_preserves_blocking_until_every_owner_releases() {
         let workspace = TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
             search: true,

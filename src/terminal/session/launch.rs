@@ -344,10 +344,8 @@ impl TerminalSession {
     ) -> Result<StartedSession, SessionError> {
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
-        let resizes = ResizeMailbox::default();
-        let worker_resizes = resizes.clone();
-        let find_queries = FindQueryMailbox::default();
-        let worker_find_queries = find_queries.clone();
+        let schedule_input = ScheduleInput::default();
+        let worker_schedule_input = schedule_input.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let native_pty_close = NativePtyCloseHandle::default();
@@ -396,10 +394,7 @@ impl TerminalSession {
                     },
                     command_rx,
                     reader_transport,
-                    TerminalWorkerMailboxes {
-                        resizes: worker_resizes,
-                        find_queries: worker_find_queries,
-                    },
+                    worker_schedule_input,
                     TerminalWorkerPublishers {
                         events: event_tx,
                         accessibility: accessibility_tx,
@@ -415,8 +410,7 @@ impl TerminalSession {
                 commands: Some(command_tx),
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
-                resizes,
-                find_queries,
+                schedule_input,
                 runtime_observation,
             },
             event_rx,
@@ -455,10 +449,8 @@ impl TerminalSession {
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
-        let resizes = ResizeMailbox::default();
-        let worker_resizes = resizes.clone();
-        let find_queries = FindQueryMailbox::default();
-        let worker_find_queries = find_queries.clone();
+        let schedule_input = ScheduleInput::default();
+        let worker_schedule_input = schedule_input.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -475,10 +467,7 @@ impl TerminalSession {
                     },
                     command_rx,
                     reader_transport,
-                    TerminalWorkerMailboxes {
-                        resizes: worker_resizes,
-                        find_queries: worker_find_queries,
-                    },
+                    worker_schedule_input,
                     TerminalWorkerPublishers {
                         events: event_tx,
                         accessibility: accessibility_tx,
@@ -495,8 +484,7 @@ impl TerminalSession {
                     commands: Some(command_tx),
                     worker: Some(worker),
                     native_pty_close: Some(native_pty_close),
-                    resizes,
-                    find_queries,
+                    schedule_input,
                     runtime_observation: None,
                 },
                 event_rx,
