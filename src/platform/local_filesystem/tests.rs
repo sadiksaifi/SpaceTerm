@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 impl LocalFilesystemAuthority {
     pub(crate) fn testing() -> Self {
-        Self::new(Arc::new(FixtureIdentities))
+        Self::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            Arc::new(FixtureIdentities),
+        )
     }
 
     pub(crate) fn testing_without_access() -> Self {
@@ -14,7 +17,10 @@ impl LocalFilesystemAuthority {
                 panic!("this context has no local filesystem authority")
             }
         }
-        Self::new(Arc::new(NoAccess))
+        Self::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            Arc::new(NoAccess),
+        )
     }
 
     pub(crate) fn testing_with_failure(error: LocalFilesystemError) -> Self {
@@ -24,7 +30,10 @@ impl LocalFilesystemAuthority {
                 Err(self.0)
             }
         }
-        Self::new(Arc::new(Unavailable(error)))
+        Self::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            Arc::new(Unavailable(error)),
+        )
     }
 
     pub(crate) fn same_source(&self, other: &Self) -> bool {
@@ -113,7 +122,8 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
         observation(1, LocalObjectKind::Directory),
         observation(2, LocalObjectKind::Directory),
     ]))));
-    let authority = LocalFilesystemAuthority::new(source.clone());
+    let authority =
+        LocalFilesystemAuthority::new(crate::local_path::LocalPathSemantics::Posix, source.clone());
     assert_eq!(
         authority.validate_workspace_directory(&root.0),
         Err(LocalFilesystemError::IdentityChanged)
@@ -124,10 +134,12 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
 #[test]
 fn identity_failures_remain_closed_and_do_not_fall_back_to_path_equality() {
     let root = Fixture::new();
-    let authority =
-        LocalFilesystemAuthority::new(Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([
-            Err(LocalFilesystemError::PermissionDenied),
-        ])))));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([Err(
+            LocalFilesystemError::PermissionDenied,
+        )])))),
+    );
     assert_eq!(
         authority.validate_workspace_directory(&root.0),
         Err(LocalFilesystemError::PermissionDenied)

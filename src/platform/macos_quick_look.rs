@@ -6,14 +6,14 @@ use cocoa::base::{NO, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use objc::{class, msg_send, sel, sel_impl};
 
-use crate::terminal::native_services::quick_look::{
-    QuickLookError, QuickLookFactory, QuickLookPanel,
+use crate::terminal::native_services::file_preview::{
+    FilePreviewError, FilePreviewFactory, FilePreviewPanel,
 };
 
 pub(crate) struct MacosQuickLookFactory;
 
-impl QuickLookFactory for MacosQuickLookFactory {
-    fn create(&self) -> Box<dyn QuickLookPanel> {
+impl FilePreviewFactory for MacosQuickLookFactory {
+    fn create(&self) -> Box<dyn FilePreviewPanel> {
         Box::<NativeQuickLookPanel>::default()
     }
 }
@@ -24,12 +24,12 @@ struct NativeQuickLookPanel {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl QuickLookPanel for NativeQuickLookPanel {
-    fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError> {
+impl FilePreviewPanel for NativeQuickLookPanel {
+    fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
         if !main_thread() {
-            return Err(QuickLookError::OffMainThread);
+            return Err(FilePreviewError::OffMainThread);
         }
-        let path = path.to_str().ok_or(QuickLookError::StaleTarget)?;
+        let path = path.to_str().ok_or(FilePreviewError::StaleTarget)?;
 
         // SAFETY: Callers must invoke this adapter from GPUI's AppKit thread. The explicit
         // assertion above enforces that boundary, and the URL is retained by the owned
@@ -41,7 +41,7 @@ impl QuickLookPanel for NativeQuickLookPanel {
                 let string = NSString::alloc(nil).init_str(path).autorelease();
                 let url: id = msg_send![class!(NSURL), fileURLWithPath: string isDirectory: NO];
                 if url == nil {
-                    return Err(QuickLookError::PlatformUnavailable);
+                    return Err(FilePreviewError::PlatformUnavailable);
                 }
                 let window = OwnedQuickLookWindow::new()?;
                 let _: () = msg_send![window.preview, setPreviewItem: url];
@@ -87,7 +87,7 @@ struct OwnedQuickLookWindow {
 }
 
 impl OwnedQuickLookWindow {
-    unsafe fn new() -> Result<Self, QuickLookError> {
+    unsafe fn new() -> Result<Self, FilePreviewError> {
         const NS_WINDOW_STYLE_MASK_TITLED: usize = 1 << 0;
         const NS_WINDOW_STYLE_MASK_CLOSABLE: usize = 1 << 1;
         const NS_WINDOW_STYLE_MASK_RESIZABLE: usize = 1 << 3;
@@ -113,7 +113,7 @@ impl OwnedQuickLookWindow {
             ]
         };
         if panel == nil {
-            return Err(QuickLookError::PlatformUnavailable);
+            return Err(FilePreviewError::PlatformUnavailable);
         }
 
         // SAFETY: QLPreviewView's designated initializer takes NSRect and NSUInteger on macOS.
@@ -126,7 +126,7 @@ impl OwnedQuickLookWindow {
             unsafe {
                 let _: () = msg_send![panel, release];
             }
-            return Err(QuickLookError::PlatformUnavailable);
+            return Err(FilePreviewError::PlatformUnavailable);
         }
 
         // SAFETY: The panel retains its content view. The view closes and releases its asynchronous

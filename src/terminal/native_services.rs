@@ -3,10 +3,10 @@
 //! irreducible capability independently; this value is wiring, not a platform API.
 pub(crate) mod clipboard;
 pub(crate) mod file_insertion;
+pub(crate) mod file_preview;
 pub(crate) mod hyperlink;
 pub(crate) mod osc52;
 pub(crate) mod paste;
-pub(crate) mod quick_look;
 pub(crate) mod selection;
 pub(crate) mod services;
 #[cfg(test)]
@@ -15,8 +15,9 @@ pub(crate) mod testing;
 #[derive(Clone)]
 pub(crate) struct NativeServiceAdapters {
     pub(crate) selection_clipboard: std::rc::Rc<dyn clipboard::SelectionClipboard>,
+    pub(crate) file_insertion: file_insertion::FileInsertionPolicy,
     pub(crate) file_clipboard: std::rc::Rc<dyn clipboard::FileClipboard>,
-    pub(crate) quick_look: std::rc::Rc<dyn quick_look::QuickLookFactory>,
+    pub(crate) file_preview: std::rc::Rc<dyn file_preview::FilePreviewFactory>,
 }
 
 use std::path::PathBuf;
@@ -33,7 +34,7 @@ use super::selection::SelectionCopy;
 pub(crate) struct NativeContextActions {
     pub(crate) copy: bool,
     pub(crate) open_link: bool,
-    pub(crate) quick_look: bool,
+    pub(crate) file_preview: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,7 +43,7 @@ pub(crate) struct TerminalContextMenuState {
     pub(crate) position: crate::terminal::SurfacePosition,
     pub(crate) link: Option<crate::terminal::HyperlinkTarget>,
     pub(crate) selection_present: bool,
-    pub(crate) quick_look_eligible: bool,
+    pub(crate) file_preview_eligible: bool,
 }
 
 impl TerminalContextMenuState {
@@ -64,7 +65,7 @@ impl TerminalContextMenuState {
             self.generation == generation && self.selection_present && selection_present,
             link,
         );
-        actions.quick_look &= self.quick_look_eligible;
+        actions.file_preview &= self.file_preview_eligible;
         actions
     }
 }
@@ -168,7 +169,7 @@ impl NativeContextActions {
         Self {
             copy: selection_present,
             open_link: link.is_some(),
-            quick_look: local_file_capabilities.are_enabled()
+            file_preview: local_file_capabilities.are_enabled()
                 && link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
@@ -210,6 +211,7 @@ impl NativeInsertion {
     }
 
     pub(crate) fn dropped_files(
+        policy: file_insertion::FileInsertionPolicy,
         paths: &[PathBuf],
         terminal_input_focused: bool,
         local_file_capabilities: TerminalLocalFileCapabilities,
@@ -217,18 +219,19 @@ impl NativeInsertion {
         if !terminal_input_focused {
             return Err(NativeInsertionError::TerminalUnfocused);
         }
-        Self::prepare_dropped_files(paths, local_file_capabilities)
+        Self::prepare_dropped_files(policy, paths, local_file_capabilities)
             .map_err(NativeInsertionError::InvalidFiles)
     }
 
     pub(crate) fn prepare_dropped_files(
+        policy: file_insertion::FileInsertionPolicy,
         paths: &[PathBuf],
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Result<Self, &'static str> {
         if !local_file_capabilities.are_enabled() {
             return Err("local file insertion is disabled for this Terminal Session");
         }
-        prepare_file_insertion(paths).map(|insertion| Self {
+        prepare_file_insertion(policy, paths).map(|insertion| Self {
             text: insertion.text,
         })
     }
@@ -244,12 +247,12 @@ impl NativeInsertion {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 
-pub(crate) struct QuickLookTarget {
+pub(crate) struct FilePreviewTarget {
     link: HyperlinkTarget,
     local_file_capabilities: TerminalLocalFileCapabilities,
 }
 
-impl QuickLookTarget {
+impl FilePreviewTarget {
     pub(crate) fn from_link(
         link: &HyperlinkTarget,
         local_file_capabilities: TerminalLocalFileCapabilities,
@@ -337,7 +340,7 @@ mod tests {
             NativeContextActions {
                 copy: true,
                 open_link: true,
-                quick_look: false,
+                file_preview: false,
             }
         );
         assert_eq!(
@@ -355,9 +358,14 @@ mod tests {
             "printf 'ok'\n"
         );
         assert_eq!(
-            NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true, LOCAL_FILES)
-                .unwrap()
-                .text(),
+            NativeInsertion::dropped_files(
+                crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+                &[PathBuf::from("/tmp/a b")],
+                true,
+                LOCAL_FILES
+            )
+            .unwrap()
+            .text(),
             "'/tmp/a b'"
         );
         assert_eq!(
@@ -365,8 +373,13 @@ mod tests {
             Err(NativeInsertionError::TerminalUnfocused)
         );
         assert!(
-            NativeInsertion::dropped_files(&[PathBuf::from("relative")], true, LOCAL_FILES)
-                .is_err()
+            NativeInsertion::dropped_files(
+                crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+                &[PathBuf::from("relative")],
+                true,
+                LOCAL_FILES
+            )
+            .is_err()
         );
     }
 
@@ -388,15 +401,15 @@ mod tests {
             NativeContextActions {
                 copy: true,
                 open_link: false,
-                quick_look: false,
+                file_preview: false,
             }
         );
     }
 
     #[test]
-    fn quick_look_accepts_only_existing_validated_local_files() {
+    fn file_preview_accepts_only_existing_validated_local_files() {
         let directory =
-            std::env::temp_dir().join(format!("spaceterm-quick-look-{}", std::process::id()));
+            std::env::temp_dir().join(format!("spaceterm-file-preview-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
@@ -410,11 +423,11 @@ mod tests {
         .unwrap();
         let url = HyperlinkTarget::url("https://example.test").unwrap();
         assert_eq!(
-            QuickLookTarget::from_link(&local, LOCAL_FILES)
+            FilePreviewTarget::from_link(&local, LOCAL_FILES)
                 .and_then(|target| target.revalidated_path()),
             Some(file.canonicalize().unwrap())
         );
-        assert!(QuickLookTarget::from_link(&url, LOCAL_FILES).is_none());
+        assert!(FilePreviewTarget::from_link(&url, LOCAL_FILES).is_none());
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -432,9 +445,9 @@ mod tests {
         fs::remove_file(file).unwrap();
 
         assert_eq!(local.activation_url(LOCAL_FILES), None);
-        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+        assert_eq!(FilePreviewTarget::from_link(&local, LOCAL_FILES), None);
         assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).file_preview);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -452,18 +465,26 @@ mod tests {
         let web = HyperlinkTarget::url("https://example.test").unwrap();
 
         assert_eq!(local.activation_url(REMOTE_FILES), None);
-        assert_eq!(QuickLookTarget::from_link(&local, REMOTE_FILES), None);
+        assert_eq!(FilePreviewTarget::from_link(&local, REMOTE_FILES), None);
         assert_eq!(
             NativeContextActions::from_presence(REMOTE_FILES, true, Some(&local)),
             NativeContextActions {
                 copy: true,
                 open_link: false,
-                quick_look: false,
+                file_preview: false,
             }
         );
         assert!(NativeContextActions::from_presence(REMOTE_FILES, false, Some(&web)).open_link);
         assert!(NativeInsertion::service_text("ordinary text", true).is_ok());
-        assert!(NativeInsertion::dropped_files(&[file], true, REMOTE_FILES).is_err());
+        assert!(
+            NativeInsertion::dropped_files(
+                crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+                &[file],
+                true,
+                REMOTE_FILES
+            )
+            .is_err()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
     mod macos_adapter_tests {

@@ -647,7 +647,7 @@ type StartedSession = (
 
 #[cfg(test)]
 fn test_launch_planner() -> ShellLaunchPlanner {
-    ShellLaunchPlanner::new(
+    ShellLaunchPlanner::for_test(
         "/fixture/zsh".into(),
         PathBuf::from("/fixture/missing-resources"),
     )
@@ -673,7 +673,11 @@ impl TerminalSession {
         local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
-        let metadata_context = TerminalMetadataContext::local(&initial_directory, local_hostname);
+        let metadata_context = TerminalMetadataContext::local(
+            local_filesystem.path_semantics(),
+            &initial_directory,
+            local_hostname,
+        );
         let launch_directory = working_directory.to_owned();
         Self::start_deferred_with_context(
             geometry,
@@ -743,8 +747,11 @@ impl TerminalSession {
         + 'static,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
-        let metadata_context =
-            TerminalMetadataContext::local(&initial_directory, Some("fixture.test"));
+        let metadata_context = TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            &initial_directory,
+            Some("fixture.test"),
+        );
         Self::start_deferred_with_context(
             geometry,
             metadata_context,
@@ -869,6 +876,7 @@ impl TerminalSession {
     ) -> Result<StartedSession, SessionError> {
         let worker_directory = working_directory.to_owned();
         let metadata_context = TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
             &worker_directory.to_string_lossy(),
             Some("fixture.test"),
         );
@@ -5552,7 +5560,9 @@ mod tests {
             start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, _events, _accessibility) = result.unwrap();
         let sender = session.accessibility_selection_sender().unwrap();
-        let model = TerminalAccessibilityModel::from_screen(&ScreenSnapshot::empty());
+        let model = TerminalAccessibilityModel::from_screen(&ScreenSnapshot::empty(
+            crate::local_path::LocalPathSemantics::Posix,
+        ));
         let request = model.selection_request(0..0).unwrap();
         session.shutdown_and_join();
         let writes = records.snapshot().written;

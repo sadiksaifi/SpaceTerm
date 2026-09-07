@@ -92,3 +92,58 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
     );
     fs::remove_dir_all(test_root).unwrap();
 }
+
+#[test]
+fn child_proxy_denial_never_searches_path_and_closes_the_real_ssh_transport() {
+    let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "spaceterm-proxy-denial-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let marker = root.join("executed");
+    for name in ["exit", "false", "exec"] {
+        let command = root.join(name);
+        fs::write(
+            &command,
+            format!("#!/bin/sh\nprintf compromised > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(command, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let context = SshCommandContext::new(
+        OpenSshExecutable::new("/usr/bin/ssh".into()).unwrap(),
+        root.join("config"),
+        SshDestination::new("unreachable.invalid".into()).unwrap(),
+        root.join("missing.sock"),
+    )
+    .unwrap();
+    let option = context
+        .child_arguments()
+        .into_iter()
+        .find(|argument| argument.to_string_lossy().starts_with("ProxyCommand="))
+        .unwrap();
+    let output = Command::new("/usr/bin/ssh")
+        .env_clear()
+        .env("PATH", &root)
+        .args([
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=1",
+            "-o",
+        ])
+        .arg(option)
+        .arg("unreachable.invalid")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        !marker.exists(),
+        "proxy denial executed a PATH-supplied command"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Connection closed"));
+    fs::remove_dir_all(root).unwrap();
+}

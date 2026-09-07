@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::shell_integration::{
-    ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, configured_mode,
+    ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy, ShellIntegrationStatus,
     plan_shell_integration,
 };
 use crate::ssh::command::SshCommandSpec;
@@ -50,21 +50,40 @@ const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
     "SPACETERM_ZSH_ZDOTDIR",
 ];
 
-/// Application composition supplies the selected shell and host resource location.
+/// Composition supplies the selected shell, resources, captured environment, and policy facts.
 #[derive(Clone)]
 pub(crate) struct ShellLaunchPlanner {
     shell: PathBuf,
     resources: PathBuf,
-    environment: Option<(ShellIntegrationMode, ShellEnvironment)>,
+    environment: (ShellIntegrationMode, ShellEnvironment),
+    policy: ShellIntegrationPolicy,
 }
 
 impl ShellLaunchPlanner {
-    pub(crate) fn new(shell: PathBuf, resources: PathBuf) -> Self {
+    pub(crate) fn new(
+        shell: PathBuf,
+        resources: PathBuf,
+        mode: ShellIntegrationMode,
+        inherited: ShellEnvironment,
+        policy: ShellIntegrationPolicy,
+    ) -> Self {
         Self {
             shell,
             resources,
-            environment: None,
+            environment: (mode, inherited),
+            policy,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(shell: PathBuf, resources: PathBuf) -> Self {
+        Self::new(
+            shell,
+            resources,
+            ShellIntegrationMode::Automatic,
+            ShellEnvironment::default(),
+            ShellIntegrationPolicy::fixture(),
+        )
     }
 
     #[cfg(test)]
@@ -73,7 +92,7 @@ impl ShellLaunchPlanner {
         mode: ShellIntegrationMode,
         inherited: ShellEnvironment,
     ) -> Self {
-        self.environment = Some((mode, inherited));
+        self.environment = (mode, inherited);
         self
     }
 
@@ -89,14 +108,7 @@ impl ShellLaunchPlanner {
         &self,
         working_directory: &Path,
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
-        if let Some((mode, inherited)) = &self.environment {
-            return self.local_with_environment(working_directory, *mode, inherited);
-        }
-        self.local_with_environment(
-            working_directory,
-            configured_mode(),
-            &ShellEnvironment::capture(),
-        )
+        self.local_with_environment(working_directory, self.environment.0, &self.environment.1)
     }
 
     fn local_with_environment(
@@ -106,7 +118,8 @@ impl ShellLaunchPlanner {
         inherited: &ShellEnvironment,
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
         validate_working_directory(working_directory)?;
-        let integration = plan_shell_integration(&self.shell, &self.resources, mode, inherited);
+        let integration =
+            plan_shell_integration(&self.shell, &self.resources, mode, inherited, &self.policy);
         let terminal_identity = identity::launch_identity(&self.resources);
         let mut arguments = integration.arguments;
         arguments.push(OsString::from("-l"));
@@ -222,13 +235,16 @@ impl PreparedShellLaunch {
 
     #[cfg(test)]
     pub(crate) fn for_test(working_directory: PathBuf) -> Self {
-        let mut launch = ShellLaunchPlanner::new("/bin/zsh".into(), "/missing-resources".into())
-            .local_with_environment(
-                &std::env::temp_dir(),
-                ShellIntegrationMode::Disabled,
-                &ShellEnvironment::default(),
-            )
-            .unwrap();
+        let mut launch = ShellLaunchPlanner::for_test(
+            "/fixture/zsh".into(),
+            "/fixture/missing-resources".into(),
+        )
+        .local_with_environment(
+            &std::env::temp_dir(),
+            ShellIntegrationMode::Disabled,
+            &ShellEnvironment::default(),
+        )
+        .unwrap();
         launch.working_directory = working_directory;
         launch
     }
@@ -297,9 +313,15 @@ mod tests {
             ("/bin/zsh", ShellKind::Zsh, vec!["-l"]),
         ] {
             let directory = std::env::temp_dir();
-            let launch = ShellLaunchPlanner::new(shell.into(), resources.path().to_path_buf())
-                .local_with_environment(&directory, ShellIntegrationMode::Automatic, &inherited)
-                .unwrap();
+            let launch = ShellLaunchPlanner::new(
+                shell.into(),
+                resources.path().to_path_buf(),
+                ShellIntegrationMode::Automatic,
+                inherited.clone(),
+                ShellIntegrationPolicy::fixture(),
+            )
+            .local(&directory)
+            .unwrap();
             assert_eq!(launch.executable(), OsStr::new(shell));
             assert_eq!(launch.arguments(), arguments);
             assert_eq!(launch.working_directory(), directory);
@@ -348,7 +370,7 @@ mod tests {
                 ShellIntegrationStatus::Disabled,
             ),
             (
-                "/bin/bash",
+                "/fixture/unsupported",
                 ShellIntegrationMode::Automatic,
                 resources.path().to_path_buf(),
                 ShellIntegrationStatus::Unsupported,
@@ -366,9 +388,15 @@ mod tests {
                 ShellIntegrationStatus::MissingResources,
             ),
         ] {
-            let launch = ShellLaunchPlanner::new(shell.into(), root)
-                .local_with_environment(&std::env::temp_dir(), mode, &ShellEnvironment::default())
-                .unwrap();
+            let launch = ShellLaunchPlanner::new(
+                shell.into(),
+                root,
+                mode,
+                ShellEnvironment::default(),
+                ShellIntegrationPolicy::fixture(),
+            )
+            .local(&std::env::temp_dir())
+            .unwrap();
             assert_eq!(launch.arguments(), ["-l"]);
             assert_eq!(launch.integration, Some(status));
             assert_eq!(
@@ -412,7 +440,7 @@ mod tests {
         let entry = root.join("terminfo/78/xterm-spaceterm");
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"compiled fixture").unwrap();
-        let planner = ShellLaunchPlanner::new("/fixture/zsh".into(), root.clone())
+        let planner = ShellLaunchPlanner::for_test("/fixture/zsh".into(), root.clone())
             .with_environment(ShellIntegrationMode::Automatic, ShellEnvironment::default());
         let launch = planner.local(&std::env::temp_dir()).unwrap();
         assert_eq!(
@@ -435,7 +463,7 @@ mod tests {
     #[test]
     fn launch_validation_preserves_spelling_and_redacts_missing_and_file_paths() {
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
-        let planner = ShellLaunchPlanner::new(
+        let planner = ShellLaunchPlanner::for_test(
             "/sensitive/shell/zsh".into(),
             resources.path().to_path_buf(),
         )

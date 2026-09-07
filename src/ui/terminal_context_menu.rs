@@ -8,11 +8,12 @@ use crate::terminal::NativeContextActions;
 pub(crate) enum TerminalContextMenuCommand {
     Copy,
     OpenLink,
-    QuickLook,
+    FilePreview,
 }
 
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
+    labels: crate::desktop_profile::FileInteractionLabels,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
     vec![
         menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy).shortcut("⌘C"),
@@ -22,9 +23,9 @@ pub(crate) fn terminal_context_menu_entries(
             actions.open_link,
         ),
         menu_entry(
-            TerminalContextMenuCommand::QuickLook,
-            "Quick Look",
-            actions.quick_look,
+            TerminalContextMenuCommand::FilePreview,
+            labels.file_preview,
+            actions.file_preview,
         ),
     ]
 }
@@ -33,7 +34,7 @@ fn command_icon(command: TerminalContextMenuCommand) -> IconName {
     match command {
         TerminalContextMenuCommand::Copy => IconName::Copy,
         TerminalContextMenuCommand::OpenLink => IconName::ExternalLink,
-        TerminalContextMenuCommand::QuickLook => IconName::Eye,
+        TerminalContextMenuCommand::FilePreview => IconName::Eye,
     }
 }
 
@@ -58,7 +59,7 @@ impl TerminalContextMenuCommand {
         match self {
             Self::Copy => "copy",
             Self::OpenLink => "open-link",
-            Self::QuickLook => "quick-look",
+            Self::FilePreview => "file-preview",
         }
     }
 }
@@ -78,7 +79,7 @@ mod tests {
             IconName::ExternalLink
         ));
         assert!(matches!(
-            command_icon(TerminalContextMenuCommand::QuickLook),
+            command_icon(TerminalContextMenuCommand::FilePreview),
             IconName::Eye
         ));
     }

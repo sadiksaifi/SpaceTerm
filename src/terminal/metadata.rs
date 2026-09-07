@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+use crate::local_path::LocalPathSemantics;
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
@@ -110,6 +111,7 @@ impl RemoteTerminalMetadataContext {
 /// only and disables every feature that would interpret them through the local filesystem.
 pub(crate) enum TerminalMetadataContext {
     Local {
+        paths: LocalPathSemantics,
         initial_directory: Arc<str>,
         local_hostname: Option<Arc<str>>,
     },
@@ -132,10 +134,42 @@ impl TerminalLocalFileCapabilities {
 }
 
 impl TerminalMetadataContext {
-    pub(crate) fn local(initial_directory: &str, local_hostname: Option<&str>) -> Self {
+    pub(crate) fn local(
+        paths: LocalPathSemantics,
+        initial_directory: &str,
+        local_hostname: Option<&str>,
+    ) -> Self {
         Self::Local {
+            paths,
             initial_directory: Arc::from(initial_directory),
             local_hostname: local_hostname.map(Arc::from),
+        }
+    }
+
+    pub(crate) const fn local_paths(&self) -> Option<LocalPathSemantics> {
+        match self {
+            Self::Local { paths, .. } => Some(*paths),
+            Self::Remote(_) => None,
+        }
+    }
+
+    pub(crate) fn local_directory(&self, directory: &str) -> Option<std::path::PathBuf> {
+        let paths = self.local_paths()?;
+        paths
+            .is_absolute(std::path::Path::new(directory))
+            .then(|| directory.into())
+    }
+
+    fn directory_basename(&self, directory: &str) -> Option<String> {
+        match self.local_paths() {
+            Some(paths) => paths.directory_basename(directory),
+            // Remote directory strings follow the remote POSIX shell protocol.
+            None => directory
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
         }
     }
 
@@ -195,13 +229,14 @@ pub(crate) struct MetadataTracker {
 
 impl MetadataTracker {
     pub(crate) fn new(
+        paths: LocalPathSemantics,
         initial_directory: &str,
         fallback_title: &str,
         local_hostname: Option<&str>,
         epoch: Instant,
     ) -> Self {
         Self::new_with_context(
-            TerminalMetadataContext::local(initial_directory, local_hostname),
+            TerminalMetadataContext::local(paths, initial_directory, local_hostname),
             fallback_title,
             epoch,
         )
@@ -243,7 +278,9 @@ impl MetadataTracker {
         let title = sanitize_title(title);
         let (value, provenance) = if title.is_empty() {
             (
-                directory_basename(&self.snapshot.directory.path)
+                self.snapshot
+                    .context
+                    .directory_basename(&self.snapshot.directory.path)
                     .unwrap_or_else(|| self.snapshot.title.value.to_string()),
                 TitleProvenance::WorkingDirectory,
             )
@@ -259,14 +296,15 @@ impl MetadataTracker {
     }
 
     pub(crate) fn set_reported_directory(&mut self, value: &str) -> bool {
-        let Some(directory) = parse_osc7_directory(value, self.snapshot.context.local_hostname())
-        else {
+        let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
         self.update(|snapshot| {
             snapshot.directory = directory;
             if snapshot.title.provenance != TitleProvenance::TerminalControl
-                && let Some(title) = directory_basename(&snapshot.directory.path)
+                && let Some(title) = snapshot
+                    .context
+                    .directory_basename(&snapshot.directory.path)
             {
                 snapshot.title = TitleMetadata {
                     value: Arc::from(title),
@@ -367,14 +405,6 @@ fn sanitize_bounded(value: &str, max_chars: usize) -> String {
         .to_owned()
 }
 
-fn directory_basename(path: &str) -> Option<String> {
-    path.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 pub(crate) fn sanitize_title(value: &str) -> String {
     value
         .chars()
@@ -390,7 +420,7 @@ pub(crate) fn sanitize_title(value: &str) -> String {
 
 pub(crate) fn parse_osc7_directory(
     value: &str,
-    local_hostname: Option<&str>,
+    context: &TerminalMetadataContext,
 ) -> Option<DirectoryMetadata> {
     let remainder = value
         .get(..7)?
@@ -400,7 +430,9 @@ pub(crate) fn parse_osc7_directory(
     let (authority, path) = remainder.split_at(slash);
     let authority_is_local = authority.is_empty()
         || authority.eq_ignore_ascii_case("localhost")
-        || local_hostname.is_some_and(|hostname| authority.eq_ignore_ascii_case(hostname));
+        || context
+            .local_hostname()
+            .is_some_and(|hostname| authority.eq_ignore_ascii_case(hostname));
     if !authority_is_local
         || !path.starts_with('/')
         || path.contains(['?', '#'])
@@ -410,6 +442,10 @@ pub(crate) fn parse_osc7_directory(
     }
 
     let path = percent_decode(path)?;
+    let path = match context.local_paths() {
+        Some(paths) => paths.decode_directory_uri_path(path)?,
+        None => path,
+    };
     if path.is_empty() || path.chars().any(char::is_control) {
         return None;
     }
@@ -450,6 +486,7 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::local_path::LocalPathSemantics;
 
     #[test]
     fn remote_metadata_context_should_preserve_typed_destination_and_directory() {
@@ -474,7 +511,11 @@ mod tests {
 
     #[test]
     fn local_file_capabilities_should_be_derived_only_from_terminal_context() {
-        let local = TerminalMetadataContext::local("/Users/test", Some("mac.local"));
+        let local = TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/test",
+            Some("mac.local"),
+        );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
             RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
@@ -491,6 +532,31 @@ mod tests {
     }
 
     #[test]
+    fn selected_local_paths_preserve_reported_spelling_without_granting_remote_authority() {
+        let local = TerminalMetadataContext::local(LocalPathSemantics::Posix, "/fixture", None);
+        let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+            SshDestination::new("user@remote".to_owned()).unwrap(),
+            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+        ));
+        for context in [&local, &remote] {
+            let mut tracker =
+                MetadataTracker::new_with_context(context.clone(), "shell", Instant::now());
+            assert!(tracker.set_reported_directory("file://localhost//project/My%20Folder/"));
+            let snapshot = tracker.snapshot();
+            assert_eq!(&*snapshot.directory.path, "//project/My Folder/");
+            assert_eq!(&*snapshot.title.value, "My Folder");
+            assert_eq!(
+                context.local_directory(&snapshot.directory.path).is_some(),
+                context.is_local()
+            );
+            assert!(context.local_directory("relative").is_none());
+            assert!(context.local_directory("C:\\project").is_none());
+            assert!(!tracker.set_reported_directory("file://remote/other"));
+            assert!(!tracker.set_reported_directory("file:///bad%00path"));
+        }
+    }
+
+    #[test]
     fn title_metadata_strips_controls_and_is_bounded() {
         let hostile = format!("  cargo\u{1b}]0;forged\u{7} test  {}", "x".repeat(400));
 
@@ -504,22 +570,35 @@ mod tests {
 
     #[test]
     fn osc7_accepts_only_local_absolute_file_urls() {
-        let local =
-            parse_osc7_directory("FiLe://MAC.LOCAL/Users/me/My%20Project", Some("mac.local"))
-                .expect("local OSC 7 should be accepted");
+        let context = TerminalMetadataContext::local(
+            LocalPathSemantics::Posix,
+            "/fixture",
+            Some("mac.local"),
+        );
+        let local = parse_osc7_directory("FiLe://MAC.LOCAL/Users/me/My%20Project", &context)
+            .expect("local OSC 7 should be accepted");
         assert_eq!(local.path.as_ref(), "/Users/me/My Project");
         assert_eq!(local.provenance, DirectoryProvenance::Osc7);
-
-        assert!(parse_osc7_directory("file://remote.example/tmp", Some("mac.local")).is_none());
-        assert!(parse_osc7_directory("file://localhost", Some("mac.local")).is_none());
-        assert!(parse_osc7_directory("file:///tmp/%ZZ", Some("mac.local")).is_none());
-        assert!(parse_osc7_directory("https://localhost/tmp", Some("mac.local")).is_none());
+        for invalid in [
+            "file://remote.example/tmp",
+            "file://localhost",
+            "file:///tmp/%ZZ",
+            "https://localhost/tmp",
+        ] {
+            assert!(parse_osc7_directory(invalid, &context).is_none());
+        }
     }
 
     #[test]
     fn accepted_semantic_and_progress_events_update_metadata() {
         let epoch = Instant::now();
-        let mut tracker = MetadataTracker::new("/tmp", "zsh", Some("mac.local"), epoch);
+        let mut tracker = MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            Some("mac.local"),
+            epoch,
+        );
 
         assert!(
             tracker
@@ -552,7 +631,13 @@ mod tests {
     #[test]
     fn stale_transition_does_not_mutate_previously_published_metadata() {
         let epoch = Instant::now();
-        let mut tracker = MetadataTracker::new("/tmp", "zsh", None, epoch);
+        let mut tracker = MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            None,
+            epoch,
+        );
         let live = tracker.snapshot();
 
         assert!(tracker.mark_stale());

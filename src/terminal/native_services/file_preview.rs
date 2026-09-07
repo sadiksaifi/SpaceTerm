@@ -1,42 +1,42 @@
 use std::path::Path;
 
-use super::QuickLookTarget;
+use super::FilePreviewTarget;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QuickLookError {
+pub(crate) enum FilePreviewError {
     StaleTarget,
     OffMainThread,
     PlatformUnavailable,
 }
 
 /// Only presentation mechanics cross this capability boundary.
-pub(crate) trait QuickLookPanel {
-    fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError>;
+pub(crate) trait FilePreviewPanel {
+    fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError>;
     fn dismiss(&mut self);
 }
 
-pub(crate) trait QuickLookFactory {
-    fn create(&self) -> Box<dyn QuickLookPanel>;
+pub(crate) trait FilePreviewFactory {
+    fn create(&self) -> Box<dyn FilePreviewPanel>;
 }
 
-pub(crate) trait QuickLookPlatform {
-    fn preview(&mut self, target: &QuickLookTarget) -> Result<(), QuickLookError>;
+pub(crate) trait FilePreviewPlatform {
+    fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError>;
     fn dismiss(&mut self);
 }
 
 /// Owns revalidation, failure cleanup, replacement and Pane teardown policy.
-pub(crate) struct QuickLookPresenter<P: QuickLookPanel> {
+pub(crate) struct FilePreviewPresenter<P: FilePreviewPanel> {
     pub(super) panel: P,
 }
 
-impl<P: QuickLookPanel> QuickLookPresenter<P> {
+impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
     pub(crate) const fn new(panel: P) -> Self {
         Self { panel }
     }
 }
 
-impl QuickLookPanel for Box<dyn QuickLookPanel> {
-    fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError> {
+impl FilePreviewPanel for Box<dyn FilePreviewPanel> {
+    fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
         (**self).preview_file(path)
     }
     fn dismiss(&mut self) {
@@ -44,11 +44,11 @@ impl QuickLookPanel for Box<dyn QuickLookPanel> {
     }
 }
 
-impl<P: QuickLookPanel> QuickLookPlatform for QuickLookPresenter<P> {
-    fn preview(&mut self, target: &QuickLookTarget) -> Result<(), QuickLookError> {
+impl<P: FilePreviewPanel> FilePreviewPlatform for FilePreviewPresenter<P> {
+    fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError> {
         let Some(path) = target.revalidated_path() else {
             self.panel.dismiss();
-            return Err(QuickLookError::StaleTarget);
+            return Err(FilePreviewError::StaleTarget);
         };
         if let Err(error) = self.panel.preview_file(&path) {
             self.panel.dismiss();
@@ -61,7 +61,7 @@ impl<P: QuickLookPanel> QuickLookPlatform for QuickLookPresenter<P> {
     }
 }
 
-impl<P: QuickLookPanel> Drop for QuickLookPresenter<P> {
+impl<P: FilePreviewPanel> Drop for FilePreviewPresenter<P> {
     fn drop(&mut self) {
         self.panel.dismiss();
     }
@@ -82,9 +82,9 @@ mod tests {
         use std::cell::Cell;
         use std::rc::Rc;
         struct Panel(Rc<Cell<usize>>);
-        impl QuickLookPanel for Panel {
-            fn preview_file(&mut self, _: &Path) -> Result<(), QuickLookError> {
-                Err(QuickLookError::PlatformUnavailable)
+        impl FilePreviewPanel for Panel {
+            fn preview_file(&mut self, _: &Path) -> Result<(), FilePreviewError> {
+                Err(FilePreviewError::PlatformUnavailable)
             }
             fn dismiss(&mut self) {
                 self.0.set(self.0.get() + 1);
@@ -96,13 +96,13 @@ mod tests {
         let file = directory.join("fixture");
         fs::write(&file, b"fixture").unwrap();
         let link = HyperlinkTarget::osc8("file:fixture", &directory, None, LOCAL_FILES).unwrap();
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
+        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES).unwrap();
         let dismissals = Rc::new(Cell::new(0));
         {
-            let mut presenter = QuickLookPresenter::new(Panel(dismissals.clone()));
+            let mut presenter = FilePreviewPresenter::new(Panel(dismissals.clone()));
             assert_eq!(
                 presenter.preview(&target),
-                Err(QuickLookError::PlatformUnavailable)
+                Err(FilePreviewError::PlatformUnavailable)
             );
             assert_eq!(dismissals.get(), 1);
         }
@@ -116,8 +116,8 @@ mod tests {
         dismissals: usize,
     }
 
-    impl QuickLookPanel for RecordingPanel {
-        fn preview_file(&mut self, path: &Path) -> Result<(), QuickLookError> {
+    impl FilePreviewPanel for RecordingPanel {
+        fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
             self.previews.push(path.to_path_buf());
             Ok(())
         }
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn presenter_submits_exactly_one_revalidated_regular_file() {
         let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-{}",
+            "spaceterm-file-preview-platform-{}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -138,8 +138,8 @@ mod tests {
         fs::write(&file, b"preview").unwrap();
         let link =
             HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
+        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES).unwrap();
+        let mut presenter = FilePreviewPresenter::new(RecordingPanel::default());
 
         let result = presenter.preview(&target);
 
@@ -149,18 +149,18 @@ mod tests {
     }
 
     #[test]
-    fn quick_look_target_rejects_web_links_before_the_platform_boundary() {
+    fn file_preview_target_rejects_web_links_before_the_platform_boundary() {
         let link = HyperlinkTarget::url("https://example.test/file.txt").unwrap();
 
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
+        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES);
 
         assert_eq!(target, None);
     }
 
     #[test]
-    fn quick_look_target_rejects_a_missing_file_before_the_platform_boundary() {
+    fn file_preview_target_rejects_a_missing_file_before_the_platform_boundary() {
         let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-missing-{}",
+            "spaceterm-file-preview-platform-missing-{}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -170,22 +170,22 @@ mod tests {
             HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
         fs::remove_file(file).unwrap();
 
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
+        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES);
 
         assert_eq!(target, None);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn quick_look_target_rejects_a_directory_before_the_platform_boundary() {
+    fn file_preview_target_rejects_a_directory_before_the_platform_boundary() {
         let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-directory-{}",
+            "spaceterm-file-preview-platform-directory-{}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
 
         let target = HyperlinkTarget::osc8("file:.", &directory, None, LOCAL_FILES)
-            .and_then(|link| QuickLookTarget::from_link(&link, LOCAL_FILES));
+            .and_then(|link| FilePreviewTarget::from_link(&link, LOCAL_FILES));
 
         assert_eq!(target, None);
         fs::remove_dir_all(directory).unwrap();
@@ -195,9 +195,9 @@ mod tests {
     fn platform_error_identifiers_carry_no_target_content() {
         assert_eq!(
             [
-                QuickLookError::StaleTarget,
-                QuickLookError::OffMainThread,
-                QuickLookError::PlatformUnavailable,
+                FilePreviewError::StaleTarget,
+                FilePreviewError::OffMainThread,
+                FilePreviewError::PlatformUnavailable,
             ]
             .map(|error| format!("{error:?}")),
             [
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn presenter_dismissal_is_explicit_and_injectable() {
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
+        let mut presenter = FilePreviewPresenter::new(RecordingPanel::default());
 
         presenter.dismiss();
 

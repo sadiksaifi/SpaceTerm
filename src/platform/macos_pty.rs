@@ -874,7 +874,7 @@ fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
 
 #[cfg(test)]
 pub(crate) fn conformance_initialization_observation() -> String {
-    let launch = ShellLaunchPlanner::new(
+    let launch = ShellLaunchPlanner::for_test(
         "/bin/zsh".into(),
         "/spaceterm-conformance-missing-resources".into(),
     )

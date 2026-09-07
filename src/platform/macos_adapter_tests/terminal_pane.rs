@@ -35,7 +35,7 @@ fn unavailable_replacement_preview_dismisses_the_previous_presentation(cx: &mut 
     let dismissals = Rc::new(Cell::new(0));
     let (pane, cx, _) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.quick_look = Box::new(RecordingQuickLookPresenter {
+        pane.file_preview = Box::new(RecordingFilePreviewPresenter {
             previews: previews.clone(),
             dismissals: dismissals.clone(),
         });

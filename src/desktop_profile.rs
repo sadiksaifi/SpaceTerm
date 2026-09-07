@@ -4,7 +4,28 @@ pub(crate) mod keybindings;
 use gpui::{App, KeyBinding};
 use spaceterm_ui::{ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile};
 
+#[derive(Clone, Copy)]
+pub(crate) struct FileInteractionLabels {
+    pub(crate) directory_selection: &'static str,
+    pub(crate) file_preview: &'static str,
+}
+impl Default for FileInteractionLabels {
+    fn default() -> Self {
+        Self {
+            directory_selection: "Choose with System",
+            file_preview: "Preview File",
+        }
+    }
+}
+impl gpui::Global for FileInteractionLabels {}
+impl FileInteractionLabels {
+    pub(crate) fn get(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+}
+
 pub(crate) struct DesktopProfile {
+    file_labels: FileInteractionLabels,
     modal_policy: ModalDesktopPolicy,
     modal_keys: ModalKeybindingProfile,
     text_keys: TextInputKeybindingProfile,
@@ -38,6 +59,7 @@ impl DesktopProfile {
             }
         }
         Ok(Self {
+            file_labels: FileInteractionLabels::default(),
             modal_policy,
             modal_keys,
             text_keys,
@@ -45,7 +67,12 @@ impl DesktopProfile {
             locale,
         })
     }
+    pub(crate) fn with_file_labels(mut self, labels: FileInteractionLabels) -> Self {
+        self.file_labels = labels;
+        self
+    }
     pub(crate) fn install(&self, cx: &mut App) {
+        cx.set_global(self.file_labels);
         spaceterm_ui::install_modal_policy(
             cx,
             self.modal_policy

@@ -10,7 +10,7 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "spaceterm-local-authority-{}-{}",
+            "spaceterm-native-local-authority-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -32,9 +32,10 @@ fn directory_identity_preserves_selected_spelling_and_equivalent_paths() {
     let selected = root.0.join("selected");
     fs::create_dir(&target).unwrap();
     symlink(&target, &selected).unwrap();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let directory = authority.validate_workspace_directory(&selected).unwrap();
     let equivalent = authority.validate_workspace_directory(&target).unwrap();
     assert_eq!(directory.path(), selected);
@@ -54,9 +55,10 @@ fn directory_revalidation_rejects_retarget_replacement_removal_and_file() {
     fs::create_dir(&target).unwrap();
     fs::create_dir(&other).unwrap();
     symlink(&target, &selected).unwrap();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let directory = authority.validate_workspace_directory(&selected).unwrap();
     fs::remove_file(&selected).unwrap();
     symlink(&other, &selected).unwrap();
@@ -88,9 +90,10 @@ fn directory_revalidation_rejects_retarget_replacement_removal_and_file() {
 #[test]
 fn directory_validation_rejects_relative_malformed_and_unreadable_paths() {
     let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     assert_eq!(
         authority.validate_workspace_directory(Path::new("relative")),
         Err(LocalFilesystemError::NotAbsolute)
@@ -110,9 +113,10 @@ fn directory_validation_rejects_relative_malformed_and_unreadable_paths() {
 #[test]
 fn errors_and_retained_identities_do_not_disclose_content() {
     let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let directory = authority.validate_workspace_directory(&root.0).unwrap();
     assert_eq!(
         format!("{:?}", directory.identity()),
@@ -169,7 +173,8 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
         observation(1, LocalObjectKind::Directory),
         observation(2, LocalObjectKind::Directory),
     ]))));
-    let authority = LocalFilesystemAuthority::new(source.clone());
+    let authority =
+        LocalFilesystemAuthority::new(crate::local_path::LocalPathSemantics::Posix, source.clone());
     assert_eq!(
         authority.validate_workspace_directory(&root.0),
         Err(LocalFilesystemError::IdentityChanged)
@@ -180,10 +185,12 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
 #[test]
 fn identity_failures_remain_closed_and_do_not_fall_back_to_path_equality() {
     let root = Fixture::new();
-    let authority =
-        LocalFilesystemAuthority::new(Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([
-            Err(LocalFilesystemError::PermissionDenied),
-        ])))));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([Err(
+            LocalFilesystemError::PermissionDenied,
+        )])))),
+    );
     assert_eq!(
         authority.validate_workspace_directory(&root.0),
         Err(LocalFilesystemError::PermissionDenied)
@@ -199,9 +206,10 @@ fn local_file_authority_rejects_symlink_retargeting_and_successor_objects() {
     fs::write(&target, b"first").unwrap();
     fs::write(&other, b"other").unwrap();
     symlink(&target, &selected).unwrap();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let file = authority.local_file("selected", &root.0).unwrap();
     assert_eq!(
         file.revalidated_path(),
@@ -223,18 +231,20 @@ fn file_identity_fails_closed_when_host_refuses_retention() {
     let path = root.0.join("file");
     fs::write(&path, b"private").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     assert!(authority.local_file("file", &root.0).is_none());
 }
 
 #[test]
 fn file_validation_rejects_missing_non_file_malformed_and_oversized_targets() {
     let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     for value in ["missing", ".", "bad\0", "bad\n", ""] {
         assert!(authority.local_file(value, &root.0).is_none());
     }
@@ -255,9 +265,10 @@ fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
     let root = Fixture::new();
     let path = root.0.join("private-name");
     fs::write(&path, b"contents").unwrap();
-    let file = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ))
+    let file = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    )
     .local_file("private-name", &root.0)
     .unwrap();
     let mut registry = LocalFileEmissionRegistry::default();
@@ -289,9 +300,10 @@ fn emission_eviction_revokes_old_metadata_without_reusing_its_authority() {
     let root = Fixture::new();
     let path = root.0.join("file");
     fs::write(&path, b"fixture").unwrap();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let mut registry = LocalFileEmissionRegistry::default();
     let first_file = authority.local_file("file", &root.0).unwrap();
     let first = registry.emit(&first_file).unwrap();
@@ -342,9 +354,10 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
     };
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
     let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let mut registries: Vec<_> = (0..4)
         .map(|_| LocalFileEmissionRegistry::default())
         .collect();
@@ -378,9 +391,10 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
 #[test]
 fn registry_eviction_releases_real_handles_before_resolving_more_output() {
     let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(Arc::new(
-        crate::platform::macos_local_identity::MacosLocalIdentity,
-    ));
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
+    );
     let mut registry = LocalFileEmissionRegistry::default();
     let mut first = None;
     for index in 0..256 {

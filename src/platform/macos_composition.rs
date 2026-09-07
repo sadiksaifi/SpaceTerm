@@ -41,6 +41,11 @@ fn capture_startup_dependencies() -> Result<
         .map_err(|_| StartupDependenciesError::Paths)?;
     StartupDependencies::capture(
         path_environment,
+        crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
+            |key| std::env::var_os(key),
+            "/usr/bin:/bin".into(),
+        )
+        .map_err(|_| StartupDependenciesError::Paths)?,
         &path_host_facts,
         Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem),
         executable,
@@ -72,6 +77,12 @@ fn desktop_profile(
         crate::desktop_profile::keybindings::bindings(),
         locale,
     )
+    .map(|profile| {
+        profile.with_file_labels(crate::desktop_profile::FileInteractionLabels {
+            directory_selection: "Choose with Finder",
+            file_preview: "Quick Look",
+        })
+    })
 }
 
 fn compose(
@@ -99,15 +110,14 @@ fn compose(
         visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
         wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
     };
-    let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(Arc::new(
-        super::macos_local_identity::MacosLocalIdentity,
-    ));
+    let paths = crate::local_path::LocalPathSemantics::Posix;
+    let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
+        paths,
+        Arc::new(super::macos_local_identity::MacosLocalIdentity),
+    );
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
         Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
-        super::shell_launch::ShellLaunchPlanner::new(
-            super::launch_host::user_shell().into(),
-            super::launch_host::resource_root(),
-        ),
+        super::launch_host::shell_launch_planner(),
         Arc::new(super::macos_pasteboard::MacosOsc52ClipboardFactory),
         local_filesystem.clone(),
         super::launch_host::local_hostname(),
@@ -131,11 +141,14 @@ fn compose(
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 selection_clipboard: Rc::new(super::macos_pasteboard::MacosSelectionClipboard),
-                file_clipboard: Rc::new(super::macos_pasteboard::MacosFileClipboard),
-                quick_look: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
+                file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
+                    paths,
+                    shell: crate::terminal::native_services::file_insertion::ShellInsertionDialect::Posix,
+                },
+                file_clipboard: Rc::new(super::macos_pasteboard::MacosFileClipboard { paths }),
+                file_preview: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
             },
             lifecycle,
-            finder: Rc::new(super::finder_fallback::NativeFinderFallback),
             permission_recovery: Some(Rc::new(
                 super::permission_recovery::PermissionRecovery::new(
                     Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
@@ -160,6 +173,132 @@ fn compose(
 mod tests {
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+
+    #[test]
+    fn macos_shell_capture_preserves_mode_compatibility_and_inherited_values() {
+        use std::ffi::OsStr;
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
+        for (
+            shell,
+            mode,
+            inherited_key,
+            inherited_value,
+            expected_key,
+            expected_value,
+            integrated,
+        ) in [
+            (
+                "/bin/bash",
+                None,
+                "ENV",
+                Some("/captured/env"),
+                "SPACETERM_BASH_ENV",
+                None,
+                false,
+            ),
+            (
+                "/custom/bash",
+                Some(" OFF "),
+                "ENV",
+                Some("/captured/env"),
+                "SPACETERM_BASH_ENV",
+                None,
+                false,
+            ),
+            (
+                "/custom/bash",
+                None,
+                "ENV",
+                Some("/captured/env"),
+                "SPACETERM_BASH_ENV",
+                Some("/captured/env"),
+                true,
+            ),
+            (
+                "/bin/zsh",
+                None,
+                "ZDOTDIR",
+                Some("/captured/zsh"),
+                "SPACETERM_ZSH_ZDOTDIR",
+                Some("/captured/zsh"),
+                true,
+            ),
+            (
+                "/custom/fish",
+                None,
+                "XDG_DATA_DIRS",
+                Some("/captured/share::"),
+                "XDG_DATA_DIRS",
+                Some("/captured/share::"),
+                true,
+            ),
+            (
+                "/custom/fish",
+                None,
+                "XDG_DATA_DIRS",
+                None,
+                "XDG_DATA_DIRS",
+                Some("/usr/local/share:/usr/share"),
+                true,
+            ),
+        ] {
+            let mut reads = Vec::new();
+            let planner = super::super::launch_host::shell_launch_planner_with(
+                shell.into(),
+                resources.path().to_path_buf(),
+                |key| {
+                    reads.push(key.to_owned());
+                    if key == "SPACETERM_SHELL_INTEGRATION" {
+                        mode.map(Into::into)
+                    } else if key == inherited_key {
+                        inherited_value.map(Into::into)
+                    } else {
+                        None
+                    }
+                },
+            );
+            assert_eq!(
+                reads,
+                [
+                    "SPACETERM_SHELL_INTEGRATION",
+                    "XDG_DATA_DIRS",
+                    "ZDOTDIR",
+                    "ENV"
+                ]
+            );
+            // Planning repeatedly uses the captured values after the reader has been dropped.
+            for _ in 0..2 {
+                let launch = planner.local(resources.path()).unwrap();
+                let lookup = |key: &str| {
+                    launch
+                        .environment()
+                        .iter()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| value.as_os_str())
+                };
+                assert_eq!(
+                    lookup("SPACETERM_SHELL_INTEGRATION_VERSION").is_some(),
+                    integrated,
+                    "{shell}"
+                );
+                let expected = expected_value.map(|value| {
+                    if expected_key == "XDG_DATA_DIRS" {
+                        let mut combined =
+                            resources.path().join("shell-integration").into_os_string();
+                        combined.push(":");
+                        combined.push(value);
+                        combined
+                    } else {
+                        value.into()
+                    }
+                });
+                assert_eq!(lookup(expected_key), expected.as_deref(), "{shell}");
+                if !integrated {
+                    assert_eq!(launch.arguments(), [OsStr::new("-l")]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn runtime_facts_should_not_consult_an_unused_temporary_fallback() {

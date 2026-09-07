@@ -26,9 +26,15 @@ fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
         PathBuf::from("/bin/sh"),
         vec!["-c".into(), script.into()],
     ));
-    let environment =
-        SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
-            .unwrap();
+    let environment = SshProcessEnvironment::new_without_authentication_from_startup(
+        PathBuf::from("/private/tmp"),
+        &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
+            |_| None,
+            "/usr/bin:/bin".into(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let runner = SshRemoteUtilityProcessRunner::new(MacOsSshProcessAdapter, environment);
     let mut future = Box::pin(runner.run(
         command,
@@ -76,9 +82,15 @@ fn completed_native_utility_should_not_cancel_the_reusable_client_token() {
         PathBuf::from("/bin/sh"),
         vec!["-s".into()],
     ));
-    let environment =
-        SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
-            .unwrap();
+    let environment = SshProcessEnvironment::new_without_authentication_from_startup(
+        PathBuf::from("/private/tmp"),
+        &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
+            |_| None,
+            "/usr/bin:/bin".into(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let runner = SshRemoteUtilityProcessRunner::new(MacOsSshProcessAdapter, environment);
     let cancellation = SshCancellationToken::default();
 
@@ -491,9 +503,15 @@ fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
         PathBuf::from("/bin/sh"),
         vec!["-c".into(), "sleep 30".into()],
     ));
-    let environment =
-        SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
-            .unwrap();
+    let environment = SshProcessEnvironment::new_without_authentication_from_startup(
+        PathBuf::from("/private/tmp"),
+        &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
+            |_| None,
+            "/usr/bin:/bin".into(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let runner = SshRemoteUtilityProcessRunner::with_timeout(
         MacOsSshProcessAdapter,
         environment,

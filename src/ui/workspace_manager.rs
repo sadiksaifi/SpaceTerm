@@ -33,6 +33,9 @@ use super::{
     TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
     WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
+#[cfg(test)]
+use crate::directory_selection::GpuiDirectorySelection;
+use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalTabCloseOutcome,
     PaneId, RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
@@ -40,9 +43,6 @@ use crate::domain::{
     WorkspaceCollection, WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity,
     WorkspaceError, WorkspaceId, WorkspaceKind,
 };
-use crate::platform::finder_fallback::FinderFallback;
-#[cfg(test)]
-use crate::platform::finder_fallback::NativeFinderFallback;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::window_movement::{
@@ -242,7 +242,7 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
     pub(crate) native_services: NativeServiceAdapters,
     pub(crate) lifecycle: PaneLifecycleDependencies,
-    pub(crate) finder: Rc<dyn FinderFallback>,
+    pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
     pub(crate) permission_recovery: Option<Rc<dyn PermissionRecoveryOpener>>,
@@ -287,7 +287,7 @@ pub(crate) struct WorkspaceManager {
     lifecycle_dependencies: PaneLifecycleDependencies,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
-    finder_fallback: Rc<dyn FinderFallback>,
+    directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
     workspace_picker: Entity<WorkspacePicker>,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -334,7 +334,7 @@ impl WorkspaceManager {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
-                finder: Rc::new(NativeFinderFallback),
+                directory_selection: Rc::new(GpuiDirectorySelection),
                 permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -345,10 +345,10 @@ impl WorkspaceManager {
     }
 
     #[cfg(test)]
-    fn new_with_finder_fallback(
+    fn new_with_directory_selection_fallback(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        finder_fallback: Rc<dyn FinderFallback>,
+        directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
         remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -362,7 +362,7 @@ impl WorkspaceManager {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
-                finder: finder_fallback,
+                directory_selection: directory_selection_fallback,
                 permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -390,7 +390,7 @@ impl WorkspaceManager {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
-                finder: Rc::new(NativeFinderFallback),
+                directory_selection: Rc::new(GpuiDirectorySelection),
                 permission_recovery: None,
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
@@ -413,7 +413,7 @@ impl WorkspaceManager {
             accessibility: accessibility_adapter_factory,
             native_services: native_service_adapters,
             lifecycle: lifecycle_dependencies,
-            finder: finder_fallback,
+            directory_selection: directory_selection_fallback,
             permission_recovery,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
@@ -552,7 +552,7 @@ impl WorkspaceManager {
             lifecycle_dependencies,
             default_workspace_root,
             default_workspace_identity,
-            finder_fallback,
+            directory_selection_fallback,
             workspace_picker,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -2469,14 +2469,18 @@ impl WorkspaceManager {
                     });
                 });
             }
-            WorkspacePickerEvent::FinderRequested => {
-                let identity = self.workspace_picker.read(cx).finder_request_identity();
-                let selection = self.finder_fallback.choose(cx);
+            WorkspacePickerEvent::DirectorySelectionRequested => {
+                let identity = self
+                    .workspace_picker
+                    .read(cx)
+                    .directory_selection_request_identity();
+                let selection = self.directory_selection_fallback.choose(cx);
                 cx.spawn_in(window, async move |manager, cx| {
                     let result = selection.await;
                     let _ = manager.update_in(cx, |manager, window, cx| {
                         manager.workspace_picker.update(cx, |picker, cx| {
-                            picker.complete_finder_request(identity, result, window, cx);
+                            picker
+                                .complete_directory_selection_request(identity, result, window, cx);
                         });
                         manager.sync_terminal_focus_blocker(window, cx);
                         cx.notify();
@@ -4508,7 +4512,6 @@ impl WorkspaceManager {
             &self.accessibility_adapter_factory,
             &expected.accessibility
         ));
-        assert!(Rc::ptr_eq(&self.finder_fallback, &expected.finder));
         assert!(Rc::ptr_eq(
             &self.native_service_adapters.selection_clipboard,
             &expected.native_services.selection_clipboard
@@ -4518,8 +4521,8 @@ impl WorkspaceManager {
             &expected.native_services.file_clipboard
         ));
         assert!(Rc::ptr_eq(
-            &self.native_service_adapters.quick_look,
-            &expected.native_services.quick_look
+            &self.native_service_adapters.file_preview,
+            &expected.native_services.file_preview
         ));
         assert!(Rc::ptr_eq(
             &self.lifecycle_dependencies.activity,
@@ -4574,7 +4577,7 @@ mod tests {
         Arc<AtomicBool>,
         async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
     );
-    use crate::platform::finder_fallback::ScriptedFinderFallback;
+    use crate::directory_selection::ScriptedDirectorySelection;
     use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
@@ -5134,15 +5137,17 @@ mod tests {
     fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(
         cx: &mut TestAppContext,
     ) {
-        use crate::terminal::native_services::quick_look::{QuickLookFactory, QuickLookPanel};
+        use crate::terminal::native_services::file_preview::{
+            FilePreviewFactory, FilePreviewPanel,
+        };
 
-        struct CountingQuickLookFactory {
+        struct CountingFilePreviewFactory {
             created: Rc<std::cell::Cell<usize>>,
-            delegate: Rc<dyn QuickLookFactory>,
+            delegate: Rc<dyn FilePreviewFactory>,
         }
 
-        impl QuickLookFactory for CountingQuickLookFactory {
-            fn create(&self) -> Box<dyn QuickLookPanel> {
+        impl FilePreviewFactory for CountingFilePreviewFactory {
+            fn create(&self) -> Box<dyn FilePreviewPanel> {
                 self.created.set(self.created.get() + 1);
                 self.delegate.create()
             }
@@ -5151,9 +5156,9 @@ mod tests {
         cx.update(crate::ui::init).unwrap();
         let created = Rc::new(std::cell::Cell::new(0));
         let mut native_services = crate::terminal::native_services::testing::adapters();
-        native_services.quick_look = Rc::new(CountingQuickLookFactory {
+        native_services.file_preview = Rc::new(CountingFilePreviewFactory {
             created: Rc::clone(&created),
-            delegate: Rc::clone(&native_services.quick_look),
+            delegate: Rc::clone(&native_services.file_preview),
         });
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
@@ -5168,7 +5173,7 @@ mod tests {
                     accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                     native_services,
                     lifecycle: PaneLifecycleDependencies::testing(),
-                    finder: Rc::new(NativeFinderFallback),
+                    directory_selection: Rc::new(GpuiDirectorySelection),
                 permission_recovery: None,
                     window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),
@@ -5216,7 +5221,7 @@ mod tests {
                     accessibility: factory.clone(),
                     native_services: crate::terminal::native_services::testing::adapters(),
                     lifecycle: PaneLifecycleDependencies::testing(),
-                    finder: Rc::new(NativeFinderFallback),
+                    directory_selection: Rc::new(GpuiDirectorySelection),
                     permission_recovery: None,
                     window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),
@@ -5454,7 +5459,7 @@ mod tests {
 
     fn workspace_manager_with_picker(
         selections: impl IntoIterator<
-            Item = Result<Option<PathBuf>, crate::platform::finder_fallback::DirectoryChooserError>,
+            Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
         >,
         cx: &mut TestAppContext,
     ) -> (
@@ -5467,13 +5472,13 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let finder_fallback: Rc<dyn FinderFallback> =
-            Rc::new(ScriptedFinderFallback::new(selections));
+        let directory_selection_fallback: Rc<dyn SystemDirectorySelection> =
+            Rc::new(ScriptedDirectorySelection::new(selections));
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            WorkspaceManager::new_with_finder_fallback(
+            WorkspaceManager::new_with_directory_selection_fallback(
                 session_factory,
                 PathBuf::from("/Users/test"),
-                finder_fallback,
+                directory_selection_fallback,
                 test_remote_backend_factory(),
                 window,
                 cx,
@@ -5615,9 +5620,9 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
+    fn choose_with_directory_selection_fallback(cx: &mut VisualTestContext) {
         open_workspace_picker(cx);
-        click("workspace-picker-finder", cx);
+        click("workspace-picker-directory-selection", cx);
         cx.run_until_parked();
     }
 
@@ -6181,10 +6186,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelled_finder_fallback_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
+    fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
 
-        choose_with_finder_fallback(cx);
+        choose_with_directory_selection_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -8069,7 +8076,7 @@ mod tests {
                 crate::platform::local_filesystem::LocalFilesystemError::Capacity,
             );
         });
-        click("workspace-picker-finder", cx);
+        click("workspace-picker-directory-selection", cx);
         cx.run_until_parked();
         assert_eq!(records.starts().len(), 1);
         assert_eq!(
@@ -8189,7 +8196,7 @@ mod tests {
         let parked = root.join("parked");
         fs::create_dir_all(&project).unwrap();
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-        choose_with_finder_fallback(cx);
+        choose_with_directory_selection_fallback(cx);
         assert_eq!(records.starts().len(), 2);
         assert!(!manager.read_with(cx, |manager, cx| {
             manager.workspace_picker.read(cx).is_open()
@@ -8226,7 +8233,7 @@ mod tests {
         let missing = temporary_directory("missing");
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
 
-        choose_with_finder_fallback(cx);
+        choose_with_directory_selection_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -8615,13 +8622,16 @@ mod tests {
         redraw(cx);
         let (_, tab_manager) = active_tab_manager(&manager, cx);
         let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
             "/Users/test",
             "zsh",
             None,
             Instant::now(),
         );
         assert!(metadata.apply_semantic_prompt("A", Instant::now()));
-        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        let mut screen =
+            (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+                .clone();
         screen.metadata = metadata.snapshot();
         records
             .event_sender(2)
@@ -9480,7 +9490,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(project))], cx);
 
-        choose_with_finder_fallback(cx);
+        choose_with_directory_selection_fallback(cx);
 
         let (scratch_id, project_id) = manager.read_with(cx, |manager, _| {
             let mut scratch = None;

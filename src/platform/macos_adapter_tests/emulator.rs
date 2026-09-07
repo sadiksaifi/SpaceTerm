@@ -19,7 +19,11 @@ fn osc8_relative_file_targets_bind_to_the_directory_at_emission() {
     fs::write(&second_file, b"preview").unwrap();
     let mut emulator = TerminalEmulator::new_with_local_filesystem(
         geometry(16, 2, 10.0, 20.0),
-        TerminalMetadataContext::local(directory.to_str().unwrap(), Some("mac.local")),
+        TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            directory.to_str().unwrap(),
+            Some("mac.local"),
+        ),
         "zsh",
         identity::TERM_FALLBACK,
         Instant::now(),

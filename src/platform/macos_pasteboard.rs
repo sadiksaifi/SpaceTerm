@@ -31,25 +31,32 @@ impl SelectionClipboard for MacosSelectionClipboard {
     }
 }
 
-pub(crate) struct MacosFileClipboard;
+pub(crate) struct MacosFileClipboard {
+    pub(crate) paths: crate::local_path::LocalPathSemantics,
+}
 impl FileClipboard for MacosFileClipboard {
     fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
-        read_file_urls().map_err(|_| ClipboardError::InvalidFiles)
+        read_file_urls(self.paths).map_err(|_| ClipboardError::InvalidFiles)
     }
 }
 
-pub(crate) fn read_file_urls() -> Result<Vec<PathBuf>, String> {
+pub(crate) fn read_file_urls(
+    paths: crate::local_path::LocalPathSemantics,
+) -> Result<Vec<PathBuf>, String> {
     // SAFETY: values are copied from the general pasteboard during this synchronous AppKit call.
     unsafe {
         let pool = NSAutoreleasePool::new(nil);
         let pasteboard = NSPasteboard::generalPasteboard(nil);
-        let result = read_file_urls_from_pasteboard(pasteboard);
+        let result = read_file_urls_from_pasteboard(pasteboard, paths);
         pool.drain();
         result
     }
 }
 
-fn read_file_urls_from_pasteboard(pasteboard: cocoa::base::id) -> Result<Vec<PathBuf>, String> {
+fn read_file_urls_from_pasteboard(
+    pasteboard: cocoa::base::id,
+    paths: crate::local_path::LocalPathSemantics,
+) -> Result<Vec<PathBuf>, String> {
     // SAFETY: The caller owns the pasteboard and an autorelease pool for this synchronous read.
     unsafe {
         let items: cocoa::base::id = msg_send![pasteboard, pasteboardItems];
@@ -87,7 +94,7 @@ fn read_file_urls_from_pasteboard(pasteboard: cocoa::base::id) -> Result<Vec<Pat
                 std::str::from_utf8(raw).map_err(|_| "file URL is not valid UTF-8".to_owned())?;
             urls.push(text.to_owned());
         }
-        parse_file_urls(&urls).map_err(str::to_owned)
+        parse_file_urls(paths, &urls).map_err(str::to_owned)
     }
 }
 
@@ -226,7 +233,10 @@ mod tests {
                 let items = NSArray::arrayWithObjects(nil, &items);
                 let written: bool = msg_send![pasteboard, writeObjects: items];
                 assert!(written);
-                let result = read_file_urls_from_pasteboard(pasteboard);
+                let result = read_file_urls_from_pasteboard(
+                    pasteboard,
+                    crate::local_path::LocalPathSemantics::Posix,
+                );
                 pasteboard.releaseGlobally();
                 if file_count > MAX_FILE_ITEMS {
                     assert!(result.is_err());
@@ -264,7 +274,10 @@ mod tests {
             let items = NSArray::arrayWithObjects(nil, &[item]);
             let written: bool = msg_send![pasteboard, writeObjects: items];
             assert!(written);
-            let result = read_file_urls_from_pasteboard(pasteboard);
+            let result = read_file_urls_from_pasteboard(
+                pasteboard,
+                crate::local_path::LocalPathSemantics::Posix,
+            );
             pasteboard.releaseGlobally();
             pool.drain();
             assert!(result.is_err());
@@ -291,14 +304,24 @@ mod tests {
             let items = NSArray::arrayWithObjects(nil, &[first, second]);
             let _: NSInteger = msg_send![pasteboard, clearContents];
             let _: bool = msg_send![pasteboard, writeObjects: items];
-            let paths = read_file_urls_from_pasteboard(pasteboard).unwrap();
+            let paths = read_file_urls_from_pasteboard(
+                pasteboard,
+                crate::local_path::LocalPathSemantics::Posix,
+            )
+            .unwrap();
             assert!(paths == vec![PathBuf::from("/a b"), PathBuf::from("/c")]);
             let remote = NSString::alloc(nil)
                 .init_str("file://remote/a")
                 .autorelease();
             let _: NSInteger = msg_send![pasteboard, clearContents];
             let _: bool = msg_send![pasteboard, setString: remote forType: file_type];
-            assert!(read_file_urls_from_pasteboard(pasteboard).is_err());
+            assert!(
+                read_file_urls_from_pasteboard(
+                    pasteboard,
+                    crate::local_path::LocalPathSemantics::Posix
+                )
+                .is_err()
+            );
             let _: () = msg_send![first, release];
             let _: () = msg_send![second, release];
             pasteboard.releaseGlobally();

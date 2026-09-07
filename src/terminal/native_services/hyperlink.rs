@@ -71,7 +71,7 @@ impl HyperlinkTarget {
     ) -> Option<Self> {
         Self::url(value).or_else(|| {
             local_file_capabilities.are_enabled().then_some(())?;
-            let path = parse_local_file_uri(value, local_hostname)?;
+            let path = parse_local_file_uri(authority.path_semantics(), value, local_hostname)?;
             Self::from_local_file(authority.local_file(&path, trusted_directory)?)
         })
     }
@@ -101,7 +101,12 @@ impl HyperlinkTarget {
                 // This is intentionally action-triggered filesystem I/O. Hover/render/context
                 // eligibility uses the immutable target and never performs synchronous I/O.
                 let path = self.revalidated_local_path(local_file_capabilities)?;
-                Some(file_url(path.to_str()?))
+                Some(
+                    self.local_file
+                        .as_ref()?
+                        .path_semantics()
+                        .file_url(path.to_str()?),
+                )
             }
         }
     }
@@ -110,7 +115,13 @@ impl HyperlinkTarget {
     /// must not retain this as proof that the filesystem entry is still safe.
     #[cfg(test)]
     pub(crate) fn canonical_file_url(&self) -> Option<String> {
-        (self.kind == HyperlinkKind::LocalPath).then(|| file_url(&self.value))
+        (self.kind == HyperlinkKind::LocalPath).then(|| {
+            self.local_file
+                .as_ref()
+                .unwrap()
+                .path_semantics()
+                .file_url(&self.value)
+        })
     }
 
     /// Transfers authority through opaque, bounded, emulator-owned emission metadata.
@@ -153,7 +164,11 @@ pub(crate) fn has_file_scheme(value: &[u8]) -> bool {
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"file:"))
 }
 
-fn parse_local_file_uri(value: &str, local_hostname: Option<&str>) -> Option<String> {
+fn parse_local_file_uri(
+    semantics: crate::local_path::LocalPathSemantics,
+    value: &str,
+    local_hostname: Option<&str>,
+) -> Option<String> {
     if !valid_text(value) {
         return None;
     }
@@ -179,7 +194,8 @@ fn parse_local_file_uri(value: &str, local_hostname: Option<&str>) -> Option<Str
         return None;
     }
     let path = percent_decode(encoded_path)?;
-    (valid_text(&path) && !path.starts_with("//")).then_some(path)
+    valid_text(&path).then_some(())?;
+    semantics.decode_uri_path(path)
 }
 
 fn uri_path_byte_is_valid(byte: u8) -> bool {
@@ -234,20 +250,9 @@ const fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 fn file_url(path: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut url = String::with_capacity("file://".len() + path.len());
-    url.push_str("file://");
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            url.push(char::from(byte));
-        } else {
-            url.push('%');
-            url.push(char::from(HEX[usize::from(byte >> 4)]));
-            url.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
-    }
-    url
+    crate::local_path::LocalPathSemantics::Posix.file_url(path)
 }
 
 pub(crate) fn detect_url_cells(cells: &[String]) -> Vec<Option<HyperlinkTarget>> {

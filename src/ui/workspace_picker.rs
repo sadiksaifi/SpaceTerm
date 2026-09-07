@@ -30,135 +30,14 @@ use crate::platform::local_filesystem::picker::{
 };
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
 
-const HOME_DISPLAY: &str = "~/";
+use crate::local_path::{
+    LocalPathSemantics, ParsedWorkspacePath, WorkspacePathFormatError,
+    display_workspace_directory_with_style, parse_workspace_path,
+};
 const ROW_ICON_SIZE: f32 = 14.0;
-const FINDER_ACTION: &str = "workspace-picker-finder";
+const DIRECTORY_SELECTION_ACTION: &str = "workspace-picker-directory-selection";
 const RETRY_ACTION: &str = "workspace-picker-retry";
 const SYSTEM_SETTINGS_ACTION: &str = "workspace-picker-open-system-settings";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum WorkspacePathFormatError {
-    Relative,
-    BareTilde,
-    UnsupportedTilde,
-}
-
-impl WorkspacePathFormatError {
-    pub(super) const fn message(self) -> &'static str {
-        match self {
-            Self::Relative => "Enter an absolute path beginning with / or ~/.",
-            Self::BareTilde => "Use ~/ to open your home folder.",
-            Self::UnsupportedTilde => "Only ~/ is supported for home-relative paths.",
-        }
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub(super) struct ParsedWorkspacePath {
-    display: String,
-    exact_path: PathBuf,
-    enumeration_directory: PathBuf,
-    leaf_filter: String,
-    trailing_separator: bool,
-}
-
-impl std::fmt::Debug for ParsedWorkspacePath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ParsedWorkspacePath(<redacted>)")
-    }
-}
-
-impl ParsedWorkspacePath {
-    pub(super) fn display(&self) -> &str {
-        &self.display
-    }
-
-    pub(super) fn exact_path(&self) -> &Path {
-        &self.exact_path
-    }
-
-    pub(super) fn enumeration_directory(&self) -> &Path {
-        &self.enumeration_directory
-    }
-
-    #[cfg(test)]
-    pub(super) fn leaf_filter(&self) -> &str {
-        &self.leaf_filter
-    }
-
-    #[cfg(test)]
-    pub(super) const fn trailing_separator(&self) -> bool {
-        self.trailing_separator
-    }
-
-    pub(super) fn reveals_dot_directories(&self) -> bool {
-        self.leaf_filter.starts_with('.')
-    }
-}
-
-pub(super) fn parse_workspace_path(
-    input: &str,
-    home: &Path,
-) -> Result<ParsedWorkspacePath, WorkspacePathFormatError> {
-    if input == "~" {
-        return Err(WorkspacePathFormatError::BareTilde);
-    }
-    if input.starts_with('~') && !input.starts_with("~/") {
-        return Err(WorkspacePathFormatError::UnsupportedTilde);
-    }
-    if !input.starts_with('/') && !input.starts_with("~/") {
-        return Err(WorkspacePathFormatError::Relative);
-    }
-
-    let exact_path = expand_workspace_path(input, home);
-    let trailing_separator = input.ends_with('/');
-    let (enumeration_directory, leaf_filter) = if trailing_separator {
-        (exact_path.clone(), String::new())
-    } else {
-        let separator = input.rfind('/').ok_or(WorkspacePathFormatError::Relative)?;
-        let display_directory = &input[..=separator];
-        (
-            expand_workspace_path(display_directory, home),
-            input[separator + 1..].to_owned(),
-        )
-    };
-
-    Ok(ParsedWorkspacePath {
-        display: input.to_owned(),
-        exact_path,
-        enumeration_directory,
-        leaf_filter,
-        trailing_separator,
-    })
-}
-
-fn expand_workspace_path(display: &str, home: &Path) -> PathBuf {
-    match display.strip_prefix("~/") {
-        Some("") => home.to_path_buf(),
-        Some(remainder) => home.join(remainder.trim_start_matches('/')),
-        None => PathBuf::from(display),
-    }
-}
-
-fn display_workspace_directory_with_style(
-    path: &Path,
-    home: &Path,
-    prefer_tilde: bool,
-) -> Option<String> {
-    if prefer_tilde && path == home {
-        return Some(HOME_DISPLAY.to_owned());
-    }
-    if prefer_tilde && let Ok(relative) = path.strip_prefix(home) {
-        let relative = relative.to_str()?;
-        return Some(format!("~/{relative}/"));
-    }
-    let path = path.to_str()?;
-    Some(if path == "/" {
-        "/".to_owned()
-    } else {
-        format!("{}/", path.trim_end_matches('/'))
-    })
-}
 
 /// Returns the directories the typed leaf selects, in stable presentation order.
 ///
@@ -192,7 +71,7 @@ pub(super) enum WorkspacePickerEvent {
     /// Escape closed the picker. Only Escape steps back to whatever presented it; an outside
     /// press or a focus loss dismisses the whole flow.
     Escaped,
-    FinderRequested,
+    DirectorySelectionRequested,
     Confirmed(ValidatedWorkspaceDirectory),
 }
 
@@ -209,7 +88,7 @@ enum WorkspacePickerStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspacePickerBusy {
-    Finder,
+    DirectorySelection,
     CreationPrompt,
     Creating,
     Validating,
@@ -235,7 +114,7 @@ struct RefreshCompletion {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ValidationKind {
     Typed,
-    Finder,
+    DirectorySelection,
     Creation,
 }
 
@@ -251,16 +130,17 @@ struct ValidationCompletion {
 /// Palette, so it shares that transient's chrome, focus restoration, and dismissal exactly.
 ///
 /// It owns only what is specific to choosing a Project Root: typed path spelling, the guarded
-/// filesystem reads, folder creation, validation, and the Finder Fallback.
+/// filesystem reads, folder creation, validation, and the System Directory Selection.
 pub(super) struct WorkspacePicker {
     home: PathBuf,
+    paths: LocalPathSemantics,
     filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync>,
     system_settings: Option<Rc<dyn PermissionRecoveryOpener>>,
     palette: Entity<CommandPalette<PathBuf>>,
     open: bool,
     lifecycle_generation: u64,
     operation_generation: u64,
-    finder_generation: u64,
+    directory_selection_generation: u64,
     parsed: Option<ParsedWorkspacePath>,
     snapshot: Option<LoadedDirectorySnapshot>,
     rows: Vec<WorkspacePickerDirectoryEntry>,
@@ -297,13 +177,14 @@ impl WorkspacePicker {
 
         Self {
             home,
+            paths: filesystem.path_semantics(),
             filesystem,
             system_settings,
             palette,
             open: false,
             lifecycle_generation: 0,
             operation_generation: 0,
-            finder_generation: 0,
+            directory_selection_generation: 0,
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
@@ -360,16 +241,24 @@ impl WorkspacePicker {
             .update(cx, |palette, cx| palette.dismiss(window, cx))
     }
 
-    pub(super) fn finder_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
+    pub(super) fn directory_selection_cancelled(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open && self.busy == Some(WorkspacePickerBusy::DirectorySelection) {
             self.busy = None;
             self.publish(cx);
             self.refocus_path(window, cx);
         }
     }
 
-    pub(super) fn finder_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
+    pub(super) fn directory_selection_failed(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open && self.busy == Some(WorkspacePickerBusy::DirectorySelection) {
             self.busy = None;
             self.status = WorkspacePickerStatus::Other;
             self.publish(cx);
@@ -377,27 +266,27 @@ impl WorkspacePicker {
         }
     }
 
-    pub(super) fn validate_finder_selection(
+    pub(super) fn validate_system_selection(
         &mut self,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
-            self.bind_finder_selection_to_input(&path, cx);
-            self.start_validation(path, ValidationKind::Finder, window, cx);
+        if self.open && self.busy == Some(WorkspacePickerBusy::DirectorySelection) {
+            self.bind_system_selection_to_input(&path, cx);
+            self.start_validation(path, ValidationKind::DirectorySelection, window, cx);
         }
     }
 
-    fn bind_finder_selection_to_input(&mut self, path: &Path, cx: &mut Context<Self>) {
+    fn bind_system_selection_to_input(&mut self, path: &Path, cx: &mut Context<Self>) {
         let prefer_tilde = self
             .parsed
             .as_ref()
-            .is_some_and(|parsed| parsed.display().starts_with(HOME_DISPLAY));
+            .is_some_and(|parsed| parsed.display().starts_with(self.paths.home_prefix()));
         let Some(display) = self.representable_directory_display(path, prefer_tilde, cx) else {
             return;
         };
-        let Ok(parsed) = parse_workspace_path(&display, &self.home) else {
+        let Ok(parsed) = parse_workspace_path(self.paths, &display, &self.home) else {
             return;
         };
         self.palette
@@ -411,7 +300,8 @@ impl WorkspacePicker {
         prefer_tilde: bool,
         cx: &Context<Self>,
     ) -> Option<String> {
-        let display = display_workspace_directory_with_style(path, &self.home, prefer_tilde)?;
+        let display =
+            display_workspace_directory_with_style(self.paths, path, &self.home, prefer_tilde)?;
         self.palette
             .read(cx)
             .can_set_query_exactly(&display, cx)
@@ -450,8 +340,9 @@ impl WorkspacePicker {
         match event {
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
                 self.open = true;
-                self.palette
-                    .update(cx, |palette, cx| palette.set_query(HOME_DISPLAY, cx));
+                self.palette.update(cx, |palette, cx| {
+                    palette.set_query(self.paths.home_prefix(), cx)
+                });
                 self.publish(cx);
             }
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
@@ -478,7 +369,7 @@ impl WorkspacePicker {
             }
             CommandPaletteEvent::Confirmed => self.confirm_typed_path(window, cx),
             CommandPaletteEvent::MenuAction(action) => match action.as_ref() {
-                FINDER_ACTION => self.request_finder(cx),
+                DIRECTORY_SELECTION_ACTION => self.request_directory_selection(cx),
                 RETRY_ACTION => self.retry(window, cx),
                 SYSTEM_SETTINGS_ACTION => self.open_system_settings(cx),
                 _ => {}
@@ -491,7 +382,7 @@ impl WorkspacePicker {
         if !self.open || self.busy.is_some() {
             return;
         }
-        let parsed = match parse_workspace_path(&value, &self.home) {
+        let parsed = match parse_workspace_path(self.paths, &value, &self.home) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.parsed = None;
@@ -504,7 +395,7 @@ impl WorkspacePicker {
         };
         let hide_dot_prefixed = !parsed.reveals_dot_directories();
         let listing_needed = !self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.directory == parsed.enumeration_directory
+            snapshot.directory == parsed.enumeration_directory()
                 && snapshot.hide_dot_prefixed == hide_dot_prefixed
         });
         self.parsed = Some(parsed.clone());
@@ -559,7 +450,7 @@ impl WorkspacePicker {
                 let palette = self.palette.clone();
                 entries.retain(|entry| palette.read(cx).can_set_query_exactly(entry.name(), cx));
                 self.snapshot = Some(LoadedDirectorySnapshot {
-                    directory: completion.parsed.enumeration_directory.clone(),
+                    directory: completion.parsed.enumeration_directory().to_owned(),
                     hide_dot_prefixed: completion.hide_dot_prefixed,
                     entries,
                 });
@@ -603,7 +494,7 @@ impl WorkspacePicker {
         let (Some(parsed), Some(snapshot)) = (self.parsed.as_ref(), self.snapshot.as_ref()) else {
             return;
         };
-        if snapshot.directory != parsed.enumeration_directory
+        if snapshot.directory != parsed.enumeration_directory()
             || snapshot.hide_dot_prefixed == parsed.reveals_dot_directories()
         {
             return;
@@ -613,7 +504,7 @@ impl WorkspacePicker {
             .rows
             .iter()
             .cloned()
-            .map(directory_palette_item)
+            .map(|entry| directory_palette_item(self.paths, entry))
             .collect();
         self.palette
             .update(cx, |palette, cx| palette.set_items(items, cx));
@@ -638,7 +529,7 @@ impl WorkspacePicker {
         let prefer_tilde = self
             .parsed
             .as_ref()
-            .is_some_and(|parsed| parsed.display().starts_with(HOME_DISPLAY));
+            .is_some_and(|parsed| parsed.display().starts_with(self.paths.home_prefix()));
         let Some(display) = self.representable_directory_display(&path, prefer_tilde, cx) else {
             self.status = WorkspacePickerStatus::Other;
             self.publish(cx);
@@ -658,7 +549,12 @@ impl WorkspacePicker {
         };
         match self.status {
             WorkspacePickerStatus::Readable => {
-                self.start_validation(parsed.exact_path, ValidationKind::Typed, window, cx);
+                self.start_validation(
+                    parsed.exact_path().to_owned(),
+                    ValidationKind::Typed,
+                    window,
+                    cx,
+                );
             }
             WorkspacePickerStatus::Missing => {
                 self.prompt_for_creation(parsed, window, cx);
@@ -701,7 +597,7 @@ impl WorkspacePicker {
                 }
                 if answer == Some(0) {
                     picker.start_validation(
-                        parsed.exact_path,
+                        parsed.exact_path().to_owned(),
                         ValidationKind::Creation,
                         window,
                         cx,
@@ -728,11 +624,13 @@ impl WorkspacePicker {
         let lifecycle_generation = self.lifecycle_generation;
         self.busy = Some(match kind {
             ValidationKind::Creation => WorkspacePickerBusy::Creating,
-            ValidationKind::Typed | ValidationKind::Finder => WorkspacePickerBusy::Validating,
+            ValidationKind::Typed | ValidationKind::DirectorySelection => {
+                WorkspacePickerBusy::Validating
+            }
         });
         let expected_input_path = match kind {
             ValidationKind::Typed | ValidationKind::Creation => Some(path.clone()),
-            ValidationKind::Finder => self
+            ValidationKind::DirectorySelection => self
                 .parsed
                 .as_ref()
                 .filter(|parsed| parsed.exact_path() == path)
@@ -792,7 +690,7 @@ impl WorkspacePicker {
             }
             Err(error) => {
                 self.busy = None;
-                self.status = if completion.kind == ValidationKind::Finder
+                self.status = if completion.kind == ValidationKind::DirectorySelection
                     && completion.expected_input_path.is_none()
                 {
                     WorkspacePickerStatus::Other
@@ -805,13 +703,14 @@ impl WorkspacePicker {
         }
     }
 
-    fn request_finder(&mut self, cx: &mut Context<Self>) {
+    fn request_directory_selection(&mut self, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
             // The chooser must not retire a directory read that cancellation still needs.
-            self.finder_generation = self.finder_generation.wrapping_add(1);
-            self.busy = Some(WorkspacePickerBusy::Finder);
+            self.directory_selection_generation =
+                self.directory_selection_generation.wrapping_add(1);
+            self.busy = Some(WorkspacePickerBusy::DirectorySelection);
             self.publish(cx);
-            cx.emit(WorkspacePickerEvent::FinderRequested);
+            cx.emit(WorkspacePickerEvent::DirectorySelectionRequested);
         }
     }
 
@@ -865,16 +764,19 @@ impl WorkspacePicker {
                 "SpaceTerm needs permission to read this folder"
             }
             WorkspacePickerStatus::Other => "SpaceTerm couldn\u{2019}t read this folder",
-            WorkspacePickerStatus::Invalid(error) => error.message(),
+            WorkspacePickerStatus::Invalid(error) => error.message(self.paths),
             WorkspacePickerStatus::Readable => "No folders here",
         }
     }
 
-    fn actions_menu(&self) -> Vec<MenuEntry<SharedString>> {
+    fn actions_menu(&self, cx: &App) -> Vec<MenuEntry<SharedString>> {
         let mut entries = vec![
-            MenuEntry::action("Choose with Finder", FINDER_ACTION.into())
-                .disabled(self.busy.is_some())
-                .debug_selector(FINDER_ACTION),
+            MenuEntry::action(
+                crate::desktop_profile::FileInteractionLabels::get(cx).directory_selection,
+                DIRECTORY_SELECTION_ACTION.into(),
+            )
+            .disabled(self.busy.is_some())
+            .debug_selector(DIRECTORY_SELECTION_ACTION),
         ];
         if self.status == WorkspacePickerStatus::PermissionDenied {
             entries.push(MenuEntry::separator());
@@ -898,7 +800,7 @@ impl WorkspacePicker {
             .disabled(!self.can_confirm())
             .debug_selector("workspace-picker-confirm");
         let empty_text = self.empty_text();
-        let actions = self.actions_menu();
+        let actions = self.actions_menu(cx);
         let loading = self.busy.is_some();
         self.palette.update(cx, |palette, cx| {
             palette.set_confirm(Some(confirm), cx);
@@ -973,13 +875,19 @@ impl Render for WorkspacePicker {
     }
 }
 
-fn directory_palette_item(entry: WorkspacePickerDirectoryEntry) -> CommandPaletteItem<PathBuf> {
+fn directory_palette_item(
+    paths: LocalPathSemantics,
+    entry: WorkspacePickerDirectoryEntry,
+) -> CommandPaletteItem<PathBuf> {
     let selector = format!("workspace-picker-row-{}", entry.name());
-    CommandPaletteItem::new(entry.path().to_path_buf(), format!("{}/", entry.name()))
-        .leading_icon(move |foreground| {
-            Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
-        })
-        .debug_selector(selector)
+    CommandPaletteItem::new(
+        entry.path().to_path_buf(),
+        format!("{}{}", entry.name(), paths.separator()),
+    )
+    .leading_icon(move |foreground| {
+        Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
+    })
+    .debug_selector(selector)
 }
 
 fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerStatus {
@@ -992,31 +900,31 @@ fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerSta
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct FinderRequestIdentity {
+pub(super) struct DirectorySelectionRequestIdentity {
     lifecycle: u64,
     request: u64,
 }
 impl WorkspacePicker {
-    pub(super) fn finder_request_identity(&self) -> FinderRequestIdentity {
-        FinderRequestIdentity {
+    pub(super) fn directory_selection_request_identity(&self) -> DirectorySelectionRequestIdentity {
+        DirectorySelectionRequestIdentity {
             lifecycle: self.lifecycle_generation,
-            request: self.finder_generation,
+            request: self.directory_selection_generation,
         }
     }
-    pub(super) fn complete_finder_request(
+    pub(super) fn complete_directory_selection_request(
         &mut self,
-        identity: FinderRequestIdentity,
-        result: Result<Option<PathBuf>, crate::platform::finder_fallback::DirectoryChooserError>,
+        identity: DirectorySelectionRequestIdentity,
+        result: Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if identity != self.finder_request_identity() {
+        if identity != self.directory_selection_request_identity() {
             return;
         }
         match result {
-            Ok(Some(path)) => self.validate_finder_selection(path, window, cx),
-            Ok(None) => self.finder_cancelled(window, cx),
-            Err(_) => self.finder_failed(window, cx),
+            Ok(Some(path)) => self.validate_system_selection(path, window, cx),
+            Ok(None) => self.directory_selection_cancelled(window, cx),
+            Err(_) => self.directory_selection_failed(window, cx),
         }
     }
 }
@@ -1094,6 +1002,9 @@ mod tests {
     }
 
     impl WorkspacePickerFilesystem for ScriptedWorkspacePickerFilesystem {
+        fn path_semantics(&self) -> LocalPathSemantics {
+            LocalPathSemantics::Posix
+        }
         fn list_directories(
             &self,
             _directory: &Path,
@@ -1252,7 +1163,10 @@ mod tests {
         cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should dismiss"));
         cx.run_until_parked();
 
-        assert_eq!(path_bar(&picker, cx), HOME_DISPLAY);
+        assert_eq!(
+            path_bar(&picker, cx),
+            LocalPathSemantics::Posix.home_prefix()
+        );
         assert!(picker.read_with(cx, |picker, cx| {
             picker.is_open() && picker.palette.read(cx).is_open()
         }));
@@ -1285,7 +1199,7 @@ mod tests {
 
     #[test]
     fn workspace_picker_path_parser_accepts_root() {
-        let parsed = parse_workspace_path("/", &home()).unwrap();
+        let parsed = parse_workspace_path(LocalPathSemantics::Posix, "/", &home()).unwrap();
 
         assert_eq!(
             (
@@ -1301,7 +1215,9 @@ mod tests {
 
     #[test]
     fn workspace_picker_path_parser_expands_home_only_for_filesystem_operations() {
-        let parsed = parse_workspace_path("~/Projects/SpaceTerm", &home()).unwrap();
+        let parsed =
+            parse_workspace_path(LocalPathSemantics::Posix, "~/Projects/SpaceTerm", &home())
+                .unwrap();
 
         assert_eq!(
             (
@@ -1321,7 +1237,8 @@ mod tests {
 
     #[test]
     fn workspace_picker_path_parser_keeps_repeated_slashes_after_tilde_home_relative() {
-        let parsed = parse_workspace_path("~//tmp/project", &home()).unwrap();
+        let parsed =
+            parse_workspace_path(LocalPathSemantics::Posix, "~//tmp/project", &home()).unwrap();
 
         assert_eq!(
             (
@@ -1341,7 +1258,9 @@ mod tests {
 
     #[test]
     fn workspace_picker_path_parser_uses_trailing_separator_as_directory_enumeration() {
-        let parsed = parse_workspace_path("~/Projects/SpaceTerm/", &home()).unwrap();
+        let parsed =
+            parse_workspace_path(LocalPathSemantics::Posix, "~/Projects/SpaceTerm/", &home())
+                .unwrap();
 
         assert_eq!(
             (
@@ -1360,7 +1279,7 @@ mod tests {
     #[test]
     fn workspace_picker_path_parser_preserves_typed_spelling() {
         let input = "~/Projects/symlink/../SpaceTerm";
-        let parsed = parse_workspace_path(input, &home()).unwrap();
+        let parsed = parse_workspace_path(LocalPathSemantics::Posix, input, &home()).unwrap();
 
         assert_eq!(parsed.display(), input);
         assert_eq!(
@@ -1372,15 +1291,15 @@ mod tests {
     #[test]
     fn workspace_picker_path_parser_rejects_invalid_relative_and_tilde_forms() {
         assert_eq!(
-            parse_workspace_path("Projects", &home()),
+            parse_workspace_path(LocalPathSemantics::Posix, "Projects", &home()),
             Err(WorkspacePathFormatError::Relative)
         );
         assert_eq!(
-            parse_workspace_path("~", &home()),
+            parse_workspace_path(LocalPathSemantics::Posix, "~", &home()),
             Err(WorkspacePathFormatError::BareTilde)
         );
         assert_eq!(
-            parse_workspace_path("~other/Projects", &home()),
+            parse_workspace_path(LocalPathSemantics::Posix, "~other/Projects", &home()),
             Err(WorkspacePathFormatError::UnsupportedTilde)
         );
     }
@@ -1389,6 +1308,7 @@ mod tests {
     fn workspace_picker_display_keeps_home_relative_spelling_inside_home() {
         assert_eq!(
             display_workspace_directory_with_style(
+                LocalPathSemantics::Posix,
                 &home().join("Projects/SpaceTerm"),
                 &home(),
                 true
@@ -1396,7 +1316,12 @@ mod tests {
             Some("~/Projects/SpaceTerm/".to_owned())
         );
         assert_eq!(
-            display_workspace_directory_with_style(&home(), &home(), true),
+            display_workspace_directory_with_style(
+                LocalPathSemantics::Posix,
+                &home(),
+                &home(),
+                true
+            ),
             Some("~/".to_owned())
         );
     }
@@ -1405,6 +1330,7 @@ mod tests {
     fn workspace_picker_display_keeps_absolute_spelling_even_inside_home() {
         assert_eq!(
             display_workspace_directory_with_style(
+                LocalPathSemantics::Posix,
                 &home().join("Projects/SpaceTerm"),
                 &home(),
                 false
@@ -1412,7 +1338,12 @@ mod tests {
             Some("/Users/tester/Projects/SpaceTerm/".to_owned())
         );
         assert_eq!(
-            display_workspace_directory_with_style(&PathBuf::from("/"), &home(), true),
+            display_workspace_directory_with_style(
+                LocalPathSemantics::Posix,
+                &PathBuf::from("/"),
+                &home(),
+                true
+            ),
             Some("/".to_owned())
         );
     }
@@ -1420,12 +1351,12 @@ mod tests {
     #[test]
     fn workspace_picker_dot_directories_are_revealed_only_by_dot_leaf() {
         assert!(
-            parse_workspace_path("~/.", &home())
+            parse_workspace_path(LocalPathSemantics::Posix, "~/.", &home())
                 .unwrap()
                 .reveals_dot_directories()
         );
         assert!(
-            !parse_workspace_path("~/config", &home())
+            !parse_workspace_path(LocalPathSemantics::Posix, "~/config", &home())
                 .unwrap()
                 .reveals_dot_directories()
         );
@@ -1433,7 +1364,8 @@ mod tests {
 
     #[test]
     fn workspace_picker_rows_filter_case_insensitive_prefixes_and_sort_deterministically() {
-        let parsed = parse_workspace_path("~/Projects/sp", &home()).unwrap();
+        let parsed =
+            parse_workspace_path(LocalPathSemantics::Posix, "~/Projects/sp", &home()).unwrap();
         let entries = [
             WorkspacePickerDirectoryEntry::new(
                 "spaceTerm".to_owned(),
@@ -1462,8 +1394,11 @@ mod tests {
 
     #[test]
     fn workspace_picker_rows_never_include_a_parent_entry() {
-        let filtered = parse_workspace_path("~/Projects/no-match", &home()).unwrap();
-        let nested = parse_workspace_path("~/Projects/", &home()).unwrap();
+        let filtered =
+            parse_workspace_path(LocalPathSemantics::Posix, "~/Projects/no-match", &home())
+                .unwrap();
+        let nested =
+            parse_workspace_path(LocalPathSemantics::Posix, "~/Projects/", &home()).unwrap();
         let entries = [WorkspacePickerDirectoryEntry::new(
             "SpaceTerm".to_owned(),
             home().join("Projects/SpaceTerm"),
@@ -1544,14 +1479,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn finder_validation_accepts_unrepresentable_path_without_rebinding_the_path_bar(
+    fn directory_selection_validation_accepts_unrepresentable_path_without_rebinding_the_path_bar(
         cx: &mut TestAppContext,
     ) {
-        let finder_path = home().join("project\nx");
+        let directory_selection_path = home().join("project\nx");
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
             [home()],
             [Ok(ValidatedWorkspaceDirectory::new(
-                finder_path.clone(),
+                directory_selection_path.clone(),
                 WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
@@ -1560,8 +1495,8 @@ mod tests {
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.request_finder(cx);
-                picker.validate_finder_selection(finder_path.clone(), window, cx);
+                picker.request_directory_selection(cx);
+                picker.validate_system_selection(directory_selection_path.clone(), window, cx);
             });
         });
         cx.run_until_parked();
@@ -1583,7 +1518,7 @@ mod tests {
                 "~/".to_owned(),
                 Some(home()),
                 Some(WorkspacePickerBusy::AwaitingActivation),
-                (Vec::new(), Vec::new(), vec![finder_path]),
+                (Vec::new(), Vec::new(), vec![directory_selection_path]),
             )
         );
     }
@@ -1597,7 +1532,7 @@ mod tests {
             cx.debug_bounds("workspace-picker-confirm").is_some(),
             "the picker did not render its confirm control"
         );
-        // The confirm control and the Finder Fallback are the only footer actions; the old panel
+        // The confirm control and the System Directory Selection are the only footer actions; the old panel
         // repeated the confirm in its header as well.
         assert!(
             cx.debug_bounds("workspace-picker-header-add").is_none(),
@@ -1679,21 +1614,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_finder_fallback_should_be_one_click_from_the_footer(cx: &mut TestAppContext) {
+    fn the_directory_selection_fallback_should_be_one_click_from_the_footer(
+        cx: &mut TestAppContext,
+    ) {
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
         let (picker, cx) = workspace_picker(filesystem, cx);
 
         assert_eq!(
-            picker.read_with(cx, |picker, _| picker.actions_menu().len()),
+            picker.read_with(cx, |picker, cx| picker.actions_menu(cx).len()),
             1
         );
         assert!(
-            cx.debug_bounds("workspace-picker-finder").is_some(),
-            "the Finder Fallback was not offered directly"
+            cx.debug_bounds("workspace-picker-directory-selection")
+                .is_some(),
+            "the System Directory Selection was not offered directly"
         );
         assert!(
             cx.debug_bounds("command-palette-actions-menu").is_none(),
-            "the lone Finder Fallback was hidden behind a disclosure"
+            "the lone System Directory Selection was hidden behind a disclosure"
         );
     }
 
@@ -1705,11 +1643,11 @@ mod tests {
 
         set_input(&picker, "/locked/", cx);
 
-        let (status, empty_text, actions) = picker.read_with(cx, |picker, _| {
+        let (status, empty_text, actions) = picker.read_with(cx, |picker, cx| {
             (
                 picker.status,
                 picker.empty_text(),
-                picker.actions_menu().len(),
+                picker.actions_menu(cx).len(),
             )
         });
         assert_eq!(
@@ -1719,8 +1657,8 @@ mod tests {
                 "SpaceTerm needs permission to read this folder",
             )
         );
-        // Choose with Finder, a separator, Retry, and Open System Settings; only a readable folder
-        // leaves the Finder Fallback alone in the footer.
+        // Choose with System, a separator, Retry, and Open System Settings; only a readable folder
+        // leaves the System Directory Selection alone in the footer.
         assert_eq!(actions, 4);
         assert!(
             cx.debug_bounds("workspace-picker-permission").is_none(),
@@ -1738,13 +1676,15 @@ mod tests {
                 picker.system_settings = None;
                 picker.open_system_settings(cx);
                 assert_eq!(picker.status, WorkspacePickerStatus::PermissionDenied);
-                assert_eq!(picker.actions_menu().len(), 3);
+                assert_eq!(picker.actions_menu(cx).len(), 3);
             })
         });
     }
 
     #[gpui::test]
-    fn finder_cancellation_preserves_a_pending_directory_refresh(cx: &mut TestAppContext) {
+    fn directory_selection_cancellation_preserves_a_pending_directory_refresh(
+        cx: &mut TestAppContext,
+    ) {
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
         filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
             "Projects".to_owned(),
@@ -1752,17 +1692,17 @@ mod tests {
         )]);
         let (picker, cx) = workspace_picker(filesystem, cx);
 
-        // Exercise both possible orders without parking the background executor until Finder
+        // Exercise both possible orders without parking the background executor until DirectorySelection
         // is already open. The real refresh task must still publish its result in either order.
         for cancel_before_refresh in [true, false] {
             let identity = cx.update(|window, cx| {
                 picker.update(cx, |picker, cx| {
                     picker.retry(window, cx);
                     assert_eq!(picker.status, WorkspacePickerStatus::Loading);
-                    picker.request_finder(cx);
-                    let identity = picker.finder_request_identity();
+                    picker.request_directory_selection(cx);
+                    let identity = picker.directory_selection_request_identity();
                     if cancel_before_refresh {
-                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                        picker.complete_directory_selection_request(identity, Ok(None), window, cx);
                     }
                     identity
                 })
@@ -1772,13 +1712,16 @@ mod tests {
                 picker.update(cx, |picker, cx| {
                     assert_eq!(picker.status, WorkspacePickerStatus::Readable);
                     if !cancel_before_refresh {
-                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                        picker.complete_directory_selection_request(identity, Ok(None), window, cx);
                     }
                     assert!(picker.can_confirm());
                     assert!(picker.path_input_is_focused(window, cx));
                 });
             });
-            assert_eq!(path_bar(&picker, cx), HOME_DISPLAY);
+            assert_eq!(
+                path_bar(&picker, cx),
+                LocalPathSemantics::Posix.home_prefix()
+            );
             assert_eq!(row_names(&picker, cx), vec!["Projects"]);
         }
     }
@@ -1789,15 +1732,15 @@ mod tests {
         let (picker, cx) = workspace_picker(filesystem, cx);
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.request_finder(cx);
-                let previous = picker.finder_request_identity();
-                picker.complete_finder_request(previous, Ok(None), window, cx);
-                picker.request_finder(cx);
-                let current = picker.finder_request_identity();
+                picker.request_directory_selection(cx);
+                let previous = picker.directory_selection_request_identity();
+                picker.complete_directory_selection_request(previous, Ok(None), window, cx);
+                picker.request_directory_selection(cx);
+                let current = picker.directory_selection_request_identity();
                 assert_ne!(previous, current);
-                picker.complete_finder_request(previous, Ok(Some(home())), window, cx);
-                assert_eq!(picker.busy, Some(WorkspacePickerBusy::Finder));
-                picker.complete_finder_request(current, Ok(None), window, cx);
+                picker.complete_directory_selection_request(previous, Ok(Some(home())), window, cx);
+                assert_eq!(picker.busy, Some(WorkspacePickerBusy::DirectorySelection));
+                picker.complete_directory_selection_request(current, Ok(None), window, cx);
                 assert_eq!(picker.busy, None);
             })
         });
@@ -1829,12 +1772,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn finder_cancellation_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+    fn directory_selection_cancellation_should_survive_key_window_transitions(
+        cx: &mut TestAppContext,
+    ) {
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
         let (picker, cx) = workspace_picker(filesystem, cx);
         let original_query = path_bar(&picker, cx);
 
-        picker.update(cx, |picker, cx| picker.request_finder(cx));
+        picker.update(cx, |picker, cx| picker.request_directory_selection(cx));
         cx.deactivate_window();
         cx.run_until_parked();
         let retained_while_inactive =
@@ -1842,13 +1787,15 @@ mod tests {
 
         cx.update(|window, _| window.activate_window());
         cx.update(|window, cx| {
-            picker.update(cx, |picker, cx| picker.finder_cancelled(window, cx));
+            picker.update(cx, |picker, cx| {
+                picker.directory_selection_cancelled(window, cx)
+            });
         });
         cx.run_until_parked();
 
         assert_eq!(
             retained_while_inactive,
-            (true, Some(WorkspacePickerBusy::Finder))
+            (true, Some(WorkspacePickerBusy::DirectorySelection))
         );
         assert_eq!(path_bar(&picker, cx), original_query);
         assert!(picker.read_with(cx, |picker, _| picker.is_open()));
@@ -1856,7 +1803,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn finder_completion_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+    fn directory_selection_completion_should_survive_key_window_transitions(
+        cx: &mut TestAppContext,
+    ) {
         let selected = home().join("Projects");
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
             [home(), selected.clone()],
@@ -1867,13 +1816,13 @@ mod tests {
         ));
         let (picker, cx) = workspace_picker(filesystem, cx);
 
-        picker.update(cx, |picker, cx| picker.request_finder(cx));
+        picker.update(cx, |picker, cx| picker.request_directory_selection(cx));
         cx.deactivate_window();
         cx.run_until_parked();
         cx.update(|window, _| window.activate_window());
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.validate_finder_selection(selected, window, cx);
+                picker.validate_system_selection(selected, window, cx);
             });
         });
         cx.run_until_parked();
@@ -2027,7 +1976,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn stale_finder_validation_completion_does_not_overwrite_newer_typed_path(
+    fn stale_directory_selection_validation_completion_does_not_overwrite_newer_typed_path(
         cx: &mut TestAppContext,
     ) {
         let current_path = PathBuf::from("/current-typed-path");
@@ -2048,8 +1997,8 @@ mod tests {
                     ValidationCompletion {
                         lifecycle_generation,
                         operation_generation: stale_operation_generation,
-                        kind: ValidationKind::Finder,
-                        expected_input_path: Some(PathBuf::from("/stale-finder-path")),
+                        kind: ValidationKind::DirectorySelection,
+                        expected_input_path: Some(PathBuf::from("/stale-directory_selection-path")),
                         result: Err(WorkspacePickerFilesystemError::Missing),
                     },
                     window,
@@ -2081,29 +2030,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn finder_validation_failure_keeps_retry_and_creation_bound_to_selected_path(
+    fn directory_selection_validation_failure_keeps_retry_and_creation_bound_to_selected_path(
         cx: &mut TestAppContext,
     ) {
-        let typed_path = PathBuf::from("/typed-before-finder");
-        let finder_path = PathBuf::from("/selected-with-finder");
+        let typed_path = PathBuf::from("/typed-before-directory_selection");
+        let directory_selection_path = PathBuf::from("/selected-with-directory_selection");
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
             [home(), typed_path.clone()],
             [
                 Err(WorkspacePickerFilesystemError::Missing),
                 Ok(ValidatedWorkspaceDirectory::new(
-                    finder_path.clone(),
+                    directory_selection_path.clone(),
                     WorkspaceDirectoryIdentity::for_test(7011),
                 )),
             ],
         ));
         let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
-        set_input(&picker, "/typed-before-finder/", cx);
+        set_input(&picker, "/typed-before-directory_selection/", cx);
         filesystem.clear_records();
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.request_finder(cx);
-                picker.validate_finder_selection(finder_path.clone(), window, cx);
+                picker.request_directory_selection(cx);
+                picker.validate_system_selection(directory_selection_path.clone(), window, cx);
             });
         });
         cx.run_until_parked();
@@ -2122,11 +2071,11 @@ mod tests {
         assert_eq!(
             (input, filesystem.records()),
             (
-                "/selected-with-finder/".to_owned(),
+                "/selected-with-directory_selection/".to_owned(),
                 (
-                    vec![finder_path.clone()],
-                    vec![finder_path.clone()],
-                    vec![finder_path.clone(), finder_path],
+                    vec![directory_selection_path.clone()],
+                    vec![directory_selection_path.clone()],
+                    vec![directory_selection_path.clone(), directory_selection_path],
                 ),
             )
         );

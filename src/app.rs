@@ -51,8 +51,13 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "startup consumes independently captured host facts and capabilities"
+    )]
     pub(crate) fn capture(
         path_environment: AppPathEnvironment,
+        ssh_environment: StartupSshEnvironment,
         path_host_facts: &AppPathHostFacts,
         secure_filesystem: Arc<dyn SecureFilesystem>,
         executable: OpenSshExecutable,
@@ -68,7 +73,6 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         if !home_directory.is_absolute() {
             return Err(StartupDependenciesError::RelativeHome);
         }
-        let ssh_environment = StartupSshEnvironment::capture();
         let ssh_capability = SshCapabilityProbe::from_startup(
             executable.clone(),
             home_directory.clone(),
@@ -264,7 +268,7 @@ pub(crate) fn open(
         accessibility: Rc::clone(&host.adapters.accessibility),
         native_services: host.adapters.native_services.clone(),
         lifecycle: host.adapters.lifecycle.clone(),
-        finder: Rc::clone(&host.adapters.finder),
+        directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         permission_recovery: host.adapters.permission_recovery.clone(),
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
@@ -513,7 +517,6 @@ pub(crate) struct ApplicationCapabilities {
         Rc<dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory>,
     pub(crate) native_services: crate::terminal::native_services::NativeServiceAdapters,
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
-    pub(crate) finder: Rc<dyn crate::platform::finder_fallback::FinderFallback>,
     pub(crate) permission_recovery:
         Option<Rc<dyn crate::platform::permission_recovery::PermissionRecoveryOpener>>,
     pub(crate) remote_workspace:
@@ -810,7 +813,6 @@ mod runtime_tests {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
-                finder: Rc::new(crate::platform::finder_fallback::ScriptedFinderFallback::new([])),
                 permission_recovery: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
@@ -1014,10 +1016,17 @@ mod runtime_tests {
         });
         cx.run_until_parked();
         let now = std::time::Instant::now();
-        let mut metadata =
-            crate::terminal::metadata::MetadataTracker::new("/tmp", "zsh", None, now);
+        let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            None,
+            now,
+        );
         assert!(metadata.apply_semantic_prompt("A", now));
-        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        let mut screen =
+            (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+                .clone();
         screen.metadata = metadata.snapshot();
         records
             .event_sender(2)

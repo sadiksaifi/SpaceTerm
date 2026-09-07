@@ -2,7 +2,6 @@ use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesyst
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -456,7 +455,7 @@ impl PartialEq for ScreenSnapshot {
 impl Eq for ScreenSnapshot {}
 
 impl ScreenSnapshot {
-    pub(crate) fn empty() -> Arc<Self> {
+    pub(crate) fn empty(paths: crate::local_path::LocalPathSemantics) -> Arc<Self> {
         Arc::new(Self {
             generation: PresentationGeneration::default(),
             rows: Arc::from([]),
@@ -475,7 +474,7 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             selection_present: false,
             title: Arc::from(""),
-            metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
+            metadata: MetadataTracker::new(paths, "", "", None, Instant::now()).snapshot(),
             find: None,
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
@@ -539,7 +538,14 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             selection_present: false,
             title: Arc::from(""),
-            metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
+            metadata: MetadataTracker::new(
+                crate::local_path::LocalPathSemantics::Posix,
+                "",
+                "",
+                None,
+                Instant::now(),
+            )
+            .snapshot(),
             find: None,
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
@@ -731,7 +737,11 @@ impl TerminalEmulator {
     ) -> Result<Self, Error> {
         Self::new_with_metadata_context(
             geometry,
-            TerminalMetadataContext::local(initial_directory, local_hostname),
+            TerminalMetadataContext::local(
+                crate::local_path::LocalPathSemantics::Posix,
+                initial_directory,
+                local_hostname,
+            ),
             fallback_title,
             terminal_name,
             epoch,
@@ -770,10 +780,7 @@ impl TerminalEmulator {
         let pending_metadata = Rc::new(RefCell::new(Vec::new()));
         let local_file_capabilities = metadata_context.local_file_capabilities();
         let trusted_directory = Rc::new(RefCell::new(
-            metadata_context
-                .is_local()
-                .then(|| PathBuf::from(metadata_context.initial_directory()))
-                .filter(|directory| directory.is_absolute()),
+            metadata_context.local_directory(metadata_context.initial_directory()),
         ));
         let pending_attention = Rc::new(RefCell::new(Vec::new()));
         set_png_decoder(Some(Box::new(RustPngDecoder::new())))?;
@@ -809,19 +816,13 @@ impl TerminalEmulator {
         terminal.on_pwd_changed({
             let pending_metadata = Rc::clone(&pending_metadata);
             let trusted_directory = Rc::clone(&trusted_directory);
-            let local_hostname = metadata_context.local_hostname().map(ToOwned::to_owned);
-            let local_context = metadata_context.is_local();
+            let context = metadata_context.clone();
             move |terminal| {
                 if let Ok(directory) = terminal.pwd() {
-                    let reported = crate::terminal::metadata::parse_osc7_directory(
-                        directory,
-                        local_hostname.as_deref(),
-                    );
-                    *trusted_directory.borrow_mut() = if local_context {
-                        reported.map(|metadata| PathBuf::from(metadata.path.as_ref()))
-                    } else {
-                        None
-                    };
+                    let reported =
+                        crate::terminal::metadata::parse_osc7_directory(directory, &context);
+                    *trusted_directory.borrow_mut() =
+                        reported.and_then(|metadata| context.local_directory(&metadata.path));
                     pending_metadata
                         .borrow_mut()
                         .push(MetadataEvent::Directory(Arc::from(directory)));
