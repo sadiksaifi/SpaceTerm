@@ -49,12 +49,12 @@ use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::metadata::{
     MetadataTracker, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
-use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 #[cfg(test)]
-use crate::terminal::session::WheelPhase;
-use crate::terminal::session::{
+use crate::terminal::pointer_input::WheelPhase;
+use crate::terminal::pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
+use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 use crate::terminal::{FindDirection, FindQueryGeneration, TerminalFindSnapshot};
 use crate::theme::{ACTIVE_THEME, Color};
 

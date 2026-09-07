@@ -9,7 +9,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::close_policy::CloseScope;
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
@@ -18,7 +17,7 @@ use super::remote_workspace_flow::{
     RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
 };
 use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
-use super::terminal_focus::TerminalFocusBlocker;
+use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
@@ -33,12 +32,13 @@ use super::{
     TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
     WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
+use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
 #[cfg(test)]
 use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalTabCloseOutcome,
-    PaneId, RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
     RemoteWorkspaceDirectory, RemoteWorkspaceKey, TabId, ValidatedWorkspaceDirectory,
     WorkspaceCollection, WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity,
     WorkspaceError, WorkspaceId, WorkspaceKind,
@@ -105,40 +105,6 @@ enum WorkspaceMenuCommand {
     Rename,
     Reconnect,
     Close,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CloseTarget {
-    Pane {
-        workspace_id: WorkspaceId,
-        tab_id: TabId,
-        pane_id: PaneId,
-    },
-    Tab {
-        workspace_id: WorkspaceId,
-        tab_id: TabId,
-    },
-    Workspace(WorkspaceId),
-    Window,
-    Application,
-}
-
-impl CloseTarget {
-    const fn scope(self) -> CloseScope {
-        match self {
-            Self::Pane { .. } => CloseScope::Pane,
-            Self::Tab { .. } => CloseScope::Tab,
-            Self::Workspace(_) => CloseScope::Workspace,
-            Self::Window => CloseScope::Window,
-            Self::Application => CloseScope::Application,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingCloseConfirmation {
-    generation: u64,
-    target: CloseTarget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,8 +278,7 @@ pub(crate) struct WorkspaceManager {
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
-    close_confirmation_generation: u64,
-    pending_close_confirmation: Option<PendingCloseConfirmation>,
+    close_confirmation: CloseConfirmation,
 }
 
 impl WorkspaceManager {
@@ -577,8 +542,7 @@ impl WorkspaceManager {
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             pending_final_tab_closes: BTreeSet::new(),
-            close_confirmation_generation: 0,
-            pending_close_confirmation: None,
+            close_confirmation: CloseConfirmation::default(),
         }
     }
 
@@ -790,166 +754,73 @@ impl WorkspaceManager {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
-            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if *directory_authority == authority)
-        }) {
-            return;
-        }
-        let directory = match self.local_filesystem.validate_workspace_directory(path) {
-            Ok(directory) => directory,
-            Err(error) => {
-                if self
-                    .workspaces
-                    .mark_directory_authority_unavailable(
-                        workspace_id,
-                        authority,
-                        error.to_string(),
-                    )
-                    .unwrap_or(false)
-                {
-                    self.refresh_workspace_search(cx);
-                    cx.notify();
-                }
-                return;
-            }
-        };
-        let changed = self
-            .workspaces
-            .update_directory_authority_report(workspace_id, authority, directory)
-            .unwrap_or(false);
-        if !changed {
-            return;
-        }
-        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-            return;
-        };
-        let manager = workspace.payload().clone();
-        let (Some(path), Some(identity)) = (
-            workspace.working_directory(),
-            workspace.directory_identity(),
-        ) else {
-            unreachable!("a Scratch Workspace must own a local Workspace Directory")
-        };
-        let path = path.to_path_buf();
-        manager.update(cx, |manager, cx| {
-            manager.set_workspace_directory(&path, identity, cx);
-        });
-        self.refresh_workspace_search(cx);
-        cx.notify();
+        self.apply_directory_change(
+            workspace_id,
+            crate::domain::DirectoryChange::Report(authority),
+            Some(path),
+            cx,
+        );
     }
 
     fn handle_authority_promotion(
         &mut self,
         workspace_id: WorkspaceId,
-        removed_authority: DirectoryAuthority,
-        promoted_authority: DirectoryAuthority,
-        reported_directory: Option<&std::path::Path>,
+        removed: DirectoryAuthority,
+        successor: DirectoryAuthority,
+        report: Option<&std::path::Path>,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
-            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if *directory_authority == removed_authority)
-        }) {
-            return;
-        }
-        let (directory, invalid_reason) = match reported_directory {
-            Some(path) => match self.local_filesystem.validate_workspace_directory(path) {
-                Ok(directory) => (Some(directory), None),
-                Err(error) => (None, Some(error.to_string())),
-            },
-            None => (None, None),
-        };
-        let promoted = self
-            .workspaces
-            .promote_directory_authority(
-                workspace_id,
-                removed_authority,
-                promoted_authority,
-                directory,
-            )
-            .unwrap_or(false);
-        if !promoted {
-            return;
-        }
-        if let Some(reason) = invalid_reason {
-            let _ = self.workspaces.mark_directory_authority_unavailable(
-                workspace_id,
-                promoted_authority,
-                reason,
-            );
-        }
-        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-            return;
-        };
-        let manager = workspace.payload().clone();
-        let (Some(path), Some(identity)) = (
-            workspace.working_directory(),
-            workspace.directory_identity(),
-        ) else {
-            unreachable!("a Scratch Workspace must own a local Workspace Directory")
-        };
-        let path = path.to_path_buf();
-        manager.update(cx, |manager, cx| {
-            manager.set_workspace_directory(&path, identity, cx)
-        });
-        self.refresh_workspace_search(cx);
-        cx.notify();
+        self.apply_directory_change(
+            workspace_id,
+            crate::domain::DirectoryChange::PaneClosed { removed, successor },
+            report,
+            cx,
+        );
     }
 
     fn handle_tab_authority_promotion(
         &mut self,
         workspace_id: WorkspaceId,
-        removed_tab_id: crate::domain::TabId,
-        promoted_authority: DirectoryAuthority,
-        reported_directory: Option<&std::path::Path>,
+        removed: TabId,
+        successor: DirectoryAuthority,
+        report: Option<&std::path::Path>,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
-            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if directory_authority.tab_id() == removed_tab_id)
-        }) {
-            return;
-        }
-        let (directory, invalid_reason) = match reported_directory {
-            Some(path) => match self.local_filesystem.validate_workspace_directory(path) {
-                Ok(directory) => (Some(directory), None),
-                Err(error) => (None, Some(error.to_string())),
+        self.apply_directory_change(
+            workspace_id,
+            crate::domain::DirectoryChange::TabClosed { removed, successor },
+            report,
+            cx,
+        );
+    }
+
+    fn apply_directory_change(
+        &mut self,
+        workspace_id: WorkspaceId,
+        change: crate::domain::DirectoryChange,
+        report: Option<&std::path::Path>,
+        cx: &mut Context<Self>,
+    ) {
+        let filesystem = &self.local_filesystem;
+        let changed = self.workspaces.apply_directory_change(
+            workspace_id,
+            change,
+            report,
+            |path| {
+                filesystem
+                    .validate_workspace_directory(path)
+                    .map_err(|error| error.to_string())
             },
-            None => (None, None),
-        };
-        let promoted = self
-            .workspaces
-            .promote_directory_authority_for_tab(
-                workspace_id,
-                removed_tab_id,
-                promoted_authority,
-                directory,
-            )
-            .unwrap_or(false);
-        if !promoted {
-            return;
+            |manager, directory| {
+                manager.update(cx, |manager, cx| {
+                    manager.set_workspace_directory(directory.path(), directory.identity(), cx);
+                })
+            },
+        );
+        if changed {
+            self.refresh_workspace_search(cx);
+            cx.notify();
         }
-        if let Some(reason) = invalid_reason {
-            let _ = self.workspaces.mark_directory_authority_unavailable(
-                workspace_id,
-                promoted_authority,
-                reason,
-            );
-        }
-        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-            return;
-        };
-        let manager = workspace.payload().clone();
-        let (Some(path), Some(identity)) = (
-            workspace.working_directory(),
-            workspace.directory_identity(),
-        ) else {
-            unreachable!("a Scratch Workspace must own a local Workspace Directory")
-        };
-        let path = path.to_path_buf();
-        manager.update(cx, |manager, cx| {
-            manager.set_workspace_directory(&path, identity, cx)
-        });
-        self.refresh_workspace_search(cx);
-        cx.notify();
     }
 
     fn report_workspace_error(operation: &str, error: WorkspaceError) {
@@ -1016,9 +887,10 @@ impl WorkspaceManager {
     }
 
     fn terminal_focus_blocker(&self, window: &Window, cx: &App) -> Option<TerminalFocusBlocker> {
-        window_modal_is_open(window, cx)
-            .then_some(TerminalFocusBlocker::Modal)
-            .or_else(|| self.non_modal_terminal_focus_blocker(window, cx))
+        TerminalFocusCoordinator::modal_blocker(
+            self.non_modal_terminal_focus_blocker(window, cx),
+            window_modal_is_open(window, cx),
+        )
     }
 
     fn non_modal_terminal_focus_blocker(
@@ -1026,43 +898,20 @@ impl WorkspaceManager {
         window: &Window,
         cx: &App,
     ) -> Option<TerminalFocusBlocker> {
-        self.workspace_picker
-            .read(cx)
-            .blocks_terminal_input()
-            .then_some(TerminalFocusBlocker::Modal)
-            .or(self
+        TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
+            picker: self.workspace_picker.read(cx).blocks_terminal_input(),
+            remote_flow: self
                 .remote_workspace_flow
                 .as_ref()
-                .is_some_and(|flow| flow.read(cx).blocks_terminal_input())
-                .then_some(TerminalFocusBlocker::CommandPalette))
-            .or(self
-                .new_workspace_panel
-                .read(cx)
-                .blocks_terminal_input()
-                .then_some(TerminalFocusBlocker::CommandPalette))
-            .or(self
-                .workspace_search
-                .read(cx)
-                .blocks_terminal_input()
-                .then_some(TerminalFocusBlocker::CommandPalette))
-            .or(self
-                .window_drag_status
-                .is_active()
-                .then_some(TerminalFocusBlocker::TopChrome))
-            .or(self
-                .sidebar_resize_interaction
-                .then_some(TerminalFocusBlocker::SidebarResize))
-            .or(self
-                .rename
-                .as_ref()
-                .map(|_| TerminalFocusBlocker::RenameField))
-            .or(self
-                .workspace_menu
-                .map(|_| TerminalFocusBlocker::ContextMenu))
-            .or(self
-                .sidebar_focus
-                .is_focused(window)
-                .then_some(TerminalFocusBlocker::Sidebar))
+                .is_some_and(|flow| flow.read(cx).blocks_terminal_input()),
+            new_workspace: self.new_workspace_panel.read(cx).blocks_terminal_input(),
+            search: self.workspace_search.read(cx).blocks_terminal_input(),
+            window_drag: self.window_drag_status.is_active(),
+            sidebar_resize: self.sidebar_resize_interaction,
+            rename: self.rename.is_some(),
+            context_menu: self.workspace_menu.is_some(),
+            sidebar: self.sidebar_focus.is_focused(window),
+        })
     }
 
     fn workspace_search_items(&self, cx: &App) -> Vec<WorkspaceSearchItem> {
@@ -1868,8 +1717,9 @@ impl WorkspaceManager {
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         }
+        let blocker = self.non_modal_terminal_focus_blocker(window, cx);
         next_manager.update(cx, |manager, cx| {
-            manager.set_parent_focus_blocker(Some(TerminalFocusBlocker::CommandPalette), cx);
+            manager.set_parent_focus_blocker(blocker, cx);
             manager.activate(window, cx);
         });
     }
@@ -2692,46 +2542,21 @@ impl WorkspaceManager {
     }
 
     fn close_target_requires_confirmation(&self, target: CloseTarget, cx: &App) -> Option<bool> {
-        match target {
-            CloseTarget::Pane {
-                workspace_id,
-                tab_id,
-                pane_id,
-            } => self
-                .workspaces
-                .workspace(workspace_id)
-                .and_then(|workspace| {
-                    workspace
-                        .payload()
-                        .read(cx)
-                        .pane_requires_close_confirmation(tab_id, pane_id, cx)
-                }),
-            CloseTarget::Tab {
-                workspace_id,
-                tab_id,
-            } => self
-                .workspaces
-                .workspace(workspace_id)
-                .and_then(|workspace| {
-                    workspace
-                        .payload()
-                        .read(cx)
-                        .tab_requires_close_confirmation(tab_id, cx)
-                }),
-            CloseTarget::Workspace(workspace_id) => self
-                .workspaces
-                .workspace(workspace_id)
-                .map(|workspace| workspace.payload().read(cx).requires_close_confirmation(cx)),
-            CloseTarget::Window | CloseTarget::Application => Some(
-                self.workspaces
-                    .iter()
-                    .any(|workspace| workspace.payload().read(cx).requires_close_confirmation(cx)),
-            ),
+        self.close_hierarchy(cx).requires_confirmation(target)
+    }
+
+    fn close_hierarchy(&self, cx: &App) -> CloseHierarchy {
+        let mut hierarchy = CloseHierarchy::default();
+        for workspace in self.workspaces.iter() {
+            for (tab, pane, terminal) in workspace.payload().read(cx).terminal_panes(cx) {
+                hierarchy.insert(workspace.id(), tab, pane, terminal.close_facts());
+            }
         }
+        hierarchy
     }
 
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_close_confirmation.is_some() {
+        if self.close_confirmation.pending().is_some() {
             return;
         }
         let Some(requires_confirmation) = self.close_target_requires_confirmation(target, cx)
@@ -2751,14 +2576,12 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(generation) = self.close_confirmation_generation.checked_add(1) else {
-            return;
-        };
         let Some(window_handle) = window.window_handle().downcast::<WorkspaceManager>() else {
             return;
         };
-        self.close_confirmation_generation = generation;
-        self.pending_close_confirmation = Some(PendingCloseConfirmation { generation, target });
+        let Some(generation) = self.close_confirmation.begin(target) else {
+            return;
+        };
 
         let scope = target.scope();
         let result = Alert::new(
@@ -2798,7 +2621,7 @@ impl WorkspaceManager {
         });
 
         if let Err(error) = result {
-            self.pending_close_confirmation = None;
+            self.close_confirmation.presentation_failed(generation);
             eprintln!("failed to present close confirmation: {error}");
         }
     }
@@ -2811,15 +2634,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_close_confirmation != Some(PendingCloseConfirmation { generation, target })
-        {
-            return;
-        }
-        self.pending_close_confirmation = None;
-        if confirmed
-            && self
-                .close_target_requires_confirmation(target, cx)
-                .is_some()
+        let hierarchy = self.close_hierarchy(cx);
+        if let Some(target) = self
+            .close_confirmation
+            .settle(generation, target, confirmed, &hierarchy)
         {
             self.commit_close_target(target, window, cx);
         }
@@ -2878,7 +2696,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.pending_close_confirmation.is_some() {
+        if self.close_confirmation.pending().is_some() {
             return false;
         }
         if self
@@ -2896,7 +2714,7 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn blocks_unconfirmed_application_quit(&self, cx: &App) -> bool {
-        self.pending_close_confirmation.is_some()
+        self.close_confirmation.pending().is_some()
             || self.close_target_requires_confirmation(CloseTarget::Application, cx) == Some(true)
     }
 
@@ -3145,12 +2963,12 @@ impl WorkspaceManager {
         &mut self,
         workspace_id: WorkspaceId,
         event: MenuLifecycleEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let blocker = match event {
+        match event {
             MenuLifecycleEvent::Opened => {
                 self.workspace_menu = Some(WorkspaceMenuState { workspace_id });
-                Some(TerminalFocusBlocker::ContextMenu)
             }
             MenuLifecycleEvent::Closed(_)
                 if self
@@ -3158,20 +2976,10 @@ impl WorkspaceManager {
                     .is_some_and(|menu| menu.workspace_id == workspace_id) =>
             {
                 self.workspace_menu = None;
-                Some(if self.rename.is_some() {
-                    TerminalFocusBlocker::RenameField
-                } else {
-                    TerminalFocusBlocker::Sidebar
-                })
             }
             MenuLifecycleEvent::Closed(_) => return,
-        };
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .update(cx, |manager, cx| {
-                manager.set_parent_focus_blocker(blocker, cx);
-            });
+        }
+        self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
@@ -3657,6 +3465,7 @@ impl WorkspaceManager {
         row: WorkspaceRowViewModel,
         manager: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
+        window: &Window,
     ) -> AnyElement {
         let WorkspaceRowViewModel {
             workspace_id,
@@ -3926,6 +3735,7 @@ impl WorkspaceManager {
 
         let open_manager = manager.clone();
         let lifecycle_manager = manager.clone();
+        let lifecycle_window = window.window_handle();
         let activate_manager = manager;
         div()
             .id(("workspace-menu", workspace_id.get()))
@@ -3949,8 +3759,21 @@ impl WorkspaceManager {
                         .unwrap_or(false)
                 })
                 .on_lifecycle(move |event, cx| {
-                    let _ = lifecycle_manager.update(cx, |manager, cx| {
-                        manager.handle_workspace_menu_lifecycle(workspace_id, *event, cx);
+                    let manager = lifecycle_manager.clone();
+                    let event = *event;
+                    // Menu lifecycle delivery can occur while its Window is borrowed.
+                    // Resolve ownership after that delivery, using the current Window facts.
+                    cx.defer(move |cx| {
+                        let _ = lifecycle_window.update(cx, |_, window, cx| {
+                            let _ = manager.update(cx, |manager, cx| {
+                                manager.handle_workspace_menu_lifecycle(
+                                    workspace_id,
+                                    event,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        });
                     });
                 })
                 .on_activate(move |activation, window, cx| {
@@ -3963,7 +3786,7 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_sidebar(&self, manager: WeakEntity<Self>, cx: &App) -> AnyElement {
+    fn render_sidebar(&self, manager: WeakEntity<Self>, window: &Window, cx: &App) -> AnyElement {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let shortcuts = workspace_surface_presentation(presentation);
         let scroll_manager = manager.clone();
@@ -4018,6 +3841,7 @@ impl WorkspaceManager {
                     },
                     manager.clone(),
                     presentation,
+                    window,
                 ),
             );
         }
@@ -4291,7 +4115,7 @@ impl Render for WorkspaceManager {
             .children(self.remote_workspace_flow.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone()))
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(manager.clone(), cx))
+                root.child(self.render_sidebar(manager.clone(), window, cx))
             })
             .child(self.render_sidebar_resize_handle(manager));
         let content = content
@@ -8581,7 +8405,8 @@ mod tests {
         cx.run_until_parked();
         let first_pending = manager.read_with(cx, |manager, _| {
             manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .expect("risky close should present one confirmation")
         });
         cx.simulate_keystrokes("cmd-w");
@@ -8589,7 +8414,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .expect("duplicate request must keep the original confirmation")
                 .generation),
             first_pending.generation
@@ -8607,7 +8433,7 @@ mod tests {
         press_return(cx);
         redraw(cx);
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
         assert_eq!(
             tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
@@ -8621,7 +8447,7 @@ mod tests {
         });
         redraw(cx);
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_some()
+            manager.close_confirmation.pending().is_some()
         }));
         assert!(
             cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
@@ -8642,7 +8468,7 @@ mod tests {
 
         assert_eq!(
             (
-                manager.read_with(cx, |manager, _| manager.pending_close_confirmation),
+                manager.read_with(cx, |manager, _| manager.close_confirmation.pending()),
                 tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
                 records.dropped_session_ids(),
             ),
@@ -8680,7 +8506,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
         assert_eq!(
             tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
@@ -8705,7 +8531,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
         assert_eq!(
             tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
@@ -8762,7 +8588,8 @@ mod tests {
         })));
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Window)
         );
@@ -8773,7 +8600,8 @@ mod tests {
         });
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Window)
         );
@@ -8786,7 +8614,8 @@ mod tests {
         });
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Application)
         );
@@ -8810,7 +8639,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Tab {
                 workspace_id,
@@ -8846,7 +8676,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Workspace(WorkspaceId::new(1)))
         );
@@ -8879,7 +8710,8 @@ mod tests {
         assert!(!cx.simulate_close());
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Window)
         );
@@ -8902,14 +8734,15 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Application)
         );
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
         assert!(records.dropped_session_ids().is_empty());
 
@@ -8917,14 +8750,15 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
-                .pending_close_confirmation
+                .close_confirmation
+                .pending()
                 .map(|pending| pending.target)),
             Some(CloseTarget::Application)
         );
         cx.simulate_keystrokes("cmd-.");
         cx.run_until_parked();
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
         assert!(records.dropped_session_ids().is_empty());
 
@@ -8933,7 +8767,7 @@ mod tests {
         click("modal-action-close-confirmation-confirm", cx);
 
         assert!(manager.read_with(cx, |manager, _| {
-            manager.pending_close_confirmation.is_none()
+            manager.close_confirmation.pending().is_none()
         }));
     }
 
@@ -10066,6 +9900,43 @@ mod tests {
             )
         });
         assert_eq!(dismissed, (None, true, Some(TerminalFocusBlocker::Sidebar)));
+    }
+
+    #[gpui::test]
+    fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let workspace_id = manager.workspaces.active_workspace_id();
+                for resizing in [true, false] {
+                    manager.sidebar_resize_interaction = resizing;
+                    manager.handle_workspace_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Opened,
+                        window,
+                        cx,
+                    );
+                    manager.handle_workspace_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(
+                        manager
+                            .workspaces
+                            .active_workspace()
+                            .payload()
+                            .read(cx)
+                            .focused_terminal_has_input_focus(window, cx),
+                        !resizing,
+                        "menu closure must immediately preserve only remaining owners"
+                    );
+                }
+            });
+        });
     }
 
     #[gpui::test]

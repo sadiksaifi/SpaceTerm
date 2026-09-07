@@ -182,7 +182,12 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("ui/native_remote_workspace_flow_backend.rs"),
         root.join("ui/remote_workspace_flow.rs"),
     ];
-    for directory in ["ssh", "platform/local_filesystem"] {
+    for directory in [
+        "ssh",
+        "platform/local_filesystem",
+        "terminal/session",
+        "terminal/native_services",
+    ] {
         collect_rust_sources(&root.join(directory), &mut files);
     }
     // Discover every shared owner of an isolated suite so new mounts cannot escape the gate.
@@ -237,7 +242,11 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
             }
         }
     }
-    let session = std::fs::read_to_string(root.join("terminal/session.rs")).unwrap();
+    let session = format!(
+        "{}\n{}",
+        std::fs::read_to_string(root.join("terminal/session.rs")).unwrap(),
+        std::fs::read_to_string(root.join("terminal/session/launch.rs")).unwrap()
+    );
     for (start, end) in [
         ("fn test_launch_planner(", "impl TerminalSession"),
         ("fn start_deferred_with(", "fn start_deferred_with_context("),
@@ -655,6 +664,7 @@ fn validation_lanes_keep_portable_and_native_prerequisites_separate() {
 #[test]
 fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
     let policy = [
+        include_str!("terminal/native_services/local_authority.rs"),
         include_str!("terminal/native_services/clipboard.rs"),
         include_str!("terminal/native_services/file_insertion.rs"),
         include_str!("terminal/native_services/hyperlink.rs"),

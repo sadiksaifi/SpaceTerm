@@ -1,4 +1,5 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
+use crate::domain::remote_project::RemoteRestartBatch;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use thiserror::Error;
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
 };
-use super::terminal_focus::TerminalFocusBlocker;
+use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
@@ -41,7 +42,7 @@ pub(crate) enum RemoteTabManagerLifecycleError {
 /// No Tab or Pane is mutated until the complete token has been prepared and revalidated.
 pub(crate) struct PreparedTabManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
-    tabs: Vec<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
+    tabs: RemoteRestartBatch<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
 }
 use crate::domain::{
     CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, WorkspaceDirectoryIdentity,
@@ -438,27 +439,15 @@ impl TabManager {
         }
     }
 
-    pub(crate) fn pane_requires_close_confirmation(
-        &self,
-        tab_id: TabId,
-        pane_id: PaneId,
-        cx: &App,
-    ) -> Option<bool> {
-        self.tabs
-            .tab(tab_id)
-            .and_then(|host| host.read(cx).pane_requires_close_confirmation(pane_id, cx))
-    }
-
-    pub(crate) fn tab_requires_close_confirmation(&self, tab_id: TabId, cx: &App) -> Option<bool> {
-        self.tabs
-            .tab(tab_id)
-            .map(|host| host.read(cx).requires_close_confirmation(cx))
-    }
-
-    pub(crate) fn requires_close_confirmation(&self, cx: &App) -> bool {
-        self.tabs
-            .iter()
-            .any(|(_, host)| host.read(cx).requires_close_confirmation(cx))
+    pub(crate) fn terminal_panes<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> impl Iterator<Item = (TabId, PaneId, &'a super::terminal_pane::TerminalPane)> {
+        self.tabs.iter().flat_map(move |(tab, host)| {
+            host.read(cx)
+                .terminal_panes(cx)
+                .map(move |(pane, terminal)| (tab, pane, terminal))
+        })
     }
 
     pub(crate) fn close_pane_authorized(
@@ -584,7 +573,7 @@ impl TabManager {
         }
         Ok(PreparedTabManagerRemoteRestart {
             session_factory,
-            tabs,
+            tabs: RemoteRestartBatch::new(tabs),
         })
     }
 
@@ -598,36 +587,37 @@ impl TabManager {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteTabManagerLifecycleError> {
-        if self.tabs.len() != prepared.tabs.len() {
-            return Err(RemoteTabManagerLifecycleError::TabChanged(
-                self.tabs.active_tab_id(),
-            ));
-        }
-        for (tab_id, pane_host, host_restart) in &prepared.tabs {
-            let Some(current) = self.tabs.tab(*tab_id) else {
-                return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
-            };
-            if current.entity_id() != pane_host.entity_id() {
-                return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
-            }
-            pane_host
-                .read(cx)
-                .can_commit_remote_restart(host_restart, cx)
-                .map_err(|source| RemoteTabManagerLifecycleError::Tab {
-                    tab_id: *tab_id,
-                    source,
-                })?;
-        }
         let session_factory = prepared.session_factory;
-        for (tab_id, pane_host, host_restart) in prepared.tabs {
-            pane_host.update(cx, |pane_host, cx| {
+        prepared.tabs.commit(
+            self.tabs.len(),
+            || RemoteTabManagerLifecycleError::TabChanged(self.tabs.active_tab_id()),
+            cx,
+            |(tab_id, pane_host, host_restart), cx| {
+                let Some(current) = self.tabs.tab(*tab_id) else {
+                    return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
+                };
+                if current.entity_id() != pane_host.entity_id() {
+                    return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
+                }
                 pane_host
-                    .commit_remote_restart(host_restart, session_factory.clone(), window, cx)
-                    .unwrap_or_else(|error| {
-                        panic!("prevalidated Tab {tab_id} restart commit failed: {error}")
-                    })
-            });
-        }
+                    .read(cx)
+                    .can_commit_remote_restart(host_restart, cx)
+                    .map_err(|source| RemoteTabManagerLifecycleError::Tab {
+                        tab_id: *tab_id,
+                        source,
+                    })?;
+                Ok(())
+            },
+            |(tab_id, pane_host, host_restart), cx| {
+                pane_host.update(cx, |pane_host, cx| {
+                    pane_host
+                        .commit_remote_restart(host_restart, session_factory.clone(), window, cx)
+                        .unwrap_or_else(|error| {
+                            panic!("prevalidated Tab {tab_id} restart commit failed: {error}")
+                        })
+                });
+            },
+        )?;
         self.session_factory = session_factory;
         self.remote_disconnected_generation = None;
         self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
@@ -695,18 +685,17 @@ impl TabManager {
     }
 
     fn terminal_focus_blocker(&self) -> Option<TerminalFocusBlocker> {
-        self.parent_focus_blocker
-            .or(self
-                .window_drag_status
-                .is_active()
-                .then_some(TerminalFocusBlocker::TopChrome))
-            .or(self
-                .tab_selector_pressed
-                .map(|_| TerminalFocusBlocker::TabSelector))
-            .or(self.tab_menu.map(|menu| match menu.invocation {
-                TabMenuInvocation::Explicit => TerminalFocusBlocker::TabMenu,
-                TabMenuInvocation::Context => TerminalFocusBlocker::ContextMenu,
-            }))
+        TerminalFocusCoordinator::tab_blocker(TabFocusOwners {
+            parent: self.parent_focus_blocker,
+            window_drag: self.window_drag_status.is_active(),
+            selector: self.tab_selector_pressed.is_some(),
+            menu: self
+                .tab_menu
+                .is_some_and(|menu| matches!(menu.invocation, TabMenuInvocation::Explicit)),
+            context_menu: self
+                .tab_menu
+                .is_some_and(|menu| matches!(menu.invocation, TabMenuInvocation::Context)),
+        })
     }
 
     fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {

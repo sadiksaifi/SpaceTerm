@@ -1,3 +1,4 @@
+use crate::close_confirmation::{CloseContinuation, CloseTabOutcome, HierarchyClose};
 use thiserror::Error;
 
 use super::TabId;
@@ -8,17 +9,6 @@ pub(crate) enum TabError {
     TabNotFound(TabId),
     #[error("Tab ID space is exhausted")]
     IdSpaceExhausted,
-}
-
-pub(crate) enum CloseTabOutcome<T> {
-    TabClosed {
-        closed_tab_id: TabId,
-        active_tab_id: TabId,
-        payload: T,
-    },
-    CloseWorkspace {
-        final_tab_id: TabId,
-    },
 }
 
 struct TabEntry<T> {
@@ -99,7 +89,7 @@ impl<T> TabCollection<T> {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Err(TabError::TabNotFound(tab_id));
         };
-        if self.tabs.len() == 1 {
+        if HierarchyClose::Tab.resolve(self.tabs.len()) == CloseContinuation::Parent {
             return Ok(CloseTabOutcome::CloseWorkspace {
                 final_tab_id: tab_id,
             });

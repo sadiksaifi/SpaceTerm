@@ -1,3 +1,7 @@
+use super::{LocalFileAccess, file_insertion};
+use crate::terminal::TerminalLocalFileCapabilities;
+use std::path::PathBuf;
+
 use libghostty_vt::paste;
 use std::time::{Duration, Instant};
 
@@ -312,5 +316,85 @@ mod tests {
         let prepared = PreparedPaste::prepare(insertion.text).unwrap();
         assert!(prepared.requires_confirmation(false));
         assert!(prepared.risk.multiline);
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct PastePayload {
+    pub(super) text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteIntakeError {
+    TerminalUnfocused,
+    InvalidFiles(&'static str),
+}
+
+impl PastePayload {
+    pub(crate) fn service_text(
+        text: impl Into<String>,
+        terminal_input_focused: bool,
+    ) -> Result<Self, PasteIntakeError> {
+        if !terminal_input_focused {
+            return Err(PasteIntakeError::TerminalUnfocused);
+        }
+        Ok(Self { text: text.into() })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dropped_files(
+        policy: file_insertion::FileInsertionPolicy,
+        paths: &[PathBuf],
+        terminal_input_focused: bool,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Result<Self, PasteIntakeError> {
+        if !terminal_input_focused {
+            return Err(PasteIntakeError::TerminalUnfocused);
+        }
+        Self::prepare_dropped_files(policy, paths, local_file_capabilities)
+            .and_then(|payload| {
+                payload.ok_or("local file insertion is disabled for this Terminal Session")
+            })
+            .map_err(PasteIntakeError::InvalidFiles)
+    }
+
+    pub(crate) fn prepare_dropped_files(
+        policy: file_insertion::FileInsertionPolicy,
+        paths: &[PathBuf],
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Result<Option<Self>, &'static str> {
+        let Some(access) = LocalFileAccess::authorize(local_file_capabilities) else {
+            return Ok(None);
+        };
+        access
+            .insertion(policy, paths)
+            .map(|text| Some(Self { text }))
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_text(self) -> String {
+        self.text
+    }
+}
+
+impl std::fmt::Debug for PastePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PastePayload").finish_non_exhaustive()
+    }
+}
+
+impl From<String> for PastePayload {
+    fn from(text: String) -> Self {
+        Self { text }
+    }
+}
+
+impl PastePayload {
+    pub(in crate::terminal) fn prepare(self) -> Result<PreparedPaste, PasteRejection> {
+        PreparedPaste::prepare(self.text)
     }
 }

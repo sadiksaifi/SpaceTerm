@@ -1,3 +1,4 @@
+use crate::close_confirmation::{CloseContinuation, ClosePaneOutcome, HierarchyClose};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -98,18 +99,6 @@ pub(crate) enum FocusDirection {
 pub(crate) enum ZoomState {
     Restored,
     Zoomed(PaneId),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ClosePaneOutcome<T> {
-    PaneClosed {
-        closed_pane_id: PaneId,
-        focused_pane_id: PaneId,
-        closed_terminal: T,
-    },
-    CloseTab {
-        tab_id: TabId,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
@@ -328,8 +317,11 @@ impl<T> TerminalTab<T> {
             .root
             .without_pane(pane_id)
             .ok_or(PaneError::PaneNotFound(pane_id))?;
-        let Some(new_root) = removal.replacement else {
+        if HierarchyClose::Pane.resolve(self.pane_count()) == CloseContinuation::Parent {
             return Ok(ClosePaneOutcome::CloseTab { tab_id: self.id });
+        }
+        let Some(new_root) = removal.replacement else {
+            unreachable!("removing a non-final Pane retains its layout")
         };
         let terminal = self
             .terminals

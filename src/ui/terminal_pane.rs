@@ -1,4 +1,10 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
+#[cfg(test)]
+use super::terminal_focus::TerminalFocusBlocker;
+pub(crate) use crate::domain::remote_project::RemotePaneLifecycleError;
+use crate::domain::remote_project::{RemotePaneFacts, RemoteRestartAuthority};
+#[cfg(test)]
+use crate::terminal::RemoteChannelUnavailable;
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -6,18 +12,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use thiserror::Error;
-
-use super::close_policy::{PaneLifecycle, pane_requires_close_confirmation};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
-use super::terminal_focus::{
-    TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus,
-};
+use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_graphics::{
     GraphicsAttemptToken, GraphicsRollbackProof, TerminalGraphicsCache,
 };
@@ -30,6 +31,7 @@ use super::{
     TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT, TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT,
     TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
+use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
 use crate::observation::{
     FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
@@ -58,15 +60,14 @@ use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
     DiagnosticBundle, DiagnosticKeyEventKind, FilePreviewTarget, FindDirection,
     FindQueryGeneration, InputModifiers, KeyAction, KeyInput, KeyTranslation, NativeContextActions,
-    NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus,
-    Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
-    PaneTerminalState, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
+    NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, Osc52Access,
+    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
+    PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
     PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    RemoteChannelUnavailable, ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent,
-    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
-    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
-    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory,
+    ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent, ShiftSelectionPolicy,
+    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
+    TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionHandle,
+    UnhandledKeyDiagnostic, WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 #[cfg(test)]
@@ -182,31 +183,13 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-/// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
-///
-/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
-pub(crate) enum RemotePaneLifecycleError {
-    #[error("the Pane does not own a remote Terminal Session")]
-    LocalPane,
-    #[error("remote connection generation {received} is stale; current generation is {current}")]
-    StaleGeneration { current: u64, received: u64 },
-    #[error("the remote Pane is not disconnected")]
-    NotDisconnected,
-    #[error("the prepared remote restart no longer matches the Pane session epoch")]
-    SessionChanged,
-    #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
-}
-
 /// A move-only restart token bound to one Pane session epoch and successor generation.
 ///
 /// Preparation reserves a fresh channel but does not replace the current Terminal Session.
 pub(crate) struct PreparedRemotePaneRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: PreparedWorkspaceTerminalLaunch,
-    generation: u64,
-    expected_epoch: u64,
+    authority: RemoteRestartAuthority,
 }
 
 pub(crate) struct TerminalPane {
@@ -258,7 +241,7 @@ pub(crate) struct TerminalPane {
     find_input: Option<Entity<TextInput>>,
     find_generation: FindQueryGeneration,
     product_focus: TerminalProductFocus,
-    native_modal_open: bool,
+    focus_coordinator: TerminalFocusCoordinator,
     terminal_input_focus: bool,
     surface_active: bool,
     application_active: bool,
@@ -296,7 +279,7 @@ pub(crate) struct TerminalPane {
     preedit_layout_key: Option<PreeditLayoutKey>,
     marked_revision: u64,
     ime_suppressed_keys: Vec<PhysicalKey>,
-    pending_file_insertion: Option<NativeInsertion>,
+    pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
     hovered_link: Option<HoveredTerminalLink>,
@@ -517,7 +500,7 @@ impl TerminalPane {
             find_input: None,
             find_generation: FindQueryGeneration::default(),
             product_focus: TerminalProductFocus::default(),
-            native_modal_open: false,
+            focus_coordinator: TerminalFocusCoordinator::default(),
             terminal_input_focus: false,
             surface_active: false,
             application_active: false,
@@ -838,17 +821,11 @@ impl TerminalPane {
             responder: self.focus_handle.is_focused(window),
             operating_system_window_key: activity.operating_system_window_key,
             application_active: activity.application_active,
-            blocker: modal_open
-                .then_some(TerminalFocusBlocker::Modal)
-                .or(self
-                    .native_modal_open
-                    .then_some(TerminalFocusBlocker::Modal))
-                .or_else(|| {
-                    self.context_menu
-                        .is_some()
-                        .then_some(TerminalFocusBlocker::ContextMenu)
-                })
-                .or(self.product_focus.blocker),
+            blocker: self.focus_coordinator.pane_blocker(
+                self.product_focus.blocker,
+                modal_open,
+                self.context_menu.is_some(),
+            ),
         })
     }
 
@@ -1086,32 +1063,13 @@ impl TerminalPane {
             .flatten()
     }
 
-    pub(crate) fn requires_close_confirmation(&self) -> bool {
-        let lifecycle = if self.session.is_none() {
-            PaneLifecycle::NoLiveTerminalSession
-        } else if matches!(self.pane_state, PaneTerminalState::Exited(_)) {
-            PaneLifecycle::Exited
-        } else if self
-            .pane_state
-            .failure()
-            .is_some_and(TerminalFailure::is_fatal)
-        {
-            PaneLifecycle::FatallyFailed
-        } else if self.remote_input_blocked {
-            PaneLifecycle::DisconnectedRemote
-        } else {
-            PaneLifecycle::Live
-        };
-        pane_requires_close_confirmation(
-            lifecycle,
-            self.screen.metadata.freshness,
-            self.screen.metadata.prompt_zone,
-            self.screen
-                .metadata
-                .command
-                .as_ref()
-                .map(|command| &command.state),
-        )
+    pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
+        PaneCloseFacts {
+            live_session: self.session.is_some(),
+            state: &self.pane_state,
+            disconnected: self.remote_input_blocked,
+            metadata: &self.screen.metadata,
+        }
     }
 
     #[cfg(test)]
@@ -1199,19 +1157,17 @@ impl TerminalPane {
         self.observation_lease.take();
     }
 
+    fn remote_facts(&self) -> RemotePaneFacts {
+        RemotePaneFacts {
+            remote: self.session_factory.is_remote(),
+            generation: self.remote_connection_generation,
+            disconnected: self.remote_input_blocked,
+            epoch: self.session_epoch,
+        }
+    }
+
     fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
-        if !self.session_factory.is_remote() {
-            return Err(RemotePaneLifecycleError::LocalPane);
-        }
-        if let Some(current) = self.remote_connection_generation
-            && generation < current
-        {
-            return Err(RemotePaneLifecycleError::StaleGeneration {
-                current,
-                received: generation,
-            });
-        }
-        Ok(())
+        self.remote_facts().validate_generation(generation)
     }
 
     /// Validates that `generation` may disconnect this Remote Pane without mutating it.
@@ -1273,51 +1229,22 @@ impl TerminalPane {
         generation: u64,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
     ) -> Result<PreparedRemotePaneRestart, RemotePaneLifecycleError> {
-        self.validate_remote_generation(generation)?;
-        if !self.remote_input_blocked {
-            return Err(RemotePaneLifecycleError::NotDisconnected);
-        }
-        let Some(disconnected_generation) = self.remote_connection_generation else {
-            return Err(RemotePaneLifecycleError::NotDisconnected);
-        };
-        if generation <= disconnected_generation {
-            return Err(RemotePaneLifecycleError::StaleGeneration {
-                current: disconnected_generation,
-                received: generation,
-            });
-        }
+        let authority = RemoteRestartAuthority::prepare(self.remote_facts(), generation)?;
         if !session_factory.is_remote() {
             return Err(RemotePaneLifecycleError::LocalPane);
         }
         Ok(PreparedRemotePaneRestart {
             session_factory,
             prepared_launch,
-            generation,
-            expected_epoch: self.session_epoch,
+            authority,
         })
     }
 
-    /// Revalidates a prepared restart against the Pane's current epoch and generation.
     pub(crate) fn can_commit_remote_restart(
         &self,
         prepared: &PreparedRemotePaneRestart,
     ) -> Result<(), RemotePaneLifecycleError> {
-        if self.session_epoch != prepared.expected_epoch {
-            return Err(RemotePaneLifecycleError::SessionChanged);
-        }
-        if !self.remote_input_blocked {
-            return Err(RemotePaneLifecycleError::NotDisconnected);
-        }
-        let Some(disconnected_generation) = self.remote_connection_generation else {
-            return Err(RemotePaneLifecycleError::NotDisconnected);
-        };
-        if prepared.generation <= disconnected_generation {
-            return Err(RemotePaneLifecycleError::StaleGeneration {
-                current: disconnected_generation,
-                received: prepared.generation,
-            });
-        }
-        Ok(())
+        prepared.authority.validate(self.remote_facts())
     }
 
     /// Commits a prevalidated successor Terminal Session in the existing Pane entity.
@@ -1350,7 +1277,7 @@ impl TerminalPane {
         self.fallback_title =
             normalized_pane_title("", &self.session_factory.fallback_title()).into();
         self.session_start_attempted = false;
-        self.remote_connection_generation = Some(prepared.generation);
+        self.remote_connection_generation = Some(prepared.authority.generation());
         self.reset_hidden_input();
         self.remote_input_blocked = false;
         self.remote_restart_start_pending = true;
@@ -2920,7 +2847,7 @@ impl TerminalPane {
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
-        let Ok(Some(insertion)) = NativeInsertion::clipboard(
+        let Ok(Some(insertion)) = PastePayload::clipboard(
             self.file_insertion,
             self.file_clipboard.as_ref(),
             || cx.read_from_clipboard().and_then(|item| item.text()),
@@ -2930,7 +2857,7 @@ impl TerminalPane {
             return;
         };
         if !insertion.text().is_empty() {
-            self.request_paste_text(insertion.into_text(), cx);
+            self.request_paste_text(insertion, cx);
         }
     }
 
@@ -2945,13 +2872,13 @@ impl TerminalPane {
         if !self.native_service_origin_matches(origin) || !self.terminal_input_focus {
             return false;
         }
-        let Ok(insertion) = NativeInsertion::service_text(text, true) else {
+        let Ok(insertion) = PastePayload::service_text(text, true) else {
             return false;
         };
         if insertion.text().is_empty() {
             return false;
         }
-        self.request_paste_text(insertion.into_text(), cx);
+        self.request_paste_text(insertion, cx);
         true
     }
 
@@ -2970,15 +2897,13 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.local_file_capabilities.are_enabled() {
-            return;
-        }
-        let insertion = match NativeInsertion::prepare_dropped_files(
+        let insertion = match PastePayload::prepare_dropped_files(
             self.file_insertion,
             paths,
             self.local_file_capabilities,
         ) {
-            Ok(insertion) => insertion,
+            Ok(Some(insertion)) => insertion,
+            Ok(None) => return,
             Err(message) => {
                 self.status = Some(format!("File drop rejected: {message}"));
                 cx.notify();
@@ -3009,7 +2934,7 @@ impl TerminalPane {
         let Some(insertion) = self.pending_file_insertion.take() else {
             return;
         };
-        self.request_paste_text(insertion.into_text(), cx);
+        self.request_paste_text(insertion, cx);
     }
 
     fn native_context_actions(&self) -> NativeContextActions {
@@ -3084,7 +3009,7 @@ impl TerminalPane {
             && self.product_focus.active_tab
             && self.product_focus.focused_pane
             && self.product_focus.blocker.is_none()
-            && !self.native_modal_open
+            && !self.focus_coordinator.native_dialog_open()
     }
 
     fn perform_context_menu_command(
@@ -3186,7 +3111,7 @@ impl TerminalPane {
         NativeServiceStatus::new(capabilities, origin)
     }
 
-    fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
+    fn request_paste_text(&mut self, text: PastePayload, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -3264,7 +3189,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.native_modal_open = true;
+        self.focus_coordinator.set_native_dialog_open(true);
         let _ = self.sync_terminal_input_focus(window, cx);
         cx.notify();
         let operation = self.begin_operation(self.screen.generation, recovery);
@@ -3275,7 +3200,7 @@ impl TerminalPane {
         cx.spawn(async move |this, cx| {
             let response = receiver.await;
             let _ = this.update(cx, |this, cx| {
-                this.native_modal_open = false;
+                this.focus_coordinator.set_native_dialog_open(false);
                 cx.notify();
             });
             let Ok(Ok(Some(path))) = response else {
@@ -3450,7 +3375,7 @@ impl TerminalPane {
             .get(usize::from(cell.col))?
             .hyperlink
             .clone()
-            .filter(|link| !link.is_local_file() || self.local_file_capabilities.are_enabled())?;
+            .filter(|link| link.is_available(self.local_file_capabilities))?;
         Some((cell, link))
     }
 
@@ -8239,7 +8164,7 @@ mod tests {
         let blocked = cx.update(|window, cx| {
             let pane = pane.read(cx);
             (
-                pane.native_modal_open,
+                pane.focus_coordinator.native_dialog_open(),
                 pane.terminal_input_focused(window, cx),
             )
         });
@@ -8254,7 +8179,7 @@ mod tests {
         let restored = cx.update(|window, cx| {
             let pane = pane.read(cx);
             (
-                pane.native_modal_open,
+                pane.focus_coordinator.native_dialog_open(),
                 pane.terminal_input_focused(window, cx),
             )
         });

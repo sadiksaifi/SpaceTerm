@@ -1,3 +1,10 @@
+use super::remote_project::{RemoteConnectionReduction, RemoteConnectionState};
+use crate::close_confirmation::{
+    CloseContinuation, CloseWorkspaceOutcome, FinalTabCloseOutcome, HierarchyClose,
+};
+mod directory_promotion;
+pub(crate) use directory_promotion::DirectoryChange;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -164,115 +171,6 @@ impl RemoteWorkspaceKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// A bounded phase in one Remote Project Workspace's Control Connection lifecycle.
-///
-/// A phase is meaningful only together with its owning connection generation.
-pub(crate) enum RemoteConnectionPhase {
-    Connected,
-    Reconnecting,
-    Disconnected,
-    Failed,
-    Closing,
-}
-
-/// One bounded connection phase coupled to the operation generation that produced it.
-///
-/// Generations are monotonic within one Remote Project Workspace. Closing is terminal, and an
-/// observation from a predecessor generation cannot mutate a successor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RemoteConnectionState {
-    generation: u64,
-    phase: RemoteConnectionPhase,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// The result of reducing one proposed Remote connection transition.
-///
-/// Rejected transitions leave the existing state unchanged. `Stale` identifies a predecessor
-/// generation; `Illegal` identifies a transition outside the explicit lifecycle table.
-pub(crate) enum RemoteConnectionReduction {
-    Applied,
-    Stale,
-    Illegal,
-}
-
-impl RemoteConnectionState {
-    pub(crate) const fn connected(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Connected)
-    }
-
-    pub(crate) const fn reconnecting(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Reconnecting)
-    }
-
-    pub(crate) const fn disconnected(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Disconnected)
-    }
-
-    pub(crate) const fn failed(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Failed)
-    }
-
-    pub(crate) const fn closing(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Closing)
-    }
-
-    const fn new(generation: u64, phase: RemoteConnectionPhase) -> Self {
-        Self { generation, phase }
-    }
-
-    pub(crate) const fn generation(self) -> u64 {
-        self.generation
-    }
-
-    pub(crate) const fn phase(self) -> RemoteConnectionPhase {
-        self.phase
-    }
-
-    /// Reduces a completion or lifecycle observation through the explicit transition table.
-    ///
-    /// A reconnect may advance the generation only from Disconnected or Failed. Same-generation
-    /// observations may complete or terminate the current attempt, while Closing accepts no
-    /// successor. Rejection never mutates `self`.
-    pub(crate) fn reduce(&mut self, next: Self) -> RemoteConnectionReduction {
-        if next.generation < self.generation {
-            return RemoteConnectionReduction::Stale;
-        }
-        let legal = if next.generation == self.generation {
-            matches!(
-                (self.phase, next.phase),
-                (
-                    RemoteConnectionPhase::Connected,
-                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing
-                ) | (
-                    RemoteConnectionPhase::Reconnecting,
-                    RemoteConnectionPhase::Connected
-                        | RemoteConnectionPhase::Disconnected
-                        | RemoteConnectionPhase::Failed
-                        | RemoteConnectionPhase::Closing
-                ) | (
-                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed,
-                    RemoteConnectionPhase::Closing
-                )
-            )
-        } else {
-            matches!(
-                (self.phase, next.phase),
-                (
-                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed,
-                    RemoteConnectionPhase::Reconnecting
-                )
-            )
-        };
-        if !legal {
-            return RemoteConnectionReduction::Illegal;
-        }
-        *self = next;
-        RemoteConnectionReduction::Applied
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DirectoryAuthority {
     tab_id: super::TabId,
     pane_id: super::PaneId,
@@ -392,20 +290,6 @@ pub(crate) enum WorkspaceError {
     IdSpaceExhausted,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum CloseWorkspaceOutcome<T> {
-    WorkspaceClosed {
-        closed_workspace_id: WorkspaceId,
-        active_workspace_id: WorkspaceId,
-        payload: T,
-    },
-    FinalWorkspaceReplaced {
-        closed_workspace_id: WorkspaceId,
-        replacement_workspace_id: WorkspaceId,
-        payload: T,
-    },
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Whether Remote Project creation allocated a new Workspace or activated its deduplicated owner.
 ///
@@ -424,18 +308,6 @@ impl CreateRemoteProjectOutcome {
             }
         }
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum FinalTabCloseOutcome<T> {
-    WorkspaceClosed {
-        closed_workspace_id: WorkspaceId,
-        active_workspace_id: WorkspaceId,
-        payload: T,
-    },
-    CloseOperatingSystemWindow {
-        workspace_id: WorkspaceId,
-    },
 }
 
 pub(crate) struct WorkspaceEntry<T> {
@@ -636,17 +508,11 @@ impl<T> WorkspaceCollection<T> {
         &mut self,
         workspace_id: WorkspaceId,
     ) -> Result<RemoteConnectionReduction, WorkspaceError> {
-        let state = self.remote_connection_state_mut(workspace_id)?;
-        if !matches!(
-            state.phase(),
-            RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
-        ) {
-            return Ok(RemoteConnectionReduction::Illegal);
-        }
-        let generation = state.generation().checked_add(1).ok_or(
-            WorkspaceError::RemoteConnectionGenerationExhausted(workspace_id),
-        )?;
-        Ok(state.reduce(RemoteConnectionState::reconnecting(generation)))
+        self.remote_connection_state_mut(workspace_id)?
+            .begin_reconnect()
+            .ok_or(WorkspaceError::RemoteConnectionGenerationExhausted(
+                workspace_id,
+            ))
     }
 
     /// Applies one observed lifecycle transition to the owning Remote Project Workspace.
@@ -669,8 +535,9 @@ impl<T> WorkspaceCollection<T> {
         &mut self,
         workspace_id: WorkspaceId,
     ) -> Result<RemoteConnectionReduction, WorkspaceError> {
-        let state = self.remote_connection_state_mut(workspace_id)?;
-        Ok(state.reduce(RemoteConnectionState::closing(state.generation())))
+        Ok(self
+            .remote_connection_state_mut(workspace_id)?
+            .begin_close())
     }
 
     #[cfg(test)]
@@ -803,124 +670,6 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
-    pub(crate) fn update_directory_authority_report(
-        &mut self,
-        workspace_id: WorkspaceId,
-        authority: DirectoryAuthority,
-        directory: ValidatedWorkspaceDirectory,
-    ) -> Result<bool, WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceKind::Scratch {
-            directory_authority,
-        } = &workspace.kind
-        else {
-            return Ok(false);
-        };
-        if *directory_authority != authority {
-            return Ok(false);
-        }
-        let WorkspaceDirectoryLocation::Local(current_directory) =
-            &mut workspace.directory_location
-        else {
-            unreachable!("a Scratch Workspace must own a local Workspace Directory")
-        };
-        let changed = current_directory != &directory || !workspace.availability.is_available();
-        *current_directory = directory;
-        workspace.availability = WorkspaceDirectoryAvailability::Available;
-        self.recalculate_automatic_names();
-        Ok(changed)
-    }
-
-    pub(crate) fn mark_directory_authority_unavailable(
-        &mut self,
-        workspace_id: WorkspaceId,
-        authority: DirectoryAuthority,
-        reason: String,
-    ) -> Result<bool, WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceKind::Scratch {
-            directory_authority,
-        } = &workspace.kind
-        else {
-            return Ok(false);
-        };
-        if *directory_authority != authority {
-            return Ok(false);
-        }
-        workspace.availability = WorkspaceDirectoryAvailability::Unavailable { reason };
-        Ok(true)
-    }
-
-    pub(crate) fn promote_directory_authority(
-        &mut self,
-        workspace_id: WorkspaceId,
-        removed_authority: DirectoryAuthority,
-        promoted_authority: DirectoryAuthority,
-        directory: Option<ValidatedWorkspaceDirectory>,
-    ) -> Result<bool, WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceKind::Scratch {
-            directory_authority,
-        } = &mut workspace.kind
-        else {
-            return Ok(false);
-        };
-        if *directory_authority != removed_authority {
-            return Ok(false);
-        }
-        *directory_authority = promoted_authority;
-        if let Some(directory) = directory {
-            let WorkspaceDirectoryLocation::Local(current_directory) =
-                &mut workspace.directory_location
-            else {
-                unreachable!("a Scratch Workspace must own a local Workspace Directory")
-            };
-            *current_directory = directory;
-            workspace.availability = WorkspaceDirectoryAvailability::Available;
-        }
-        self.recalculate_automatic_names();
-        Ok(true)
-    }
-
-    pub(crate) fn promote_directory_authority_for_tab(
-        &mut self,
-        workspace_id: WorkspaceId,
-        removed_tab_id: super::TabId,
-        promoted_authority: DirectoryAuthority,
-        directory: Option<ValidatedWorkspaceDirectory>,
-    ) -> Result<bool, WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceKind::Scratch {
-            directory_authority,
-        } = &mut workspace.kind
-        else {
-            return Ok(false);
-        };
-        if directory_authority.tab_id() != removed_tab_id {
-            return Ok(false);
-        }
-        *directory_authority = promoted_authority;
-        if let Some(directory) = directory {
-            let WorkspaceDirectoryLocation::Local(current_directory) =
-                &mut workspace.directory_location
-            else {
-                unreachable!("a Scratch Workspace must own a local Workspace Directory")
-            };
-            *current_directory = directory;
-            workspace.availability = WorkspaceDirectoryAvailability::Available;
-        }
-        self.recalculate_automatic_names();
-        Ok(true)
-    }
-
     pub(crate) fn set_directory_unavailable(
         &mut self,
         workspace_id: WorkspaceId,
@@ -999,7 +748,7 @@ impl<T> WorkspaceCollection<T> {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
 
-        if self.workspaces.len() == 1 {
+        if HierarchyClose::Workspace.resolve(self.workspaces.len()) == CloseContinuation::Replace {
             let (replacement_workspace_id, next_workspace_id) = self.next_workspace_id()?;
             let replacement_name = if self.directory_names {
                 automatic_workspace_basename(
@@ -1062,7 +811,7 @@ impl<T> WorkspaceCollection<T> {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
 
-        if self.workspaces.len() == 1 {
+        if HierarchyClose::FinalTab.resolve(self.workspaces.len()) == CloseContinuation::Window {
             return Ok(FinalTabCloseOutcome::CloseOperatingSystemWindow { workspace_id });
         }
 
@@ -2055,76 +1804,6 @@ mod tests {
                 .workspace(workspace_id)
                 .and_then(WorkspaceEntry::remote_connection_state),
             Some(RemoteConnectionState::closing(6))
-        );
-    }
-
-    #[test]
-    fn authority_reports_treat_exact_spelling_changes_as_directory_updates() {
-        let authority =
-            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(1));
-        let mut workspaces =
-            WorkspaceCollection::new_scratch(validated("/project", 10), authority, |_, _| ());
-        assert!(
-            workspaces
-                .update_directory_authority_report(
-                    WorkspaceId::new(1),
-                    authority,
-                    validated("/project/.", 10)
-                )
-                .unwrap()
-        );
-        assert_eq!(
-            workspaces
-                .active_workspace()
-                .working_directory()
-                .unwrap()
-                .as_os_str(),
-            "/project/."
-        );
-    }
-
-    #[test]
-    fn authority_reports_validate_ownership_and_promotion() {
-        let first =
-            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(1));
-        let promoted =
-            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(2));
-        let mut workspaces =
-            WorkspaceCollection::new_scratch(validated("/previous", 10), first, |_, _| ());
-
-        assert!(
-            !workspaces
-                .update_directory_authority_report(
-                    WorkspaceId::new(1),
-                    promoted,
-                    validated("/ignored", 11)
-                )
-                .unwrap()
-        );
-        assert!(
-            workspaces
-                .mark_directory_authority_unavailable(
-                    WorkspaceId::new(1),
-                    first,
-                    "missing".to_owned()
-                )
-                .unwrap()
-        );
-        assert!(
-            workspaces
-                .promote_directory_authority(
-                    WorkspaceId::new(1),
-                    first,
-                    promoted,
-                    Some(validated("/promoted", 12)),
-                )
-                .unwrap()
-        );
-        let workspace = workspaces.workspace(WorkspaceId::new(1)).unwrap();
-        assert_eq!(workspace.working_directory(), Some(Path::new("/promoted")));
-        assert_eq!(
-            workspace.availability(),
-            &WorkspaceDirectoryAvailability::Available
         );
     }
 

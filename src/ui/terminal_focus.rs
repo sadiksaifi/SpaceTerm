@@ -60,9 +60,106 @@ impl TerminalFocusFacts {
     }
 }
 
-pub(crate) struct TerminalFocusCoordinator;
+#[derive(Default)]
+pub(crate) struct TerminalFocusCoordinator {
+    native_dialog_open: bool,
+}
+
+/// Raw temporary ownership facts. Priority belongs to the coordinator, not the managers.
+#[derive(Default)]
+pub(crate) struct WorkspaceFocusOwners {
+    pub(crate) picker: bool,
+    pub(crate) remote_flow: bool,
+    pub(crate) new_workspace: bool,
+    pub(crate) search: bool,
+    pub(crate) window_drag: bool,
+    pub(crate) sidebar_resize: bool,
+    pub(crate) rename: bool,
+    pub(crate) context_menu: bool,
+    pub(crate) sidebar: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct TabFocusOwners {
+    pub(crate) parent: Option<TerminalFocusBlocker>,
+    pub(crate) window_drag: bool,
+    pub(crate) selector: bool,
+    pub(crate) menu: bool,
+    pub(crate) context_menu: bool,
+}
 
 impl TerminalFocusCoordinator {
+    pub(crate) fn workspace_blocker(owners: WorkspaceFocusOwners) -> Option<TerminalFocusBlocker> {
+        Self::first_owner(&[
+            (owners.picker, TerminalFocusBlocker::Modal),
+            (
+                owners.remote_flow || owners.new_workspace || owners.search,
+                TerminalFocusBlocker::CommandPalette,
+            ),
+            (owners.window_drag, TerminalFocusBlocker::TopChrome),
+            (owners.sidebar_resize, TerminalFocusBlocker::SidebarResize),
+            (owners.rename, TerminalFocusBlocker::RenameField),
+            (owners.context_menu, TerminalFocusBlocker::ContextMenu),
+            (owners.sidebar, TerminalFocusBlocker::Sidebar),
+        ])
+    }
+
+    pub(crate) fn tab_blocker(owners: TabFocusOwners) -> Option<TerminalFocusBlocker> {
+        owners.parent.or_else(|| {
+            Self::first_owner(&[
+                (owners.window_drag, TerminalFocusBlocker::TopChrome),
+                (owners.selector, TerminalFocusBlocker::TabSelector),
+                (owners.menu, TerminalFocusBlocker::TabMenu),
+                (owners.context_menu, TerminalFocusBlocker::ContextMenu),
+            ])
+        })
+    }
+
+    pub(crate) fn pane_layout_blocker(
+        parent: Option<TerminalFocusBlocker>,
+        menu: bool,
+        resizing: bool,
+    ) -> Option<TerminalFocusBlocker> {
+        Self::first_owner(&[
+            (menu, TerminalFocusBlocker::PaneMenu),
+            (resizing, TerminalFocusBlocker::PaneResize),
+        ])
+        .or(parent)
+    }
+
+    pub(crate) fn modal_blocker(
+        parent: Option<TerminalFocusBlocker>,
+        modal: bool,
+    ) -> Option<TerminalFocusBlocker> {
+        modal.then_some(TerminalFocusBlocker::Modal).or(parent)
+    }
+
+    pub(crate) fn pane_blocker(
+        &self,
+        parent: Option<TerminalFocusBlocker>,
+        modal: bool,
+        context_menu: bool,
+    ) -> Option<TerminalFocusBlocker> {
+        Self::modal_blocker(
+            Self::first_owner(&[(context_menu, TerminalFocusBlocker::ContextMenu)]).or(parent),
+            modal || self.native_dialog_open,
+        )
+    }
+
+    pub(crate) fn set_native_dialog_open(&mut self, open: bool) {
+        self.native_dialog_open = open;
+    }
+
+    pub(crate) const fn native_dialog_open(&self) -> bool {
+        self.native_dialog_open
+    }
+
+    fn first_owner(owners: &[(bool, TerminalFocusBlocker)]) -> Option<TerminalFocusBlocker> {
+        owners
+            .iter()
+            .find_map(|(owns, blocker)| owns.then_some(*blocker))
+    }
+
     pub(crate) const fn is_focused(facts: TerminalFocusFacts) -> bool {
         facts.active_workspace
             && facts.active_tab
@@ -77,6 +174,70 @@ impl TerminalFocusCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_a_workspace_menu_preserves_other_owners_and_does_not_invent_sidebar_focus() {
+        let mut owners = WorkspaceFocusOwners {
+            search: true,
+            context_menu: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(owners),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+        owners = WorkspaceFocusOwners {
+            search: true,
+            context_menu: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(owners),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+        assert_eq!(
+            TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn nested_ownership_preserves_blocking_until_every_owner_releases() {
+        let workspace = TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
+            search: true,
+            sidebar: true,
+            ..Default::default()
+        });
+        let tab = TerminalFocusCoordinator::tab_blocker(TabFocusOwners {
+            parent: workspace,
+            menu: true,
+            ..Default::default()
+        });
+        assert_eq!(tab, Some(TerminalFocusBlocker::CommandPalette));
+        let pane = TerminalFocusCoordinator::pane_layout_blocker(tab, true, true);
+        assert_eq!(pane, Some(TerminalFocusBlocker::PaneMenu));
+        let mut coordinator = TerminalFocusCoordinator::default();
+        coordinator.set_native_dialog_open(true);
+        assert_eq!(
+            coordinator.pane_blocker(pane, false, false),
+            Some(TerminalFocusBlocker::Modal)
+        );
+        coordinator.set_native_dialog_open(false);
+        assert_eq!(coordinator.pane_blocker(pane, false, false), pane);
+        assert_eq!(
+            TerminalFocusCoordinator::pane_layout_blocker(tab, false, true),
+            Some(TerminalFocusBlocker::PaneResize)
+        );
+        assert_eq!(
+            TerminalFocusCoordinator::pane_layout_blocker(tab, false, false),
+            tab
+        );
+        assert_eq!(
+            coordinator.pane_blocker(None, true, false),
+            Some(TerminalFocusBlocker::Modal)
+        );
+        assert_eq!(coordinator.pane_blocker(None, false, false), None);
+    }
 
     #[test]
     fn terminal_input_focus_requires_every_positive_fact_and_no_blocker() {
