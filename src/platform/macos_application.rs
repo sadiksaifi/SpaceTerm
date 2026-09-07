@@ -43,7 +43,7 @@ impl super::application_activity::ApplicationActivity for MacosApplicationActivi
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use std::mem::size_of;
 

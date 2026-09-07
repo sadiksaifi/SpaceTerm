@@ -203,7 +203,7 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};

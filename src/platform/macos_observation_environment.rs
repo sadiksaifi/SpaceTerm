@@ -24,7 +24,7 @@ impl PrivateEnvironment for PrivateDirectories {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     use crate::observation::clean_acceptance_environment;

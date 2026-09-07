@@ -32,7 +32,7 @@ impl super::locale::LocaleDirection for ApplicationLocale {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
 

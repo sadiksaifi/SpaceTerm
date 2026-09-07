@@ -62,7 +62,7 @@ impl AskPassCapabilityCopy {
         self.bytes.as_slice()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "macos-native-tests"))]
     pub(crate) fn from_test_bytes(bytes: &[u8]) -> Self {
         Self {
             bytes: Zeroizing::new(bytes.to_vec()),
@@ -982,7 +982,7 @@ impl AskPassBrokerLease {
     pub(crate) fn new(lease: Arc<dyn AskPassLease>) -> Self {
         Self(lease)
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "macos-native-tests"))]
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
         self.0.entries().into_iter()
     }

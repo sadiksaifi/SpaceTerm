@@ -2,7 +2,9 @@
 use crate::app::{
     HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
 };
-use crate::desktop_profile::{DesktopProfile, DesktopProfileError};
+use crate::desktop_profile::{
+    ActionShortcut, DesktopPresentation, DesktopProfile, DesktopProfileError, DesktopWording,
+};
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::{TitlebarOptions, point, px};
 use std::{path::PathBuf, rc::Rc, sync::Arc};
@@ -70,19 +72,39 @@ fn runtime_path_host_facts(
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
 ) -> Result<DesktopProfile, DesktopProfileError> {
+    use crate::ui::{
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
+        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+    };
+    use spaceterm_ui::EditCopy;
+
     DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         spaceterm_ui::ModalKeybindingProfile::MacOs,
         spaceterm_ui::TextInputKeybindingProfile::MacOs,
         crate::desktop_profile::keybindings::bindings(),
+        DesktopPresentation::new(
+            DesktopWording {
+                directory_selection: "Choose with Finder",
+                file_preview: "Quick Look",
+                local_project_description: "Pinned to a folder on this Mac",
+            },
+            vec![
+                ActionShortcut::new(CreateScratchWorkspace, "⇧⌘N"),
+                ActionShortcut::new(SearchWorkspaces, "⌘P"),
+                ActionShortcut::new(ShowNewWorkspacePanel, "⌘N"),
+                ActionShortcut::new(OpenLocalProject, "⌘O"),
+                ActionShortcut::new(CreateTab, "⌘T"),
+                ActionShortcut::new(EditCopy, "⌘C"),
+                ActionShortcut::new(SplitRight, "⌘D"),
+                ActionShortcut::new(SplitDown, "⇧⌘D"),
+                ActionShortcut::new(TogglePaneZoom, "⇧⌘↩"),
+                ActionShortcut::new(ClosePane, "⌘W"),
+                ActionShortcut::new(CloseTab, "⇧⌘W"),
+            ],
+        ),
         locale,
     )
-    .map(|profile| {
-        profile.with_file_labels(crate::desktop_profile::FileInteractionLabels {
-            directory_selection: "Choose with Finder",
-            file_preview: "Quick Look",
-        })
-    })
 }
 
 fn compose(
@@ -169,7 +191,7 @@ fn compose(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
@@ -338,5 +360,43 @@ mod tests {
         });
 
         assert!(matches!(result, Err(StartupDependenciesError::Paths)));
+    }
+
+    #[gpui::test]
+    fn desktop_profile_should_preserve_macos_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
+        use crate::ui::{
+            ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject,
+            SearchWorkspaces, ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+        };
+
+        cx.update(|cx| {
+            crate::ui::initialize_controls(cx).unwrap();
+            desktop_profile(Rc::new(crate::platform::locale::FixedLocaleDirection(
+                spaceterm_ui::TextDirection::LeftToRight,
+            )))
+            .unwrap()
+            .install(cx);
+            let presentation = DesktopPresentation::get(cx);
+            assert_eq!(presentation.shortcut(&CreateScratchWorkspace), "⇧⌘N");
+            assert_eq!(presentation.shortcut(&SearchWorkspaces), "⌘P");
+            assert_eq!(presentation.shortcut(&ShowNewWorkspacePanel), "⌘N");
+            assert_eq!(presentation.shortcut(&OpenLocalProject), "⌘O");
+            assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
+            assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");
+            assert_eq!(presentation.shortcut(&SplitRight), "⌘D");
+            assert_eq!(presentation.shortcut(&SplitDown), "⇧⌘D");
+            assert_eq!(presentation.shortcut(&TogglePaneZoom), "⇧⌘↩");
+            assert_eq!(presentation.shortcut(&ClosePane), "⌘W");
+            assert_eq!(presentation.shortcut(&CloseTab), "⇧⌘W");
+            assert_eq!(
+                presentation.wording().directory_selection,
+                "Choose with Finder"
+            );
+            assert_eq!(presentation.wording().file_preview, "Quick Look");
+            assert_eq!(
+                presentation.wording().local_project_description,
+                "Pinned to a folder on this Mac"
+            );
+        });
     }
 }

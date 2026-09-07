@@ -21,7 +21,7 @@ impl fmt::Display for FailureClass {
             Self::Pty => "PTY",
             Self::Emulator => "Terminal Emulator",
             Self::Presentation => "presentation",
-            Self::Platform => "macOS integration",
+            Self::Platform => "desktop integration",
             Self::Resource => "renderer resource",
         })
     }

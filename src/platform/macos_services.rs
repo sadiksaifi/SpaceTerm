@@ -373,7 +373,7 @@ impl ServicesRegistration for NativeServicesRegistration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use cocoa::appkit::NSPasteboard;
 

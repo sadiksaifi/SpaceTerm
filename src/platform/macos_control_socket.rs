@@ -16,7 +16,7 @@ impl ControlSocketProbe for MacosControlSocketProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};

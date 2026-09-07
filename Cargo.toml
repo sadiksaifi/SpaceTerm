@@ -32,6 +32,10 @@ application-folder-position = { x = 480, y = 170 }
 members = ["crates/spaceterm-ui"]
 resolver = "2"
 
+[features]
+default = []
+macos-native-tests = []
+
 [dependencies]
 anyhow = "1.0.100"
 async-channel = "2.5.0"

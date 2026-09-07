@@ -1357,7 +1357,13 @@ impl TabManager {
                 .h(px(TAB_BAR_HEIGHT))
                 .flex_none()
                 .child(item),
-            pane_action_menu_entries("tab-menu", zoomed, zoom_enabled, CloseTarget::Tab),
+            pane_action_menu_entries(
+                "tab-menu",
+                zoomed,
+                zoom_enabled,
+                CloseTarget::Tab,
+                crate::desktop_profile::DesktopPresentation::get(cx),
+            ),
         )
         .size(MenuSize::Wide)
         .placement(
@@ -1452,7 +1458,10 @@ impl TabManager {
                 .debug_selector("create-tab-button")
                 .tooltip(
                     Tooltip::new("create-tab-tooltip", "Create Tab")
-                        .keyboard_equivalent("⌘T")
+                        .keyboard_equivalent(
+                            crate::desktop_profile::DesktopPresentation::get(cx)
+                                .shortcut(&crate::ui::CreateTab),
+                        )
                         .debug_selector("create-tab-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
@@ -1475,6 +1484,7 @@ impl TabManager {
                                 zoomed,
                                 zoom_enabled,
                                 CloseTarget::Tab,
+                                crate::desktop_profile::DesktopPresentation::get(cx),
                             ),
                         )
                         .icon_trigger(menu_icon(IconName::Ellipsis))

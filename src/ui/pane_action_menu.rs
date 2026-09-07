@@ -22,9 +22,10 @@ pub(crate) fn pane_action_menu_entries(
     zoomed: bool,
     zoom_enabled: bool,
     close_target: CloseTarget,
+    presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<PaneActionMenuCommand>> {
     let (zoom_icon, zoom_label) = zoom_presentation(zoomed);
-    let (close_label, close_shortcut, close_selector) = close_presentation(close_target);
+    let (close_label, close_selector) = close_presentation(close_target);
 
     vec![
         MenuEntry::action("Split Right", PaneActionMenuCommand::SplitRight)
@@ -32,18 +33,18 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::SplitRight,
                 zoomed,
             )))
-            .shortcut("⌘D")
+            .shortcut(presentation.shortcut(&crate::ui::SplitRight))
             .debug_selector(format!("{debug_prefix}-row-split-right")),
         MenuEntry::action("Split Down", PaneActionMenuCommand::SplitDown)
             .icon(menu_icon(pane_action_icon(
                 PaneActionMenuCommand::SplitDown,
                 zoomed,
             )))
-            .shortcut("⇧⌘D")
+            .shortcut(presentation.shortcut(&crate::ui::SplitDown))
             .debug_selector(format!("{debug_prefix}-row-split-down")),
         MenuEntry::action(zoom_label, PaneActionMenuCommand::ToggleZoom)
             .icon(menu_icon(zoom_icon))
-            .shortcut("⇧⌘↩")
+            .shortcut(presentation.shortcut(&crate::ui::TogglePaneZoom))
             .disabled(!zoom_enabled)
             .debug_selector(format!("{debug_prefix}-row-toggle-zoom")),
         MenuEntry::separator(),
@@ -52,7 +53,10 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::Close,
                 zoomed,
             )))
-            .shortcut(close_shortcut)
+            .shortcut(match close_target {
+                CloseTarget::Pane => presentation.shortcut(&crate::ui::ClosePane),
+                CloseTarget::Tab => presentation.shortcut(&crate::ui::CloseTab),
+            })
             .destructive(true)
             .debug_selector(format!("{debug_prefix}-row-{close_selector}")),
     ]
@@ -76,10 +80,10 @@ fn zoom_presentation(zoomed: bool) -> (IconName, &'static str) {
     )
 }
 
-fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str, &'static str) {
+fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str) {
     match close_target {
-        CloseTarget::Pane => ("Close Pane", "⌘W", "close-pane"),
-        CloseTarget::Tab => ("Close Tab", "⇧⌘W", "close-tab"),
+        CloseTarget::Pane => ("Close Pane", "close-pane"),
+        CloseTarget::Tab => ("Close Tab", "close-tab"),
     }
 }
 
@@ -111,6 +115,7 @@ mod tests {
                         self.zoomed,
                         self.zoom_enabled,
                         self.close_target,
+                        &crate::desktop_profile::testing_presentation(),
                     ),
                 )
                 .size(MenuSize::Wide)
@@ -170,11 +175,11 @@ mod tests {
     fn close_entry_should_use_target_specific_label_and_shortcut() {
         assert_eq!(
             close_presentation(CloseTarget::Pane),
-            ("Close Pane", "⌘W", "close-pane")
+            ("Close Pane", "close-pane")
         );
         assert_eq!(
             close_presentation(CloseTarget::Tab),
-            ("Close Tab", "⇧⌘W", "close-tab")
+            ("Close Tab", "close-tab")
         );
     }
 

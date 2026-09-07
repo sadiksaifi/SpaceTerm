@@ -772,7 +772,9 @@ impl WorkspacePicker {
     fn actions_menu(&self, cx: &App) -> Vec<MenuEntry<SharedString>> {
         let mut entries = vec![
             MenuEntry::action(
-                crate::desktop_profile::FileInteractionLabels::get(cx).directory_selection,
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .directory_selection,
                 DIRECTORY_SELECTION_ACTION.into(),
             )
             .disabled(self.busy.is_some())

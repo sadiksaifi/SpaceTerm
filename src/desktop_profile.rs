@@ -1,31 +1,62 @@
 //! Validated desktop policy supplied by host composition, with no host detection.
 pub(crate) mod keybindings;
 
-use gpui::{App, KeyBinding};
+use gpui::{Action, App, KeyBinding};
 use spaceterm_ui::{ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile};
 
 #[derive(Clone, Copy)]
-pub(crate) struct FileInteractionLabels {
+pub(crate) struct DesktopWording {
     pub(crate) directory_selection: &'static str,
     pub(crate) file_preview: &'static str,
+    pub(crate) local_project_description: &'static str,
 }
-impl Default for FileInteractionLabels {
-    fn default() -> Self {
+
+#[derive(Clone, Copy)]
+pub(crate) struct ActionShortcut {
+    action: &'static str,
+    display: &'static str,
+}
+
+impl ActionShortcut {
+    pub(crate) fn new<A: Action>(action: A, display: &'static str) -> Self {
         Self {
-            directory_selection: "Choose with System",
-            file_preview: "Preview File",
+            action: action.name(),
+            display,
         }
     }
 }
-impl gpui::Global for FileInteractionLabels {}
-impl FileInteractionLabels {
-    pub(crate) fn get(cx: &App) -> Self {
-        cx.try_global::<Self>().copied().unwrap_or_default()
-    }
+
+#[derive(Clone)]
+pub(crate) struct DesktopPresentation {
+    wording: DesktopWording,
+    shortcuts: Vec<ActionShortcut>,
 }
 
+impl DesktopPresentation {
+    pub(crate) fn new(wording: DesktopWording, shortcuts: Vec<ActionShortcut>) -> Self {
+        Self { wording, shortcuts }
+    }
+
+    pub(crate) fn get(cx: &App) -> &Self {
+        cx.global::<Self>()
+    }
+
+    pub(crate) const fn wording(&self) -> DesktopWording {
+        self.wording
+    }
+
+    pub(crate) fn shortcut<A: Action>(&self, action: &A) -> &'static str {
+        self.shortcuts
+            .iter()
+            .find(|presentation| presentation.action == action.name())
+            .expect("desktop profile validation must cover every displayed action")
+            .display
+    }
+}
+impl gpui::Global for DesktopPresentation {}
+
 pub(crate) struct DesktopProfile {
-    file_labels: FileInteractionLabels,
+    presentation: DesktopPresentation,
     modal_policy: ModalDesktopPolicy,
     modal_keys: ModalKeybindingProfile,
     text_keys: TextInputKeybindingProfile,
@@ -47,6 +78,7 @@ impl DesktopProfile {
         modal_keys: ModalKeybindingProfile,
         text_keys: TextInputKeybindingProfile,
         bindings: Vec<KeyBinding>,
+        presentation: DesktopPresentation,
         locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
     ) -> Result<Self, DesktopProfileError> {
         for (index, binding) in bindings.iter().enumerate() {
@@ -58,8 +90,28 @@ impl DesktopProfile {
                 return Err(DesktopProfileError::DuplicateGlobalKey);
             }
         }
+        for (index, shortcut) in presentation.shortcuts.iter().enumerate() {
+            if shortcut.display.is_empty()
+                || !bindings
+                    .iter()
+                    .any(|binding| binding.action().name() == shortcut.action)
+                || presentation.shortcuts[..index]
+                    .iter()
+                    .any(|previous| previous.action == shortcut.action)
+            {
+                return Err(DesktopProfileError::InvalidCombination);
+            }
+        }
+        if required_presented_actions().iter().any(|required| {
+            !presentation
+                .shortcuts
+                .iter()
+                .any(|shortcut| shortcut.action == *required)
+        }) {
+            return Err(DesktopProfileError::MissingCapability);
+        }
         Ok(Self {
-            file_labels: FileInteractionLabels::default(),
+            presentation,
             modal_policy,
             modal_keys,
             text_keys,
@@ -67,12 +119,8 @@ impl DesktopProfile {
             locale,
         })
     }
-    pub(crate) fn with_file_labels(mut self, labels: FileInteractionLabels) -> Self {
-        self.file_labels = labels;
-        self
-    }
     pub(crate) fn install(&self, cx: &mut App) {
-        cx.set_global(self.file_labels);
+        cx.set_global(self.presentation.clone());
         spaceterm_ui::install_modal_policy(
             cx,
             self.modal_policy
@@ -83,6 +131,59 @@ impl DesktopProfile {
         cx.bind_keys(self.bindings.clone());
     }
 }
+
+fn required_presented_actions() -> [&'static str; 11] {
+    use crate::ui::{
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
+        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+    };
+    use spaceterm_ui::EditCopy;
+
+    [
+        CreateScratchWorkspace.name(),
+        SearchWorkspaces.name(),
+        ShowNewWorkspacePanel.name(),
+        OpenLocalProject.name(),
+        CreateTab.name(),
+        EditCopy.name(),
+        SplitRight.name(),
+        SplitDown.name(),
+        TogglePaneZoom.name(),
+        ClosePane.name(),
+        CloseTab.name(),
+    ]
+}
+
+#[cfg(test)]
+pub(crate) fn testing_presentation() -> DesktopPresentation {
+    use crate::ui::{
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
+        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+    };
+    use spaceterm_ui::EditCopy;
+
+    DesktopPresentation::new(
+        DesktopWording {
+            directory_selection: "Choose Directory",
+            file_preview: "Preview File",
+            local_project_description: "Pinned to a local folder",
+        },
+        vec![
+            ActionShortcut::new(CreateScratchWorkspace, "Primary+Shift+N"),
+            ActionShortcut::new(SearchWorkspaces, "Primary+P"),
+            ActionShortcut::new(ShowNewWorkspacePanel, "Primary+N"),
+            ActionShortcut::new(OpenLocalProject, "Primary+O"),
+            ActionShortcut::new(CreateTab, "Primary+T"),
+            ActionShortcut::new(EditCopy, "Primary+C"),
+            ActionShortcut::new(SplitRight, "Primary+D"),
+            ActionShortcut::new(SplitDown, "Primary+Shift+D"),
+            ActionShortcut::new(TogglePaneZoom, "Primary+Shift+Enter"),
+            ActionShortcut::new(ClosePane, "Primary+W"),
+            ActionShortcut::new(CloseTab, "Primary+Shift+W"),
+        ],
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> DesktopProfile {
     DesktopProfile::new(
@@ -90,6 +191,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
         ModalKeybindingProfile::MacOs,
         TextInputKeybindingProfile::MacOs,
         keybindings::bindings(),
+        testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
     )
     .expect("valid explicit desktop profile fixture")
@@ -157,10 +259,32 @@ mod tests {
                 KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
                 KeyBinding::new("shift-cmd-n", ShowNewWorkspacePanel, None),
             ],
+            testing_presentation(),
             std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
                 spaceterm_ui::TextDirection::LeftToRight,
             )),
         );
         assert_eq!(result.err(), Some(DesktopProfileError::DuplicateGlobalKey));
+    }
+
+    #[test]
+    fn missing_required_action_presentation_is_rejected() {
+        let mut presentation = testing_presentation();
+        presentation
+            .shortcuts
+            .retain(|shortcut| shortcut.action != OpenLocalProject.name());
+
+        let result = DesktopProfile::new(
+            ModalDesktopPolicy::mac_os(),
+            ModalKeybindingProfile::MacOs,
+            TextInputKeybindingProfile::MacOs,
+            keybindings::bindings(),
+            presentation,
+            std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
+                spaceterm_ui::TextDirection::LeftToRight,
+            )),
+        );
+
+        assert_eq!(result.err(), Some(DesktopProfileError::MissingCapability));
     }
 }

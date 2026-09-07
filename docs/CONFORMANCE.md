@@ -27,9 +27,10 @@ user configuration. The shared harness supplies deterministic recording implemen
 fixtures, and explicit host facts. It never selects concrete macOS Adapters or uses Unix mechanics.
 The isolated macOS Adapter suites retain native PTY, key-event enrichment, real SSH and shell
 process, local socket, filesystem-security, and shipped-resource evidence. Run those with
-`just macos-adapter-tests`; their assertions remain part of `just validate`. `just
-conformance` is the focused loop. `just test` includes the same tests, so `just validate` is the
-required release gate.
+`just macos-adapter-tests`; their modules require the macOS target and the explicit native-test
+feature. `just conformance` is the focused loop. `just portable-validate` runs the corpus and all
+shared verification without native tools or evidence. `just macos-validate` runs the native lane,
+and `just validate` aggregates both as the required release gate.
 
 ## Authority policy
 

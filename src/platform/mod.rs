@@ -1,10 +1,15 @@
 pub(crate) mod app_paths;
 pub(crate) mod application_activity;
 pub(crate) mod control_socket;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_observation;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_observation_clock;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_observation_environment;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_observation_package;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_observation_transport;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
@@ -50,7 +55,6 @@ mod macos_accessibility;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_accessibility;
 
-#[cfg(target_os = "macos")]
 pub(crate) mod ssh_askpass;
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -133,11 +137,12 @@ mod macos_composition;
 pub(crate) mod permission_recovery;
 pub(crate) mod services_registration;
 pub(crate) mod window_movement;
+#[cfg(target_os = "macos")]
 pub(crate) use macos_composition::main;
 
 pub(crate) mod locale;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 #[path = "macos_adapter_tests/mod.rs"]
 pub(crate) mod macos_adapter_tests;
 

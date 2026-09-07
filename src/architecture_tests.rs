@@ -278,25 +278,46 @@ pub(crate) fn portable_verification_source(source: &str) -> String {
     let mut index = 0;
     while index < lines.len() {
         let line = lines[index].trim();
-        if native_suite_declaration(line, "#[path = \"", "\"]")
+        if native_suite_gate(line)
             && lines
                 .get(index + 1)
-                .is_some_and(|next| next.trim() == "mod macos_adapter_tests;")
-        {
-            index += 2;
-        } else if line == "mod macos_adapter_tests {"
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| native_suite_declaration(next.trim(), "include!(\"", "\");"))
-            && lines.get(index + 2).is_some_and(|next| next.trim() == "}")
+                .is_some_and(|next| native_suite_declaration(next.trim(), "#[path = \"", "\"]"))
+            && lines.get(index + 2).is_some_and(|next| {
+                matches!(
+                    next.trim(),
+                    "mod macos_adapter_tests;" | "pub(crate) mod macos_adapter_tests;"
+                )
+            })
         {
             index += 3;
+        } else if native_suite_gate(line)
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| next.trim() == "mod macos_adapter_tests {")
+            && lines
+                .get(index + 2)
+                .is_some_and(|next| native_suite_declaration(next.trim(), "include!(\"", "\");"))
+            && lines.get(index + 3).is_some_and(|next| next.trim() == "}")
+        {
+            index += 4;
         } else {
             portable.push(lines[index]);
             index += 1;
         }
     }
     portable.join("\n")
+}
+
+fn native_suite_gate(line: &str) -> bool {
+    let compact: String = line
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    matches!(
+        compact.as_str(),
+        "#[cfg(all(test,target_os=\"macos\",feature=\"macos-native-tests\"))]"
+            | "#[cfg(all(target_os=\"macos\",feature=\"macos-native-tests\"))]"
+    )
 }
 
 fn native_suite_declaration(line: &str, prefix: &str, suffix: &str) -> bool {
@@ -379,8 +400,162 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
             "accepted {source}"
         );
     }
-    let wiring = "#[cfg(test)]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;";
-    assert!(native_verification_dependency(&portable_verification_source(wiring)).is_none());
+    for wiring in [
+        "#[cfg(all(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
+        "#[cfg(all(target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+    ] {
+        assert!(native_verification_dependency(&portable_verification_source(wiring)).is_none());
+    }
+    for wiring in [
+        "#[cfg(test)]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
+        "#[cfg(target_os = \"macos\")]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+    ] {
+        assert!(native_verification_dependency(&portable_verification_source(wiring)).is_some());
+    }
+}
+
+#[test]
+fn every_native_suite_mount_requires_test_target_and_feature_gates() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_sources(&root, &mut files);
+    for path in files {
+        if path == root.join("architecture_tests.rs")
+            || path.starts_with(root.join("platform/macos_adapter_tests"))
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        if !source.contains("macos_adapter_tests/") {
+            continue;
+        }
+        assert!(
+            !portable_verification_source(&source).contains("macos_adapter_tests/"),
+            "{} mounts native evidence without the complete gate",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn macos_source_modules_are_target_gated_while_portable_policy_is_not() {
+    let source = include_str!("platform/mod.rs");
+    let lines = source.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let declaration = line.trim();
+        if (declaration.starts_with("mod macos_")
+            || declaration.starts_with("pub(crate) mod macos_")
+            || declaration == "pub(crate) use macos_composition::main;")
+            && !declaration.contains("macos_adapter_tests")
+        {
+            assert!(
+                index > 0 && lines[index - 1].contains("target_os = \"macos\""),
+                "{declaration} is not explicitly owned by the macOS source set"
+            );
+        }
+    }
+    let askpass = lines
+        .iter()
+        .position(|line| line.trim() == "pub(crate) mod ssh_askpass;")
+        .unwrap();
+    assert!(!lines[askpass - 1].contains("target_os"));
+    assert!(source.contains("compile_error!(\"SpaceTerm currently supports macOS only\")"));
+}
+
+fn shared_presentation_violation(source: &str) -> Option<&'static str> {
+    [
+        "⌘",
+        "⇧",
+        "⌥",
+        "⌃",
+        "cmd-",
+        "Command-Period",
+        "Finder",
+        "Quick Look",
+        "this Mac",
+        "macOS",
+    ]
+    .into_iter()
+    .find(|forbidden| source.contains(forbidden))
+}
+
+#[test]
+fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_sources(&root.join("ui"), &mut files);
+    files.push(root.join("terminal/failure.rs"));
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        if let Some(forbidden) = shared_presentation_violation(production) {
+            panic!("{} contains host presentation {forbidden}", path.display());
+        }
+    }
+}
+
+#[test]
+fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
+    for source in [
+        "button.child(\"⌘N\")",
+        "tooltip.keyboard_equivalent(\"cmd-t\")",
+        "let label = \"Choose with Finder\";",
+        "let label = \"Quick Look\";",
+        "let description = \"Pinned to a folder on this Mac\";",
+        "let failure = \"macOS integration\";",
+    ] {
+        assert!(
+            shared_presentation_violation(source).is_some(),
+            "accepted {source}"
+        );
+    }
+    assert!(shared_presentation_violation("profile.shortcut(&CreateTab)").is_none());
+}
+
+#[test]
+fn validation_lanes_keep_portable_and_native_prerequisites_separate() {
+    let justfile = include_str!("../Justfile");
+    for required in [
+        "portable-validate: portable-fmt-check portable-check portable-test portable-clippy diff-check",
+        "macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check performance-tools-check",
+        "validate: portable-validate macos-validate",
+        "cargo test --workspace --all-targets --no-default-features --locked",
+        "cargo test --all-targets --features macos-native-tests --locked \"macos\"",
+    ] {
+        assert!(
+            justfile.contains(required),
+            "missing validation contract: {required}"
+        );
+    }
+    let portable_commands = [
+        "portable-check:",
+        "portable-fmt-check:",
+        "portable-test:",
+        "portable-clippy:",
+    ]
+    .into_iter()
+    .map(|recipe| {
+        justfile
+            .split(recipe)
+            .nth(1)
+            .unwrap()
+            .lines()
+            .take_while(|line| line.starts_with(' ') || line.is_empty())
+            .collect::<String>()
+    })
+    .collect::<String>();
+    for forbidden in [
+        "xcrun",
+        "AppKit",
+        "package-macos",
+        "mounted-dmg",
+        "performance",
+    ] {
+        assert!(
+            !portable_commands.contains(forbidden),
+            "portable lane invokes {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -396,6 +571,7 @@ fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
         include_str!("terminal/native_services/services.rs"),
     ];
     for source in policy {
+        let source = portable_verification_source(source);
         // Local Filesystem Authority is portable policy, shared with Workspaces.
         let source = source.replace("crate::platform::local_filesystem::", "");
         assert!(!source.contains("crate::platform::"));
@@ -498,7 +674,10 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         );
     }
     let pasteboard = std::fs::read_to_string(root.join("platform/macos_pasteboard.rs")).unwrap();
-    let production = pasteboard.split("#[cfg(test)]\nmod tests").next().unwrap();
+    let production = pasteboard
+        .split("#[cfg(all(test, feature = \"macos-native-tests\"))]\nmod tests")
+        .next()
+        .unwrap();
     assert!(!production.contains("LocalPathSemantics::Posix"));
     let picker = std::fs::read_to_string(root.join("ui/workspace_picker.rs")).unwrap();
     let production = picker.split("#[cfg(test)]\nmod tests").next().unwrap();

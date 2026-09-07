@@ -18,6 +18,8 @@ A native macOS terminal implemented as a Rust application with one internal UI l
 - `just check` — compile every target and feature.
 - `just test` — run the complete test suite.
 - `just test-one <filter>` — run focused tests.
+- `just portable-validate` — validate shared policy without native tooling or evidence.
+- `just macos-validate` — validate macOS Adapter suites and native tooling.
 - `just validate` — run all required pre-commit validation.
 - `just package` — build and verify native macOS artifacts.
 

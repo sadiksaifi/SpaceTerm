@@ -30,6 +30,7 @@
 | --- | --- | --- |
 | **Application Runtime** | The platform-neutral owner of common startup after host helper dispatch, GPUI/control initialization, semantic Actions and menus, Operating-System Window and Workspace composition, close and quit coordination, activation, startup failure handling, and Runtime Observation completion. | macOS startup, broad Platform Adapter |
 | **Host Composition** | One validated constructor-wiring value selected by the host that supplies desktop policy and independent capabilities, sharing application coordinators and allocating exact-window mechanics at their owning scope. It defines no platform operations. | desktop Adapter, platform callback bag |
+| **Desktop Profile** | The explicitly selected bundle of reusable control policies, semantic Action bindings, displayed shortcut strings, host-specific wording, and Locale Direction used by shared application UI without host detection. | automatic platform detection, UI-local shortcut strings |
 | **macOS Keybinding Profile** | The explicitly selected mapping of semantic Actions and reusable control profiles to the shipped macOS shortcuts; it is immutable and not user-configurable. | semantic Actions, automatic platform detection |
 | **Permission Recovery** | An optional injected capability whose availability and label determine whether the Workspace Picker offers a recovery action, with portable preferred/fallback ordering and closed outcomes. | unconditional System Settings action |
 | **Locale Direction** | The injected application-locale fact sampled after GPUI application initialization and consumed by installed desktop layout policy. | per-dialog host detection |
@@ -127,12 +128,15 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Conformance Corpus** | The portable release gate that exercises platform-neutral Module Interfaces and real terminal and UI reducers with deterministic recording implementations, isolated fixtures, explicit host facts, bounded inputs, and protocol or semantic oracles. | native integration suite, host-selected harness |
+| **Portable Validation Lane** | The release evidence that formats, compiles, tests, lints, and structurally audits shared policy without native Adapter suites, Xcode, AppKit tooling, packaging, mounted acceptance evidence, or native performance evidence. | cross-platform support claim, native verification |
+| **macOS Validation Lane** | The release evidence for macOS-only source formatting and linting, native Adapter suites, scripts, and performance tooling, enabled only on the macOS target with the explicit native-test feature. | portable verification, automatic host selection |
 | **macOS Adapter Integration Suite** | Isolated verification of native PTY, keyboard enrichment, real processes, local transport, retained filesystem identity, security, and shipped resources that portable recording implementations cannot prove. | portable corpus, mocked native evidence |
 
 The Conformance Corpus and shared Terminal Session, Terminal Key Input, SSH, Remote Project,
 Local Filesystem Authority, and Shell Integration facilities never select concrete macOS Adapters,
 discover host launch facts, or use Unix-only mechanics. Native suites retain genuine mechanism
-evidence separately. Both layers run in `just validate`; this separation makes no new host-support claim.
+evidence separately. `just validate` aggregates the Portable Validation Lane and macOS Validation
+Lane; this separation makes no new host-support claim.
 
 ## Lifecycle actions
 
@@ -157,6 +161,7 @@ evidence separately. Both layers run in `just validate`; this separation makes n
 - The **Application Runtime** consumes a complete validated **Host Composition** and performs no host detection or concrete native selection. Host helper dispatch precedes capture of startup dependencies and bypasses application startup when handled.
 - Use GPUI when it preserves behavior, then portable Rust for policy, validation, availability, ordering, identity, cleanup, and failures; retain independent capability-specific Operating-System Adapters only for irreducible mechanics.
 - The **Host Composition** selects application-wide Terminal Attention and Secure Event Input coordinators once and shares their identities through every Operating-System Window, Workspace, Tab, Pane, split, replacement, Local, and Remote path. Window movement state belongs to one exact Operating-System Window.
+- The **Desktop Profile** owns every shortcut string and host-specific phrase displayed by shared UI. The macOS selection retains its shipped modifier glyphs, Finder, Quick Look, and local-Mac wording; portable fixtures use host-neutral values.
 - The **macOS Keybinding Profile** maps **Show New Workspace Panel** to `cmd-n`, **Create Scratch Workspace** to `cmd-shift-n`, and **Open Local Project** to `cmd-o`. Its other 141 binding/action/context pairs are unchanged, and native menus dispatch those same semantic Actions.
 - **System Directory Selection** completion requires its exact picker lifecycle and chooser request identity, independent of directory reads. Cancellation preserves picker state and any pending read; a successful selection enters the existing shared validation path; a stale completion cannot settle a successor request.
 - **Permission Recovery** is offered only when its selected capability is present. Portable Rust owns preferred/fallback ordering and content-free failure classification; host composition supplies the current System Settings destinations and label.

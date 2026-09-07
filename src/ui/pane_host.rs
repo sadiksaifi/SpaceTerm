@@ -1274,20 +1274,30 @@ impl PaneHost {
         self.request_close_pane(self.terminal_tab.focused_pane_id(), cx);
     }
 
-    fn render_tree(&self, tree: PaneTreeRef<'_>, host: gpui::WeakEntity<Self>) -> AnyElement {
+    fn render_tree(
+        &self,
+        tree: PaneTreeRef<'_>,
+        host: gpui::WeakEntity<Self>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
+    ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host),
+            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, presentation),
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host),
+            } => self.render_split(split_id, axis, ratio, (first, second), host, presentation),
         }
     }
 
-    fn render_leaf(&self, pane_id: PaneId, host: gpui::WeakEntity<Self>) -> AnyElement {
+    fn render_leaf(
+        &self,
+        pane_id: PaneId,
+        host: gpui::WeakEntity<Self>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
+    ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
                 .size_full()
@@ -1355,6 +1365,7 @@ impl PaneHost {
                     zoomed,
                     &pane_group,
                     host.clone(),
+                    presentation,
                 ))
             })
             .into_any_element()
@@ -1367,10 +1378,11 @@ impl PaneHost {
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone());
-        let second = self.render_tree(second, host.clone());
+        let first = self.render_tree(first, host.clone(), presentation);
+        let second = self.render_tree(second, host.clone(), presentation);
         let measure_host = host.clone();
         let mut split = div()
             .on_children_prepainted(move |children, _, cx| {
@@ -1441,9 +1453,12 @@ impl Render for PaneHost {
                 }
             },
         };
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let content = match zoom_state {
-            ZoomState::Restored => self.render_tree(self.terminal_tab.root(), host.clone()),
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host),
+            ZoomState::Restored => {
+                self.render_tree(self.terminal_tab.root(), host.clone(), presentation)
+            }
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, presentation),
         };
 
         div()
@@ -1605,6 +1620,7 @@ fn render_pane_controls(
     zoomed: bool,
     pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
+    presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> AnyElement {
     let activation_host = host.clone();
     let lifecycle_host = host;
@@ -1623,7 +1639,13 @@ fn render_pane_controls(
             Menu::new(
                 ("pane-menu", pane_id.get()),
                 "Pane Actions",
-                pane_action_menu_entries("pane-menu", zoomed, true, CloseTarget::Pane),
+                pane_action_menu_entries(
+                    "pane-menu",
+                    zoomed,
+                    true,
+                    CloseTarget::Pane,
+                    presentation,
+                ),
             )
             .icon_trigger(menu_icon(IconName::Ellipsis))
             .size(MenuSize::Wide)

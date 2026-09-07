@@ -795,6 +795,7 @@ mod tests {
         ) -> Result<(), SecureFilesystemError> {
             Err(SecureFilesystemError::Unavailable)
         }
+        #[cfg(feature = "macos-native-tests")]
         fn create_private_artifact(
             &self,
             _: &SecureDirectory,

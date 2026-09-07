@@ -170,7 +170,7 @@ fn main_thread() -> bool {
 #[link(name = "QuickLookUI", kind = "framework")]
 unsafe extern "C" {}
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};

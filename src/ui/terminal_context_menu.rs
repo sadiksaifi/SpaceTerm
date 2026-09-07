@@ -13,10 +13,11 @@ pub(crate) enum TerminalContextMenuCommand {
 
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
-    labels: crate::desktop_profile::FileInteractionLabels,
+    presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
     vec![
-        menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy).shortcut("⌘C"),
+        menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy)
+            .shortcut(presentation.shortcut(&spaceterm_ui::EditCopy)),
         menu_entry(
             TerminalContextMenuCommand::OpenLink,
             "Open Link",
@@ -24,7 +25,7 @@ pub(crate) fn terminal_context_menu_entries(
         ),
         menu_entry(
             TerminalContextMenuCommand::FilePreview,
-            labels.file_preview,
+            presentation.wording().file_preview,
             actions.file_preview,
         ),
     ]

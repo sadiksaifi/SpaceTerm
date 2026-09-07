@@ -59,7 +59,7 @@ const fn classify_detail(gesture: u64, momentum: u64) -> Option<WheelPhaseDetail
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
 
