@@ -38,8 +38,6 @@ impl KeyboardProtocolEncoder {
             .set_macos_option_as_alt(match input.option_as_alt {
                 OptionAsAltPolicy::None => OptionAsAlt::False,
                 OptionAsAltPolicy::Both => OptionAsAlt::True,
-                OptionAsAltPolicy::Left => OptionAsAlt::Left,
-                OptionAsAltPolicy::Right => OptionAsAlt::Right,
             });
         self.event
             .set_action(match input.action {

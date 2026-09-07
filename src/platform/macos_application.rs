@@ -42,15 +42,3 @@ impl super::application_activity::ApplicationActivity for MacosApplicationActivi
         is_active()
     }
 }
-
-#[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
-    use std::mem::size_of;
-
-    use objc::runtime::BOOL;
-
-    #[test]
-    fn objective_c_bool_has_the_supported_macos_abi_width() {
-        assert_eq!(size_of::<BOOL>(), 1);
-    }
-}

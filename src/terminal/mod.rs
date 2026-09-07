@@ -69,11 +69,6 @@ pub(crate) use native_services::{
     FilePreviewTarget, NativeContextActions, NativeServiceCapabilities, NativeServiceOrigin,
     NativeServiceStatus, PastePayload,
 };
-#[cfg(test)]
-pub(crate) use osc52::Osc52AuthorizationId;
-pub(crate) use osc52::{
-    Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
-};
 pub(crate) use paste::{
     MAX_PASTE_BYTES, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
 };
@@ -81,22 +76,16 @@ pub(crate) use paste::{
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
 pub(crate) use session::AccessibilitySelectionSender;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "SessionFailure is part of the crate-visible SessionEvent interface"
-    )
-)]
+#[cfg(test)]
 pub(crate) use session::SessionFailure;
 #[cfg(test)]
 pub(crate) use session::{
     LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, SessionExit,
-    StartedTerminalSession, TerminalLaunchPlan,
+    TerminalLaunchPlan,
 };
 pub(crate) use session::{
-    NativeTerminalSessionFactory, SelectionCopyError, SessionEvent, TerminalSessionFactory,
-    TerminalSessionHandle,
+    NativeTerminalSessionFactory, SelectionCopyError, SessionEvent, StartedTerminalSession,
+    TerminalSessionFactory, TerminalSessionHandle,
 };
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,

@@ -2,19 +2,41 @@ use std::time::Duration;
 
 use gpui::{
     Context, FocusHandle, InteractiveElement as _, ParentElement as _, Render, TestAppContext,
-    Window, div, px, rgba,
+    Window, div,
 };
 use spaceterm_ui::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, DeterminateProgress, Dialog,
     DialogCloseDecision, DialogCompletion, DialogFocusTarget, DialogInitialFocus, DialogOutcome,
-    DialogSize, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
-    ModalActivationSource, ModalCloseReason, ModalDesktopPolicy, ModalDismissalError, ModalId,
-    ModalLayer, ModalLifecycleEvent, ModalMetrics, ModalPaint, ModalPresentationError,
-    ModalPresentationHandle, ModalPresentationId, ModalStaleGenerationError,
-    ModalTerminalOutcomeError, ModalTextField, ModalTheme, ModalUpdateError, ModalValidationError,
-    ProgressCancellation, ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, TextDirection,
+    DialogPendingCompletion, DialogSize, ModalAction, ModalActionIntent, ModalActionRole,
+    ModalDesktopPolicy, ModalDismissalError, ModalId, ModalLifecycleEvent, ModalPresentationError,
+    ModalPresentationHandle, ModalStaleGenerationError, ModalTerminalOutcomeError, ModalTextField,
+    ModalUpdateError, ModalValidationError, ProgressCancellation, ProgressCancellationCompletion,
+    ProgressDialog, ProgressDialogHandle, ProgressDialogUpdate, ProgressState, ProgressValueError,
     install_modal_policy,
+};
+
+const _: fn() = || {
+    fn require_recoverable_error<T: std::error::Error + Send + Sync + 'static>() {}
+    fn retain_opaque_support_types(
+        _: Option<(
+            ModalPresentationHandle,
+            DialogCompletion,
+            DialogPendingCompletion,
+            ProgressCancellationCompletion,
+            ProgressDialogHandle,
+            ModalTextField,
+        )>,
+    ) {
+    }
+
+    require_recoverable_error::<ModalValidationError>();
+    require_recoverable_error::<ModalPresentationError>();
+    require_recoverable_error::<ModalStaleGenerationError>();
+    require_recoverable_error::<ModalUpdateError>();
+    require_recoverable_error::<ModalTerminalOutcomeError>();
+    require_recoverable_error::<ModalDismissalError>();
+    require_recoverable_error::<ProgressValueError>();
+    retain_opaque_support_types(None);
 };
 
 #[derive(Default)]
@@ -380,85 +402,5 @@ fn public_progress_validation_rejects_deadline_above_installed_policy_boundary()
             deadline,
             maximum: Duration::from_secs(30 * 60),
         })
-    );
-}
-
-#[test]
-fn action_emphasis_remains_independent_from_default_key_designation() {
-    let default_standard = save_action();
-    let prominent_non_default = ModalAction::new(
-        Decision::Save,
-        "Save",
-        ModalActionRole::Affirmative,
-        "prominent-save",
-    )
-    .with_emphasis(ModalActionEmphasis::Prominent);
-
-    assert_eq!(
-        (
-            default_standard.is_default(),
-            default_standard.emphasis(),
-            prominent_non_default.is_default(),
-            prominent_non_default.emphasis(),
-        ),
-        (
-            true,
-            ModalActionEmphasis::Standard,
-            false,
-            ModalActionEmphasis::Prominent,
-        )
-    );
-}
-
-#[test]
-fn public_modal_support_contract_is_exported_without_private_machinery() {
-    fn assert_error<T: std::error::Error + Send + Sync + 'static>() {}
-    fn retain_opaque_types(
-        _: Option<(
-            ModalPresentationHandle,
-            DialogCompletion,
-            spaceterm_ui::DialogPendingCompletion,
-            ProgressCancellationCompletion,
-            ProgressDialogHandle,
-        )>,
-    ) {
-    }
-
-    assert_error::<ModalValidationError>();
-    assert_error::<ModalPresentationError>();
-    assert_error::<ModalStaleGenerationError>();
-    assert_error::<ModalUpdateError>();
-    assert_error::<ModalTerminalOutcomeError>();
-    assert_error::<ModalDismissalError>();
-    retain_opaque_types(None);
-
-    let color = rgba(0x223344ff);
-    let theme = ModalTheme::new(
-        ModalPaint::new(
-            color, color, color, color, color, color, color, color, color, color, color, color,
-            color, color,
-        ),
-        ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
-    );
-    let _layer = ModalLayer::new(div());
-    let semantic_types = (
-        TextDirection::LeftToRight,
-        ModalActionEmphasis::Standard,
-        ModalActionIntent::Ordinary,
-        ModalActivationSource::Programmatic,
-        ModalCloseReason::Programmatic,
-        ModalTextField::VisibleTitle,
-        ProgressDialogOutcome::Completed,
-    );
-    let identity_and_events: Option<(
-        ModalPresentationId,
-        ModalLifecycleEvent,
-        ModalStaleGenerationError,
-    )> = None;
-
-    assert!(
-        !theme.surface_animation_enabled()
-            && semantic_types.0 == TextDirection::LeftToRight
-            && identity_and_events.is_none()
     );
 }

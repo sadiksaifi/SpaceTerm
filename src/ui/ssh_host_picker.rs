@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Host Picker lands before its Workspace Manager integration"
-    )
-)]
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -162,6 +154,7 @@ impl fmt::Debug for HostPickerRow {
 }
 
 impl HostPickerRow {
+    #[cfg(test)]
     fn label(&self) -> &str {
         &self.label
     }
@@ -384,6 +377,7 @@ impl SshHostPicker {
         self.start_refresh(window, cx);
     }
 
+    #[cfg(test)]
     pub(super) const fn is_open(&self) -> bool {
         self.open
     }

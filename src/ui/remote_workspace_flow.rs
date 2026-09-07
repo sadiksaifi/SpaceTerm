@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Remote Workspace Flow lands before its Workspace Manager integration"
-    )
-)]
-
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -405,10 +397,6 @@ impl RemoteWorkspaceFlowCompletion {
         }
     }
 
-    pub(crate) const fn session(&self) -> &RemoteWorkspaceConnectedSession {
-        &self.session
-    }
-
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
@@ -421,16 +409,8 @@ impl RemoteWorkspaceFlowCompletion {
         &self.physical_directory
     }
 
-    pub(crate) fn remote_user(&self) -> &str {
-        self.account.user()
-    }
-
     pub(crate) const fn remote_home_identity(&self) -> &RemoteDirectoryIdentity {
         self.account.home_identity()
-    }
-
-    pub(crate) fn login_shell(&self) -> &str {
-        self.account.login_shell().as_str()
     }
 
     pub(crate) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
@@ -542,24 +522,187 @@ enum AcknowledgeAction {
     Acknowledge,
 }
 
+struct ConnectedHost {
+    destination: SshDestination,
+    session: RemoteWorkspaceConnectedSession,
+    retained_lifecycle: Option<ControlConnectionObserver>,
+}
+
+struct ConnectionAttempt {
+    destination: SshDestination,
+    cancelled: Arc<AtomicBool>,
+    finished: bool,
+    phase: RemoteWorkspaceConnectionProgress,
+    progress: Option<ProgressDialogHandle>,
+}
+
+impl Drop for ConnectionAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+struct PendingActivation {
+    handle: RemoteWorkspaceFlowCompletionHandle,
+    picker: Option<Entity<RemoteWorkspacePicker>>,
+}
+
+impl Drop for PendingActivation {
+    fn drop(&mut self) {
+        drop(self.handle.take());
+    }
+}
+
+enum RemoteWorkspaceFlowState {
+    Idle,
+    HostSelection {
+        retained: Option<ConnectedHost>,
+    },
+    AddingHost {
+        _form: Entity<SshHostForm>,
+        retained: Option<ConnectedHost>,
+    },
+    EditingHost {
+        _form: Entity<SshHostForm>,
+        retained: Option<ConnectedHost>,
+    },
+    DeleteConfirmation {
+        alert: Option<ModalPresentationHandle>,
+        retained: Option<ConnectedHost>,
+    },
+    DeletingHost {
+        alert: Option<ModalPresentationHandle>,
+        retained: Option<ConnectedHost>,
+    },
+    Connecting(ConnectionAttempt),
+    ConnectionReady {
+        connection: ConnectedHost,
+        phase: RemoteWorkspaceConnectionProgress,
+        progress: Option<ProgressDialogHandle>,
+    },
+    ConnectionFailed {
+        destination: SshDestination,
+        error: RemoteWorkspaceFlowBackendError,
+        progress: Option<ProgressDialogHandle>,
+    },
+    ConnectionError {
+        destination: SshDestination,
+        alert: Option<ModalPresentationHandle>,
+    },
+    DirectorySelection {
+        connection: ConnectedHost,
+        picker: Option<Entity<RemoteWorkspacePicker>>,
+    },
+    AwaitingActivation(PendingActivation),
+    Completed,
+    Cancelled,
+}
+
+impl RemoteWorkspaceFlowState {
+    const fn stage(&self) -> RemoteWorkspaceFlowStage {
+        match self {
+            Self::Idle => RemoteWorkspaceFlowStage::Idle,
+            Self::HostSelection { .. } => RemoteWorkspaceFlowStage::HostSelection,
+            Self::AddingHost { .. } => RemoteWorkspaceFlowStage::AddingHost,
+            Self::EditingHost { .. } => RemoteWorkspaceFlowStage::EditingHost,
+            Self::DeleteConfirmation { .. } => RemoteWorkspaceFlowStage::DeleteConfirmation,
+            Self::DeletingHost { .. } => RemoteWorkspaceFlowStage::DeletingHost,
+            Self::Connecting(attempt) => RemoteWorkspaceFlowStage::Connecting(attempt.phase),
+            Self::ConnectionReady { phase, .. } => RemoteWorkspaceFlowStage::Connecting(*phase),
+            Self::ConnectionFailed { .. } | Self::ConnectionError { .. } => {
+                RemoteWorkspaceFlowStage::ConnectionError
+            }
+            Self::DirectorySelection { .. } => RemoteWorkspaceFlowStage::DirectorySelection,
+            Self::AwaitingActivation(_) => RemoteWorkspaceFlowStage::AwaitingActivation,
+            Self::Completed => RemoteWorkspaceFlowStage::Completed,
+            Self::Cancelled => RemoteWorkspaceFlowStage::Cancelled,
+        }
+    }
+
+    fn take_retained_connection(&mut self) -> Option<ConnectedHost> {
+        match self {
+            Self::HostSelection { retained }
+            | Self::AddingHost { retained, .. }
+            | Self::EditingHost { retained, .. }
+            | Self::DeleteConfirmation { retained, .. }
+            | Self::DeletingHost { retained, .. } => retained.take(),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn progress(&self) -> Option<&ProgressDialogHandle> {
+        match self {
+            Self::Connecting(attempt) => attempt.progress.as_ref(),
+            Self::ConnectionReady { progress, .. } | Self::ConnectionFailed { progress, .. } => {
+                progress.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    fn take_progress(&mut self) -> Option<ProgressDialogHandle> {
+        match self {
+            Self::Connecting(attempt) => attempt.progress.take(),
+            Self::ConnectionReady { progress, .. } | Self::ConnectionFailed { progress, .. } => {
+                progress.take()
+            }
+            _ => None,
+        }
+    }
+
+    fn remote_picker(&self) -> Option<&Entity<RemoteWorkspacePicker>> {
+        match self {
+            Self::DirectorySelection { picker, .. } => picker.as_ref(),
+            Self::AwaitingActivation(pending) => pending.picker.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn connection_error(&self) -> Option<&RemoteWorkspaceFlowBackendError> {
+        match self {
+            Self::ConnectionFailed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    fn dismiss(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(progress) = self.take_progress() {
+            let _ = progress.dismiss(window, cx);
+        }
+        match self {
+            Self::DeleteConfirmation { alert, .. }
+            | Self::DeletingHost { alert, .. }
+            | Self::ConnectionError { alert, .. } => {
+                if let Some(alert) = alert.take() {
+                    let _ = alert.dismiss(window, cx);
+                }
+            }
+            Self::AwaitingActivation(pending) => {
+                drop(pending.handle.take());
+                if let Some(picker) = &pending.picker {
+                    picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
+                }
+            }
+            _ => {}
+        }
+        if let Some(picker) = self.remote_picker() {
+            picker.update(cx, |picker, cx| picker.dismiss(window, cx));
+        }
+    }
+}
+
 pub(crate) struct RemoteWorkspaceFlow {
     backend: Arc<dyn RemoteWorkspaceFlowBackend>,
     host_picker: Entity<SshHostPicker>,
     focus_scope: FocusHandle,
-    active_form: Option<Entity<SshHostForm>>,
-    remote_picker: Option<Entity<RemoteWorkspacePicker>>,
-    stage: RemoteWorkspaceFlowStage,
+    state: RemoteWorkspaceFlowState,
     action_generation: u64,
-    pending_destination: Option<SshDestination>,
-    connection_error: Option<RemoteWorkspaceFlowBackendError>,
-    connection_cancelled: Option<Arc<AtomicBool>>,
-    progress: Option<ProgressDialogHandle>,
-    connected: Option<RemoteWorkspaceConnectedSession>,
-    retained_lifecycle: Option<ControlConnectionObserver>,
-    pending_completion: Option<RemoteWorkspaceFlowCompletionHandle>,
+    #[cfg(test)]
     observed_progress: Vec<RemoteWorkspaceConnectionProgress>,
-    delete_alert: Option<ModalPresentationHandle>,
-    error_alert: Option<ModalPresentationHandle>,
     cancelled_emitted: bool,
 }
 
@@ -590,35 +733,21 @@ impl RemoteWorkspaceFlow {
             backend,
             host_picker,
             focus_scope: cx.focus_handle(),
-            active_form: None,
-            remote_picker: None,
-            stage: RemoteWorkspaceFlowStage::Idle,
+            state: RemoteWorkspaceFlowState::Idle,
             action_generation: 0,
-            pending_destination: None,
-            connection_error: None,
-            connection_cancelled: None,
-            progress: None,
-            connected: None,
-            retained_lifecycle: None,
-            pending_completion: None,
+            #[cfg(test)]
             observed_progress: Vec::new(),
-            delete_alert: None,
-            error_alert: None,
             cancelled_emitted: false,
         }
     }
 
     pub(crate) const fn stage(&self) -> RemoteWorkspaceFlowStage {
-        self.stage
+        self.state.stage()
     }
 
     pub(crate) fn owns_activation(&self, handle: &RemoteWorkspaceFlowCompletionHandle) -> bool {
-        self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
-            && self
-                .pending_completion
-                .as_ref()
-                .is_some_and(|pending| pending.is_same_transfer(handle))
-            && handle.is_empty()
+        matches!(&self.state, RemoteWorkspaceFlowState::AwaitingActivation(pending)
+            if pending.handle.is_same_transfer(handle) && handle.is_empty())
     }
 
     #[cfg(test)]
@@ -628,8 +757,10 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) {
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
-        self.pending_completion = Some(handle.clone());
-        self.stage = RemoteWorkspaceFlowStage::AwaitingActivation;
+        self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
+            handle: handle.clone(),
+            picker: None,
+        });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
     }
@@ -653,6 +784,7 @@ impl RemoteWorkspaceFlow {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open_with_replacement(None, window, cx)
     }
@@ -673,20 +805,20 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) -> bool {
         if !matches!(
-            self.stage,
+            self.stage(),
             RemoteWorkspaceFlowStage::Idle | RemoteWorkspaceFlowStage::Cancelled
         ) {
             return false;
         }
         self.cancelled_emitted = false;
-        self.stage = RemoteWorkspaceFlowStage::HostSelection;
+        self.return_to_hosts();
         let blocked_by_modal = spaceterm_ui::window_modal_is_open(window, cx);
         let opened = self.host_picker.update(cx, |picker, cx| match replacement {
             Some(replacement) => picker.open_replacing(replacement, window, cx),
             None => picker.open(window, cx),
         });
         if !opened && !blocked_by_modal {
-            self.stage = RemoteWorkspaceFlowStage::Idle;
+            self.state = RemoteWorkspaceFlowState::Idle;
             return false;
         }
         self.publish(cx);
@@ -695,13 +827,14 @@ impl RemoteWorkspaceFlow {
 
     pub(crate) fn blocks_terminal_input(&self) -> bool {
         !matches!(
-            self.stage,
+            self.stage(),
             RemoteWorkspaceFlowStage::Idle
                 | RemoteWorkspaceFlowStage::Completed
                 | RemoteWorkspaceFlowStage::Cancelled
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn owns_first_responder(&self, window: &Window, cx: &App) -> bool {
         self.focus_scope.contains_focused(window, cx)
     }
@@ -715,24 +848,24 @@ impl RemoteWorkspaceFlow {
         match event {
             SshHostPickerEvent::Lifecycle(SshHostPickerLifecycleEvent::Opened) => {}
             SshHostPickerEvent::Lifecycle(SshHostPickerLifecycleEvent::Closed(reason)) => {
-                if self.stage == RemoteWorkspaceFlowStage::HostSelection
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection
                     && !matches!(reason, spaceterm_ui::CommandPaletteCloseReason::Replaced)
                 {
                     self.cancel_flow(window, cx);
                 }
             }
             SshHostPickerEvent::SelectDestination(destination)
-                if self.stage == RemoteWorkspaceFlowStage::HostSelection =>
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
             {
                 self.start_connection(destination.clone(), window, cx);
             }
             SshHostPickerEvent::RequestAddHost(_)
-                if self.stage == RemoteWorkspaceFlowStage::HostSelection =>
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
             {
                 self.present_host_form(SshHostFormMode::Add, window, cx);
             }
             SshHostPickerEvent::RequestEditHost(alias)
-                if self.stage == RemoteWorkspaceFlowStage::HostSelection =>
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
             {
                 if self.backend.host_in_active_use(alias) {
                     return;
@@ -742,7 +875,7 @@ impl RemoteWorkspaceFlow {
                 }
             }
             SshHostPickerEvent::RequestDeleteHost(alias)
-                if self.stage == RemoteWorkspaceFlowStage::HostSelection =>
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
             {
                 if !self.backend.host_in_active_use(alias) {
                     self.present_delete_confirmation(alias.clone(), window, cx);
@@ -779,8 +912,17 @@ impl RemoteWorkspaceFlow {
         if !form.update(cx, |form, cx| form.present(window, cx)) {
             return;
         }
-        self.active_form = Some(form);
-        self.stage = stage;
+        let retained = self.state.take_retained_connection();
+        self.state = match stage {
+            RemoteWorkspaceFlowStage::AddingHost => RemoteWorkspaceFlowState::AddingHost {
+                _form: form,
+                retained,
+            },
+            _ => RemoteWorkspaceFlowState::EditingHost {
+                _form: form,
+                retained,
+            },
+        };
         self.publish(cx);
     }
 
@@ -797,33 +939,30 @@ impl RemoteWorkspaceFlow {
         match event {
             SshHostFormEvent::StateChanged => cx.notify(),
             SshHostFormEvent::SavedAndConnect(host)
-                if self.stage == RemoteWorkspaceFlowStage::AddingHost =>
+                if self.stage() == RemoteWorkspaceFlowStage::AddingHost =>
             {
-                self.active_form = None;
                 self.host_picker
                     .update(cx, |picker, cx| picker.refresh(window, cx));
                 let Ok(destination) = SshDestination::new(host.alias().as_str().to_owned()) else {
-                    self.stage = RemoteWorkspaceFlowStage::HostSelection;
+                    self.return_to_hosts();
                     self.publish(cx);
                     return;
                 };
                 self.start_connection(destination, window, cx);
             }
-            SshHostFormEvent::Saved(_) if self.stage == RemoteWorkspaceFlowStage::EditingHost => {
-                self.active_form = None;
-                self.stage = RemoteWorkspaceFlowStage::HostSelection;
+            SshHostFormEvent::Saved(_) if self.stage() == RemoteWorkspaceFlowStage::EditingHost => {
+                self.return_to_hosts();
                 self.host_picker
                     .update(cx, |picker, cx| picker.refresh(window, cx));
                 self.publish(cx);
             }
             SshHostFormEvent::Cancelled
                 if matches!(
-                    self.stage,
+                    self.stage(),
                     RemoteWorkspaceFlowStage::AddingHost | RemoteWorkspaceFlowStage::EditingHost
                 ) =>
             {
-                self.active_form = None;
-                self.stage = RemoteWorkspaceFlowStage::HostSelection;
+                self.return_to_hosts();
                 self.publish(cx);
             }
             _ => {}
@@ -838,7 +977,11 @@ impl RemoteWorkspaceFlow {
     ) {
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        self.stage = RemoteWorkspaceFlowStage::DeleteConfirmation;
+        let retained = self.state.take_retained_connection();
+        self.state = RemoteWorkspaceFlowState::DeleteConfirmation {
+            alert: None,
+            retained,
+        };
         let flow = cx.weak_entity();
         let window_handle = window.window_handle();
         let expected = alias.clone();
@@ -872,8 +1015,13 @@ impl RemoteWorkspaceFlow {
             });
         });
         match result {
-            Ok(handle) => self.delete_alert = Some(handle),
-            Err(_) => self.stage = RemoteWorkspaceFlowStage::HostSelection,
+            Ok(handle) => {
+                if let RemoteWorkspaceFlowState::DeleteConfirmation { alert, .. } = &mut self.state
+                {
+                    *alert = Some(handle);
+                }
+            }
+            Err(_) => self.return_to_hosts(),
         }
         self.publish(cx);
     }
@@ -887,11 +1035,13 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) {
         if self.action_generation != generation
-            || self.stage != RemoteWorkspaceFlowStage::DeleteConfirmation
+            || self.stage() != RemoteWorkspaceFlowStage::DeleteConfirmation
         {
             return;
         }
-        self.delete_alert = None;
+        if let RemoteWorkspaceFlowState::DeleteConfirmation { alert, .. } = &mut self.state {
+            alert.take();
+        }
         if matches!(
             outcome,
             AlertOutcome::Activated {
@@ -900,13 +1050,16 @@ impl RemoteWorkspaceFlow {
             }
         ) {
             if self.backend.host_in_active_use(&alias) {
-                self.stage = RemoteWorkspaceFlowStage::DeletingHost;
+                self.state = RemoteWorkspaceFlowState::DeletingHost {
+                    retained: self.state.take_retained_connection(),
+                    alert: None,
+                };
                 self.present_delete_error(RemoteWorkspaceFlowBackendError::HostInUse, window, cx);
             } else {
                 self.start_delete(alias, window, cx);
             }
         } else {
-            self.stage = RemoteWorkspaceFlowStage::HostSelection;
+            self.return_to_hosts();
             self.publish(cx);
         }
     }
@@ -914,19 +1067,22 @@ impl RemoteWorkspaceFlow {
     fn start_delete(&mut self, alias: SshHostAlias, window: &mut Window, cx: &mut Context<Self>) {
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        self.stage = RemoteWorkspaceFlowStage::DeletingHost;
+        self.state = RemoteWorkspaceFlowState::DeletingHost {
+            retained: self.state.take_retained_connection(),
+            alert: None,
+        };
         let task = self.backend.delete_managed_host(alias);
         cx.spawn_in(window, async move |flow, cx| {
             let result = task.await;
             let _ = flow.update_in(cx, |flow, window, cx| {
                 if flow.action_generation != generation
-                    || flow.stage != RemoteWorkspaceFlowStage::DeletingHost
+                    || flow.stage() != RemoteWorkspaceFlowStage::DeletingHost
                 {
                     return;
                 }
                 match result {
                     Ok(()) => {
-                        flow.stage = RemoteWorkspaceFlowStage::HostSelection;
+                        flow.return_to_hosts();
                         flow.host_picker
                             .update(cx, |picker, cx| picker.refresh(window, cx));
                         flow.publish(cx);
@@ -973,18 +1129,19 @@ impl RemoteWorkspaceFlow {
         .present(window, cx, move |_, cx| {
             let _ = window_handle.update(cx, |_, _, cx| {
                 let _ = flow.update(cx, |flow, cx| {
-                    if flow.stage == RemoteWorkspaceFlowStage::DeletingHost {
-                        flow.error_alert = None;
-                        flow.stage = RemoteWorkspaceFlowStage::HostSelection;
+                    if flow.stage() == RemoteWorkspaceFlowStage::DeletingHost {
+                        flow.return_to_hosts();
                         flow.publish(cx);
                     }
                 });
             });
         });
         if let Ok(handle) = result {
-            self.error_alert = Some(handle);
+            if let RemoteWorkspaceFlowState::DeletingHost { alert, .. } = &mut self.state {
+                *alert = Some(handle);
+            }
         } else {
-            self.stage = RemoteWorkspaceFlowStage::HostSelection;
+            self.return_to_hosts();
         }
         self.publish(cx);
     }
@@ -996,45 +1153,41 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) {
         if !matches!(
-            self.stage,
+            self.stage(),
             RemoteWorkspaceFlowStage::HostSelection
                 | RemoteWorkspaceFlowStage::AddingHost
                 | RemoteWorkspaceFlowStage::ConnectionError
         ) {
             return;
         }
-        if self.stage == RemoteWorkspaceFlowStage::HostSelection
-            && self.connected.is_some()
-            && self.pending_destination.as_ref() == Some(&destination)
+        if matches!(&self.state, RemoteWorkspaceFlowState::HostSelection { retained: Some(connection) }
+            if connection.destination == destination)
         {
-            self.connection_error = None;
             self.open_remote_picker(window, cx);
             return;
         }
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        self.pending_destination = Some(destination.clone());
-        self.connection_error = None;
-        self.connected = None;
-        self.retained_lifecycle = None;
+        #[cfg(test)]
         self.observed_progress.clear();
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.connection_cancelled = Some(Arc::clone(&cancelled));
-        self.stage = RemoteWorkspaceFlowStage::Connecting(
-            RemoteWorkspaceConnectionProgress::CheckingCompatibility,
-        );
+        self.state = RemoteWorkspaceFlowState::Connecting(ConnectionAttempt {
+            destination: destination.clone(),
+            cancelled: Arc::clone(&cancelled),
+            finished: false,
+            phase: RemoteWorkspaceConnectionProgress::CheckingCompatibility,
+            progress: None,
+        });
         if !self.present_connection_progress(
             generation,
             RemoteWorkspaceConnectionProgress::CheckingCompatibility,
             window,
             cx,
         ) {
-            self.connection_error = Some(RemoteWorkspaceFlowBackendError::ConnectionFailed);
-            self.stage = RemoteWorkspaceFlowStage::ConnectionError;
+            self.fail_connecting(RemoteWorkspaceFlowBackendError::ConnectionFailed);
             self.present_connection_error(generation, window, cx);
             return;
         }
-
         let (progress_sender, progress_receiver) = async_channel::bounded(8);
         let context = RemoteWorkspaceConnectContext {
             progress: progress_sender,
@@ -1094,9 +1247,9 @@ impl RemoteWorkspaceFlow {
             move |_, _, cx| {
                 let _ = flow.update(cx, |flow, _| {
                     if flow.action_generation == generation
-                        && let Some(cancelled) = &flow.connection_cancelled
+                        && let RemoteWorkspaceFlowState::Connecting(attempt) = &flow.state
                     {
-                        cancelled.store(true, Ordering::Release);
+                        attempt.cancelled.store(true, Ordering::Release);
                     }
                 });
                 ProgressCancelDecision::Allow
@@ -1112,36 +1265,37 @@ impl RemoteWorkspaceFlow {
         let Ok(progress) = dialog else {
             return false;
         };
-        self.progress = Some(progress);
+        let RemoteWorkspaceFlowState::Connecting(attempt) = &mut self.state else {
+            return false;
+        };
+        attempt.progress = Some(progress);
         true
     }
 
     fn apply_connection_progress(
         &mut self,
         generation: u64,
-        progress: RemoteWorkspaceConnectionProgress,
+        phase: RemoteWorkspaceConnectionProgress,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.action_generation != generation
-            || !matches!(self.stage, RemoteWorkspaceFlowStage::Connecting(_))
-        {
+        if self.action_generation != generation {
             return false;
         }
-        self.stage = RemoteWorkspaceFlowStage::Connecting(progress);
-        self.observed_progress.push(progress);
-        if progress == RemoteWorkspaceConnectionProgress::Authenticating {
-            if let Some(handle) = self.progress.take() {
+        let RemoteWorkspaceFlowState::Connecting(attempt) = &mut self.state else {
+            return false;
+        };
+        attempt.phase = phase;
+        #[cfg(test)]
+        self.observed_progress.push(phase);
+        if phase == RemoteWorkspaceConnectionProgress::Authenticating {
+            if let Some(handle) = attempt.progress.take() {
                 let _ = handle.dismiss(window, cx);
             }
-        } else if let Some(handle) = &self.progress {
-            let _ = handle.update(connection_progress_dialog_update(progress), window, cx);
-        } else if !self.present_connection_progress(generation, progress, window, cx) {
-            if let Some(cancelled) = &self.connection_cancelled {
-                cancelled.store(true, Ordering::Release);
-            }
-            self.connection_error = Some(RemoteWorkspaceFlowBackendError::ConnectionFailed);
-            self.stage = RemoteWorkspaceFlowStage::ConnectionError;
+        } else if let Some(handle) = &attempt.progress {
+            let _ = handle.update(connection_progress_dialog_update(phase), window, cx);
+        } else if !self.present_connection_progress(generation, phase, window, cx) {
+            self.fail_connecting(RemoteWorkspaceFlowBackendError::ConnectionFailed);
             self.present_connection_error(generation, window, cx);
             return false;
         }
@@ -1156,42 +1310,57 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.action_generation != generation
-            || !matches!(self.stage, RemoteWorkspaceFlowStage::Connecting(_))
-            || self
-                .connection_cancelled
-                .as_ref()
-                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
-        {
+        if self.action_generation != generation {
             return;
         }
-        match result {
-            Ok(session) => {
-                self.connected = Some(session);
-                if let Some(handle) = &self.progress {
-                    let _ = handle.complete(window, cx);
-                } else {
-                    self.open_remote_picker(window, cx);
-                }
+        let RemoteWorkspaceFlowState::Connecting(attempt) = &mut self.state else {
+            return;
+        };
+        if attempt.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        attempt.finished = true;
+        let destination = attempt.destination.clone();
+        let phase = attempt.phase;
+        let progress = attempt.progress.take();
+        self.state = match result {
+            Ok(session) => RemoteWorkspaceFlowState::ConnectionReady {
+                connection: ConnectedHost {
+                    destination,
+                    session,
+                    retained_lifecycle: None,
+                },
+                phase,
+                progress,
+            },
+            Err(error) => RemoteWorkspaceFlowState::ConnectionFailed {
+                destination,
+                error,
+                progress,
+            },
+        };
+        match &self.state {
+            RemoteWorkspaceFlowState::ConnectionReady {
+                progress: Some(handle),
+                ..
+            } => {
+                let _ = handle.complete(window, cx);
             }
-            Err(error) => {
-                let authentication_cancelled = matches!(
-                    error,
-                    RemoteWorkspaceFlowBackendError::AuthenticationCancelled
-                );
-                self.connection_error = Some(error);
-                self.stage = RemoteWorkspaceFlowStage::ConnectionError;
-                if let Some(handle) = &self.progress {
-                    let _ = handle.fail(window, cx);
-                } else if authentication_cancelled {
-                    self.connection_error = None;
-                    self.connection_cancelled = None;
-                    self.pending_destination = None;
-                    self.stage = RemoteWorkspaceFlowStage::HostSelection;
-                } else {
-                    self.present_connection_error(generation, window, cx);
-                }
+            RemoteWorkspaceFlowState::ConnectionReady { .. } => self.open_remote_picker(window, cx),
+            RemoteWorkspaceFlowState::ConnectionFailed {
+                progress: Some(handle),
+                ..
+            } => {
+                let _ = handle.fail(window, cx);
             }
+            RemoteWorkspaceFlowState::ConnectionFailed {
+                error: RemoteWorkspaceFlowBackendError::AuthenticationCancelled,
+                ..
+            } => self.return_to_hosts(),
+            RemoteWorkspaceFlowState::ConnectionFailed { .. } => {
+                self.present_connection_error(generation, window, cx)
+            }
+            _ => unreachable!("connection completion installs a result state"),
         }
         self.publish(cx);
     }
@@ -1206,28 +1375,35 @@ impl RemoteWorkspaceFlow {
         if self.action_generation != generation {
             return;
         }
-        self.progress = None;
+        self.state.take_progress();
         match outcome {
-            ProgressDialogOutcome::Completed if self.connected.is_some() => {
+            ProgressDialogOutcome::Completed
+                if matches!(self.state, RemoteWorkspaceFlowState::ConnectionReady { .. }) =>
+            {
                 self.open_remote_picker(window, cx);
             }
             ProgressDialogOutcome::Failed
                 if matches!(
-                    self.connection_error.as_ref(),
-                    Some(RemoteWorkspaceFlowBackendError::AuthenticationCancelled)
+                    self.state,
+                    RemoteWorkspaceFlowState::ConnectionFailed {
+                        error: RemoteWorkspaceFlowBackendError::AuthenticationCancelled,
+                        ..
+                    }
                 ) =>
             {
-                self.connection_error = None;
-                self.connection_cancelled = None;
-                self.pending_destination = None;
-                self.stage = RemoteWorkspaceFlowStage::HostSelection;
+                self.return_to_hosts();
                 self.publish(cx);
             }
-            ProgressDialogOutcome::Failed if self.connection_error.is_some() => {
+            ProgressDialogOutcome::Failed
+                if matches!(
+                    self.state,
+                    RemoteWorkspaceFlowState::ConnectionFailed { .. }
+                ) =>
+            {
                 self.present_connection_error(generation, window, cx);
             }
             ProgressDialogOutcome::ProgrammaticDismissal
-                if self.stage
+                if self.stage()
                     == RemoteWorkspaceFlowStage::Connecting(
                         RemoteWorkspaceConnectionProgress::Authenticating,
                     ) =>
@@ -1239,8 +1415,7 @@ impl RemoteWorkspaceFlow {
             | ProgressDialogOutcome::OwnerRemoved
             | ProgressDialogOutcome::ProgrammaticDismissal
             | ProgressDialogOutcome::Replaced => self.cancel_flow(window, cx),
-            ProgressDialogOutcome::Completed => {}
-            ProgressDialogOutcome::Failed => {}
+            ProgressDialogOutcome::Completed | ProgressDialogOutcome::Failed => {}
         }
     }
 
@@ -1253,9 +1428,19 @@ impl RemoteWorkspaceFlow {
         if self.action_generation != generation {
             return;
         }
-        self.stage = RemoteWorkspaceFlowStage::ConnectionError;
-        let connection_error = self.connection_error.take();
-        let content = connection_error_content(connection_error.as_ref());
+        let state = std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle);
+        let RemoteWorkspaceFlowState::ConnectionFailed {
+            destination, error, ..
+        } = state
+        else {
+            self.state = state;
+            return;
+        };
+        let content = connection_error_content(Some(&error));
+        self.state = RemoteWorkspaceFlowState::ConnectionError {
+            destination,
+            alert: None,
+        };
         let flow = cx.weak_entity();
         let window_handle = window.window_handle();
         let alert = Alert::new(
@@ -1300,7 +1485,11 @@ impl RemoteWorkspaceFlow {
                 });
             });
         match alert {
-            Ok(handle) => self.error_alert = Some(handle),
+            Ok(handle) => {
+                if let RemoteWorkspaceFlowState::ConnectionError { alert, .. } = &mut self.state {
+                    *alert = Some(handle);
+                }
+            }
             Err(_) => self.cancel_flow(window, cx),
         }
         self.publish(cx);
@@ -1313,31 +1502,27 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.action_generation != generation
-            || self.stage != RemoteWorkspaceFlowStage::ConnectionError
-        {
+        if self.action_generation != generation {
             return;
         }
-        self.error_alert = None;
+        let RemoteWorkspaceFlowState::ConnectionError { destination, alert } = &mut self.state
+        else {
+            return;
+        };
+        alert.take();
         let action = match outcome {
             AlertOutcome::Activated { action_id, .. } => action_id,
             AlertOutcome::Dismissed { .. } => ConnectionErrorAction::Cancel,
         };
         match action {
             ConnectionErrorAction::Retry => {
-                let Some(destination) = self.pending_destination.clone() else {
-                    self.cancel_flow(window, cx);
-                    return;
-                };
+                let destination = destination.clone();
                 cx.defer_in(window, move |flow, window, cx| {
                     flow.start_connection(destination, window, cx);
                 });
             }
             ConnectionErrorAction::Back => {
-                self.connection_error = None;
-                self.pending_destination = None;
-                self.connection_cancelled = None;
-                self.stage = RemoteWorkspaceFlowStage::HostSelection;
+                self.return_to_hosts();
                 self.publish(cx);
             }
             ConnectionErrorAction::Cancel => self.cancel_flow(window, cx),
@@ -1345,13 +1530,20 @@ impl RemoteWorkspaceFlow {
     }
 
     fn open_remote_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.connected.as_ref() else {
-            self.cancel_flow(window, cx);
-            return;
+        let connection = match std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle) {
+            RemoteWorkspaceFlowState::ConnectionReady { connection, .. } => connection,
+            RemoteWorkspaceFlowState::HostSelection {
+                retained: Some(connection),
+            } => connection,
+            state => {
+                self.state = state;
+                self.cancel_flow(window, cx);
+                return;
+            }
         };
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        let provider = session.provider();
+        let provider = connection.session.provider();
         let picker = cx.new(|cx| RemoteWorkspacePicker::new(provider, window, cx));
         cx.subscribe_in(
             &picker,
@@ -1369,14 +1561,13 @@ impl RemoteWorkspaceFlow {
             None => picker.open(window, cx),
         });
         if !opened {
-            self.connected = None;
             self.cancel_flow(window, cx);
             return;
         }
-        self.remote_picker = Some(picker);
-        self.connection_cancelled = None;
-        self.connection_error = None;
-        self.stage = RemoteWorkspaceFlowStage::DirectorySelection;
+        self.state = RemoteWorkspaceFlowState::DirectorySelection {
+            connection,
+            picker: Some(picker),
+        };
         self.publish(cx);
     }
 
@@ -1388,7 +1579,7 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) {
         if self.action_generation != generation
-            || self.stage != RemoteWorkspaceFlowStage::DirectorySelection
+            || self.stage() != RemoteWorkspaceFlowStage::DirectorySelection
         {
             return;
         }
@@ -1396,15 +1587,21 @@ impl RemoteWorkspaceFlow {
             RemoteWorkspacePickerEvent::StateChanged => cx.notify(),
             RemoteWorkspacePickerEvent::BackToHost => {
                 self.action_generation = self.action_generation.wrapping_add(1);
-                self.remote_picker = None;
-                self.stage = RemoteWorkspaceFlowStage::HostSelection;
+                let RemoteWorkspaceFlowState::DirectorySelection { connection, .. } =
+                    std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
+                else {
+                    return;
+                };
+                self.state = RemoteWorkspaceFlowState::HostSelection {
+                    retained: Some(connection),
+                };
                 self.host_picker
                     .update(cx, |picker, cx| picker.open(window, cx));
                 self.publish(cx);
             }
             RemoteWorkspacePickerEvent::Dismissed => self.cancel_flow(window, cx),
             RemoteWorkspacePickerEvent::Confirmed(selection) => {
-                self.complete(selection.clone(), window, cx);
+                self.complete(selection.clone(), window, cx)
             }
         }
     }
@@ -1415,48 +1612,43 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(mut session), Some(destination)) =
-            (self.connected.take(), self.pending_destination.take())
+        let RemoteWorkspaceFlowState::DirectorySelection { connection, picker } = &mut self.state
         else {
-            if let Some(picker) = &self.remote_picker {
-                picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-            }
             return;
         };
-        let terminal_channels = match session.bind_terminal_channels_for_identity(
+        let terminal_channels = match connection.session.bind_terminal_channels_for_identity(
             selection.directory(),
             selection.physical_directory(),
             selection.account().login_shell(),
         ) {
             Ok(provider) => provider,
-            Err(error) => {
-                self.connected = Some(session);
-                self.pending_destination = Some(destination);
-                self.connection_error = Some(error);
-                if let Some(picker) = &self.remote_picker {
+            Err(_) => {
+                if let Some(picker) = picker {
                     picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
                 }
                 self.publish(cx);
                 return;
             }
         };
-        let lifecycle = self
+        let lifecycle = connection
             .retained_lifecycle
             .take()
-            .or_else(|| session.take_lifecycle_observer());
+            .or_else(|| connection.session.take_lifecycle_observer());
         let Some(lifecycle) = lifecycle else {
-            self.connected = Some(session);
-            self.pending_destination = Some(destination);
-            self.connection_error = Some(RemoteWorkspaceFlowBackendError::ConnectionFailed);
-            if let Some(picker) = &self.remote_picker {
+            if let Some(picker) = picker {
                 picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
             }
             self.publish(cx);
             return;
         };
+        let RemoteWorkspaceFlowState::DirectorySelection { connection, picker } =
+            std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
+        else {
+            unreachable!();
+        };
         let completion = RemoteWorkspaceFlowCompletion {
-            session,
-            destination,
+            session: connection.session,
+            destination: connection.destination,
             directory: selection.directory().clone(),
             physical_directory: selection.physical_directory().clone(),
             account: selection.account().clone(),
@@ -1464,8 +1656,10 @@ impl RemoteWorkspaceFlow {
             lifecycle,
         };
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
-        self.pending_completion = Some(handle.clone());
-        self.stage = RemoteWorkspaceFlowStage::AwaitingActivation;
+        self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
+            handle: handle.clone(),
+            picker,
+        });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
     }
@@ -1480,16 +1674,11 @@ impl RemoteWorkspaceFlow {
         if !self.owns_activation(handle) {
             return false;
         }
-        drop(handle.take());
-        if let Some(picker) = &self.remote_picker {
-            picker.update(cx, |picker, cx| {
-                picker.complete_activation(window, cx);
-            });
+        if let Some(picker) = self.state.remote_picker() {
+            picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
         }
-        self.pending_completion = None;
-        self.remote_picker = None;
+        self.state = RemoteWorkspaceFlowState::Completed;
         self.action_generation = self.action_generation.wrapping_add(1);
-        self.stage = RemoteWorkspaceFlowStage::Completed;
         self.publish(cx);
         true
     }
@@ -1505,67 +1694,47 @@ impl RemoteWorkspaceFlow {
         if !self.owns_activation(handle) {
             return Err(Box::new(completion));
         }
+        let RemoteWorkspaceFlowState::AwaitingActivation(mut pending) =
+            std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
+        else {
+            unreachable!();
+        };
         let RemoteWorkspaceFlowCompletion {
             session,
             destination,
-            directory: _,
-            physical_directory: _,
-            account: _,
-            terminal_channels: _,
             lifecycle,
+            ..
         } = completion;
-        self.connected = Some(session);
-        self.retained_lifecycle = Some(lifecycle);
-        self.pending_destination = Some(destination);
-        self.pending_completion = None;
-        if let Some(picker) = &self.remote_picker {
+        let connection = ConnectedHost {
+            session,
+            destination,
+            retained_lifecycle: Some(lifecycle),
+        };
+        let picker = pending.picker.take();
+        if let Some(picker) = &picker {
             picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
         }
-        self.stage = RemoteWorkspaceFlowStage::DirectorySelection;
+        self.state = RemoteWorkspaceFlowState::DirectorySelection { connection, picker };
         self.publish(cx);
         Ok(())
     }
 
     fn cancel_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
-            self.stage,
-            RemoteWorkspaceFlowStage::Cancelled | RemoteWorkspaceFlowStage::Completed
+            self.state,
+            RemoteWorkspaceFlowState::Cancelled | RemoteWorkspaceFlowState::Completed
         ) {
             return;
         }
         self.action_generation = self.action_generation.wrapping_add(1);
-        if let Some(cancelled) = self.connection_cancelled.take() {
-            cancelled.store(true, Ordering::Release);
+        let mut previous = std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Cancelled);
+        if let RemoteWorkspaceFlowState::Connecting(attempt) = &previous {
+            attempt.cancelled.store(true, Ordering::Release);
         }
-        if let Some(progress) = self.progress.take() {
-            let _ = progress.dismiss(window, cx);
-        }
-        if let Some(alert) = self.delete_alert.take().or_else(|| self.error_alert.take()) {
-            let _ = alert.dismiss(window, cx);
-        }
-        if self.stage == RemoteWorkspaceFlowStage::AwaitingActivation {
-            if let Some(handle) = self.pending_completion.take() {
-                drop(handle.take());
-            }
-            if let Some(picker) = &self.remote_picker {
-                picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-            }
-        }
-        if let Some(picker) = &self.remote_picker {
-            picker.update(cx, |picker, cx| {
-                picker.dismiss(window, cx);
-            });
-        }
+        previous.dismiss(window, cx);
         self.host_picker
             .update(cx, |picker, cx| picker.dismiss(window, cx));
-        self.active_form = None;
-        self.remote_picker = None;
-        self.pending_completion = None;
-        self.connected = None;
-        self.retained_lifecycle = None;
-        self.pending_destination = None;
-        self.connection_error = None;
-        self.stage = RemoteWorkspaceFlowStage::Cancelled;
+        drop(previous);
         if !self.cancelled_emitted {
             self.cancelled_emitted = true;
             cx.emit(RemoteWorkspaceFlowEvent::Cancelled);
@@ -1573,21 +1742,27 @@ impl RemoteWorkspaceFlow {
         self.publish(cx);
     }
 
+    fn return_to_hosts(&mut self) {
+        let retained = self.state.take_retained_connection();
+        self.state = RemoteWorkspaceFlowState::HostSelection { retained };
+    }
+
+    fn fail_connecting(&mut self, error: RemoteWorkspaceFlowBackendError) {
+        let RemoteWorkspaceFlowState::Connecting(attempt) = &mut self.state else {
+            return;
+        };
+        let destination = attempt.destination.clone();
+        let progress = attempt.progress.take();
+        self.state = RemoteWorkspaceFlowState::ConnectionFailed {
+            destination,
+            error,
+            progress,
+        };
+    }
+
     fn publish(&mut self, cx: &mut Context<Self>) {
         cx.emit(RemoteWorkspaceFlowEvent::StateChanged);
         cx.notify();
-    }
-}
-
-impl Drop for RemoteWorkspaceFlow {
-    fn drop(&mut self) {
-        if let Some(cancelled) = self.connection_cancelled.take() {
-            cancelled.store(true, Ordering::Release);
-        }
-        if let Some(handle) = self.pending_completion.take() {
-            drop(handle.take());
-        }
-        self.connected = None;
     }
 }
 
@@ -1597,7 +1772,7 @@ impl Render for RemoteWorkspaceFlow {
             .size_full()
             .track_focus(&self.focus_scope)
             .child(self.host_picker.clone())
-            .children(self.remote_picker.iter().cloned())
+            .children(self.state.remote_picker().cloned())
     }
 }
 
@@ -2282,10 +2457,10 @@ mod tests {
 
         let (stage, history, presentation) = flow.read_with(cx, |flow, _| {
             (
-                flow.stage,
+                flow.stage(),
                 flow.observed_progress.clone(),
-                flow.progress
-                    .as_ref()
+                flow.state
+                    .progress()
                     .map(ProgressDialogHandle::presentation_id),
             )
         });
@@ -2323,7 +2498,7 @@ mod tests {
                 .detail(Some(CONNECTION_PROGRESS_DETAIL))
                 .cancellation_enabled(true)
         );
-        assert!(flow.read_with(cx, |flow, _| flow.progress.is_some()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_some()));
 
         sender.try_send(Ok(session(&closes))).unwrap();
         cx.run_until_parked();
@@ -2332,7 +2507,7 @@ mod tests {
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::DirectorySelection
         );
-        assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_none()));
         assert_eq!(backend.discoveries.load(Ordering::SeqCst), 1);
         assert_eq!(closes.load(Ordering::SeqCst), 0);
     }
@@ -2362,7 +2537,7 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_none()));
 
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
@@ -2391,7 +2566,7 @@ mod tests {
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::Cancelled
         );
-        assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_none()));
         assert_eq!(events.borrow().cancelled, 1);
 
         sender
@@ -2421,8 +2596,8 @@ mod tests {
             });
             let original = flow
                 .read(cx)
-                .progress
-                .as_ref()
+                .state
+                .progress()
                 .map(ProgressDialogHandle::presentation_id)
                 .unwrap();
             flow.update(cx, |_, cx| {
@@ -2453,7 +2628,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_none()));
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::Connecting(RemoteWorkspaceConnectionProgress::Authenticating)
@@ -2476,8 +2651,8 @@ mod tests {
 
         let restored = flow
             .read_with(cx, |flow, _| {
-                flow.progress
-                    .as_ref()
+                flow.state
+                    .progress()
                     .map(ProgressDialogHandle::presentation_id)
             })
             .unwrap();
@@ -2890,7 +3065,7 @@ mod tests {
 
         select_destination(&flow, "work", cx);
         assert!(cx.debug_bounds("modal-alert-detail-2").is_some());
-        assert!(flow.read_with(cx, |flow, _| flow.connection_error.is_none()));
+        assert!(flow.read_with(cx, |flow, _| flow.state.connection_error().is_none()));
 
         press_return(cx);
         cx.update(|window, _| window.refresh());
@@ -3115,10 +3290,7 @@ mod tests {
         assert_eq!(completion.destination().as_str(), "deploy@work");
         assert_eq!(completion.directory().as_str(), "~/src");
         assert_eq!(completion.physical_directory().as_str(), "/home/tester/src");
-        assert_eq!(completion.remote_user(), "tester");
         assert_eq!(completion.remote_home_identity().as_str(), "/home/tester");
-        assert_eq!(completion.login_shell(), "/bin/zsh");
-        let _ = completion.session();
         assert!(handle.take().is_none());
         assert_eq!(closes.load(Ordering::SeqCst), 0);
         let (session, destination, directory, physical, account, terminal_channels, lifecycle) =
@@ -3126,6 +3298,7 @@ mod tests {
         assert_eq!(destination.as_str(), "deploy@work");
         assert_eq!(directory.as_str(), "~/src");
         assert_eq!(physical.as_str(), "/home/tester/src");
+        assert_eq!(account.user(), "tester");
         assert_eq!(account.login_shell().as_str(), "/bin/zsh");
         assert!(terminal_channels.is_ready());
         let _ = lifecycle;

@@ -425,6 +425,7 @@ impl<A> ProgressDialog<A> {
             ModalKind::Progress,
             PreparedModalRequest::erase_actions(actions),
             PreparedModalSemantics::Progress {
+                #[cfg(test)]
                 accessibility_title: self.accessibility_title,
                 visible_title: self.title,
                 status: self.status,

@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the managed SSH host form lands before its Workspace Manager integration"
-    )
-)]
-
 use std::fmt;
 use std::num::NonZeroU16;
 use std::sync::Arc;
@@ -343,10 +335,12 @@ impl SshHostForm {
         true
     }
 
+    #[cfg(test)]
     pub(super) const fn is_open(&self) -> bool {
         self.open
     }
 
+    #[cfg(test)]
     pub(super) const fn is_pending(&self) -> bool {
         self.pending
     }

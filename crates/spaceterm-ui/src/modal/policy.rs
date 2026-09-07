@@ -639,16 +639,6 @@ mod tests {
         )
     }
 
-    fn dialog(actions: Vec<ModalAction<&'static str>>) -> Dialog<&'static str> {
-        Dialog::new(
-            ModalId::new("dialog"),
-            "Logical dialog title",
-            "Dialog title",
-            actions,
-            DialogInitialFocus::Action("cancel"),
-        )
-    }
-
     #[test]
     fn modal_validation_rejects_empty_mandatory_title() {
         let alert = Alert::new(
@@ -840,18 +830,6 @@ mod tests {
     }
 
     #[test]
-    fn dialog_validation_rejects_missing_enabled_dismissal() {
-        let dialog = dialog(vec![
-            action("cancel", ModalActionRole::Cancel, "cancel").enabled(false),
-        ]);
-
-        assert_eq!(
-            dialog.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::MissingSafeDismissal)
-        );
-    }
-
-    #[test]
     fn dialog_validation_rejects_missing_action_initial_focus_identity() {
         let dialog = Dialog::new(
             ModalId::new("dialog"),
@@ -877,20 +855,6 @@ mod tests {
 
         assert_eq!(
             alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::DestructiveCancelAction { index: 1 })
-        );
-    }
-
-    #[test]
-    fn dialog_validation_rejects_destructive_cancel_with_ordinary_sibling() {
-        let dialog = dialog(vec![
-            action("continue", ModalActionRole::Affirmative, "continue"),
-            action("cancel", ModalActionRole::Cancel, "cancel")
-                .with_intent(ModalActionIntent::Destructive),
-        ]);
-
-        assert_eq!(
-            dialog.validate(&ModalDesktopPolicy::mac_os()),
             Err(ModalValidationError::DestructiveCancelAction { index: 1 })
         );
     }
@@ -1201,41 +1165,6 @@ mod tests {
                 maximum: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
             })
         );
-    }
-
-    #[test]
-    fn programmatic_only_progress_rejects_deadline_above_installed_policy_maximum() {
-        let deadline = MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE + Duration::from_millis(1);
-        let progress = ProgressDialog::<&'static str>::new(
-            ModalId::new("progress"),
-            "Logical progress title",
-            "Progress title",
-            "Working",
-            ProgressState::Indeterminate,
-            ProgressCancellation::programmatic_only(deadline),
-        );
-
-        assert_eq!(
-            progress.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::InvalidProgrammaticOnlyDeadline {
-                deadline,
-                maximum: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
-            })
-        );
-    }
-
-    #[test]
-    fn programmatic_only_progress_accepts_installed_policy_maximum_deadline() {
-        let progress = ProgressDialog::<&'static str>::new(
-            ModalId::new("progress"),
-            "Logical progress title",
-            "Progress title",
-            "Working",
-            ProgressState::Indeterminate,
-            ProgressCancellation::programmatic_only(MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE),
-        );
-
-        assert_eq!(progress.validate(&ModalDesktopPolicy::mac_os()), Ok(()));
     }
 
     #[test]

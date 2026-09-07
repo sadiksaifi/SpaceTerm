@@ -652,6 +652,7 @@ impl ValidatedRemoteLoginShell {
     /// Validates a supported shell that does not require a separately discovered capability.
     ///
     /// POSIX does not standardize `sh -l`, so callers must use [`Self::from_discovery`] for `sh`.
+    #[cfg(test)]
     pub(crate) fn new(path: String) -> Result<Self, RemoteShellCommandError> {
         let shell = Self::parse(path)?;
         if shell.kind == SupportedRemoteLoginShell::PosixSh {
@@ -680,6 +681,7 @@ impl ValidatedRemoteLoginShell {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.path
     }

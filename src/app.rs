@@ -335,7 +335,7 @@ mod tests {
     use crate::ui::TerminalPane;
 
     #[gpui::test]
-    fn standard_macos_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
+    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init).expect("UI initialization");
         cx.update(init);
         let expected = [
@@ -529,10 +529,8 @@ pub(crate) struct HostCompositionParts {
     pub(crate) home_directory: PathBuf,
     pub(crate) session_factory: Rc<dyn TerminalSessionFactory>,
     pub(crate) adapters: ApplicationCapabilities,
-    pub(crate) services:
-        Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
-    pub(crate) window_movement:
-        Option<Rc<dyn crate::platform::window_movement::WindowMovementFactory>>,
+    pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
+    pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     pub(crate) titlebar: Option<TitlebarOptions>,
 }
 pub(crate) struct HostComposition {
@@ -562,12 +560,8 @@ impl HostComposition {
             home_directory: parts.home_directory,
             session_factory: parts.session_factory,
             adapters: parts.adapters,
-            services: parts
-                .services
-                .ok_or(DesktopProfileError::MissingCapability)?,
-            window_movement: parts
-                .window_movement
-                .ok_or(DesktopProfileError::MissingCapability)?,
+            services: parts.services,
+            window_movement: parts.window_movement,
             titlebar: parts.titlebar,
         })
     }
@@ -626,98 +620,13 @@ fn start_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
-    initialize_application(
-        cx,
-        |cx| crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization),
-        |cx| {
-            host.profile.install(cx);
-            if let Err(error) = host.services.register() {
-                eprintln!("failed to register Services: {error}");
-            }
-            init(cx);
-            open(cx, host)
-        },
-    )
-}
-
-fn initialize_application<T, R, E>(
-    state: &mut T,
-    initialize_ui: impl FnOnce(&mut T) -> Result<(), E>,
-    open_application: impl FnOnce(&mut T) -> Result<R, E>,
-) -> Result<R, E> {
-    initialize_ui(state)?;
-    open_application(state)
-}
-pub(crate) fn dispatch_or_prepare_application<T>(
-    dispatch_helper: impl FnOnce() -> Option<i32>,
-    prepare_application: impl FnOnce() -> T,
-) -> Result<T, i32> {
-    match dispatch_helper() {
-        Some(exit_code) => Err(exit_code),
-        None => Ok(prepare_application()),
+    crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    host.profile.install(cx);
+    if let Err(error) = host.services.register() {
+        eprintln!("failed to register Services: {error}");
     }
-}
-
-#[cfg(test)]
-mod startup_tests {
-    use std::cell::RefCell;
-
-    use super::{dispatch_or_prepare_application, initialize_application};
-
-    #[test]
-    fn ui_initialization_failure_should_prevent_opening_an_operating_system_window() {
-        let mut window_opened = false;
-
-        let result = initialize_application(
-            &mut window_opened,
-            |_| Err::<(), _>("font registration failed"),
-            |window_opened| {
-                *window_opened = true;
-                Ok(())
-            },
-        );
-
-        assert_eq!(result, Err("font registration failed"));
-        assert!(!window_opened);
-    }
-
-    #[test]
-    fn askpass_helper_dispatch_should_precede_and_bypass_application_startup_capture() {
-        let calls = RefCell::new(Vec::new());
-
-        let outcome = dispatch_or_prepare_application(
-            || {
-                calls.borrow_mut().push("helper");
-                Some(17)
-            },
-            || {
-                calls.borrow_mut().push("capture");
-                "application"
-            },
-        );
-
-        assert_eq!(outcome, Err(17));
-        assert_eq!(calls.into_inner(), ["helper"]);
-    }
-
-    #[test]
-    fn application_startup_should_capture_once_after_helper_declines_dispatch() {
-        let calls = RefCell::new(Vec::new());
-
-        let outcome = dispatch_or_prepare_application(
-            || {
-                calls.borrow_mut().push("helper");
-                None
-            },
-            || {
-                calls.borrow_mut().push("capture");
-                "application"
-            },
-        );
-
-        assert_eq!(outcome, Ok("application"));
-        assert_eq!(calls.into_inner(), ["helper", "capture"]);
-    }
+    init(cx);
+    open(cx, host)
 }
 
 #[cfg(test)]
@@ -798,22 +707,7 @@ mod runtime_tests {
                 permission_recovery: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
-            services: Some(services), window_movement: Some(movement), titlebar: None,
-        }
-    }
-    #[test]
-    fn incomplete_composition_is_rejected_before_runtime_startup() {
-        for missing_services in [true, false] {
-            let mut parts = parts(Rc::default(), Rc::default());
-            if missing_services {
-                parts.services = None;
-            } else {
-                parts.window_movement = None;
-            }
-            assert_eq!(
-                HostComposition::new(parts).err(),
-                Some(crate::desktop_profile::DesktopProfileError::MissingCapability)
-            );
+            services, window_movement: movement, titlebar: None,
         }
     }
     #[test]
@@ -824,25 +718,6 @@ mod runtime_tests {
         assert_eq!(
             error.to_string(),
             "desktop policy and capabilities disagree"
-        );
-    }
-    #[test]
-    fn window_failure_propagates_after_initialization_without_activation() {
-        let mut events = Vec::new();
-        let result = initialize_application(
-            &mut events,
-            |events| {
-                events.push("initialize");
-                Ok(())
-            },
-            |events| {
-                events.push("open");
-                Err::<(), _>(RuntimeError::WindowOpen)
-            },
-        );
-        assert_eq!(
-            (result, events),
-            (Err(RuntimeError::WindowOpen), vec!["initialize", "open"])
         );
     }
     #[gpui::test]

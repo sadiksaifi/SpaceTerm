@@ -341,6 +341,14 @@ struct PreparedFrameRow {
     preedit: Option<PreparedPreeditRow>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackgroundPaintLayer {
+    Terminal,
+    Find,
+    Selection,
+    Cursor,
+}
+
 #[derive(Clone, Debug)]
 struct PreparedPreeditKey {
     clusters: Arc<[super::terminal_ime::PreeditCluster]>,
@@ -398,6 +406,31 @@ impl PreparedFrameRow {
             cursor_overlay_visible: false,
             preedit: None,
         }
+    }
+
+    fn backgrounds_in_paint_order(
+        &self,
+    ) -> impl Iterator<Item = (BackgroundPaintLayer, &PaintQuad)> {
+        self.stable
+            .backgrounds
+            .iter()
+            .map(|quad| (BackgroundPaintLayer::Terminal, quad))
+            .chain(
+                self.find_backgrounds
+                    .iter()
+                    .map(|quad| (BackgroundPaintLayer::Find, quad)),
+            )
+            .chain(
+                self.stable
+                    .selections
+                    .iter()
+                    .map(|quad| (BackgroundPaintLayer::Selection, quad)),
+            )
+            .chain(
+                self.cursor_background
+                    .iter()
+                    .map(|quad| (BackgroundPaintLayer::Cursor, quad)),
+            )
     }
 }
 
@@ -540,16 +573,7 @@ impl TerminalPaintBatch {
                     .paint_layer(GraphicsLayer::BelowBackground, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
                 for row in &self.rows {
-                    for background in &row.stable.backgrounds {
-                        window.paint_quad(background.clone());
-                    }
-                    for background in &row.find_backgrounds {
-                        window.paint_quad(background.clone());
-                    }
-                    for background in &row.stable.selections {
-                        window.paint_quad(background.clone());
-                    }
-                    if let Some(background) = &row.cursor_background {
+                    for (_, background) in row.backgrounds_in_paint_order() {
                         window.paint_quad(background.clone());
                     }
                 }
@@ -1457,18 +1481,6 @@ struct BackgroundSpan {
     start: usize,
     len: usize,
     color: Color,
-}
-
-#[cfg(test)]
-fn presentation_backgrounds(
-    row: &RowPaintInput,
-    row_index: usize,
-    find_spans: &[FindHighlightSpan],
-) -> Vec<BackgroundSpan> {
-    let mut backgrounds = row.backgrounds.clone();
-    backgrounds.extend(find_background_spans(row_index, find_spans));
-    backgrounds.extend(row.selections.iter().copied());
-    backgrounds
 }
 
 fn find_background_spans(
@@ -2739,8 +2751,9 @@ mod tests {
     }
 
     #[test]
-    fn find_backgrounds_distinguish_current_match_and_keep_selection_on_top() {
+    fn prepared_background_plan_distinguishes_find_matches_and_paints_selection_on_top() {
         let mut selected = cell("a");
+        selected.background_source = TerminalColor::Palette(1);
         selected.selected = true;
         let row = Arc::<[CellSnapshot]>::from([selected]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
@@ -2759,18 +2772,61 @@ mod tests {
             },
         ];
 
-        let backgrounds = presentation_backgrounds(&input, 0, &spans);
+        let find_backgrounds = find_background_spans(0, &spans);
+        let stable = Arc::new(PreparedRow {
+            text: Vec::new(),
+            symbols: PreparedDecorations::default(),
+            backgrounds: prepare_background_geometry(
+                &input.backgrounds,
+                px(0.0),
+                px(0.0),
+                px(8.0),
+                px(20.0),
+            ),
+            selections: prepare_background_geometry(
+                &input.selections,
+                px(0.0),
+                px(0.0),
+                px(8.0),
+                px(20.0),
+            ),
+            under_text_decorations: PreparedDecorations::default(),
+            over_text_decorations: PreparedDecorations::default(),
+            cursor_text: Vec::new(),
+            cursor_symbols: PreparedDecorations::default(),
+        });
+        let mut prepared = PreparedFrameRow::new(stable);
+        prepared.find_backgrounds =
+            prepare_background_geometry(&find_backgrounds, px(0.0), px(0.0), px(8.0), px(20.0));
+        prepared.cursor_background = Some(fill(
+            Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0))),
+            rgba(0xffff_ffff),
+        ));
 
         assert_eq!(
-            backgrounds
-                .iter()
-                .map(|background| background.color)
-                .collect::<Vec<_>>(),
-            [
-                ACTIVE_THEME.search_match_background,
-                ACTIVE_THEME.search_current_match_background,
-                ACTIVE_THEME.players[0].selection,
-            ]
+            (
+                find_backgrounds
+                    .iter()
+                    .map(|background| background.color)
+                    .collect::<Vec<_>>(),
+                prepared
+                    .backgrounds_in_paint_order()
+                    .map(|(layer, _)| layer)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                vec![
+                    ACTIVE_THEME.search_match_background,
+                    ACTIVE_THEME.search_current_match_background,
+                ],
+                vec![
+                    BackgroundPaintLayer::Terminal,
+                    BackgroundPaintLayer::Find,
+                    BackgroundPaintLayer::Find,
+                    BackgroundPaintLayer::Selection,
+                    BackgroundPaintLayer::Cursor,
+                ],
+            )
         );
     }
 

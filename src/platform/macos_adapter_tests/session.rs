@@ -23,7 +23,6 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
         size,
         &std::env::current_dir().unwrap(),
         Some("fixture.test"),
-        Arc::new(UnavailableOsc52ClipboardFactory),
         LocalFilesystemAuthority::testing(),
     )
     .unwrap();
@@ -32,7 +31,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     // The command renders a red X. The echoed command contains an X too, but
     // only the shell's output passes through the SGR sequence and becomes red.
     let request = session
-        .request_paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned())
+        .request_paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned().into())
         .recv_blocking()
         .unwrap()
         .unwrap();
@@ -59,9 +58,6 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
             }
             Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
             Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
-            Ok(
-                SessionEvent::Osc52Authorization(_) | SessionEvent::Osc52AuthorizationExpired(_),
-            ) => {}
             Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
             Err(async_channel::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));
@@ -86,14 +82,13 @@ fn real_shell_exit_command_emits_an_exited_event() {
         size,
         &std::env::current_dir().unwrap(),
         Some("fixture.test"),
-        Arc::new(UnavailableOsc52ClipboardFactory),
         LocalFilesystemAuthority::testing(),
     )
     .unwrap();
     let session = JoinedRealPtySession(session);
 
     let request = session
-        .request_paste("exit\n".to_owned())
+        .request_paste("exit\n".to_owned().into())
         .recv_blocking()
         .unwrap()
         .unwrap();
@@ -111,9 +106,6 @@ fn real_shell_exit_command_emits_an_exited_event() {
             Ok(SessionEvent::Screen(_)) => {}
             Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
             Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
-            Ok(
-                SessionEvent::Osc52Authorization(_) | SessionEvent::Osc52AuthorizationExpired(_),
-            ) => {}
             Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
             Err(async_channel::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));

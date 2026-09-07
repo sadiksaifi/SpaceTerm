@@ -22,17 +22,11 @@ pub(crate) enum KeyAction {
     Release,
 }
 
-#[allow(
-    dead_code,
-    reason = "all policies are configuration values even before preferences UI exists"
-)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OptionAsAltPolicy {
     None,
     #[default]
     Both,
-    Left,
-    Right,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

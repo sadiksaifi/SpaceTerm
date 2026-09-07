@@ -49,7 +49,7 @@ fn check_pty_shutdown() -> Result<(), String> {
     )
 }
 fn check_macos_keyboard_bridge() -> Result<(), String> {
-    let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Left);
+    let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
     let translation = bridge.translate(NativeKeyEvent {
         action: KeyAction::Press,
         native_key_code: 0,

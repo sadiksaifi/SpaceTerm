@@ -80,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn native_normal_gesture_classification_is_deleted() {
+    fn ordinary_gesture_phases_need_no_native_enrichment() {
         for gesture in [0, PHASE_BEGAN, 2, PHASE_ENDED, 32] {
             assert_eq!(classify_detail(gesture, 0), None);
         }

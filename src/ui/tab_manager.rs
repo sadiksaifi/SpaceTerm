@@ -1,7 +1,5 @@
-use super::pane_lifecycle::PaneLifecycleDependencies;
+use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::remote_project::RemoteRestartBatch;
-use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
-use crate::terminal::native_services::NativeServiceAdapters;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -53,12 +51,9 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
-#[cfg(test)]
-use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    RemoteChannelRevalidationError, RemoteChannelUnavailable, SelectionCopy,
-    TerminalKeyInputAdapterFactory, WorkspaceChildLaunchValidation,
+    RemoteChannelRevalidationError, RemoteChannelUnavailable, WorkspaceChildLaunchValidation,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -154,10 +149,7 @@ impl std::fmt::Debug for TabManagerEvent {
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
-    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-    native_service_adapters: NativeServiceAdapters,
-    lifecycle_dependencies: PaneLifecycleDependencies,
+    pane_construction: PaneConstruction,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -168,8 +160,7 @@ pub(crate) struct TabManager {
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
-    remote_disconnected_generation: Option<u64>,
-    child_launch_generation: u64,
+    remote_lifecycle: RemoteHierarchyLifecycle,
 }
 
 impl TabManager {
@@ -206,41 +197,26 @@ impl TabManager {
             session_factory,
             prepared_launch,
             operating_system_window_drag_platform,
-            Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-            Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-            crate::terminal::native_services::testing::adapters(),
-            PaneLifecycleDependencies::testing(),
+            PaneConstruction::testing(),
             window,
             cx,
         ))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
     pub(crate) fn new_with_prepared_initial_launch(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
+        pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_key_input_adapter_factory = Rc::clone(&key_input_adapter_factory);
-        let initial_accessibility_adapter_factory = Rc::clone(&accessibility_adapter_factory);
         let tabs = TabCollection::new(|tab_id| {
             Self::create_pane_host(
                 tab_id,
                 session_factory.clone(),
                 prepared_launch,
-                Rc::clone(&initial_key_input_adapter_factory),
-                Rc::clone(&initial_accessibility_adapter_factory),
-                native_service_adapters.clone(),
-                lifecycle_dependencies.clone(),
+                pane_construction.clone(),
                 window,
                 cx,
             )
@@ -248,10 +224,7 @@ impl TabManager {
         Self {
             tabs,
             session_factory,
-            key_input_adapter_factory,
-            accessibility_adapter_factory,
-            native_service_adapters,
-            lifecycle_dependencies,
+            pane_construction,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -262,23 +235,15 @@ impl TabManager {
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
-            remote_disconnected_generation: None,
-            child_launch_generation: 0,
+            remote_lifecycle: RemoteHierarchyLifecycle::default(),
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
     fn create_pane_host(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
-        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
+        pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
@@ -287,10 +252,7 @@ impl TabManager {
                 tab_id,
                 session_factory,
                 prepared_launch,
-                key_input_adapter_factory,
-                accessibility_adapter_factory,
-                native_service_adapters,
-                lifecycle_dependencies,
+                pane_construction,
                 window,
                 cx,
             )
@@ -378,36 +340,18 @@ impl TabManager {
         })
     }
 
-    pub(crate) fn native_service_selection(
+    pub(crate) fn native_service_target(
         &self,
         origin: NativeServiceOrigin,
-        window: &Window,
-        cx: &mut App,
-    ) -> Option<SelectionCopy> {
+        cx: &App,
+    ) -> Option<Entity<super::TerminalPane>> {
         if !self.active || self.tabs.active_tab_id() != origin.tab_id() {
             return None;
         }
-        self.tabs.tab(origin.tab_id())?.update(cx, |pane_host, cx| {
-            pane_host.native_service_selection(origin, window, cx)
-        })
-    }
-
-    pub(crate) fn insert_native_service_text(
-        &self,
-        origin: NativeServiceOrigin,
-        text: String,
-        window: &Window,
-        cx: &mut App,
-    ) -> bool {
-        if !self.active || self.tabs.active_tab_id() != origin.tab_id() {
-            return false;
-        }
-        let Some(pane_host) = self.tabs.tab(origin.tab_id()) else {
-            return false;
-        };
-        pane_host.update(cx, |pane_host, cx| {
-            pane_host.insert_native_service_text(origin, text, window, cx)
-        })
+        self.tabs
+            .tab(origin.tab_id())?
+            .read(cx)
+            .native_service_target(origin)
     }
 
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -497,8 +441,7 @@ impl TabManager {
                     .expect("prevalidated Tab disconnect must remain legal")
             });
         }
-        self.remote_disconnected_generation = Some(generation);
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.remote_lifecycle.disconnect(generation);
         self.sync_terminal_focus_blocker(cx);
         cx.notify();
         Ok(())
@@ -515,8 +458,7 @@ impl TabManager {
         generation: u64,
         cx: &mut Context<Self>,
     ) -> Task<Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError>> {
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
-        let child_launch_generation = self.child_launch_generation;
+        let child_launch_generation = self.remote_lifecycle.begin_child_launch();
         let pane_count = self
             .tabs
             .iter()
@@ -533,7 +475,10 @@ impl TabManager {
             }
             manager
                 .update(cx, |manager, cx| {
-                    if manager.child_launch_generation != child_launch_generation {
+                    if !manager
+                        .remote_lifecycle
+                        .is_current_child_launch(child_launch_generation)
+                    {
                         return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
                     }
                     manager.prepare_remote_restart_with_launches(
@@ -619,8 +564,7 @@ impl TabManager {
             },
         )?;
         self.session_factory = session_factory;
-        self.remote_disconnected_generation = None;
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.remote_lifecycle.restarted();
         self.sync_terminal_focus_blocker(cx);
         cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
@@ -825,7 +769,7 @@ impl TabManager {
     }
 
     pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.remote_disconnected_generation.is_some() {
+        if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
@@ -858,17 +802,19 @@ impl TabManager {
             }
         }
         if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
-            self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
-            let child_launch_generation = self.child_launch_generation;
+            let child_launch_generation = self.remote_lifecycle.begin_child_launch();
             let session_factory = self.session_factory.clone();
             cx.spawn_in(window, async move |manager, cx| {
                 let revalidation = revalidation.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    if manager.remote_disconnected_generation.is_some() {
+                    if manager.remote_lifecycle.disconnected_generation().is_some() {
                         cx.emit(RemoteChildLaunchUnavailable::Cancelled);
                         return;
                     }
-                    if manager.child_launch_generation != child_launch_generation {
+                    if !manager
+                        .remote_lifecycle
+                        .is_current_child_launch(child_launch_generation)
+                    {
                         cx.emit(RemoteChildLaunchUnavailable::Stale);
                         return;
                     }
@@ -907,19 +853,13 @@ impl TabManager {
     ) {
         let previous_tab = self.tabs.active_tab().clone();
         let session_factory = self.session_factory.clone();
-        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
-        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
-        let native_service_adapters = self.native_service_adapters.clone();
-        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
+        let pane_construction = self.pane_construction.clone();
         let result = self.tabs.create_tab(|tab_id| {
             Self::create_pane_host(
                 tab_id,
                 session_factory,
                 prepared_launch,
-                key_input_adapter_factory,
-                accessibility_adapter_factory,
-                native_service_adapters,
-                lifecycle_dependencies,
+                pane_construction,
                 window,
                 cx,
             )
@@ -3170,7 +3110,7 @@ mod tests {
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.create_tab(window, cx);
-                manager.child_launch_generation = manager.child_launch_generation.wrapping_add(1);
+                manager.remote_lifecycle.begin_child_launch();
             });
         });
         cx.run_until_parked();
@@ -3340,7 +3280,9 @@ mod tests {
         assert_eq!(provider.preparation_count(), preparation_count);
         assert_eq!(provider.revalidation_count(), revalidation_count);
         assert_eq!(
-            manager.read_with(cx, |manager, _| manager.remote_disconnected_generation),
+            manager.read_with(cx, |manager, _| manager
+                .remote_lifecycle
+                .disconnected_generation()),
             Some(4)
         );
     }

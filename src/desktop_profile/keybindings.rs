@@ -43,16 +43,6 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
             Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
         ),
         KeyBinding::new(
-            "cmd-enter",
-            AllowOsc52Clipboard,
-            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "escape",
-            DenyOsc52Clipboard,
-            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
             "cmd-=",
             IncreaseTerminalFontSize,
             Some(TERMINAL_KEY_CONTEXT),

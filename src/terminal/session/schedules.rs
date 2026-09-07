@@ -1,6 +1,5 @@
 //! Private Session scheduling, including deadline arbitration and bounded fairness.
 use super::*;
-use crate::terminal::osc52::Osc52AuthorizationSchedule;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use std::sync::{Mutex, MutexGuard};
 
@@ -38,7 +37,6 @@ pub(super) struct WorkerSchedules {
     accessibility_continuation: AccessibilityContinuationSchedule,
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
-    osc52_authorization: Osc52AuthorizationSchedule,
     hidden_input: HiddenInputSchedule,
 }
 
@@ -104,29 +102,8 @@ impl WorkerSchedules {
         self.paste_confirmations.take(id, now)
     }
 
-    pub(super) fn osc52_pending(&self) -> bool {
-        self.osc52_authorization.is_pending()
-    }
-
-    pub(super) fn request_osc52_authorization(
-        &mut self,
-        operation: Osc52Operation,
-        now: Instant,
-    ) -> Option<Osc52AuthorizationRequest> {
-        self.osc52_authorization.create(operation, now)
-    }
-
-    pub(super) fn resolve_osc52_authorization(
-        &mut self,
-        id: Osc52AuthorizationId,
-        now: Instant,
-    ) -> Option<Osc52Operation> {
-        self.osc52_authorization.take(id, now)
-    }
-
-    pub(super) fn cancel_authorizations(&mut self) {
+    pub(super) fn cancel_paste_confirmation(&mut self) {
         self.paste_confirmations.cancel();
-        self.osc52_authorization.cancel();
     }
 
     pub(super) fn new(now: Instant, input: ScheduleInput) -> Self {
@@ -135,7 +112,6 @@ impl WorkerSchedules {
             accessibility_continuation: AccessibilityContinuationSchedule::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
-            osc52_authorization: Osc52AuthorizationSchedule::default(),
             hidden_input: HiddenInputSchedule::new(now),
         }
     }
@@ -145,7 +121,6 @@ impl WorkerSchedules {
             synchronized_output,
             self.selection_autoscroll.deadline(),
             self.paste_confirmations.deadline(),
-            self.osc52_authorization.deadline(),
             Some(self.hidden_input.deadline),
         ]
         .into_iter()
@@ -159,9 +134,6 @@ impl WorkerSchedules {
         }
         if self.paste_confirmations.expire(now) {
             return Some(Command::PasteConfirmationExpired);
-        }
-        if let Some(id) = self.osc52_authorization.expire(now) {
-            return Some(Command::Osc52AuthorizationExpired(id));
         }
         (now >= self.hidden_input.deadline).then_some(Command::PollHiddenInput)
     }
@@ -268,15 +240,6 @@ mod tests {
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
             .unwrap();
-        let authorization = schedules
-            .request_osc52_authorization(
-                Osc52Operation::Read {
-                    target: crate::terminal::osc52::Osc52Target::Standard,
-                    terminator: crate::terminal::osc52::Osc52Terminator::StringTerminator,
-                },
-                now,
-            )
-            .unwrap();
         assert_eq!(schedules.deadline(Some(now)), Some(now));
         assert!(matches!(
             schedules.take_due(due),
@@ -286,11 +249,6 @@ mod tests {
             schedules.take_due(due),
             Some(Command::PasteConfirmationExpired)
         ));
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::Osc52AuthorizationExpired(id)) if id == authorization.id
-        ));
-        assert!(!schedules.osc52_pending());
         assert!(matches!(
             schedules.take_due(due),
             Some(Command::PollHiddenInput)

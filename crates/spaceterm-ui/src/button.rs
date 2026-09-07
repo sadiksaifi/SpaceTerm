@@ -415,18 +415,13 @@ struct ButtonStyle {
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
 type ContentBuilder = Box<dyn FnOnce(Rgba) -> AnyElement>;
 type ModalPressCancellation = Rc<dyn Fn(&mut App)>;
+#[cfg(test)]
 type ModalPressIdleCheck = Rc<dyn Fn(&App) -> bool>;
 type ModalPressLivenessCheck = Rc<dyn Fn() -> bool>;
 
 struct ModalPressRegistration {
     cancel: ModalPressCancellation,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "modal press idleness is observable only by interaction tests"
-        )
-    )]
+    #[cfg(test)]
     is_idle: ModalPressIdleCheck,
     is_alive: ModalPressLivenessCheck,
 }
@@ -441,18 +436,20 @@ impl ModalPressOwner {
         &self,
         state: &Entity<T>,
         cancel: impl Fn(&mut T, &mut gpui::Context<T>) + 'static,
-        is_idle: impl Fn(&T) -> bool + 'static,
+        _is_idle: impl Fn(&T) -> bool + 'static,
     ) {
         let cancel_state = state.downgrade();
+        #[cfg(test)]
         let idle_state = state.downgrade();
         let live_state = state.downgrade();
         let registration = ModalPressRegistration {
             cancel: Rc::new(move |cx| {
                 let _ = cancel_state.update(cx, |state, cx| cancel(state, cx));
             }),
+            #[cfg(test)]
             is_idle: Rc::new(move |cx| {
                 idle_state
-                    .read_with(cx, |state, _| is_idle(state))
+                    .read_with(cx, |state, _| _is_idle(state))
                     .unwrap_or(true)
             }),
             is_alive: Rc::new(move || live_state.upgrade().is_some()),

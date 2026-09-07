@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, Osc52AuthorizationDecision,
-    Osc52AuthorizationId, PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution,
-    PointerInput, PresentationGeneration, SelectionCopy, SelectionCopyError, SessionError,
-    SessionEvent, StartedTerminalSession, TerminalAccessibilityModel, TerminalKeyInputAdapter,
-    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, PasteConfirmationId,
+    PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
+    SelectionCopy, SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
+    TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
+    TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
@@ -141,7 +140,6 @@ pub(crate) enum RecordedSessionCommand {
     EndFind(FindQueryGeneration),
     RequestPaste(String),
     ResolvePaste(PasteConfirmationId, PasteDecision),
-    ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
 }
@@ -465,16 +463,6 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_resolution.clone());
         receiver
-    }
-
-    fn resolve_osc52_authorization(
-        &self,
-        id: Osc52AuthorizationId,
-        decision: Osc52AuthorizationDecision,
-    ) {
-        self.record(RecordedSessionCommand::ResolveOsc52Authorization(
-            id, decision,
-        ));
     }
 
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {

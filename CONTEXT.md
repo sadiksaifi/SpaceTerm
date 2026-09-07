@@ -139,8 +139,8 @@ A bounded text insertion candidate retained until accepted or cancelled.
 **Paste Confirmation**:
 Time-bounded authorization for one unsafe Paste Payload while Terminal Input Focus remains valid.
 
-**OSC 52 Authorization**:
-One deny-by-default decision for a bounded terminal clipboard read or write.
+**OSC 52 Filtering**:
+Bounded recognition and unconditional denial of terminal clipboard read and write escape sequences.
 
 **Terminal Local File Capabilities**:
 Session-scoped authority for local path actions in a Local Pane.

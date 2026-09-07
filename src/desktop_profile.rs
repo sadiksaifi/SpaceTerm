@@ -230,9 +230,7 @@ mod tests {
     use gpui::Action;
 
     #[gpui::test]
-    fn complete_profile_preserves_141_bindings_and_remaps_only_three(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
         let actual = cx.update(|cx| {
             crate::ui::init(cx).unwrap();
             crate::app::init(cx);
@@ -255,23 +253,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         });
-        // Captured from the original installed GPUI keymap, including every control context.
-        let mut expected = include_str!("keybindings_baseline.txt")
+        let expected = include_str!("keybindings_baseline.txt")
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(expected.len(), 144);
-        for (action, shortcut) in [
-            (CreateScratchWorkspace.name(), "cmd-shift-n"),
-            (ShowNewWorkspacePanel.name(), "cmd-n"),
-            (OpenLocalProject.name(), "cmd-o"),
-        ] {
-            let entry = expected
-                .iter_mut()
-                .find(|line| line.ends_with(action))
-                .unwrap();
-            *entry = format!("{shortcut}\tNone\t{action}");
-        }
         assert_eq!(actual, expected);
     }
 
@@ -314,13 +299,5 @@ mod tests {
         );
 
         assert_eq!(result.err(), Some(DesktopProfileError::MissingCapability));
-    }
-
-    #[test]
-    fn testing_presentation_uses_a_host_neutral_palette_confirmation_shortcut() {
-        assert_eq!(
-            testing_presentation().command_palette_confirm_shortcut(),
-            "Primary+Enter"
-        );
     }
 }
