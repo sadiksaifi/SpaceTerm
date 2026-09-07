@@ -6,7 +6,7 @@ use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, px};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
-    CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteItem,
+    CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus, Icon,
     IconName, MenuEntry,
 };
@@ -161,11 +161,11 @@ impl HostPickerRow {
 
     fn into_palette_item(self) -> CommandPaletteItem<SshHostPickerItemId> {
         let status = if self.synthetic {
-            "User override"
+            "Entered host"
         } else if self.managed {
-            "Managed"
+            "Saved host"
         } else {
-            "Read-only"
+            "SSH config"
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
@@ -303,6 +303,13 @@ impl SshHostPicker {
     ) -> Self {
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Connect to SSH Host", Vec::new(), window, cx);
+            palette.set_hints(
+                vec![
+                    CommandPaletteHint::new("Connect", "↵"),
+                    CommandPaletteHint::new("Dismiss", "esc"),
+                ],
+                cx,
+            );
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette.set_no_results_text("No matching SSH hosts", cx);

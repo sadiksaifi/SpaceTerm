@@ -49,7 +49,7 @@ use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    PromptButton, PromptLevel, Render, Window, deferred, div, px, rgba,
+    PromptButton, PromptLevel, Render, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, Icon, IconButton, IconName, Menu, MenuAlignment, MenuLifecycleEvent,
@@ -337,19 +337,16 @@ impl PaneHost {
     pub(crate) fn tab_title(&self) -> gpui::SharedString {
         let attention = self.pane_attention.values().copied().sum::<u32>();
         let pane_count = self.terminal_tab.pane_count();
-        if pane_count > 1 {
-            return if attention > 0 {
-                format!("• {pane_count} Panes").into()
-            } else {
-                format!("{pane_count} Panes").into()
-            };
-        }
-
         let title = self
             .pane_titles
             .get(&self.terminal_tab.focused_pane_id())
             .cloned()
             .unwrap_or_else(|| "Terminal".into());
+        let title = if pane_count > 1 {
+            format!("{title} · {pane_count} Panes").into()
+        } else {
+            title
+        };
         if attention > 0 {
             format!("• {title}").into()
         } else {
@@ -1246,6 +1243,17 @@ impl PaneHost {
             .get(&pane_id)
             .cloned()
             .unwrap_or_else(|| "Terminal".into());
+        let position = self
+            .terminal_tab
+            .terminals_with_ids()
+            .position(|(id, _)| id == pane_id)
+            .unwrap_or(0)
+            + 1;
+        let title = if has_multiple_panes {
+            format!("{position} · {title}").into()
+        } else {
+            title
+        };
         let pane_group = format!("pane-group-{}", pane_id.get());
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let measure_host = host.clone();
@@ -1319,8 +1327,9 @@ impl PaneHost {
         let second = self.render_tree(second, host.clone(), presentation);
         let measure_host = host.clone();
         let mut split = div()
+            .relative()
             .on_children_prepainted(move |children, _, cx| {
-                let (Some(first), Some(last)) = (children.first(), children.last()) else {
+                let (Some(first), Some(last)) = (children.first(), children.get(2)) else {
                     return;
                 };
                 let bounds = first.union(last);
@@ -1346,15 +1355,34 @@ impl PaneHost {
             .and_then(|bounds| split_content_extent(axis, *bounds))
             .map_or(0.0, |extent| extent * ratio);
 
+        // Paint the resize target after both panes, but before sibling popovers. A deferred
+        // divider would paint through command palettes, whose own menus are deferred overlays.
+        let divider = div()
+            .absolute()
+            .child(render_divider(split_id, axis, current_offset, host));
+        let (spacer, divider) = match axis {
+            SplitAxis::Horizontal => (
+                div().w(px(DIVIDER_SIZE)).h_full().flex_shrink_0(),
+                divider
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(ratio))
+                    .ml(px(-ratio * DIVIDER_SIZE)),
+            ),
+            SplitAxis::Vertical => (
+                div().h(px(DIVIDER_SIZE)).w_full().flex_shrink_0(),
+                divider
+                    .left_0()
+                    .right_0()
+                    .top(relative(ratio))
+                    .mt(px(-ratio * DIVIDER_SIZE)),
+            ),
+        };
         split
             .child(split_child(first, axis, ratio))
-            .child(deferred(render_divider(
-                split_id,
-                axis,
-                current_offset,
-                host,
-            )))
+            .child(spacer)
             .child(split_child(second, axis, 1.0 - ratio))
+            .child(divider)
             .into_any_element()
     }
 }
@@ -1425,7 +1453,7 @@ fn render_pane_header(
     host: gpui::WeakEntity<PaneHost>,
 ) -> AnyElement {
     let divider_color = if focused {
-        ACTIVE_THEME.panel_focused_border
+        ACTIVE_THEME.border_focused
     } else {
         ACTIVE_THEME.border
     };
@@ -1490,9 +1518,16 @@ fn render_pane_header(
         .pr(px(PANE_CONTROL_INSET + PANE_CONTROL_SIZE + 4.0))
         .border_b(px(1.0))
         .border_color(gpui_color(divider_color))
-        .bg(gpui_color(ACTIVE_THEME.terminal_background))
+        .bg(gpui_color(ACTIVE_THEME.toolbar_background))
         .text_size(px(12.0))
-        .text_color(gpui_color(ACTIVE_THEME.text_muted))
+        .text_color(gpui_color(if focused {
+            ACTIVE_THEME.text
+        } else {
+            ACTIVE_THEME.text_muted
+        }))
+        .when(focused, |header| {
+            header.font_weight(gpui::FontWeight::MEDIUM)
+        })
         .when(attention, |header| {
             header.child(
                 div()

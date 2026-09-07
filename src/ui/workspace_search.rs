@@ -99,7 +99,7 @@ pub(super) struct WorkspaceSearch {
 impl WorkspaceSearch {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Search Workspaces", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new("Switch Workspace", Vec::new(), window, cx);
             palette.set_no_results_text("No matching Workspaces", cx);
             palette.set_hints(
                 vec![

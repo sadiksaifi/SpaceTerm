@@ -455,7 +455,13 @@ impl Render for AskPassSecretBody {
                             .px(px(8.0))
                             .rounded(px(4.0))
                             .border(px(1.0))
-                            .border_color(gpui_color(ACTIVE_THEME.border))
+                            .border_color(gpui_color(if self.required_error {
+                                ACTIVE_THEME.error_border
+                            } else if self.input.read(cx).is_focused() {
+                                ACTIVE_THEME.border_focused
+                            } else {
+                                ACTIVE_THEME.border
+                            }))
                             .bg(gpui_color(ACTIVE_THEME.element_background))
                             .text_size(px(13.0))
                             .text_color(gpui_color(ACTIVE_THEME.text))

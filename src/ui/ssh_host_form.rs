@@ -1,5 +1,7 @@
+use crate::directory_selection::SystemFileSelection;
 use std::fmt;
 use std::num::NonZeroU16;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -154,6 +156,8 @@ struct SshHostFormValidation {
 
 pub(super) struct SshHostForm {
     backend: Arc<dyn ManagedHostFormBackend>,
+    file_selection: Rc<dyn SystemFileSelection>,
+    file_selection_pending: bool,
     mode: SshHostFormMode,
     alias: Entity<TextInput>,
     host_name: Entity<TextInput>,
@@ -179,6 +183,7 @@ impl SshHostForm {
     pub(super) fn new(
         mode: SshHostFormMode,
         backend: Arc<dyn ManagedHostFormBackend>,
+        file_selection: Rc<dyn SystemFileSelection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -245,6 +250,8 @@ impl SshHostForm {
         }
         let mut form = Self {
             backend,
+            file_selection,
+            file_selection_pending: false,
             mode,
             alias,
             host_name,
@@ -265,6 +272,37 @@ impl SshHostForm {
         };
         form.errors = validate_form_values(&form.values(cx)).errors;
         form
+    }
+
+    fn choose_identity_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || self.pending || self.file_selection_pending {
+            return;
+        }
+        let selection = self.file_selection.choose_file(cx);
+        let generation = self.lifecycle_generation;
+        self.file_selection_pending = true;
+        cx.notify();
+        cx.spawn_in(window, async move |form, cx| {
+            let result = selection.await;
+            let _ = form.update_in(cx, |form, window, cx| {
+                if !form.open || form.lifecycle_generation != generation { return; }
+                form.file_selection_pending = false;
+                match result {
+                    Ok(Some(path)) => {
+                        if let Some(path) = path.to_str() {
+                            form.identity_file.update(cx, |input, cx| { input.set_value(path, cx); });
+                            form.revalidate(cx);
+                        } else {
+                            form.backend_error = Some("Choose a file with a Unicode file name.");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => form.backend_error = Some("The file chooser could not open. Enter the identity file path instead."),
+                }
+                form.identity_file.read(cx).focus_handle().focus(window);
+                cx.notify();
+            });
+        }).detach();
     }
 
     pub(super) fn present(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -524,6 +562,7 @@ impl SshHostForm {
             return;
         }
         self.open = false;
+        self.file_selection_pending = false;
         self.pending = false;
         self.presentation = None;
         self.pending_cancel = None;
@@ -668,6 +707,16 @@ impl Render for SshHostForm {
                 self.visible_error(SshHostFormField::IdentityFile),
                 "managed-ssh-host-identity-file-error",
             ))
+            .child(
+                spaceterm_ui::Button::new("choose-ssh-identity-file", "Choose Identity File…")
+                    .variant(spaceterm_ui::ButtonVariant::Outline)
+                    .size(spaceterm_ui::ButtonSize::Small)
+                    .tab_stop(true)
+                    .disabled(self.pending || self.file_selection_pending)
+                    .on_activate(
+                        cx.listener(|form, _, window, cx| form.choose_identity_file(window, cx)),
+                    ),
+            )
             .when_some(self.backend_error, |form, error| {
                 form.child(
                     div()
@@ -710,7 +759,7 @@ fn form_field(
     let border_color = if error.is_some() {
         ACTIVE_THEME.error_border
     } else if focused {
-        ACTIVE_THEME.border_selected
+        ACTIVE_THEME.border_focused
     } else {
         ACTIVE_THEME.border
     };
@@ -762,7 +811,7 @@ fn form_field(
             field.child(
                 div()
                     .debug_selector(move || error_selector.to_owned())
-                    .text_size(px(11.0))
+                    .text_size(px(12.0))
                     .text_color(gpui_color(ACTIVE_THEME.error))
                     .child(error),
             )
@@ -1012,7 +1061,15 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn ManagedHostFormBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let form = cx.new(|cx| SshHostForm::new(mode, injected, window, cx));
+            let form = cx.new(|cx| {
+                SshHostForm::new(
+                    mode,
+                    injected,
+                    Rc::new(crate::directory_selection::GpuiFileSelection),
+                    window,
+                    cx,
+                )
+            });
             let events = Rc::new(RefCell::new(Vec::new()));
             let captured = Rc::clone(&events);
             cx.subscribe(&form, move |_, _, event, _| {
@@ -1202,6 +1259,70 @@ mod tests {
         assert!(backend.records().is_empty());
         assert!(!form.read_with(cx, |form, _| form.is_open()));
         assert!(events.borrow().contains(&SshHostFormEvent::Cancelled));
+    }
+
+    struct ScriptedFileSelection(
+        RefCell<Option<crate::directory_selection::DirectorySelectionFuture>>,
+    );
+
+    impl SystemFileSelection for ScriptedFileSelection {
+        fn choose_file(&self, _: &App) -> crate::directory_selection::DirectorySelectionFuture {
+            self.0.borrow_mut().take().unwrap()
+        }
+    }
+
+    #[gpui::test]
+    fn identity_file_selection_updates_only_the_form_and_restores_input_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let backend = ScriptedBackend::ready(Ok(()));
+        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        cx.update(|window, cx| {
+            form.update(cx, |form, cx| {
+                form.file_selection =
+                    Rc::new(ScriptedFileSelection(RefCell::new(Some(Box::pin(async {
+                        Ok(Some("/tmp/example-identity".into()))
+                    })))));
+                form.choose_identity_file(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert!(backend.records().is_empty());
+        assert!(cx.update(|window, cx| {
+            let form = form.read(cx);
+            assert_eq!(form.identity_file.read(cx).value(), "/tmp/example-identity");
+            assert!(!form.file_selection_pending);
+            form.identity_file
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }));
+    }
+
+    #[gpui::test]
+    fn cancelling_form_rejects_late_identity_file_selection(cx: &mut TestAppContext) {
+        let backend = ScriptedBackend::ready(Ok(()));
+        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        cx.update(|window, cx| {
+            form.update(cx, |form, cx| {
+                form.file_selection = Rc::new(ScriptedFileSelection(RefCell::new(Some(Box::pin(
+                    async move { receiver.recv().await.unwrap() },
+                )))));
+                form.choose_identity_file(window, cx);
+            })
+        });
+        click(CANCEL_ACTION_SELECTOR, cx);
+        sender
+            .try_send(Ok(Some("/tmp/late-identity".into())))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(backend.records().is_empty());
+        form.read_with(cx, |form, cx| {
+            assert!(!form.is_open());
+            assert!(!form.file_selection_pending);
+            assert_eq!(form.identity_file.read(cx).value(), "");
+        });
     }
 
     #[gpui::test]

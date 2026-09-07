@@ -59,7 +59,7 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 You need macOS, a Rust toolchain, and [`just`](https://github.com/casey/just).
 
 ```sh
-git clone https://github.com/sadiksaifi/SpaceTerm.git
+git clone --recurse-submodules https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
 
 # Run from source
@@ -73,3 +73,8 @@ Run `just` to see the complete command list.
 
 Run `just validate` for the full validation suite, including SpaceTerm's patched terminal library.
 Inside a SpaceTerm Pane, `just kitty-graphics-smoke` displays image layering and scaling checks.
+
+The default theme is built from the pinned `third_party/vague-pro-zed` submodule.
+For an existing checkout, run `git submodule update --init --recursive` before building.
+The build embeds the theme, so the installed application needs no checkout or network access.
+UI colors follow Zed semantic roles; terminal font sizing remains independent of UI sizing.

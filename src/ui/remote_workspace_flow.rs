@@ -900,7 +900,15 @@ impl RemoteWorkspaceFlow {
         let backend: Arc<dyn ManagedHostFormBackend> = Arc::new(FlowManagedHostBackend {
             backend: Arc::clone(&self.backend),
         });
-        let form = cx.new(|cx| SshHostForm::new(mode, backend, window, cx));
+        let form = cx.new(|cx| {
+            SshHostForm::new(
+                mode,
+                backend,
+                std::rc::Rc::new(crate::directory_selection::GpuiFileSelection),
+                window,
+                cx,
+            )
+        });
         cx.subscribe_in(
             &form,
             window,

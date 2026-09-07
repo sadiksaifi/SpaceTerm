@@ -7,6 +7,8 @@ use crate::terminal::NativeContextActions;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalContextMenuCommand {
     Copy,
+    Paste,
+    Find,
     OpenLink,
     FilePreview,
 }
@@ -30,10 +32,15 @@ pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
+    let paste_shortcut = presentation.shortcut(&spaceterm_ui::EditPaste);
+    let find_shortcut = presentation.shortcut(&crate::ui::OpenTerminalFind);
     let presentation = terminal_context_presentation(presentation);
     vec![
         menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy)
             .shortcut(presentation.copy_shortcut),
+        menu_entry(TerminalContextMenuCommand::Paste, "Paste", true).shortcut(paste_shortcut),
+        menu_entry(TerminalContextMenuCommand::Find, "Find…", true).shortcut(find_shortcut),
+        MenuEntry::separator(),
         menu_entry(
             TerminalContextMenuCommand::OpenLink,
             "Open Link",
@@ -50,6 +57,8 @@ pub(crate) fn terminal_context_menu_entries(
 fn command_icon(command: TerminalContextMenuCommand) -> IconName {
     match command {
         TerminalContextMenuCommand::Copy => IconName::Copy,
+        TerminalContextMenuCommand::Paste => IconName::Clipboard,
+        TerminalContextMenuCommand::Find => IconName::Search,
         TerminalContextMenuCommand::OpenLink => IconName::ExternalLink,
         TerminalContextMenuCommand::FilePreview => IconName::Eye,
     }
@@ -75,6 +84,8 @@ impl TerminalContextMenuCommand {
     const fn debug_name(self) -> &'static str {
         match self {
             Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::Find => "find",
             Self::OpenLink => "open-link",
             Self::FilePreview => "file-preview",
         }

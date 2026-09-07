@@ -2368,7 +2368,7 @@ const ANSI_BRIGHT_INDICES: [PaletteIndex; 8] = [
 ];
 
 fn apply_theme(terminal: &mut Terminal<'static, 'static>) -> Result<(), libghostty_vt::Error> {
-    let theme = ACTIVE_THEME;
+    let theme = &*ACTIVE_THEME;
     terminal
         .set_default_fg_color(Some(ghostty_color(theme.terminal_foreground)))?
         .set_default_bg_color(Some(ghostty_color(theme.terminal_background)))?

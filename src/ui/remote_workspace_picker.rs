@@ -6,9 +6,9 @@ use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div, px};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMatching, CommandPaletteReplacementFocus, Icon, IconName, ModalAction,
-    ModalActionRole, ModalId, ModalPresentationHandle,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus, Icon,
+    IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
 };
 
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, RemoteWorkspaceValueError};
@@ -478,7 +478,8 @@ impl RemoteWorkspacePicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Remote workspace path", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new("Open Remote Project", Vec::new(), window, cx);
+            palette.set_hints(vec![CommandPaletteHint::new("Enter folder", "↵")], cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
@@ -554,6 +555,7 @@ impl RemoteWorkspacePicker {
         self.palette.update(cx, |palette, cx| {
             palette.set_query_editable(true, cx);
             palette.set_dismissible(true, cx);
+            palette.set_escape_cancellable(false, cx);
             if let Some(replacement) = replacement {
                 palette.open_replacing(replacement, window, cx);
             } else {
@@ -1078,7 +1080,7 @@ impl RemoteWorkspacePicker {
         if self.status == RemoteWorkspacePickerStatus::Missing {
             "Create Folder"
         } else {
-            "Open Remote Project"
+            "Open This Folder"
         }
     }
 
@@ -1122,6 +1124,10 @@ impl RemoteWorkspacePicker {
             palette.set_loading(loading, cx);
             palette.set_query_editable(!loading, cx);
             palette.set_dismissible(!loading, cx);
+            palette.set_escape_cancellable(
+                matches!(self.busy, Some(RemoteWorkspacePickerBusy::Validating)),
+                cx,
+            );
         });
     }
 
@@ -1869,7 +1875,7 @@ mod tests {
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
-            for key in ["cmd-a", "x", "escape"] {
+            for key in ["cmd-a", "x"] {
                 window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
             }
         });
@@ -1889,6 +1895,36 @@ mod tests {
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.busy),
             Some(RemoteWorkspacePickerBusy::AwaitingActivation)
+        );
+    }
+
+    #[gpui::test]
+    fn escape_during_validation_returns_to_hosts_without_accepting_late_success(
+        cx: &mut TestAppContext,
+    ) {
+        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [Ok(identity)],
+        );
+        let (picker, events, cx) = remote_workspace_picker(provider, cx);
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+            window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            events
+                .borrow()
+                .contains(&RemoteWorkspacePickerEvent::BackToHost)
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, RemoteWorkspacePickerEvent::Confirmed(_)))
         );
     }
 

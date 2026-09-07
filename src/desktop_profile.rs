@@ -156,12 +156,13 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 11] {
+fn required_presented_actions() -> [&'static str; 13] {
+    use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
         ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
     };
-    use spaceterm_ui::EditCopy;
+    use spaceterm_ui::{EditCopy, EditPaste};
 
     [
         CreateScratchWorkspace.name(),
@@ -170,6 +171,8 @@ fn required_presented_actions() -> [&'static str; 11] {
         OpenLocalProject.name(),
         CreateTab.name(),
         EditCopy.name(),
+        EditPaste.name(),
+        OpenTerminalFind.name(),
         SplitRight.name(),
         SplitDown.name(),
         TogglePaneZoom.name(),
@@ -180,11 +183,12 @@ fn required_presented_actions() -> [&'static str; 11] {
 
 #[cfg(test)]
 pub(crate) fn testing_presentation() -> DesktopPresentation {
+    use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
         ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
     };
-    use spaceterm_ui::EditCopy;
+    use spaceterm_ui::{EditCopy, EditPaste};
 
     DesktopPresentation::new(
         DesktopWording {
@@ -200,6 +204,8 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(OpenLocalProject, "Primary+O"),
             ActionShortcut::new(CreateTab, "Primary+T"),
             ActionShortcut::new(EditCopy, "Primary+C"),
+            ActionShortcut::new(EditPaste, "Primary+V"),
+            ActionShortcut::new(OpenTerminalFind, "Primary+F"),
             ActionShortcut::new(SplitRight, "Primary+D"),
             ActionShortcut::new(SplitDown, "Primary+Shift+D"),
             ActionShortcut::new(TogglePaneZoom, "Primary+Shift+Enter"),
