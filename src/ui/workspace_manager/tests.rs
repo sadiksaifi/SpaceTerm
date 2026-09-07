@@ -1854,7 +1854,7 @@ fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
             .read(cx)
             .focused_terminal_is_focused(window, cx)
     }));
-    assert!(cx.update(|window, cx| { window.is_action_available(&ShowNewWorkspacePanel, cx) }));
+    assert!(cx.update(|window, cx| { window.is_action_available(&NewWorkspace, cx) }));
 
     open_new_workspace_panel(cx);
     assert!(cx.update(|window, cx| {

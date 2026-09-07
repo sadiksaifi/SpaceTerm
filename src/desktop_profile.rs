@@ -159,15 +159,15 @@ impl DesktopProfile {
 fn required_presented_actions() -> [&'static str; 13] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
-        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
+        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
     [
         CreateScratchWorkspace.name(),
         SearchWorkspaces.name(),
-        ShowNewWorkspacePanel.name(),
+        NewWorkspace.name(),
         OpenLocalProject.name(),
         CreateTab.name(),
         EditCopy.name(),
@@ -185,8 +185,8 @@ fn required_presented_actions() -> [&'static str; 13] {
 pub(crate) fn testing_presentation() -> DesktopPresentation {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
-        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
+        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
@@ -200,7 +200,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         vec![
             ActionShortcut::new(CreateScratchWorkspace, "Primary+Shift+N"),
             ActionShortcut::new(SearchWorkspaces, "Primary+P"),
-            ActionShortcut::new(ShowNewWorkspacePanel, "Primary+N"),
+            ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(OpenLocalProject, "Primary+O"),
             ActionShortcut::new(CreateTab, "Primary+T"),
             ActionShortcut::new(EditCopy, "Primary+C"),
@@ -232,7 +232,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{CreateScratchWorkspace, OpenLocalProject, ShowNewWorkspacePanel};
+    use crate::ui::{CreateScratchWorkspace, NewWorkspace, OpenLocalProject};
     use gpui::Action;
 
     #[gpui::test]
@@ -275,7 +275,7 @@ mod tests {
             TextInputKeybindingProfile::MacOs,
             vec![
                 KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
-                KeyBinding::new("shift-cmd-n", ShowNewWorkspacePanel, None),
+                KeyBinding::new("shift-cmd-n", NewWorkspace, None),
             ],
             testing_presentation(),
             std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(

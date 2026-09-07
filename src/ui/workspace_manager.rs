@@ -26,9 +26,9 @@ use super::{
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateScratchWorkspace, CreateTab, FindNext,
-    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenLocalProject,
-    OpenTerminalFind, RemoteChildLaunchUnavailable, SearchWorkspaces, ShowNewWorkspacePanel,
-    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent,
+    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace,
+    OpenLocalProject, OpenTerminalFind, RemoteChildLaunchUnavailable, SearchWorkspaces, SplitDown,
+    SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent,
     TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
     WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
@@ -3317,12 +3317,7 @@ impl WorkspaceManager {
         self.open_local_project(window, cx);
     }
 
-    fn on_show_new_workspace_panel(
-        &mut self,
-        _: &ShowNewWorkspacePanel,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
         self.show_new_workspace_panel(window, cx);
     }
 
@@ -4191,7 +4186,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::on_create_scratch_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
-            .on_action(cx.listener(Self::on_show_new_workspace_panel))
+            .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
             .on_action(cx.listener(Self::on_activate_workspace_2))
@@ -4294,7 +4289,7 @@ fn workspace_surface_presentation(
 ) -> WorkspaceSurfacePresentation {
     WorkspaceSurfacePresentation {
         search_tooltip: presentation.shortcut(&SearchWorkspaces),
-        new_workspace_button: presentation.shortcut(&ShowNewWorkspacePanel),
+        new_workspace_button: presentation.shortcut(&NewWorkspace),
         new_tab_menu: presentation.shortcut(&CreateTab),
     }
 }
