@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -155,6 +155,7 @@ pub(crate) struct RecordedSessionCall {
 #[derive(Clone, Default)]
 pub(crate) struct TestTerminalSessionRecords {
     starts: Rc<RefCell<Vec<RecordedSessionStart>>>,
+    selection_copies: Rc<RefCell<VecDeque<Option<SelectionCopy>>>>,
     selection_receivers:
         Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
@@ -165,6 +166,10 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
+        self.selection_copies.borrow_mut().push_back(copy);
+    }
+
     pub(crate) fn accessibility_selection_requests(
         &self,
         session_id: usize,
@@ -474,7 +479,11 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopy);
-        self.selection_response.clone()
+        self.records
+            .selection_copies
+            .borrow_mut()
+            .pop_front()
+            .map_or_else(|| self.selection_response.clone(), Ok)
     }
 
     fn copy_selection_at(

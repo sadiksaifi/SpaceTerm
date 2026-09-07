@@ -2264,24 +2264,17 @@ impl TerminalPane {
         recovery: Option<RecoveryToken>,
         cx: &mut Context<Self>,
     ) {
-        match self.selection_copy_from_result(result, cx) {
-            Some(copy) => {
-                if let Err(error) = self.selection_pasteboard.write(copy, cx) {
-                    let _ = error;
-                    self.present_failure(
-                        TerminalFailure::platform("write-selection-pasteboard"),
-                        true,
-                        Some(RecoveryAction::CopySelection),
-                    );
-                    cx.notify();
-                } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
-                    cx.notify();
-                }
-            }
-            None => {
-                if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
-                    cx.notify();
-                }
+        if let Some(copy) = self.selection_copy_from_result(result, cx) {
+            if let Err(error) = self.selection_pasteboard.write(copy, cx) {
+                let _ = error;
+                self.present_failure(
+                    TerminalFailure::platform("write-selection-pasteboard"),
+                    true,
+                    Some(RecoveryAction::CopySelection),
+                );
+                cx.notify();
+            } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                cx.notify();
             }
         }
     }
@@ -9226,6 +9219,56 @@ mod tests {
                 true,
                 Some("recovered selection".to_owned()),
                 2,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "recovered selection".to_owned(),
+                html: None,
+            },
+        );
+        pane.update(cx, |pane, _| {
+            pane.selection_pasteboard.fail_next_write();
+        });
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+
+        records.queue_selection_copy(None);
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("recoverable native failure should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pane_state
+                .failure()
+                .is_some_and(|failure| failure.class() == crate::terminal::FailureClass::Platform)
+                && pane.pending_recovery.is_some()
+        }));
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("a missing Selection should keep Retry available");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                pane.read_with(cx, |pane, _| pane.pane_state.clone()),
+                pane.read_with(cx, |pane, _| pane.pending_recovery),
+                cx.read_from_clipboard().and_then(|item| item.text()),
+            ),
+            (
+                PaneTerminalState::Running,
+                None,
+                Some("recovered selection".to_owned()),
             )
         );
     }
