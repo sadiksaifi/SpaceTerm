@@ -1,57 +1,155 @@
-# SpaceTerm Context
+# SpaceTerm
 
-This document owns SpaceTerm's durable product and architecture decisions. Code owns implementation
-detail. Domain definitions and invariants belong to the
-[ubiquitous language](docs/UBIQUITOUS_LANGUAGE.md).
+SpaceTerm organizes local and remote terminal work into Workspaces, Tabs, Pane Layouts, and
+Pane-owned Terminal Sessions.
 
-## Product
+## Hierarchy
 
-SpaceTerm is a modern native desktop terminal. It ships on macOS today; Linux is the intentional
-next platform. Its layout takes useful inspiration from tmux without adopting a tmux server/client
-model. The product hierarchy is `SpaceTerm -> Workspace -> Tab -> Pane Layout -> Pane`.
+**SpaceTerm**:
+The application that owns all Workspaces.
 
-The interface is a compact, keyboard-first, Zed-like desktop experience. The application-owned
-Workspace Picker is the primary Open Local Project path. It is a live, one-level filesystem
-navigator presented through the Command Palette; System Directory Selection is an explicit
-fallback.
+**Workspace**:
+A named top-level scope with one immutable Workspace Kind, one Workspace Directory, and one or more
+Tabs.
+_Avoid_: session, project
 
-## Technology
+**Workspace Kind**:
+The immutable classification of a Workspace as Scratch, Local Project, or Remote Project.
 
-- Use Rust 2024 and GPUI for the application and GPU UI.
-- Use `libghostty-vt` for terminal emulation.
-- Keep the executable in the root application crate and reusable, platform-neutral controls in
-  `crates/spaceterm-ui`.
-- Use typed Lucide `IconName` values for application icons and Vague Pro tokens from `src/theme.rs`
-  for product color. Terminal text prefers JetBrains Mono Nerd Font with a system monospace
-  fallback.
-- Package macOS artifacts with pinned `cargo-packager` 0.11.8 and the tracked
-  `assets/macos/SpaceTerm.icon`. Xcode 26 or newer produces the layered and legacy icon assets.
-  Local packages use ad-hoc signing and are not notarized.
+**Scratch Workspace**:
+A Workspace created at `HOME` whose Workspace Directory follows its Directory Authority.
 
-## Architecture
+**Local Project Workspace**:
+A Workspace opened at one immutable local Project Root.
 
-- Prefer deep Modules with narrow Interfaces. Keep terminal emulation, PTY ownership, Pane Layout,
-  reusable control mechanics, and filesystem identity behind their owners.
-- Put product policy, validation, ordering, bounds, lifecycle, and closed failure classification in
-  portable Rust. Use GPUI for behavior it preserves and narrow Operating-System Adapters only for
-  irreducible host facts or effects.
-- Select capabilities through constructor injection. Constructor-wiring values group dependencies
-  but define no platform operations. Owners retain cleanup authority, and stale generations or
-  retired handles cannot affect successors.
-- Domain Modules allocate identities and expose intentional operations instead of mutable
-  collections. Active and focused identities always refer to owned entities.
-- Keep the root application crate and the internal UI library. Add a crate only for a durable
-  replaceability or locality boundary.
-- The macOS Adapters are the only production host implementations. Portable GPUI capabilities are
-  the starting point for Linux, but the repository makes no complete Linux claim and defines no
-  speculative Windows Adapter.
+**Remote Project Workspace**:
+A Workspace pinned to one SSH Destination and one Physical Directory Identity.
 
-## Security and failures
+**Workspace Directory**:
+The exact directory value used to start new Terminal Sessions in a Workspace.
 
-Use typed failures when callers must recover. Errors and Local Diagnostics exclude terminal and
-clipboard contents, environment values, paths, credentials, and raw native errors. SpaceTerm sends
-no automatic telemetry or crash reports.
+**Directory Authority**:
+The Pane whose valid Reported Working Directory may update a Scratch Workspace's Workspace
+Directory.
 
-Local filesystem authority is explicit and retained. Remote values never acquire local-file
-authority. Authentication remains under OpenSSH policy; SpaceTerm does not store credentials or
-weaken host verification.
+**Project Root**:
+The exact selected path and retained filesystem identity of a Local Project Workspace.
+
+**Tab**:
+An ordered work area that belongs to one Workspace and owns one Pane Layout.
+_Avoid_: Window, Terminal Session
+
+**Pane Layout**:
+The recursive arrangement of Panes and Splits in a Tab.
+
+**Split**:
+A Pane Layout node with exactly two child Pane Layouts and a constrained ratio.
+
+**Pane**:
+A terminal region that is one leaf of a Tab's Pane Layout and owns one Terminal Session.
+
+**Operating-System Window**:
+A native window that presents SpaceTerm.
+
+## Focus and transient UI
+
+**Active Workspace**:
+The one Workspace presented in an Operating-System Window.
+
+**Active Tab**:
+The one Tab presented within a Workspace.
+
+**Focused Pane**:
+The Pane selected by a Tab for Pane actions and focus restoration.
+
+**Terminal Input Focus**:
+The transient eligibility of a Pane to accept terminal input while its Workspace and Tab are Active,
+it is the Focused Pane and responder, its window and application are active, and temporary UI has
+released input.
+
+**Zoomed Pane**:
+The Focused Pane presented alone while its Pane Layout remains intact.
+
+**New Workspace Panel**:
+The transient chooser that selects a Workspace Source for later creation.
+
+**Workspace Picker**:
+The in-app, one-level local directory navigator used by Open Local Project.
+
+**System Directory Selection**:
+The system chooser available as an explicit fallback from the Workspace Picker.
+
+## Workspace sources and remote identity
+
+**Workspace Source**:
+A New Workspace Panel choice for a Scratch, Local Project, or Remote Project Workspace.
+
+**SSH Destination**:
+The exact validated OpenSSH destination token selected for a Remote Project Workspace; different
+aliases remain distinct.
+
+**Remote Workspace Directory**:
+The exact absolute or home-relative remote path spelling used to start remote Terminal Sessions.
+
+**Physical Directory Identity**:
+The resolved absolute remote directory paired with an SSH Destination for deduplication and
+automatic naming.
+
+**Control Connection**:
+The Workspace-owned OpenSSH transport shared by its Remote Panes.
+
+**Terminal Session Channel**:
+The single-use remote shell channel consumed by one Remote Pane through its Control Connection.
+
+**Authentication Prompt**:
+One OpenSSH confirmation or obscured response request presented by SpaceTerm.
+
+## Terminal
+
+**Terminal Session**:
+The runtime owned by one Pane, joining a Terminal Emulator to a local shell or remote Terminal
+Session Channel.
+_Avoid_: session, terminal
+
+**Terminal Emulator**:
+The state machine that interprets terminal output and owns screen state.
+
+**Terminal Metadata**:
+Sanitized title, Reported Working Directory, Semantic Zone, command, and progress facts associated
+with terminal screen state.
+
+**Reported Working Directory**:
+The last valid local absolute directory reported by trusted OSC 7 metadata.
+
+## Terminal interaction and safety
+
+**Selection**:
+A terminal-owned logical content range anchored across Scrollback movement, output, and reflow.
+
+**Terminal Find**:
+Literal search owned by one Pane over its active screen and available Scrollback.
+
+**Terminal Hyperlink**:
+A validated target attached to complete terminal cells and activated through the current
+modified-pointer gesture.
+
+**Paste Payload**:
+A bounded text insertion candidate retained until accepted or cancelled.
+
+**Paste Confirmation**:
+Time-bounded authorization for one unsafe Paste Payload while Terminal Input Focus remains valid.
+
+**OSC 52 Authorization**:
+One deny-by-default decision for a bounded terminal clipboard read or write.
+
+**Terminal Local File Capabilities**:
+Session-scoped authority for local path actions in a Local Pane.
+
+**Terminal Failure**:
+A typed terminal fault with an explicit recovery class.
+
+**Local Diagnostics**:
+Bounded content-free failure and unhandled-key metadata exported after an explicit user action.
+
+**Close Confirmation**:
+One authorization for an exact user-requested close that may discard running work.

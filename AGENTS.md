@@ -1,22 +1,36 @@
 # SpaceTerm
 
-SpaceTerm is a native macOS terminal written in Rust with GPUI and one internal UI library.
+SpaceTerm is a native desktop terminal multiplexer.
 
-## Context
+## Domain and decisions
 
-- Read [`CONTEXT.md`](CONTEXT.md) before changing product or architecture decisions.
-- Read [`docs/UBIQUITOUS_LANGUAGE.md`](docs/UBIQUITOUS_LANGUAGE.md) before changing domain behavior
-  or product terminology.
+- Domain behavior and terminology: read [`CONTEXT.md`](CONTEXT.md) and use its canonical terms in
+  code, tests, issues, and documentation.
+- Architecture and remote-authentication changes: read the relevant records under
+  [`docs/adr/`](docs/adr/).
 
-Inspect the code for implementation details. Keep each durable decision in one canonical document
-and link to it instead of repeating it.
+Code and tests own implementation detail and executable invariants. ADRs own the rationale for
+important durable decisions.
+
+## Architecture
+
+- Design deep Modules with narrow Interfaces that concentrate behavior, invariants, and cleanup
+  with their owner.
+- Keep product policy and lifecycle portable. Connect frameworks, external systems, and
+  Operating-System capabilities at narrow Seams.
+- Select replaceable capabilities through constructor injection and keep ownership explicit.
+- Expose intentional operations and typed recoverable failures.
+- Create structural boundaries when they provide durable replaceability, Leverage, or Locality.
+
+## Safety
+
+- Keep errors and Local Diagnostics content-free. Use typed classifications and bounded metadata;
+  exclude terminal and clipboard contents, environment values, paths, credentials, and raw native
+  errors. SpaceTerm sends no automatic telemetry or crash reports.
+- Keep local filesystem authority explicit and retained. Remote values remain remote and provide no
+  authority for local file actions.
 
 ## Work
 
-- Use the `Justfile` as the command authority. Start with a focused check and finish with
-  `just validate`.
-- Add focused tests for changed behavior and preserve unrelated changes.
-- Let Cargo generate `Cargo.lock`; keep generated `target/` and `dist/` contents out of source
-  edits.
+- Use the `Justfile` as the command authority.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.
-- Run `just doctor` before packaging when tool availability is uncertain.
