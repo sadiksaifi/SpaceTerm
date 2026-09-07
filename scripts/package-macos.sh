@@ -255,9 +255,9 @@ mkdir -p -- "$PACKAGER_OUTPUT_DIR"
 
 echo "Packaging $APP_NAME.app and $APP_NAME.dmg with cargo-packager $PACKAGER_VERSION"
 if (( UNIVERSAL )); then
-    cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR" --target "$UNIVERSAL_TARGET"
+    CI="${CI:-true}" cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR" --target "$UNIVERSAL_TARGET"
 else
-    cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR"
+    CI="${CI:-true}" cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR"
 fi
 
 readonly STAGED_APP="$PACKAGER_OUTPUT_DIR/$APP_NAME.app"
