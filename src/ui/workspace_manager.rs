@@ -100,6 +100,14 @@ const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 
+fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str) {
+    if sidebar_visible {
+        (IconName::PanelLeft, "Close Sidebar")
+    } else {
+        (IconName::PanelRight, "Open Sidebar")
+    }
+}
+
 fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
     let text_style = window.text_style();
     let run = TextRun {
@@ -3458,6 +3466,7 @@ impl WorkspaceManager {
         } else {
             collapsed_top_chrome_width(self.workspaces.active_workspace().name(), window)
         };
+        let (toggle_icon, toggle_label) = sidebar_toggle_presentation(self.sidebar.visible);
         let drag_manager = manager.clone();
         let toggle_manager = manager;
         let content = div()
@@ -3494,14 +3503,14 @@ impl WorkspaceManager {
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
                     .child(
-                        IconButton::new("toggle-sidebar-button", "Toggle Sidebar", |foreground| {
-                            Icon::new(IconName::PanelLeft, px(14.0), foreground).into_any_element()
+                        IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
+                            Icon::new(toggle_icon, px(14.0), foreground).into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
                         .debug_selector("toggle-sidebar-button")
                         .tooltip(
-                            Tooltip::new("toggle-sidebar-tooltip", "Toggle Sidebar")
+                            Tooltip::new("toggle-sidebar-tooltip", toggle_label)
                                 .debug_selector("toggle-sidebar-tooltip"),
                         )
                         .on_activate(move |_, window, cx| {
