@@ -4796,6 +4796,32 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
 }
 
 #[gpui::test]
+fn dragging_the_collapsed_handle_should_reopen_from_the_top_chrome_edge(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let requested_width = chrome.size.width + px(40.0);
+
+    drag_to(
+        "workspace-sidebar-resize-handle",
+        root.origin.x + requested_width,
+        cx,
+    );
+
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            (manager.sidebar.visible, manager.sidebar.width)
+        }),
+        (true, requested_width)
+    );
+}
+
+#[gpui::test]
 fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_session(
     cx: &mut TestAppContext,
 ) {
@@ -4993,6 +5019,109 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(
+                WorkspaceId::new(1),
+                "A Workspace Name That Must Be Truncated".to_owned(),
+            )
+            .expect("the Active Workspace should be renamed");
+        cx.notify();
+    });
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    drag_to(
+        "workspace-sidebar-resize-handle",
+        root.origin.x + px(320.0),
+        cx,
+    );
+
+    click("toggle-sidebar-button", cx);
+
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let spacer = cx
+        .debug_bounds("tab-manager-top-spacer")
+        .expect("the collapsed top-left spacer was not rendered");
+    let tab_bar = cx
+        .debug_bounds("tab-bar")
+        .expect("the Tab bar was not rendered");
+    let divider = cx
+        .debug_bounds("workspace-sidebar-resize-handle-divider")
+        .expect("the collapsed sidebar divider was not rendered");
+    assert_eq!(
+        (
+            chrome.size.width,
+            spacer.size.width,
+            tab_bar.origin.x,
+            divider.center().x,
+        ),
+        (
+            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+        )
+    );
+}
+
+#[gpui::test]
+fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "A".to_owned())
+            .expect("the Active Workspace should be renamed");
+        cx.notify();
+    });
+
+    click("toggle-sidebar-button", cx);
+
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let spacer = cx
+        .debug_bounds("tab-manager-top-spacer")
+        .expect("the collapsed top-left spacer was not rendered");
+    let tab_bar = cx
+        .debug_bounds("tab-bar")
+        .expect("the Tab bar was not rendered");
+    assert!(chrome.size.width < px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+    assert_eq!(
+        (spacer.size.width, tab_bar.origin.x),
+        (chrome.size.width, root.origin.x + chrome.size.width)
+    );
+}
+
+#[gpui::test]
+fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
+    cx: &mut TestAppContext,
+) {
+    let (_, _, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let spacer = cx
+        .debug_bounds("tab-manager-top-spacer")
+        .expect("the new Workspace top-left spacer was not rendered");
+    assert_eq!(spacer.size.width, chrome.size.width);
+}
+
+#[gpui::test]
 fn cmd_n_should_create_a_scratch_workspace_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
@@ -5187,9 +5316,7 @@ fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut
 }
 
 #[gpui::test]
-fn command_b_should_hide_only_the_sidebar_body_and_expand_terminal_content(
-    cx: &mut TestAppContext,
-) {
+fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let expanded_chrome = cx
         .debug_bounds("workspace-top-chrome")
@@ -5208,11 +5335,16 @@ fn command_b_should_hide_only_the_sidebar_body_and_expand_terminal_content(
     assert_eq!(
         (
             hidden_state,
-            expanded_chrome,
-            collapsed_chrome,
+            expanded_chrome.size.width,
+            collapsed_chrome.size.width,
             content.origin.x,
         ),
-        (false, expanded_chrome, expanded_chrome, px(0.0))
+        (
+            false,
+            px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            px(0.0),
+        )
     );
 }
 

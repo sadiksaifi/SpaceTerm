@@ -5,6 +5,8 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+#[cfg(test)]
+use super::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
 };
@@ -153,6 +155,7 @@ pub(crate) struct TabManager {
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
+    top_chrome_width: Pixels,
     tab_menu: Option<TabMenuState>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
@@ -228,6 +231,7 @@ impl TabManager {
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+            top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             tab_menu: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
@@ -605,12 +609,17 @@ impl TabManager {
     pub(crate) fn set_sidebar_layout(
         &mut self,
         visible: bool,
-        width: Pixels,
+        sidebar_width: Pixels,
+        top_chrome_width: Pixels,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_visible != visible || self.sidebar_width != width {
+        if self.sidebar_visible != visible
+            || self.sidebar_width != sidebar_width
+            || self.top_chrome_width != top_chrome_width
+        {
             self.sidebar_visible = visible;
-            self.sidebar_width = width;
+            self.sidebar_width = sidebar_width;
+            self.top_chrome_width = top_chrome_width;
             cx.notify();
         }
     }
@@ -1517,7 +1526,7 @@ impl Render for TabManager {
                         div()
                             .id("tab-manager-top-spacer")
                             .debug_selector(|| "tab-manager-top-spacer".to_owned())
-                            .w(self.sidebar_width)
+                            .w(self.top_chrome_width)
                             .h_full()
                             .flex_shrink_0()
                             .bg(gpui_color(ACTIVE_THEME.tab_bar_background)),
@@ -2064,7 +2073,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hiding_sidebar_should_expand_content_without_moving_the_tab_bar(cx: &mut TestAppContext) {
+    fn hiding_sidebar_should_expand_content_and_use_the_supplied_top_chrome_width(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, _records, cx) = tab_manager(cx);
         let root = cx
             .debug_bounds("tab-manager")
@@ -2077,7 +2088,12 @@ mod tests {
             .expect("the Tab bar was not rendered");
 
         manager.update(cx, |manager, cx| {
-            manager.set_sidebar_layout(false, px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), cx);
+            manager.set_sidebar_layout(
+                false,
+                px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+                cx,
+            );
         });
         cx.run_until_parked();
 
@@ -2098,7 +2114,7 @@ mod tests {
                 root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                 root.origin.x,
                 root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-                root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
             )
         );
     }
