@@ -280,9 +280,9 @@ is never repainted as a second focus stroke, and the ring radius expands with it
 concentric corners. This transient focus indication is distinct from a persistent outlined Button
 style. The global Outline variant remains available to non-modal controls.
 Indeterminate progress uses a static repeated-segment treatment rather than a determinate fill or
-motion-only cue. Generic
-Modal initialization installs only portable traversal, Return, and Escape behavior; the explicit
-macOS profile adds Command-Period. The library performs no platform detection and accepts no
+motion-only cue. Application composition installs portable Modal traversal, Return, and Escape
+behavior independently from the explicit macOS profile, which adds only Command-Period. The
+library performs no platform detection and accepts no
 call-site paint or layout escape hatch. The macOS policy owns installed locale direction,
 validation, logical leading/trailing placement, right-to-left mirroring, action axis, focus entry,
 default-action presentation, and the private programmatic-only deadline maximum. One shared action

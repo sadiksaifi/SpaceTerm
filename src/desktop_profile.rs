@@ -149,6 +149,7 @@ impl DesktopProfile {
                 .with_text_direction(self.locale.text_direction()),
         );
         spaceterm_ui::install_command_palette_keybindings(cx, self.command_palette_keys);
+        spaceterm_ui::install_portable_modal_keybindings(cx);
         spaceterm_ui::install_modal_keybindings(cx, self.modal_keys);
         spaceterm_ui::install_text_input_keybindings(cx, self.text_keys);
         cx.bind_keys(self.bindings.clone());

@@ -28,9 +28,10 @@
 //! default state, typed identity, and debug identity remain independent. The installed desktop
 //! policy selects locale direction, physical action placement, focus entry, layout axis, and
 //! deadline limits. Every Operating-System Window modal root consumes that installed direction;
-//! individual modal call sites do not select it. The application separately selects platform key
-//! equivalents through [`ModalKeybindingProfile`] and owns and explicitly installs the immutable
-//! policy and aggregate [`ModalTheme`].
+//! individual modal call sites do not select it. The application explicitly installs portable
+//! modal bindings and separately selects platform key equivalents through
+//! [`ModalKeybindingProfile`]. It also owns and explicitly installs the immutable policy and
+//! aggregate [`ModalTheme`].
 //!
 //! Dialog action callbacks run after the private reducer releases its GPUI entity update. A
 //! [`DialogCloseDecision::Pending`] result disables duplicate primary completion and gives the
@@ -135,7 +136,10 @@ pub use progress_dialog::{
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogOutcome,
     ProgressDialogUpdate, ProgressState, ProgressValueError,
 };
-pub use render::{ModalKeybindingProfile, ModalLayer, install_modal_keybindings};
+pub use render::{
+    ModalKeybindingProfile, ModalLayer, install_modal_keybindings,
+    install_portable_modal_keybindings,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ModalParentToken {
@@ -161,9 +165,14 @@ pub(crate) fn focus_allows_transient_resume(window: &gpui::Window, cx: &gpui::Ap
     core::focus_allows_transient_resume(window, cx)
 }
 
+#[cfg(test)]
 pub(super) fn init(cx: &mut gpui::App) {
     core::init(cx);
     render::init(cx);
+}
+
+pub(super) fn init_core(cx: &mut gpui::App) {
+    core::init(cx);
 }
 
 #[derive(Clone, Copy)]
