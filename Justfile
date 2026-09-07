@@ -3,11 +3,11 @@ disk_image := "dist/SpaceTerm.dmg"
 packager_version := "0.11.8"
 minimum_xcode_major := "26"
 
-# List the available project commands.
+# List project commands.
 default:
     @just --list
 
-# Check that the development and packaging tools are available.
+# Verify development and packaging tools.
 doctor:
     @cargo --version
     @cargo clippy --version
@@ -24,7 +24,7 @@ doctor:
     @xcrun --find iconutil
     @xcrun --find tic
 
-# Install the pinned macOS application and DMG packager.
+# Install the pinned macOS packager.
 install-packager:
     cargo install cargo-packager --version "{{ packager_version }}" --locked
 
@@ -36,11 +36,11 @@ fetch:
 run:
     cargo run --locked
 
-# Compile all targets and features without running tests.
+# Check every target and feature.
 check:
     cargo check --workspace --all-targets --all-features --locked
 
-# Compile shared targets without enabling native Adapter test suites.
+# Check shared targets without native features.
 portable-check:
     cargo check --workspace --all-targets --no-default-features --locked
 
@@ -49,50 +49,50 @@ fmt:
     cargo fmt --all
     rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs
 
-# Check Rust formatting without changing files.
+# Check workspace Rust formatting.
 portable-fmt-check:
     cargo fmt --all -- --check
 
-# Check formatting for isolated macOS Adapter suite sources mounted with include/path attributes.
+# Check isolated macOS Adapter formatting.
 macos-fmt-check:
     rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs
 
-# Check formatting for every Rust source set.
+# Check all Rust formatting.
 fmt-check: portable-fmt-check macos-fmt-check
 
-# Run the complete test suite.
+# Run all tests with every feature.
 test:
     cargo test --workspace --all-targets --all-features --locked
 
-# Run shared tests, the Conformance Corpus, and structural architecture tests only.
+# Run shared tests without native features.
 portable-test:
     cargo test --workspace --all-targets --no-default-features --locked
 
-# Run tests whose names contain the supplied filter.
+# Run tests matching a filter.
 test-one filter:
     cargo test --workspace --all-targets --all-features --locked "{{ filter }}"
 
-# Run the conventional terminal capability and protocol conformance corpus.
+# Run terminal protocol conformance tests.
 conformance:
     cargo test --all-targets --no-default-features --locked "terminal::conformance"
 
-# Run isolated native Adapter suites and existing macOS capability integration tests.
+# Run native macOS Adapter tests.
 macos-adapter-tests:
     cargo test --all-targets --features macos-native-tests --locked "macos"
 
-# Run Clippy with warnings treated as errors.
+# Lint every target and feature.
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-# Run Clippy without enabling native Adapter test suites.
+# Lint shared targets without native features.
 portable-clippy:
     cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
 
-# Run Clippy across the native Adapter source and test suites.
+# Lint with native features.
 macos-clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-# Validate the retained macOS scripts and package metadata.
+# Check macOS scripts and package metadata.
 scripts-check:
     bash -n scripts/package-macos.sh scripts/verify-macos-package.sh \
         scripts/kitty-graphics-smoke.sh
@@ -100,44 +100,49 @@ scripts-check:
         scripts/kitty-graphics-smoke.sh
     plutil -lint packaging/macos/Info.plist
 
-# Check patches for whitespace errors.
+# Check the diff for whitespace errors.
 diff-check:
     git diff --check
 
-# Validate portable ownership without invoking native test or tooling prerequisites.
+# Run checks without native tooling.
 portable-validate: portable-fmt-check portable-check portable-test portable-clippy diff-check
 
-# Validate macOS Adapter suites, native linting, retained scripts, and packaging contracts.
+# Run macOS-specific checks.
 macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check
 
-# Run every portable and macOS validation required before committing.
+# Run the full pre-push or handoff gate.
 validate: portable-validate macos-validate
 
-# Build the optimized native executable.
+# Build the optimized executable.
 release:
     cargo build --release --locked
 
-# Build and verify native SpaceTerm.app and SpaceTerm.dmg artifacts.
+# Build and verify the macOS app and disk image.
 package build_number="1":
     ./scripts/package-macos.sh --build-number "{{ build_number }}"
 
-# Build and verify universal Apple Silicon and Intel artifacts.
+# Build, verify, and install the macOS app.
+install-macos: package
+    rm -rf -- "/Applications/SpaceTerm.app"
+    /usr/bin/ditto "{{ app_bundle }}" "/Applications/SpaceTerm.app"
+
+# Build universal Apple Silicon and Intel artifacts.
 package-universal build_number="1":
     ./scripts/package-macos.sh --universal --build-number "{{ build_number }}"
 
-# Verify existing app and DMG artifacts without rebuilding them.
+# Verify existing macOS artifacts.
 verify-package:
     ./scripts/verify-macos-package.sh
 
-# Launch the packaged application as a new process.
+# Open the packaged application.
 open-app:
     open -n "{{ app_bundle }}"
 
-# Open the installer disk image in Finder.
+# Open the installer disk image.
 open-dmg:
     open "{{ disk_image }}"
 
-# Show metadata, architecture, signature, and artifact sizes.
+# Show package metadata, architectures, signature, and sizes.
 package-info:
     @plutil -p "{{ app_bundle }}/Contents/Info.plist"
     @lipo -archs "{{ app_bundle }}/Contents/MacOS/SpaceTerm"
