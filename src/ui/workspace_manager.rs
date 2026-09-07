@@ -3575,15 +3575,7 @@ impl WorkspaceManager {
             .gap(px(10.0))
             .block_mouse_except_scroll()
             .when(active, |row| {
-                row.bg(gpui_color(ACTIVE_THEME.element_selected)).child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(2.0))
-                        .bg(gpui_color(ACTIVE_THEME.border_selected)),
-                )
+                row.bg(gpui_color(ACTIVE_THEME.element_selected))
             })
             .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
             .on_click(move |_, window, cx| {
