@@ -239,7 +239,12 @@ mod tests {
     fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
         let actual = cx.update(|cx| {
             crate::ui::init(cx).unwrap();
-            crate::app::init(cx);
+            crate::app::init(
+                cx,
+                std::rc::Rc::new(
+                    crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+                ),
+            );
             cx.key_bindings()
                 .borrow()
                 .bindings()

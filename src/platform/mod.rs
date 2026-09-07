@@ -1,5 +1,6 @@
 pub(crate) mod app_paths;
 pub(crate) mod application_activity;
+pub(crate) mod application_menu;
 pub(crate) mod control_socket;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
@@ -24,6 +25,11 @@ pub(crate) mod macos_attention;
 mod macos_application;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_application_menu;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_application_menu;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_control_socket;
