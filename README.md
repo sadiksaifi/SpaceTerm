@@ -1,89 +1,72 @@
 # SpaceTerm
 
-A native macOS terminal built with Rust, GPUI, `libghostty-vt`, and a macOS PTY.
+A native desktop terminal multiplexer currently built for macOS.
 
-## Requirements
+> [!WARNING]
+> SpaceTerm is under active development and has not reached its first release. Build it from source
+> to try it today.
 
-- macOS
-- Rust
-- Xcode 26 or newer
-- Zig 0.15.2
-- Just
-- ShellCheck
-- `cargo-packager` 0.11.8
+SpaceTerm brings terminal multiplexing into a native, keyboard-first desktop application.
+Workspaces organize local and remote projects, Tabs separate tasks, and split Pane Layouts keep the
+shells you need visible together.
 
-Install the Homebrew Zig build required by `libghostty-vt`:
+## Highlights
 
-```sh
-brew install just shellcheck zig@0.15
-brew link --force zig@0.15
+- **Workspaces** for scratch shells, local projects, and remote projects
+- **Tabs and Panes** with recursive splits, focus, resize, and zoom
+- **Remote terminals** through your existing OpenSSH configuration
+- **Keyboard-first navigation** through the Command Palette and Workspace Picker
+- **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
+
+## Workspace hierarchy
+
+```mermaid
+flowchart TB
+    SpaceTerm["SpaceTerm"]
+
+    SpaceTerm --> W1["Workspace 1"]
+    SpaceTerm --> W2["Workspace 2"]
+    SpaceTerm --> W3["Workspace 3"]
+
+    W1 --> W1T1["Tab 1"]
+    W1 --> W1T2["Tab 2"]
+    W2 --> W2T1["Tab 1"]
+    W2 --> W2T2["Tab 2"]
+    W3 --> W3T1["Tab 1"]
+    W3 --> W3T2["Tab 2"]
+
+    W1T1 --> W1T1P1["Pane"]
+    W1T1 --> W1T1P2["Pane"]
+    W1T2 --> W1T2P1["Pane"]
+    W2T1 --> W2T1P1["Pane"]
+    W2T2 --> W2T2P1["Pane"]
+    W2T2 --> W2T2P2["Pane"]
+    W3T1 --> W3T1P1["Pane"]
+    W3T1 --> W3T1P2["Pane"]
+    W3T2 --> W3T2P1["Pane"]
 ```
 
-Install the pinned Rust packaging tool:
+SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
+one or more Panes through its Pane Layout.
+
+## Built with
+
+Rust powers the application, GPUI provides the native GPU-rendered interface, and `libghostty-vt`
+provides terminal emulation. Remote Workspaces use the system OpenSSH client.
+
+## Try SpaceTerm
+
+You need macOS, a Rust toolchain, and [`just`](https://github.com/casey/just).
 
 ```sh
-just install-packager
-```
+git clone https://github.com/sadiksaifi/SpaceTerm.git
+cd SpaceTerm
 
-Run `just doctor` to verify the Rust, Xcode, packaging, and native build tools.
-
-Run `just` to list the common development, validation, and packaging commands.
-
-## Run
-
-```sh
+# Run from source
 just run
+
+# Build, verify, and install to /Applications
+just install-macos
 ```
 
-## Documentation
-
-- [Remote Project Workspaces](docs/REMOTE_PROJECT_WORKSPACES.md) covers Remote over SSH setup,
-  authentication, lifecycle, reconnect, security, and troubleshooting.
-
-## Package for macOS
-
-Create a release application bundle and installer disk image:
-
-```sh
-just package
-```
-
-Packaging uses pinned `cargo-packager` for application-bundle and DMG construction. Xcode compiles
-the tracked `assets/macos/SpaceTerm.icon` into the layered icon catalog and legacy macOS fallback.
-
-Pass a build number when producing another build of the same Cargo version, for example `just package 2`.
-
-The native-architecture artifacts are written to:
-
-- `dist/SpaceTerm.app`
-- `dist/SpaceTerm.dmg`
-
-The DMG contains `SpaceTerm.app` and an Applications shortcut. To build a universal Apple Silicon and Intel package, install both Rust targets and run the universal recipe:
-
-```sh
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-just package-universal
-```
-
-Verify existing artifacts without rebuilding them:
-
-```sh
-just verify-package
-```
-
-Packaging uses an ad-hoc signature, so it does not require an Apple Developer Program membership.
-It works for local development and testing, but it cannot provide Developer ID trust or Apple
-notarization. A downloaded copy may require the explicit **Open Anyway** action in **System
-Settings → Privacy & Security** before its first launch.
-
-## Validate
-
-```sh
-just portable-validate
-just macos-validate
-just validate
-```
-
-The portable lane verifies shared policy without native tooling or evidence. The macOS lane verifies
-native Adapter suites, native linting, scripts, and performance tooling. The aggregate command runs
-both.
+Run `just` to see the complete command list.

@@ -1,49 +1,36 @@
 # SpaceTerm
 
-A native macOS terminal implemented as a Rust application with one internal UI library.
+SpaceTerm is a native desktop terminal multiplexer.
 
-## Required Context
+## Domain and decisions
 
-- Read `CONTEXT.md` completely before changing application code, UI, platform integration,
-  packaging, or architecture. It is canonical for product intent, technology decisions, UI
-  constraints, and architectural principles.
-- Also read `docs/UBIQUITOUS_LANGUAGE.md` completely before changing domain behavior, hierarchy,
-  lifecycle, focus state, terminal ownership, or product-facing terminology.
-- When a design or domain decision changes, update its canonical document in the same change; do
-  not copy its definitions into this file.
+- Domain behavior and terminology: read [`CONTEXT.md`](CONTEXT.md) and use its canonical terms in
+  code, tests, issues, and documentation.
+- Architecture and remote-authentication changes: read the relevant records under
+  [`docs/adr/`](docs/adr/).
 
-## Commands
-
-- `just run` — primary development loop.
-- `just check` — compile every target and feature.
-- `just test` — run the complete test suite.
-- `just test-one <filter>` — run focused tests.
-- `just portable-validate` — validate shared policy without native tooling or evidence.
-- `just macos-validate` — validate macOS Adapter suites and native tooling.
-- `just validate` — run all required pre-commit validation.
-- `just package` — build and verify native macOS artifacts.
+Code and tests own implementation detail and executable invariants. ADRs own the rationale for
+important durable decisions.
 
 ## Architecture
 
-- Shape: one macOS-only Rust application crate plus `crates/spaceterm-ui` for reusable controls.
-- Entry points: `src/main.rs` and `src/app.rs`.
-- Seams: `src/domain`, `src/ui`, `src/terminal`, `src/platform`, and `crates/spaceterm-ui`.
-- Packaging: `Justfile`, `scripts/`, `packaging/macos`, and `assets/macos`.
+- Design deep Modules with narrow Interfaces that concentrate behavior, invariants, and cleanup
+  with their owner.
+- Keep product policy and lifecycle portable. Connect frameworks, external systems, and
+  Operating-System capabilities at narrow Seams.
+- Select replaceable capabilities through constructor injection and keep ownership explicit.
+- Expose intentional operations and typed recoverable failures.
+- Create structural boundaries when they provide durable replaceability, Leverage, or Locality.
 
-## Working Rules
+## Safety
 
-- Use the `Justfile` commands instead of reproducing validation or packaging pipelines.
-- Treat `Cargo.lock` as Cargo-generated; do not edit generated `target/` or `dist/` contents.
-- Add focused tests for changed behavior and keep unrelated user changes intact.
+- Keep errors and Local Diagnostics content-free. Use typed classifications and bounded metadata;
+  exclude terminal and clipboard contents, environment values, paths, credentials, and raw native
+  errors. SpaceTerm sends no automatic telemetry or crash reports.
+- Keep local filesystem authority explicit and retained. Remote values remain remote and provide no
+  authority for local file actions.
 
-## Verification
+## Work
 
-- Run `just validate` before handoff.
-- During iteration, run `just test-one <filter>` plus the narrowest relevant checks.
-
-## Sharp Edges
-
-- Run `just doctor` before packaging when local tool availability is uncertain.
-- Product terminology intentionally differs from tmux, browser, and GPUI terminology; follow the
-  ubiquitous language rather than visual analogy.
-- A user-installed `/Applications/SpaceTerm.app` is always present and may be an older build. Do not confuse it with test builds.
+- Use the `Justfile` as the command authority.
+- Debug the source build; `/Applications/SpaceTerm.app` may be stale.
