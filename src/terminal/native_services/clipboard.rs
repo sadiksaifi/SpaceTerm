@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::App;
 
-use super::{NativeInsertion, NativeInsertionError};
+use super::{PasteIntakeError, PastePayload};
 use crate::terminal::{SelectionCopy, TerminalLocalFileCapabilities};
 
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -92,7 +92,7 @@ impl SelectionPublication {
     }
 }
 
-impl NativeInsertion {
+impl PastePayload {
     /// Focus and local authority are checked before consulting either clipboard source.
     pub(crate) fn clipboard(
         policy: super::file_insertion::FileInsertionPolicy,
@@ -100,16 +100,19 @@ impl NativeInsertion {
         text: impl FnOnce() -> Option<String>,
         focused: bool,
         local: TerminalLocalFileCapabilities,
-    ) -> Result<Option<Self>, NativeInsertionError> {
+    ) -> Result<Option<Self>, PasteIntakeError> {
         if !focused {
-            return Err(NativeInsertionError::TerminalUnfocused);
+            return Err(PasteIntakeError::TerminalUnfocused);
         }
-        if local.are_enabled() {
-            let paths = files.read_files().map_err(|_| {
-                NativeInsertionError::InvalidFiles("clipboard files are unavailable")
-            })?;
+        if let Some(access) = super::LocalFileAccess::authorize(local) {
+            let paths = access
+                .clipboard(files)
+                .map_err(|_| PasteIntakeError::InvalidFiles("clipboard files are unavailable"))?;
             if !paths.is_empty() {
-                return Self::dropped_files(policy, &paths, focused, local).map(Some);
+                return access
+                    .insertion(policy, &paths)
+                    .map(|text| Some(Self { text }))
+                    .map_err(PasteIntakeError::InvalidFiles);
             }
         }
         text()
@@ -153,7 +156,7 @@ mod tests {
             Some("fixture".to_owned())
         };
         assert!(
-            NativeInsertion::clipboard(
+            PastePayload::clipboard(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &files,
                 text,
@@ -163,7 +166,7 @@ mod tests {
             .is_err()
         );
         assert_eq!((files.reads.get(), text_reads.get()), (0, 0));
-        let remote = NativeInsertion::clipboard(
+        let remote = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             &files,
             text,
@@ -174,7 +177,7 @@ mod tests {
         .unwrap();
         assert!(remote.text() == "fixture");
         assert_eq!((files.reads.get(), text_reads.get()), (0, 1));
-        let local = NativeInsertion::clipboard(
+        let local = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             &files,
             text,
@@ -194,7 +197,7 @@ mod tests {
             paths: Vec::new(),
             fail: true,
         };
-        let result = NativeInsertion::clipboard(
+        let result = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             &files,
             || panic!("unexpected clipboard read"),

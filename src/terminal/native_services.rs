@@ -1,6 +1,9 @@
 //! Native Terminal Services owns portable clipboard, insertion, contextual-action,
 //! preview and Services request policy. Application composition injects each
 //! irreducible capability independently; this value is wiring, not a platform API.
+pub(crate) use paste::{PasteIntakeError, PastePayload};
+mod local_authority;
+use local_authority::LocalFileAccess;
 pub(crate) mod clipboard;
 pub(crate) mod file_insertion;
 pub(crate) mod file_preview;
@@ -24,7 +27,6 @@ use std::path::PathBuf;
 
 use crate::domain::{PaneId, TabId, WorkspaceId};
 
-use self::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
 use super::metadata::TerminalLocalFileCapabilities;
 #[cfg(test)]
@@ -163,13 +165,11 @@ impl NativeContextActions {
         selection_present: bool,
         link: Option<&HyperlinkTarget>,
     ) -> Self {
-        let link = link.filter(|link| {
-            link.kind == HyperlinkKind::Url || local_file_capabilities.are_enabled()
-        });
+        let link = link.filter(|link| link.is_available(local_file_capabilities));
         Self {
             copy: selection_present,
             open_link: link.is_some(),
-            file_preview: local_file_capabilities.are_enabled()
+            file_preview: LocalFileAccess::authorize(local_file_capabilities).is_some()
                 && link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
@@ -188,68 +188,11 @@ impl NativeContextActions {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct NativeInsertion {
-    text: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeInsertionError {
-    TerminalUnfocused,
-    InvalidFiles(&'static str),
-}
-
-impl NativeInsertion {
-    pub(crate) fn service_text(
-        text: impl Into<String>,
-        terminal_input_focused: bool,
-    ) -> Result<Self, NativeInsertionError> {
-        if !terminal_input_focused {
-            return Err(NativeInsertionError::TerminalUnfocused);
-        }
-        Ok(Self { text: text.into() })
-    }
-
-    pub(crate) fn dropped_files(
-        policy: file_insertion::FileInsertionPolicy,
-        paths: &[PathBuf],
-        terminal_input_focused: bool,
-        local_file_capabilities: TerminalLocalFileCapabilities,
-    ) -> Result<Self, NativeInsertionError> {
-        if !terminal_input_focused {
-            return Err(NativeInsertionError::TerminalUnfocused);
-        }
-        Self::prepare_dropped_files(policy, paths, local_file_capabilities)
-            .map_err(NativeInsertionError::InvalidFiles)
-    }
-
-    pub(crate) fn prepare_dropped_files(
-        policy: file_insertion::FileInsertionPolicy,
-        paths: &[PathBuf],
-        local_file_capabilities: TerminalLocalFileCapabilities,
-    ) -> Result<Self, &'static str> {
-        if !local_file_capabilities.are_enabled() {
-            return Err("local file insertion is disabled for this Terminal Session");
-        }
-        prepare_file_insertion(policy, paths).map(|insertion| Self {
-            text: insertion.text,
-        })
-    }
-
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub(crate) fn into_text(self) -> String {
-        self.text
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 
 pub(crate) struct FilePreviewTarget {
     link: HyperlinkTarget,
-    local_file_capabilities: TerminalLocalFileCapabilities,
+    local_access: LocalFileAccess,
 }
 
 impl FilePreviewTarget {
@@ -257,22 +200,16 @@ impl FilePreviewTarget {
         link: &HyperlinkTarget,
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<Self> {
-        link.revalidated_local_path(local_file_capabilities)?;
+        let local_access = LocalFileAccess::authorize(local_file_capabilities)?;
+        local_access.revalidate(link)?;
         Some(Self {
             link: link.clone(),
-            local_file_capabilities,
+            local_access,
         })
     }
 
     pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
-        self.link
-            .revalidated_local_path(self.local_file_capabilities)
-    }
-}
-
-impl std::fmt::Debug for NativeInsertion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeInsertion").finish_non_exhaustive()
+        self.local_access.revalidate(&self.link)
     }
 }
 
@@ -318,8 +255,8 @@ mod tests {
             html: Some("<pre>fixture</pre>".into()),
         };
         assert_eq!(format!("{selection:?}"), "SelectionCopy { .. }");
-        let insertion = NativeInsertion::service_text("fixture", true).unwrap();
-        assert_eq!(format!("{insertion:?}"), "NativeInsertion { .. }");
+        let insertion = PastePayload::service_text("fixture", true).unwrap();
+        assert_eq!(format!("{insertion:?}"), "PastePayload { .. }");
         let link = HyperlinkTarget::url("https://example.test/fixture").unwrap();
         assert_eq!(format!("{link:?}"), "HyperlinkTarget { kind: Url, .. }");
     }
@@ -352,13 +289,13 @@ mod tests {
     #[test]
     fn service_text_and_file_drops_produce_only_sanitized_paste_candidates() {
         assert_eq!(
-            NativeInsertion::service_text("printf 'ok'\n", true)
+            PastePayload::service_text("printf 'ok'\n", true)
                 .unwrap()
                 .text(),
             "printf 'ok'\n"
         );
         assert_eq!(
-            NativeInsertion::dropped_files(
+            PastePayload::dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[PathBuf::from("/tmp/a b")],
                 true,
@@ -369,11 +306,11 @@ mod tests {
             "'/tmp/a b'"
         );
         assert_eq!(
-            NativeInsertion::service_text("ignored", false),
-            Err(NativeInsertionError::TerminalUnfocused)
+            PastePayload::service_text("ignored", false),
+            Err(PasteIntakeError::TerminalUnfocused)
         );
         assert!(
-            NativeInsertion::dropped_files(
+            PastePayload::dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[PathBuf::from("relative")],
                 true,
@@ -475,9 +412,9 @@ mod tests {
             }
         );
         assert!(NativeContextActions::from_presence(REMOTE_FILES, false, Some(&web)).open_link);
-        assert!(NativeInsertion::service_text("ordinary text", true).is_ok());
+        assert!(PastePayload::service_text("ordinary text", true).is_ok());
         assert!(
-            NativeInsertion::dropped_files(
+            PastePayload::dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[file],
                 true,

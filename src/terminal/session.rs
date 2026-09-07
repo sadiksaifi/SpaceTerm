@@ -1,4 +1,13 @@
+use super::native_services::PastePayload;
+mod schedules;
+use schedules::*;
+mod launch;
+use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
+pub(crate) use launch::{
+    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
+    TerminalLaunchPlan,
+};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::Write;
@@ -31,8 +40,10 @@ use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::identity;
 #[cfg(test)]
+use crate::terminal::key::InputModifiers;
+#[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
-use crate::terminal::key::{InputModifiers, KeyInput, PhysicalKey};
+use crate::terminal::key::{KeyInput, PhysicalKey};
 use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
 use crate::terminal::osc52::{
     MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
@@ -54,82 +65,6 @@ const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct SurfacePosition {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PointerButton {
-    Left,
-    Middle,
-    Right,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PointerPhase {
-    Press,
-    Motion,
-    Release,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShiftSelectionPolicy {
-    OverrideApplicationMouse,
-    ReportToApplication,
-}
-
-impl ShiftSelectionPolicy {
-    pub(crate) const fn from_selection_override(enabled: bool) -> Self {
-        if enabled {
-            Self::OverrideApplicationMouse
-        } else {
-            Self::ReportToApplication
-        }
-    }
-}
-
-impl Default for ShiftSelectionPolicy {
-    fn default() -> Self {
-        Self::from_selection_override(true)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PointerInput {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) phase: PointerPhase,
-    pub(crate) button: Option<PointerButton>,
-    pub(crate) position: SurfacePosition,
-    pub(crate) modifiers: InputModifiers,
-    pub(crate) shift_selection: ShiftSelectionPolicy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct WheelInput {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) horizontal_steps: i32,
-    pub(crate) vertical_steps: i32,
-    pub(crate) phase: WheelPhase,
-    pub(crate) position: SurfacePosition,
-    pub(crate) modifiers: InputModifiers,
-    pub(crate) shift_selection: ShiftSelectionPolicy,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum WheelPhase {
-    GestureStarted,
-    #[default]
-    GestureChanged,
-    GestureEnded,
-    GestureCancelled,
-    MomentumStarted,
-    MomentumChanged,
-    MomentumEnded,
-    MomentumCancelled,
-}
 
 fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
     let grid = geometry.grid();
@@ -341,7 +276,7 @@ pub(crate) trait TerminalSessionHandle {
     fn end_find(&self, generation: FindQueryGeneration);
     fn request_paste(
         &self,
-        text: String,
+        text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>>;
     fn resolve_paste(
         &self,
@@ -388,189 +323,6 @@ pub(crate) trait TerminalSessionFactory {
 
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// A local Terminal Session launch bound to one validated local Workspace Directory.
-///
-/// Its directory is local filesystem authority and is the only launch directory passed to local
-/// process `chdir` and identity validation.
-pub(crate) struct LocalTerminalLaunchPlan {
-    working_directory: crate::domain::ValidatedWorkspaceDirectory,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-/// A Remote Terminal Session launch bound to one prepared OpenSSH Pane channel.
-///
-/// `local_home` is used only as the local SSH process working directory. Destination and Remote
-/// Workspace Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
-/// or local filesystem validation. The prepared channel is single-use and sensitive Debug output
-/// is deliberately redacted.
-pub(crate) struct RemoteTerminalLaunchPlan {
-    local_home: crate::domain::ValidatedWorkspaceDirectory,
-    metadata_context: RemoteTerminalMetadataContext,
-    fallback_title: String,
-    pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
-}
-
-impl fmt::Debug for RemoteTerminalLaunchPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RemoteTerminalLaunchPlan")
-            .finish_non_exhaustive()
-    }
-}
-
-impl RemoteTerminalLaunchPlan {
-    pub(crate) const fn new(
-        local_home: crate::domain::ValidatedWorkspaceDirectory,
-        destination: crate::domain::SshDestination,
-        remote_directory: crate::domain::RemoteWorkspaceDirectory,
-        fallback_title: String,
-        pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
-    ) -> Self {
-        Self {
-            local_home,
-            metadata_context: RemoteTerminalMetadataContext::new(destination, remote_directory),
-            fallback_title,
-            pane_channel,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
-        &self.local_home
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn destination(&self) -> &crate::domain::SshDestination {
-        self.metadata_context.destination()
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteWorkspaceDirectory {
-        self.metadata_context.initial_directory()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fallback_title(&self) -> &str {
-        &self.fallback_title
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
-        &self.metadata_context
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_pane_channel(
-        &self,
-    ) -> Result<crate::ssh::command::SshCommandSpec, crate::ssh::command::PreparedSshPaneChannelError>
-    {
-        self.pane_channel.take()
-    }
-}
-
-impl LocalTerminalLaunchPlan {
-    pub(crate) const fn new(working_directory: crate::domain::ValidatedWorkspaceDirectory) -> Self {
-        Self { working_directory }
-    }
-
-    pub(crate) const fn working_directory(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
-        &self.working_directory
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// The exhaustive Local or Remote launch authority consumed by a Terminal Session factory.
-///
-/// Matching this enum is the boundary at which local path capabilities and remote channel
-/// ownership diverge; callers must not reconstruct one variant from the other's directory data.
-pub(crate) enum TerminalLaunchPlan {
-    Local(LocalTerminalLaunchPlan),
-    Remote(Box<RemoteTerminalLaunchPlan>),
-}
-
-#[derive(Clone)]
-pub(crate) struct NativeTerminalSessionFactory {
-    local_filesystem: LocalFilesystemAuthority,
-    local_hostname: Option<String>,
-    native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
-    launch_planner: ShellLaunchPlanner,
-    osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-}
-
-impl NativeTerminalSessionFactory {
-    pub(crate) fn new(
-        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
-        launch_planner: ShellLaunchPlanner,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-        local_filesystem: LocalFilesystemAuthority,
-        local_hostname: Option<String>,
-    ) -> Self {
-        Self {
-            local_filesystem,
-            local_hostname,
-            native_pty_adapter_factory,
-            launch_planner,
-            osc52_clipboard_factory,
-        }
-    }
-}
-
-impl TerminalSessionFactory for NativeTerminalSessionFactory {
-    fn start(
-        &self,
-        geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
-    ) -> Result<StartedTerminalSession, SessionError> {
-        self.start_observed(geometry, launch_plan, None)
-    }
-
-    fn start_observed(
-        &self,
-        geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
-        observation: Option<crate::observation::SessionObservationLease>,
-    ) -> Result<StartedTerminalSession, SessionError> {
-        let observation =
-            observation.and_then(crate::observation::SessionObservationLease::consume);
-
-        let (session, events, accessibility) = match launch_plan {
-            TerminalLaunchPlan::Local(local) => TerminalSession::start(
-                Arc::clone(&self.native_pty_adapter_factory),
-                self.launch_planner.clone(),
-                geometry,
-                local.working_directory().path(),
-                self.local_hostname.as_deref(),
-                observation,
-                Arc::clone(&self.osc52_clipboard_factory),
-                self.local_filesystem.clone(),
-            )?,
-            TerminalLaunchPlan::Remote(remote) => {
-                let remote = *remote;
-                let command = remote.pane_channel.take()?;
-                TerminalSession::start_remote(
-                    Arc::clone(&self.native_pty_adapter_factory),
-                    geometry,
-                    remote,
-                    command,
-                    observation,
-                    Arc::clone(&self.osc52_clipboard_factory),
-                    self.local_filesystem.clone(),
-                )?
-            }
-        };
-        Ok(StartedTerminalSession {
-            handle: Box::new(session),
-            events,
-            accessibility,
-        })
-    }
-
-    fn fallback_title(&self) -> String {
-        self.launch_planner.fallback_title()
     }
 }
 
@@ -658,301 +410,6 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalSession {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "independent session dependencies are injected at construction"
-    )]
-    pub(crate) fn start(
-        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
-        launch_planner: ShellLaunchPlanner,
-        geometry: TerminalGeometry,
-        working_directory: &Path,
-        local_hostname: Option<&str>,
-        runtime_observation: Option<RuntimeObservation>,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-        local_filesystem: LocalFilesystemAuthority,
-    ) -> Result<StartedSession, SessionError> {
-        let initial_directory = working_directory.to_string_lossy();
-        let metadata_context = TerminalMetadataContext::local(
-            local_filesystem.path_semantics(),
-            &initial_directory,
-            local_hostname,
-        );
-        let launch_directory = working_directory.to_owned();
-        Self::start_deferred_with_context(
-            geometry,
-            metadata_context,
-            launch_planner.fallback_title(),
-            runtime_observation,
-            osc52_clipboard_factory,
-            local_filesystem,
-            move |size, output, close_handle| {
-                let launch = launch_planner.local(&launch_directory)?;
-                let terminal_name = launch.terminal_name();
-                let owner = NativePtyOwner::start(
-                    native_pty_adapter_factory.as_ref(),
-                    launch,
-                    size,
-                    output,
-                    close_handle,
-                )?;
-                Ok((owner, terminal_name))
-            },
-        )
-    }
-
-    fn start_remote(
-        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
-        geometry: TerminalGeometry,
-        remote: RemoteTerminalLaunchPlan,
-        command: crate::ssh::command::SshCommandSpec,
-        runtime_observation: Option<RuntimeObservation>,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-        local_filesystem: LocalFilesystemAuthority,
-    ) -> Result<StartedSession, SessionError> {
-        let local_home = remote.local_home.path().to_owned();
-        Self::start_deferred_with_context(
-            geometry,
-            TerminalMetadataContext::Remote(remote.metadata_context),
-            remote.fallback_title,
-            runtime_observation,
-            osc52_clipboard_factory,
-            local_filesystem,
-            move |size, output, close_handle| {
-                let launch = PreparedShellLaunch::remote(&local_home, command)?;
-                let terminal_name = launch.terminal_name();
-                let owner = NativePtyOwner::start(
-                    native_pty_adapter_factory.as_ref(),
-                    launch,
-                    size,
-                    output,
-                    close_handle,
-                )?;
-                Ok((owner, terminal_name))
-            },
-        )
-    }
-
-    #[cfg(test)]
-    fn start_deferred_with(
-        geometry: TerminalGeometry,
-        working_directory: &Path,
-        runtime_observation: Option<RuntimeObservation>,
-        start_native_pty: impl FnOnce(
-            NativePtySize,
-            Arc<dyn NativePtyOutputSink>,
-            &NativePtyCloseHandle,
-        ) -> Result<NativePtyOwner, NativePtyStartupFailure>
-        + Send
-        + 'static,
-    ) -> Result<StartedSession, SessionError> {
-        let initial_directory = working_directory.to_string_lossy();
-        let metadata_context = TerminalMetadataContext::local(
-            crate::local_path::LocalPathSemantics::Posix,
-            &initial_directory,
-            Some("fixture.test"),
-        );
-        Self::start_deferred_with_context(
-            geometry,
-            metadata_context,
-            test_launch_planner().fallback_title(),
-            runtime_observation,
-            Arc::new(UnavailableOsc52ClipboardFactory),
-            LocalFilesystemAuthority::testing(),
-            move |size, output, close_handle| {
-                start_native_pty(size, output, close_handle)
-                    .map(|owner| (owner, identity::TERM_FALLBACK))
-            },
-        )
-    }
-
-    fn start_deferred_with_context(
-        geometry: TerminalGeometry,
-        metadata_context: TerminalMetadataContext,
-        fallback_title: String,
-        runtime_observation: Option<RuntimeObservation>,
-        osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
-        local_filesystem: LocalFilesystemAuthority,
-        start_native_pty: impl FnOnce(
-            NativePtySize,
-            Arc<dyn NativePtyOutputSink>,
-            &NativePtyCloseHandle,
-        )
-            -> Result<(NativePtyOwner, &'static str), NativePtyStartupFailure>
-        + Send
-        + 'static,
-    ) -> Result<StartedSession, SessionError> {
-        let (command_tx, command_rx) = mpsc::channel();
-        let reader_transport = ReaderTransport::new(command_tx.clone());
-        let resizes = ResizeMailbox::default();
-        let worker_resizes = resizes.clone();
-        let find_queries = FindQueryMailbox::default();
-        let worker_find_queries = find_queries.clone();
-        let (event_tx, event_rx) = async_channel::bounded(2);
-        let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
-        let native_pty_close = NativePtyCloseHandle::default();
-        let worker_native_pty_close = native_pty_close.clone();
-        let native_pty_output = reader_transport.output_sink();
-        let worker_events = event_tx.clone();
-        let worker_observation = runtime_observation.clone();
-
-        let worker = thread::Builder::new()
-            .name("spaceterm-terminal".to_owned())
-            .spawn(move || {
-                let (native_pty, terminal_name) = match start_native_pty(
-                    pty_size(geometry),
-                    native_pty_output,
-                    &worker_native_pty_close,
-                ) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        let stage = match error.stage() {
-                            NativePtyStartupStage::Adapter => SessionStartupStage::Pty,
-                            NativePtyStartupStage::Reader => SessionStartupStage::Reader,
-                            NativePtyStartupStage::ReaderThread => {
-                                SessionStartupStage::ReaderThread
-                            }
-                        };
-                        send_session_event(
-                            &worker_events,
-                            SessionEvent::Failed(SessionFailure::Startup {
-                                stage,
-                                message: error.to_string(),
-                            }),
-                            worker_observation.as_ref(),
-                        );
-                        return;
-                    }
-                };
-                TerminalWorker::run(
-                    native_pty,
-                    TerminalWorkerContext {
-                        initial_geometry: geometry,
-                        metadata_context,
-                        fallback_title,
-                        terminal_name,
-                        osc52_clipboard_factory,
-                        local_filesystem,
-                    },
-                    command_rx,
-                    reader_transport,
-                    TerminalWorkerMailboxes {
-                        resizes: worker_resizes,
-                        find_queries: worker_find_queries,
-                    },
-                    TerminalWorkerPublishers {
-                        events: event_tx,
-                        accessibility: accessibility_tx,
-                        runtime_observation: worker_observation.clone(),
-                    },
-                    StartupReporter::Events(worker_events, worker_observation),
-                );
-            })
-            .map_err(SessionError::SpawnWorker)?;
-
-        Ok((
-            Self {
-                commands: Some(command_tx),
-                worker: Some(worker),
-                native_pty_close: Some(native_pty_close),
-                resizes,
-                find_queries,
-                runtime_observation,
-            },
-            event_rx,
-            accessibility_rx,
-        ))
-    }
-
-    #[cfg(test)]
-    fn start_with(
-        geometry: TerminalGeometry,
-        working_directory: &Path,
-        start_native_pty: impl FnOnce(
-            NativePtySize,
-            Arc<dyn NativePtyOutputSink>,
-            &NativePtyCloseHandle,
-        ) -> Result<NativePtyOwner, NativePtyStartupFailure>,
-    ) -> Result<StartedSession, SessionError> {
-        let worker_directory = working_directory.to_owned();
-        let metadata_context = TerminalMetadataContext::local(
-            crate::local_path::LocalPathSemantics::Posix,
-            &worker_directory.to_string_lossy(),
-            Some("fixture.test"),
-        );
-        let terminal_name = identity::TERM_FALLBACK;
-        let (command_tx, command_rx) = mpsc::channel();
-        let reader_transport = ReaderTransport::new(command_tx.clone());
-        let native_pty_close = NativePtyCloseHandle::default();
-        let native_pty = start_native_pty(
-            pty_size(geometry),
-            reader_transport.output_sink(),
-            &native_pty_close,
-        )
-        .map_err(|error| SessionError::EmulatorStartup(error.to_string()))?;
-        // Two slots retain the latest screen and a final lifecycle event without
-        // allowing sustained PTY output to build an unbounded UI backlog.
-        let (event_tx, event_rx) = async_channel::bounded(2);
-        let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
-        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
-        let resizes = ResizeMailbox::default();
-        let worker_resizes = resizes.clone();
-        let find_queries = FindQueryMailbox::default();
-        let worker_find_queries = find_queries.clone();
-
-        let worker = thread::Builder::new()
-            .name("spaceterm-terminal".to_owned())
-            .spawn(move || {
-                TerminalWorker::run(
-                    native_pty,
-                    TerminalWorkerContext {
-                        initial_geometry: geometry,
-                        metadata_context,
-                        fallback_title: "Terminal".to_owned(),
-                        terminal_name,
-                        osc52_clipboard_factory: Arc::new(UnavailableOsc52ClipboardFactory),
-                        local_filesystem: LocalFilesystemAuthority::testing(),
-                    },
-                    command_rx,
-                    reader_transport,
-                    TerminalWorkerMailboxes {
-                        resizes: worker_resizes,
-                        find_queries: worker_find_queries,
-                    },
-                    TerminalWorkerPublishers {
-                        events: event_tx,
-                        accessibility: accessibility_tx,
-                        runtime_observation: None,
-                    },
-                    StartupReporter::Blocking(startup_tx),
-                )
-            })
-            .map_err(SessionError::SpawnWorker)?;
-
-        match startup_rx.recv() {
-            Ok(Ok(())) => Ok((
-                Self {
-                    commands: Some(command_tx),
-                    worker: Some(worker),
-                    native_pty_close: Some(native_pty_close),
-                    resizes,
-                    find_queries,
-                    runtime_observation: None,
-                },
-                event_rx,
-                accessibility_rx,
-            )),
-            Ok(Err(message)) => {
-                join_worker(worker);
-                Err(SessionError::EmulatorStartup(message))
-            }
-            Err(_) => {
-                join_worker(worker);
-                Err(SessionError::StartupChannelClosed)
-            }
-        }
-    }
-
     pub(crate) fn key(&self, input: KeyInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Key(input)).is_err()
@@ -1056,12 +513,12 @@ impl TerminalSession {
 
     pub(crate) fn request_paste(
         &self,
-        text: String,
+        text: impl Into<PastePayload>,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         let (reply, receiver) = async_channel::bounded(1);
         let sent = self.commands.as_ref().is_some_and(|commands| {
             commands
-                .send(Command::RequestPaste(text, reply.clone()))
+                .send(Command::RequestPaste(text.into(), reply.clone()))
                 .is_ok()
         });
         if !sent {
@@ -1208,7 +665,7 @@ impl TerminalSessionHandle for TerminalSession {
 
     fn request_paste(
         &self,
-        text: String,
+        text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         Self::request_paste(self, text)
     }
@@ -1313,7 +770,7 @@ enum Command {
     FindQueryChanged,
     NavigateFind(FindQueryGeneration, FindDirection),
     RequestPaste(
-        String,
+        PastePayload,
         async_channel::Sender<Result<PasteRequestOutcome, String>>,
     ),
     ResolvePaste(
@@ -1379,20 +836,16 @@ struct TerminalWorker {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
     pending_command: Option<Command>,
-    accessibility_continuation: AccessibilityContinuationSchedule,
     terminal_input_focused: bool,
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
-    selection_autoscroll: SelectionAutoscrollSchedule,
-    paste_confirmations: PasteConfirmationSchedule,
+    schedules: WorkerSchedules,
     osc52_filter: Osc52Filter,
     osc52_policy: Osc52AuthorizationPolicy,
     osc52_clipboard: Box<dyn Osc52Clipboard>,
-    osc52_authorization: Osc52AuthorizationSchedule,
     deferred_osc52_effects: VecDeque<Osc52Effect>,
     deferred_output_chunks: VecDeque<Vec<u8>>,
     deferred_reader_ready: bool,
-    hidden_input: HiddenInputSchedule,
     runtime_observation: Option<RuntimeObservation>,
 }
 
@@ -1414,108 +867,6 @@ struct TerminalWorkerPublishers {
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     runtime_observation: Option<RuntimeObservation>,
-}
-
-#[derive(Default)]
-struct AccessibilityContinuationSchedule {
-    pending: bool,
-    normal_commands: u8,
-}
-
-impl AccessibilityContinuationSchedule {
-    fn update(&mut self, more: bool) {
-        self.pending = more;
-        if !more {
-            self.normal_commands = 0;
-        }
-    }
-
-    fn note_normal_command(&mut self) {
-        if self.pending {
-            self.normal_commands = self.normal_commands.saturating_add(1);
-        }
-    }
-
-    fn must_continue(&self) -> bool {
-        self.pending && self.normal_commands >= ACCESSIBILITY_NORMAL_COMMAND_BURST
-    }
-
-    fn take(&mut self) -> bool {
-        if !self.pending {
-            return false;
-        }
-        self.pending = false;
-        self.normal_commands = 0;
-        true
-    }
-}
-
-struct HiddenInputSchedule {
-    active: bool,
-    deadline: Instant,
-}
-
-impl HiddenInputSchedule {
-    fn new(now: Instant) -> Self {
-        Self {
-            active: false,
-            deadline: now,
-        }
-    }
-
-    fn update(
-        &mut self,
-        now: Instant,
-        result: Result<bool, NativePtyOperationFailure>,
-    ) -> Option<bool> {
-        self.deadline = now + HIDDEN_INPUT_POLL_INTERVAL;
-        let active = match result {
-            Ok(active) => active,
-            Err(error) => {
-                eprintln!(
-                    "failed to inspect PTY hidden-input state; releasing secure input: {error}"
-                );
-                false
-            }
-        };
-        if self.active == active {
-            None
-        } else {
-            self.active = active;
-            Some(active)
-        }
-    }
-}
-
-#[derive(Default)]
-struct SelectionAutoscrollSchedule {
-    deadline: Option<Instant>,
-    generation: PresentationGeneration,
-}
-
-impl SelectionAutoscrollSchedule {
-    fn update(
-        &mut self,
-        now: Instant,
-        interval: Option<Duration>,
-        generation: PresentationGeneration,
-    ) {
-        self.deadline = interval.map(|interval| now + interval);
-        self.generation = generation;
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    fn take_due(&mut self, now: Instant) -> Option<PresentationGeneration> {
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.deadline = None;
-            Some(self.generation)
-        } else {
-            None
-        }
-    }
 }
 
 #[derive(Default)]
@@ -1690,20 +1041,16 @@ impl TerminalWorker {
             resizes,
             find_queries,
             pending_command: None,
-            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            selection_autoscroll: SelectionAutoscrollSchedule::default(),
-            paste_confirmations: PasteConfirmationSchedule::default(),
+            schedules: WorkerSchedules::new(Instant::now()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: osc52_clipboard_factory.create(),
-            osc52_authorization: Osc52AuthorizationSchedule::default(),
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            hidden_input: HiddenInputSchedule::new(Instant::now()),
             runtime_observation,
         };
 
@@ -1737,22 +1084,22 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
-        if self.accessibility_continuation.must_continue() {
+        if self.schedules.accessibility_continuation.must_continue() {
             return self.take_accessibility_continuation();
         }
         if let Some(command) = self.pending_command.take() {
             return Some(self.note_normal_command(command));
         }
-        if !self.osc52_authorization.is_pending()
+        if !self.schedules.osc52_authorization.is_pending()
             && (!self.deferred_osc52_effects.is_empty() || !self.deferred_output_chunks.is_empty())
         {
             return Some(self.note_normal_command(Command::ResumeOsc52Output));
         }
-        if !self.osc52_authorization.is_pending() && self.deferred_reader_ready {
+        if !self.schedules.osc52_authorization.is_pending() && self.deferred_reader_ready {
             self.deferred_reader_ready = false;
             return Some(self.note_normal_command(Command::ReaderReady));
         }
-        if self.accessibility_continuation.pending {
+        if self.schedules.accessibility_continuation.pending {
             return match self.commands.try_recv() {
                 Ok(command) => Some(self.note_normal_command(command)),
                 Err(mpsc::TryRecvError::Empty) => self.take_accessibility_continuation(),
@@ -1762,17 +1109,7 @@ impl TerminalWorker {
 
         loop {
             let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
-            let autoscroll_deadline = self.selection_autoscroll.deadline();
-            let deadline = [
-                synchronized_output_deadline,
-                autoscroll_deadline,
-                self.paste_confirmations.deadline(),
-                self.osc52_authorization.deadline(),
-                Some(self.hidden_input.deadline),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+            let deadline = self.schedules.deadline(synchronized_output_deadline);
             let Some(deadline) = deadline else {
                 let command = self.commands.recv().ok()?;
                 return Some(self.note_normal_command(command));
@@ -1782,21 +1119,8 @@ impl TerminalWorker {
                 Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
-                    if let Some(generation) = self.selection_autoscroll.take_due(now) {
-                        return Some(
-                            self.note_normal_command(Command::SelectionAutoscrollTick(generation)),
-                        );
-                    }
-                    if self.paste_confirmations.expire(now) {
-                        return Some(self.note_normal_command(Command::PasteConfirmationExpired));
-                    }
-                    if let Some(id) = self.osc52_authorization.expire(now) {
-                        return Some(
-                            self.note_normal_command(Command::Osc52AuthorizationExpired(id)),
-                        );
-                    }
-                    if now >= self.hidden_input.deadline {
-                        return Some(self.note_normal_command(Command::PollHiddenInput));
+                    if let Some(command) = self.schedules.take_due(now) {
+                        return Some(self.note_normal_command(command));
                     }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
@@ -1811,13 +1135,16 @@ impl TerminalWorker {
 
     fn note_normal_command(&mut self, command: Command) -> Command {
         if !matches!(&command, Command::AccessibilityContinue) {
-            self.accessibility_continuation.note_normal_command();
+            self.schedules
+                .accessibility_continuation
+                .note_normal_command();
         }
         command
     }
 
     fn take_accessibility_continuation(&mut self) -> Option<Command> {
-        self.accessibility_continuation
+        self.schedules
+            .accessibility_continuation
             .take()
             .then_some(Command::AccessibilityContinue)
     }
@@ -1826,7 +1153,7 @@ impl TerminalWorker {
         match command {
             Command::Key(input) => self.process_key(input),
             Command::Focus(focused) => self.process_focus(focused),
-            Command::ReaderReady if self.osc52_authorization.is_pending() => {
+            Command::ReaderReady if self.schedules.osc52_authorization.is_pending() => {
                 self.deferred_reader_ready = true;
                 true
             }
@@ -1986,6 +1313,7 @@ impl TerminalWorker {
             Command::Shutdown => false,
             Command::PollHiddenInput => {
                 if let Some(active) = self
+                    .schedules
                     .hidden_input
                     .update(Instant::now(), self.native_pty.hidden_input())
                 {
@@ -2003,7 +1331,7 @@ impl TerminalWorker {
 
     fn process_paste_request(
         &mut self,
-        text: String,
+        text: PastePayload,
         reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
     ) -> bool {
         if !self.terminal_input_focused {
@@ -2012,7 +1340,7 @@ impl TerminalWorker {
             )));
             return true;
         }
-        let payload = match PreparedPaste::prepare(text) {
+        let payload = match text.prepare() {
             Ok(payload) => payload,
             Err(rejection) => {
                 let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(rejection)));
@@ -2030,6 +1358,7 @@ impl TerminalWorker {
         };
         if payload.requires_confirmation(bracketed_paste) {
             let outcome = self
+                .schedules
                 .paste_confirmations
                 .create(payload, Instant::now())
                 .map(PasteRequestOutcome::ConfirmationRequired)
@@ -2049,7 +1378,7 @@ impl TerminalWorker {
         decision: PasteDecision,
         reply: async_channel::Sender<Result<PasteResolution, String>>,
     ) -> bool {
-        let Some(payload) = self.paste_confirmations.take(id, Instant::now()) else {
+        let Some(payload) = self.schedules.paste_confirmations.take(id, Instant::now()) else {
             let _ = reply.try_send(Ok(PasteResolution::Stale));
             return true;
         };
@@ -2099,7 +1428,7 @@ impl TerminalWorker {
     fn refresh_selection_autoscroll(&mut self) -> bool {
         match self.emulator.selection_autoscroll_interval() {
             Ok(interval) => {
-                self.selection_autoscroll.update(
+                self.schedules.selection_autoscroll.update(
                     Instant::now(),
                     interval,
                     self.emulator.presentation_generation(),
@@ -2227,8 +1556,10 @@ impl TerminalWorker {
                             }
                         }
                         Osc52AccessPolicy::Ask => {
-                            let Some(request) =
-                                self.osc52_authorization.create(operation, Instant::now())
+                            let Some(request) = self
+                                .schedules
+                                .osc52_authorization
+                                .create(operation, Instant::now())
                             else {
                                 continue;
                             };
@@ -2290,7 +1621,7 @@ impl TerminalWorker {
         id: Osc52AuthorizationId,
         decision: Osc52AuthorizationDecision,
     ) -> bool {
-        let Some(operation) = self.osc52_authorization.take(id, Instant::now()) else {
+        let Some(operation) = self.schedules.osc52_authorization.take(id, Instant::now()) else {
             return true;
         };
         if decision == Osc52AuthorizationDecision::Allow && !self.perform_osc52_operation(operation)
@@ -2344,8 +1675,8 @@ impl TerminalWorker {
         }
 
         if !focused {
-            self.paste_confirmations.cancel();
-            self.osc52_authorization.cancel();
+            self.schedules.paste_confirmations.cancel();
+            self.schedules.osc52_authorization.cancel();
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
@@ -2462,7 +1793,7 @@ impl TerminalWorker {
                     return false;
                 }
             };
-        self.accessibility_continuation.update(more);
+        self.schedules.accessibility_continuation.update(more);
         if let Some(accessibility) = accessibility {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
@@ -2517,8 +1848,6 @@ impl TerminalWorker {
             terminal_input_focused: _terminal_input_focused,
             focus_reporting_enabled: _focus_reporting_enabled,
             held_keys: _held_keys,
-            selection_autoscroll: _selection_autoscroll,
-            paste_confirmations: _paste_confirmations,
             runtime_observation,
             ..
         } = self;
@@ -3386,20 +2715,16 @@ mod tests {
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
-            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            selection_autoscroll: SelectionAutoscrollSchedule::default(),
-            paste_confirmations: PasteConfirmationSchedule::default(),
+            schedules: WorkerSchedules::new(Instant::now()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: policy,
             osc52_clipboard: Box::new(clipboard),
-            osc52_authorization: Osc52AuthorizationSchedule::default(),
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            hidden_input: HiddenInputSchedule::new(Instant::now()),
             runtime_observation: None,
         };
         (worker, receiver, records)
@@ -3473,7 +2798,7 @@ mod tests {
         );
         assert!(clipboard.snapshot().writes.is_empty());
         assert!(records.snapshot().written.is_empty());
-        assert!(worker.osc52_authorization.is_pending());
+        assert!(worker.schedules.osc52_authorization.is_pending());
 
         assert!(worker.process_osc52_authorization(request.id, Osc52AuthorizationDecision::Allow,));
         assert_eq!(
@@ -3524,12 +2849,16 @@ mod tests {
                     assert!(worker.process_command(Command::Focus(false)));
                 }
                 Cancellation::Timeout => {
-                    let deadline = worker.osc52_authorization.deadline().unwrap();
-                    let expired = worker.osc52_authorization.expire(deadline).unwrap();
+                    let deadline = worker.schedules.osc52_authorization.deadline().unwrap();
+                    let expired = worker
+                        .schedules
+                        .osc52_authorization
+                        .expire(deadline)
+                        .unwrap();
                     assert!(worker.process_command(Command::Osc52AuthorizationExpired(expired)));
                 }
             }
-            assert!(!worker.osc52_authorization.is_pending());
+            assert!(!worker.schedules.osc52_authorization.is_pending());
             assert!(worker.process_command(Command::ResolveOsc52Authorization(
                 request.id,
                 Osc52AuthorizationDecision::Allow,
@@ -3559,7 +2888,7 @@ mod tests {
             events.try_recv(),
             Ok(SessionEvent::Osc52Authorization(_))
         ));
-        assert!(worker.osc52_authorization.is_pending());
+        assert!(worker.schedules.osc52_authorization.is_pending());
         assert!(!worker.process_command(Command::Shutdown));
         worker.finish();
 
@@ -4478,20 +3807,16 @@ mod tests {
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
-            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            selection_autoscroll: SelectionAutoscrollSchedule::default(),
-            paste_confirmations: PasteConfirmationSchedule::default(),
+            schedules: WorkerSchedules::new(Instant::now()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
-            osc52_authorization: Osc52AuthorizationSchedule::default(),
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            hidden_input: HiddenInputSchedule::new(Instant::now()),
             runtime_observation: None,
         };
 
@@ -4527,20 +3852,16 @@ mod tests {
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
-            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
-            selection_autoscroll: SelectionAutoscrollSchedule::default(),
-            paste_confirmations: PasteConfirmationSchedule::default(),
+            schedules: WorkerSchedules::new(Instant::now()),
             osc52_filter: Osc52Filter::default(),
             osc52_policy: Osc52AuthorizationPolicy::default(),
             osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
-            osc52_authorization: Osc52AuthorizationSchedule::default(),
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            hidden_input: HiddenInputSchedule::new(Instant::now()),
             runtime_observation: None,
         };
         assert!(worker.publish_screen());
@@ -4709,7 +4030,7 @@ mod tests {
         assert_eq!(
             format!(
                 "{:?}",
-                Command::RequestPaste("private paste content".to_owned(), reply)
+                Command::RequestPaste("private paste content".to_owned().into(), reply)
             ),
             "RequestPaste",
         );

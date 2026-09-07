@@ -27,18 +27,18 @@ use super::metadata::{
     DirectoryProvenance, TerminalLocalFileCapabilities, parse_osc7_directory, sanitize_title,
 };
 use super::native_services::{
-    FilePreviewTarget, NativeContextActions, NativeInsertion, NativeInsertionError,
+    FilePreviewTarget, NativeContextActions, PasteIntakeError, PastePayload,
 };
 use super::osc52::{
     Osc52AccessPolicy, Osc52AuthorizationPolicy, Osc52Effect, Osc52Filter, Osc52Operation,
     Osc52Rejection, Osc52Target,
 };
 use super::paste::{MAX_PASTE_BYTES, PasteRejection, PreparedPaste};
-use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
-use super::session::{
+use super::pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
+use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
 use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
@@ -1616,7 +1616,7 @@ fn check_native_services() -> Result<(), String> {
             file_preview: false,
         },
     )?;
-    let insertion = NativeInsertion::dropped_files(
+    let insertion = PastePayload::dropped_files(
         crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
         &[PathBuf::from("/tmp/a b")],
         true,
@@ -1626,8 +1626,8 @@ fn check_native_services() -> Result<(), String> {
     require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
     require_eq(
         "native-focus-gate",
-        NativeInsertion::service_text("ignored", false),
-        Err(NativeInsertionError::TerminalUnfocused),
+        PastePayload::service_text("ignored", false),
+        Err(PasteIntakeError::TerminalUnfocused),
     )?;
 
     let directory = std::env::temp_dir().join(format!(

@@ -24,6 +24,7 @@ pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
 mod runtime_observation;
 pub(crate) use native_services::selection;
+mod pointer_input;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -64,8 +65,8 @@ pub(crate) use key_input::{
 };
 pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{
-    FilePreviewTarget, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
-    NativeServiceOrigin, NativeServiceStatus,
+    FilePreviewTarget, NativeContextActions, NativeServiceCapabilities, NativeServiceOrigin,
+    NativeServiceStatus, PastePayload,
 };
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;
@@ -93,9 +94,8 @@ pub(crate) use session::AccessibilitySelectionSender;
 )]
 pub(crate) use session::SessionFailure;
 pub(crate) use session::{
-    AcceptanceSessionFailure, NativeTerminalSessionFactory, PointerButton, PointerInput,
-    PointerPhase, SelectionCopyError, SessionEvent, SessionExit, ShiftSelectionPolicy,
-    SurfacePosition, TerminalSessionFactory, TerminalSessionHandle, WheelInput, WheelPhase,
+    AcceptanceSessionFailure, NativeTerminalSessionFactory, SelectionCopyError, SessionEvent,
+    SessionExit, TerminalSessionFactory, TerminalSessionHandle,
 };
 #[cfg(test)]
 pub(crate) use session::{
@@ -105,4 +105,9 @@ pub(crate) use session::{
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,
     RemoteTerminalChannelProvider, WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+};
+
+pub(crate) use pointer_input::{
+    PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
+    WheelPhase,
 };

@@ -1,3 +1,4 @@
+use super::local_authority::LocalFileAccess;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ pub(crate) struct HyperlinkTarget {
     pub(crate) identity: u64,
     pub(crate) kind: HyperlinkKind,
     pub(crate) value: String,
-    local_file: Option<ValidatedLocalFile>,
+    pub(super) local_file: Option<ValidatedLocalFile>,
 }
 
 impl fmt::Debug for HyperlinkTarget {
@@ -30,8 +31,8 @@ impl fmt::Debug for HyperlinkTarget {
 }
 
 impl HyperlinkTarget {
-    pub(crate) const fn is_local_file(&self) -> bool {
-        matches!(self.kind, HyperlinkKind::LocalPath)
+    pub(crate) fn is_available(&self, capabilities: TerminalLocalFileCapabilities) -> bool {
+        self.kind == HyperlinkKind::Url || LocalFileAccess::authorize(capabilities).is_some()
     }
 
     pub(crate) fn url(value: &str) -> Option<Self> {
@@ -70,13 +71,16 @@ impl HyperlinkTarget {
         authority: &LocalFilesystemAuthority,
     ) -> Option<Self> {
         Self::url(value).or_else(|| {
-            local_file_capabilities.are_enabled().then_some(())?;
-            let path = parse_local_file_uri(authority.path_semantics(), value, local_hostname)?;
-            Self::from_local_file(authority.local_file(&path, trusted_directory)?)
+            LocalFileAccess::authorize(local_file_capabilities)?.resolve(
+                value,
+                trusted_directory,
+                local_hostname,
+                authority,
+            )
         })
     }
 
-    fn from_local_file(file: ValidatedLocalFile) -> Option<Self> {
+    pub(super) fn from_local_file(file: ValidatedLocalFile) -> Option<Self> {
         let value = file.canonical_path().to_str()?.to_owned();
         Some(Self::new(HyperlinkKind::LocalPath, value, Some(file)))
     }
@@ -97,7 +101,6 @@ impl HyperlinkTarget {
         match self.kind {
             HyperlinkKind::Url => Some(self.value.clone()),
             HyperlinkKind::LocalPath => {
-                local_file_capabilities.are_enabled().then_some(())?;
                 // This is intentionally action-triggered filesystem I/O. Hover/render/context
                 // eligibility uses the immutable target and never performs synchronous I/O.
                 let path = self.revalidated_local_path(local_file_capabilities)?;
@@ -130,9 +133,7 @@ impl HyperlinkTarget {
         local_file_capabilities: TerminalLocalFileCapabilities,
         registry: &mut LocalFileEmissionRegistry,
     ) -> Option<Vec<u8>> {
-        local_file_capabilities.are_enabled().then_some(())?;
-        (self.kind == HyperlinkKind::LocalPath).then_some(())?;
-        registry.emit(self.local_file.as_ref()?)
+        LocalFileAccess::authorize(local_file_capabilities)?.emit(self, registry)
     }
 
     pub(crate) fn from_local_emission_metadata(
@@ -140,21 +141,14 @@ impl HyperlinkTarget {
         local_file_capabilities: TerminalLocalFileCapabilities,
         registry: &LocalFileEmissionRegistry,
     ) -> Option<Self> {
-        local_file_capabilities.are_enabled().then_some(())?;
-        Self::from_local_file(registry.restore(metadata)?)
+        LocalFileAccess::authorize(local_file_capabilities)?.restore(metadata, registry)
     }
 
     pub(crate) fn revalidated_local_path(
         &self,
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<PathBuf> {
-        local_file_capabilities.are_enabled().then_some(())?;
-        (self.kind == HyperlinkKind::LocalPath).then_some(())?;
-        let file = self.local_file.as_ref()?;
-        (file.canonical_path().to_str()? == self.value
-            && stable_identity(self.kind, self.value.as_bytes()) == self.identity)
-            .then_some(())?;
-        file.revalidated_path()
+        LocalFileAccess::authorize(local_file_capabilities)?.revalidate(self)
     }
 }
 
@@ -164,7 +158,7 @@ pub(crate) fn has_file_scheme(value: &[u8]) -> bool {
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"file:"))
 }
 
-fn parse_local_file_uri(
+pub(super) fn parse_local_file_uri(
     semantics: crate::local_path::LocalPathSemantics,
     value: &str,
     local_hostname: Option<&str>,
@@ -288,7 +282,7 @@ fn valid_text(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_LINK_BYTES && !value.chars().any(char::is_control)
 }
 
-const fn stable_identity(kind: HyperlinkKind, bytes: &[u8]) -> u64 {
+pub(super) const fn stable_identity(kind: HyperlinkKind, bytes: &[u8]) -> u64 {
     let mut hash = match kind {
         HyperlinkKind::Url => 0xcbf29ce484222325,
         HyperlinkKind::LocalPath => 0x84222325cbf29ce4,
@@ -498,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_identity_does_not_depend_on_wrapping_or_scrollback_position() {
+    pub(super) fn stable_identity_does_not_depend_on_wrapping_or_scrollback_position() {
         let first = HyperlinkTarget::url("https://example.test/path").unwrap();
         let second = HyperlinkTarget::url("https://example.test/path").unwrap();
         assert_eq!(first.identity, second.identity);

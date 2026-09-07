@@ -448,9 +448,9 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn request_paste(
         &self,
-        text: String,
+        text: crate::terminal::native_services::PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
-        self.record(RecordedSessionCommand::RequestPaste(text));
+        self.record(RecordedSessionCommand::RequestPaste(text.into_text()));
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_response.clone());
         receiver

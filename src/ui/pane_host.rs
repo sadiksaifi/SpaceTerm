@@ -1,4 +1,5 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
+use crate::domain::remote_project::RemoteRestartBatch;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::BTreeMap;
@@ -10,7 +11,7 @@ use thiserror::Error;
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
 };
-use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
+use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
 use super::{
     ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     PreparedRemotePaneRestart, RemoteChildLaunchUnavailable, RemotePaneLifecycleError, SplitDown,
@@ -37,7 +38,7 @@ pub(crate) enum RemotePaneHostLifecycleError {
 /// The token is valid only while Tab, Pane, and session-epoch identities remain unchanged.
 pub(crate) struct PreparedPaneHostRemoteRestart {
     tab_id: TabId,
-    panes: Vec<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
+    panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
@@ -386,20 +387,13 @@ impl PaneHost {
             .and_then(|terminal| terminal.read(cx).reported_working_directory())
     }
 
-    pub(crate) fn pane_requires_close_confirmation(
-        &self,
-        pane_id: PaneId,
-        cx: &App,
-    ) -> Option<bool> {
+    pub(crate) fn terminal_panes<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> impl Iterator<Item = (PaneId, &'a TerminalPane)> {
         self.terminal_tab
-            .terminal(pane_id)
-            .map(|terminal| terminal.read(cx).requires_close_confirmation())
-    }
-
-    pub(crate) fn requires_close_confirmation(&self, cx: &App) -> bool {
-        self.terminal_tab
-            .terminals()
-            .any(|terminal| terminal.read(cx).requires_close_confirmation())
+            .terminals_with_ids()
+            .map(|(id, terminal)| (id, terminal.read(cx)))
     }
 
     pub(crate) fn set_workspace_directory(
@@ -545,7 +539,7 @@ impl PaneHost {
         }
         Ok(PreparedPaneHostRemoteRestart {
             tab_id: self.terminal_tab.id(),
-            panes,
+            panes: RemoteRestartBatch::new(panes),
         })
     }
 
@@ -561,27 +555,26 @@ impl PaneHost {
                 current: self.terminal_tab.id(),
             });
         }
-        if self.terminal_tab.pane_count() != prepared.panes.len() {
-            return Err(RemotePaneHostLifecycleError::PaneChanged(
-                self.terminal_tab.focused_pane_id(),
-            ));
-        }
-        for (pane_id, terminal, pane_restart) in &prepared.panes {
-            let Some(current) = self.terminal_tab.terminal(*pane_id) else {
-                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
-            };
-            if current.entity_id() != terminal.entity_id() {
-                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
-            }
-            terminal
-                .read(cx)
-                .can_commit_remote_restart(pane_restart)
-                .map_err(|source| RemotePaneHostLifecycleError::Pane {
-                    pane_id: *pane_id,
-                    source,
-                })?;
-        }
-        Ok(())
+        prepared.panes.validate(
+            self.terminal_tab.pane_count(),
+            || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
+            |(pane_id, terminal, pane_restart)| {
+                let Some(current) = self.terminal_tab.terminal(*pane_id) else {
+                    return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+                };
+                if current.entity_id() != terminal.entity_id() {
+                    return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+                }
+                terminal
+                    .read(cx)
+                    .can_commit_remote_restart(pane_restart)
+                    .map_err(|source| RemotePaneHostLifecycleError::Pane {
+                        pane_id: *pane_id,
+                        source,
+                    })?;
+                Ok(())
+            },
+        )
     }
 
     /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
@@ -597,15 +590,29 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> Result<(), RemotePaneHostLifecycleError> {
         self.can_commit_remote_restart(&prepared, cx)?;
-        for (pane_id, terminal, pane_restart) in prepared.panes {
-            terminal.update(cx, |terminal, cx| {
+        prepared.panes.commit(
+            self.terminal_tab.pane_count(),
+            || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
+            cx,
+            |(_, terminal, pane_restart), cx| {
                 terminal
-                    .commit_remote_restart(pane_restart, window, cx)
-                    .unwrap_or_else(|error| {
-                        panic!("prevalidated Pane {pane_id} restart commit failed: {error}")
+                    .read(cx)
+                    .can_commit_remote_restart(pane_restart)
+                    .map_err(|source| RemotePaneHostLifecycleError::Pane {
+                        pane_id: self.terminal_tab.focused_pane_id(),
+                        source,
                     })
-            });
-        }
+            },
+            |(pane_id, terminal, pane_restart), cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal
+                        .commit_remote_restart(pane_restart, window, cx)
+                        .unwrap_or_else(|error| {
+                            panic!("prevalidated Pane {pane_id} restart commit failed: {error}")
+                        })
+                });
+            },
+        )?;
         self.session_factory = session_factory;
         self.remote_disconnected_generation = None;
         self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
@@ -1137,13 +1144,11 @@ impl PaneHost {
                 self.terminal_tab.terminal(pane_id).map(Entity::entity_id)
             }
         };
-        let blocker = menu_blocked
-            .then_some(TerminalFocusBlocker::PaneMenu)
-            .or(self
-                .resizing_split_id
-                .is_some()
-                .then_some(TerminalFocusBlocker::PaneResize))
-            .or(self.focus_branch_blocker);
+        let blocker = TerminalFocusCoordinator::pane_layout_blocker(
+            self.focus_branch_blocker,
+            menu_blocked,
+            self.resizing_split_id.is_some(),
+        );
         let signature = (self.active, self.terminal_tab.focused_pane_id(), blocker);
         if self.native_service_focus_signature != Some(signature) {
             self.advance_native_service_hierarchy_generation(cx);

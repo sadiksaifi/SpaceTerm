@@ -1498,6 +1498,45 @@ identity in sidebar order. An empty trimmed rename clears the custom name; dupli
 valid. An unrenamed Remote Project Workspace at its remote home Physical Directory Identity uses its
 SSH Destination alone; every other Remote Project uses `<physical basename> · <SSH Destination>`.
 
+### Lifecycle Policy Ownership
+
+`src/close_confirmation.rs` owns Close Confirmation lifecycle classification, exact hierarchy scope
+resolution, pending authorization, stale settlement, and the shared close continuation vocabulary.
+Managers supply immutable Pane facts and perform the resulting hierarchy and GPUI effects; they do
+not interpret terminal metadata or aggregate close policy independently. Interface tests exercise
+classification, aggregate scopes, one-shot authorization, and final-child continuation together.
+
+The Workspace collection's private `directory_promotion` Module owns Scratch Directory Authority
+matching, report validation, promotion, availability, automatic naming, and child-directory
+publication ordering. It rejects stale or non-Scratch owners before invoking Local Filesystem
+Authority, then commits accepted state before publishing the directory to child factories. Report,
+Pane close, and Tab close use this same operation. An invalid successor report retains the prior
+path while transferring authority and marking availability; a missing report retains availability.
+
+`src/domain/remote_project.rs` owns Remote Connection Phase transitions, checked Connection
+Generation allocation, Pane restart authority, and aggregate child restart sequencing. Its
+move-only reservations validate complete membership and every child before any restart effect.
+GPUI managers retain entity effects and asynchronous connection presentation, while the existing
+Control Connection remains the sole process and socket owner.
+
+The Terminal Focus Coordinator owns temporary-owner precedence for Workspace, Tab, Pane Layout,
+and Pane facts, including retained native-dialog ownership. Managers supply raw ownership facts.
+The reusable modal's current per-window fact remains independent from a native system dialog;
+closing one never releases the other's blocker.
+
+Native Terminal Services admits local-file work through one private `LocalFileAccess` gate. An
+admitted operation performs clipboard intake, resolution, emission, restoration, insertion, or
+identity revalidation through that proof. File Preview retains it for subsequent revalidation.
+One raw Paste Payload travels through native intake and the Session command lane; its sanitized
+worker-only state and pending confirmation remain private insertion implementation. Selection Copy
+remains a distinct outgoing formatted value, never an insertion authorization.
+
+The Terminal Session's private `launch` Module owns Local and Remote launch descriptions, channel
+consumption, process preparation, and the common production worker handoff. Its private `schedules`
+Module owns deadline arbitration and worker schedule state. Pointer and wheel values belong to the
+lower `pointer_input` Module shared by Session and Emulator, so the Emulator does not import the
+Session Interface. These changes add no platform capability or new Adapter.
+
 ### Cross-Hierarchy Close Escalation
 
 Closing a final child escalates to its owning hierarchy Module without first destroying the child.
