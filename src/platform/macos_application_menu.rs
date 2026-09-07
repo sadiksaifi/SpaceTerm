@@ -431,7 +431,7 @@ mod native {
         TOGGLE_PANE_ZOOM_TITLE,
     };
 
-    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer built with Rust, GPUI, and libghostty-vt.";
+    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
     const CENTER_TEXT_ALIGNMENT: NSInteger = 2;
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
