@@ -602,23 +602,14 @@ fn portable_validation_violation(justfile: &str) -> Option<String> {
             continue;
         }
         if recipe.starts_with("macos-")
-            || matches!(
-                recipe,
-                "scripts-check" | "performance-tools-check" | "package" | "mounted-dmg"
-            )
+            || matches!(recipe, "scripts-check" | "package" | "mounted-dmg")
         {
             return Some(format!("portable lane reaches native recipe {recipe}"));
         }
         let Some((dependencies, body)) = just_recipe(justfile, recipe) else {
             return Some(format!("portable lane references missing recipe {recipe}"));
         };
-        for forbidden in [
-            "xcrun",
-            "AppKit",
-            "package-macos",
-            "mounted-dmg",
-            "performance",
-        ] {
+        for forbidden in ["xcrun", "AppKit", "package-macos", "mounted-dmg"] {
             if body.contains(forbidden) {
                 return Some(format!(
                     "portable lane invokes {forbidden} through {recipe}"
@@ -635,7 +626,7 @@ fn validation_lanes_keep_portable_and_native_prerequisites_separate() {
     let justfile = include_str!("../Justfile");
     assert_eq!(portable_validation_violation(justfile), None);
     for required in [
-        "macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check performance-tools-check",
+        "macos-validate: macos-fmt-check macos-adapter-tests macos-clippy scripts-check",
         "validate: portable-validate macos-validate",
         "cargo test --workspace --all-targets --no-default-features --locked",
         "cargo test --all-targets --features macos-native-tests --locked \"macos\"",

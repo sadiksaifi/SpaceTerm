@@ -58,6 +58,7 @@ pub(crate) trait FileClipboard {
 
 pub(crate) struct SelectionPublication {
     clipboard: Rc<dyn SelectionClipboard>,
+    #[cfg(test)]
     fail_next_write: bool,
 }
 
@@ -65,6 +66,7 @@ impl SelectionPublication {
     pub(crate) fn new(clipboard: Rc<dyn SelectionClipboard>) -> Self {
         Self {
             clipboard,
+            #[cfg(test)]
             fail_next_write: false,
         }
     }
@@ -77,16 +79,14 @@ impl SelectionPublication {
         if copy.plain_text.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
         if std::mem::take(&mut self.fail_next_write) {
             return Err(ClipboardError::Unavailable);
         }
         self.clipboard.publish(&copy, cx)
     }
 
-    pub(crate) fn cancel_injected_failure(&mut self) {
-        self.fail_next_write = false;
-    }
-
+    #[cfg(test)]
     pub(crate) fn fail_next_write(&mut self) {
         self.fail_next_write = true;
     }

@@ -1,7 +1,6 @@
 mod app;
 mod close_confirmation;
 mod domain;
-mod observation;
 mod platform;
 mod ssh;
 mod terminal;

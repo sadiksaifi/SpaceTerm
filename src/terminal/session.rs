@@ -59,7 +59,7 @@ use crate::terminal::paste::{
     PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
-use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
+use crate::terminal::{FindDirection, FindQueryGeneration};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
@@ -208,12 +208,6 @@ pub(crate) enum SelectionCopyError {
     WorkerStopped,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AcceptanceSessionFailure {
-    Pty,
-    Emulator,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct AccessibilitySelectionSender {
     commands: CommandSender<Command>,
@@ -291,7 +285,6 @@ pub(crate) trait TerminalSessionHandle {
         &self,
         generation: PresentationGeneration,
     ) -> Result<Option<SelectionCopy>, SelectionCopyError>;
-    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure);
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
     }
@@ -309,16 +302,6 @@ pub(crate) trait TerminalSessionFactory {
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError>;
 
-    fn start_observed(
-        &self,
-        geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
-        observation: Option<crate::observation::SessionObservationLease>,
-    ) -> Result<StartedTerminalSession, SessionError> {
-        drop(observation);
-        self.start(geometry, launch_plan)
-    }
-
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
     }
@@ -329,7 +312,6 @@ pub(crate) struct TerminalSession {
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
     schedule_input: ScheduleInput,
-    runtime_observation: Option<RuntimeObservation>,
 }
 
 type StartedSession = (
@@ -371,9 +353,6 @@ impl TerminalSession {
         if let Some(commands) = &self.commands {
             let should_notify = self.schedule_input.enqueue_resize(geometry);
             let notification_delivered = should_notify && commands.send(Command::Resize).is_ok();
-            if let Some(observation) = &self.runtime_observation {
-                observation.resize_requested(notification_delivered, !should_notify);
-            }
             if should_notify && !notification_delivered {
                 eprintln!("terminal resize was dropped because the worker has stopped");
             }
@@ -636,14 +615,6 @@ impl TerminalSessionHandle for TerminalSession {
         Self::copy_selection_at(self, generation)
     }
 
-    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::AcceptanceFailure(failure)).is_err()
-        {
-            eprintln!("acceptance failure injection was dropped because the worker has stopped");
-        }
-    }
-
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         self.commands
             .as_ref()
@@ -729,7 +700,6 @@ enum Command {
     AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
-    AcceptanceFailure(AcceptanceSessionFailure),
     Shutdown,
     PollHiddenInput,
 }
@@ -757,7 +727,6 @@ impl fmt::Debug for Command {
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
             Self::ReaderReady => "ReaderReady",
-            Self::AcceptanceFailure(..) => "AcceptanceFailure",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
         };
@@ -783,7 +752,6 @@ struct TerminalWorker {
     deferred_osc52_effects: VecDeque<Osc52Effect>,
     deferred_output_chunks: VecDeque<Vec<u8>>,
     deferred_reader_ready: bool,
-    runtime_observation: Option<RuntimeObservation>,
 }
 
 struct TerminalWorkerContext {
@@ -798,7 +766,6 @@ struct TerminalWorkerContext {
 struct TerminalWorkerPublishers {
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
-    runtime_observation: Option<RuntimeObservation>,
 }
 
 #[derive(Default)]
@@ -882,10 +849,7 @@ impl HeldKeys {
 enum StartupReporter {
     #[cfg(test)]
     Blocking(mpsc::SyncSender<Result<(), String>>),
-    Events(
-        async_channel::Sender<SessionEvent>,
-        Option<RuntimeObservation>,
-    ),
+    Events(async_channel::Sender<SessionEvent>),
 }
 
 impl StartupReporter {
@@ -895,11 +859,10 @@ impl StartupReporter {
             Self::Blocking(startup) => {
                 let _ = startup.send(Err(message));
             }
-            Self::Events(events, observation) => {
+            Self::Events(events) => {
                 send_session_event(
                     events,
                     SessionEvent::Failed(SessionFailure::Startup { stage, message }),
-                    observation.as_ref(),
                 );
             }
         }
@@ -909,7 +872,7 @@ impl StartupReporter {
         match self {
             #[cfg(test)]
             Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
-            Self::Events(_, _) => true,
+            Self::Events(_) => true,
         }
     }
 }
@@ -935,7 +898,6 @@ impl TerminalWorker {
         let TerminalWorkerPublishers {
             events,
             accessibility,
-            runtime_observation,
         } = publishers;
         let ReaderTransport {
             output: _output,
@@ -977,12 +939,7 @@ impl TerminalWorker {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            runtime_observation,
         };
-
-        if let Some(observation) = &worker.runtime_observation {
-            observation.worker_started(initial_geometry);
-        }
 
         if !startup.succeeded() {
             worker.finish();
@@ -1097,9 +1054,6 @@ impl TerminalWorker {
 
                 match result {
                     Ok(()) => {
-                        if let Some(observation) = &self.runtime_observation {
-                            observation.resize_applied(geometry);
-                        }
                         self.apply_emulator_action(EmulatorAction::screen_changed())
                             && self.refresh_selection_autoscroll()
                     }
@@ -1218,32 +1172,13 @@ impl TerminalWorker {
                     }
                 }
             }
-            Command::AcceptanceFailure(failure) => {
-                let event = match failure {
-                    AcceptanceSessionFailure::Pty => {
-                        SessionEvent::Failed(SessionFailure::PtyRead {
-                            read_error: "acceptance-injected".to_owned(),
-                            exit_status: "acceptance-injected".to_owned(),
-                        })
-                    }
-                    AcceptanceSessionFailure::Emulator => SessionEvent::Failed(
-                        SessionFailure::Runtime("acceptance-injected".to_owned()),
-                    ),
-                };
-                self.send_terminal_event(event);
-                false
-            }
             Command::Shutdown => false,
             Command::PollHiddenInput => {
                 if let Some(active) = self
                     .schedules
                     .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
                 {
-                    send_session_event(
-                        &self.events,
-                        SessionEvent::HiddenInputChanged(active),
-                        self.runtime_observation.as_ref(),
-                    )
+                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
                 } else {
                     true
                 }
@@ -1637,13 +1572,8 @@ impl TerminalWorker {
         if !self.write_pending_pty_responses() {
             return false;
         }
-        if !action.bytes.is_empty() {
-            if !self.write_pty(&action.bytes) {
-                return false;
-            }
-            if let Some(observation) = &self.runtime_observation {
-                observation.terminal_input_accepted();
-            }
+        if !action.bytes.is_empty() && !self.write_pty(&action.bytes) {
+            return false;
         }
         !action.screen_changed || self.publish_screen()
     }
@@ -1671,32 +1601,10 @@ impl TerminalWorker {
         }
 
         match self.emulator.snapshot() {
-            Ok(Some(snapshot)) => {
-                if let Some(observation) = &self.runtime_observation {
-                    observation.screen_published(snapshot.generation.as_u64());
-                }
-                match self.events.force_send(SessionEvent::Screen(snapshot)) {
-                    Ok(evicted) => {
-                        if let Some(observation) = &self.runtime_observation {
-                            let evicted_event = evicted.is_some();
-                            let superseded_screen =
-                                matches!(evicted, Some(SessionEvent::Screen(_)));
-                            observation.screen_enqueued(
-                                self.events.len(),
-                                evicted_event,
-                                superseded_screen,
-                            );
-                        }
-                        true
-                    }
-                    Err(_) => {
-                        if let Some(observation) = &self.runtime_observation {
-                            observation.event_send_failed();
-                        }
-                        false
-                    }
-                }
-            }
+            Ok(Some(snapshot)) => self
+                .events
+                .force_send(SessionEvent::Screen(snapshot))
+                .is_ok(),
             Ok(None) => true,
             Err(error) => {
                 self.send_runtime_failure(format!(
@@ -1758,7 +1666,7 @@ impl TerminalWorker {
     }
 
     fn send_terminal_event(&self, event: SessionEvent) -> bool {
-        send_session_event(&self.events, event, self.runtime_observation.as_ref())
+        send_session_event(&self.events, event)
     }
 
     fn finish(self) {
@@ -1772,15 +1680,11 @@ impl TerminalWorker {
             terminal_input_focused: _terminal_input_focused,
             focus_reporting_enabled: _focus_reporting_enabled,
             held_keys: _held_keys,
-            runtime_observation,
             ..
         } = self;
         // The Native PTY Owner performs termination, waiting, and reaping off the GPUI thread.
         drop(reader_events);
         drop(native_pty);
-        if let Some(observation) = &runtime_observation {
-            observation.session_exited(exit_class_code(&SessionExit::GracefulShutdown));
-        }
     }
 }
 
@@ -1811,80 +1715,12 @@ fn classify_native_pty_exit(exit: NativePtyExit) -> SessionExit {
     }
 }
 
-fn exit_class_code(exit: &SessionExit) -> u64 {
-    match exit {
-        SessionExit::Success => 1,
-        SessionExit::ExitCode(_) => 2,
-        SessionExit::Signal(_) => 3,
-        SessionExit::GracefulShutdown => 4,
-        SessionExit::ForcedShutdown => 5,
+fn send_session_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) => true,
+        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
+        Err(async_channel::TrySendError::Closed(_)) => false,
     }
-}
-
-fn failure_class_code(failure: &SessionFailure) -> u64 {
-    match failure {
-        SessionFailure::Startup { stage, .. } => match stage {
-            SessionStartupStage::Pty => 1,
-            SessionStartupStage::Reader => 2,
-            SessionStartupStage::ReaderThread => 3,
-            SessionStartupStage::Emulator => 4,
-        },
-        SessionFailure::Runtime(_) => 5,
-        SessionFailure::PtyRead { .. } => 6,
-        SessionFailure::ShellWait { .. } => 7,
-    }
-}
-
-fn send_session_event(
-    events: &async_channel::Sender<SessionEvent>,
-    event: SessionEvent,
-    observation: Option<&RuntimeObservation>,
-) -> bool {
-    let terminal = match &event {
-        SessionEvent::Exited(exit) => Some((false, exit_class_code(exit))),
-        SessionEvent::Failed(failure) => Some((true, failure_class_code(failure))),
-        _ => None,
-    };
-    let sent = match events.try_send(event) {
-        Ok(()) => {
-            if let Some(observation) = observation {
-                observation.event_enqueued(events.len(), false, false);
-            }
-            true
-        }
-        Err(async_channel::TrySendError::Full(event)) => match events.force_send(event) {
-            Ok(evicted) => {
-                if let Some(observation) = observation {
-                    let evicted_event = evicted.is_some();
-                    let superseded_screen = matches!(evicted, Some(SessionEvent::Screen(_)));
-                    observation.event_enqueued(events.len(), evicted_event, superseded_screen);
-                }
-                true
-            }
-            Err(_) => {
-                if let Some(observation) = observation {
-                    observation.event_send_failed();
-                }
-                false
-            }
-        },
-        Err(async_channel::TrySendError::Closed(_)) => {
-            if let Some(observation) = observation {
-                observation.event_send_failed();
-            }
-            false
-        }
-    };
-    if let Some(observation) = observation
-        && let Some((failed, class)) = terminal
-    {
-        if failed {
-            observation.session_failed(class);
-        } else {
-            observation.session_exited(class);
-        }
-    }
-    sent
 }
 
 #[cfg(test)]
@@ -2584,7 +2420,6 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            runtime_observation: None,
         };
         (worker, receiver, records)
     }
@@ -3115,7 +2950,6 @@ mod tests {
         let (mut session, events, _accessibility) = TerminalSession::start_deferred_with(
             test_geometry(),
             &std::env::temp_dir(),
-            None,
             move |size, _output, _close_handle| {
                 assert_eq!(size, pty_size(test_geometry()));
                 spawn_entered.send(()).unwrap();
@@ -3192,7 +3026,6 @@ mod tests {
             test_geometry(),
             &std::env::temp_dir(),
             Some("fixture.test"),
-            None,
             Arc::new(UnavailableOsc52ClipboardFactory),
             LocalFilesystemAuthority::testing(),
         )
@@ -3673,7 +3506,6 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            runtime_observation: None,
         };
 
         assert!(worker.process_reader_events());
@@ -3716,7 +3548,6 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
-            runtime_observation: None,
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -4049,7 +3880,6 @@ mod tests {
             worker: None,
             native_pty_close: None,
             schedule_input,
-            runtime_observation: None,
         };
         let pixel_only = TerminalGeometry::from_grid(
             CellGridSize::new(80, 24),
@@ -4082,7 +3912,6 @@ mod tests {
             worker: None,
             native_pty_close: None,
             schedule_input,
-            runtime_observation: None,
         };
 
         session.set_find_query(FindQueryGeneration::test(1), "n".to_owned());
@@ -4111,7 +3940,6 @@ mod tests {
             worker: None,
             native_pty_close: None,
             schedule_input,
-            runtime_observation: None,
         };
 
         session.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
@@ -4375,47 +4203,6 @@ mod tests {
             (state.terminations, state.pty_drops, state.terminator_drops),
             (1, 1, 1)
         );
-    }
-
-    #[test]
-    fn authenticated_acceptance_failures_use_typed_session_paths_and_stop_the_worker() {
-        for (injected, expected) in [
-            (
-                AcceptanceSessionFailure::Pty,
-                SessionFailure::PtyRead {
-                    read_error: "acceptance-injected".to_owned(),
-                    exit_status: "acceptance-injected".to_owned(),
-                },
-            ),
-            (
-                AcceptanceSessionFailure::Emulator,
-                SessionFailure::Runtime("acceptance-injected".to_owned()),
-            ),
-        ] {
-            let (result, _reader_steps, records) =
-                start_scripted_session(ScriptedPtyOptions::default());
-            let (mut session, events, _accessibility) = result.unwrap();
-
-            session.inject_acceptance_failure(injected);
-            let event = receive_event(&events, "the authenticated acceptance failure", |event| {
-                matches!(event, SessionEvent::Failed(_))
-            });
-            let SessionEvent::Failed(failure) = event else {
-                unreachable!("the event predicate accepts only terminal failures")
-            };
-            assert_eq!(failure, expected);
-            let state = records.wait_for("the injected worker to release ownership", |state| {
-                state.pty_drops == 1
-            });
-            assert_eq!(state.pty_drops, 1);
-
-            session.shutdown();
-            let state = records.snapshot();
-            assert_eq!(
-                (state.terminations, state.pty_drops, state.terminator_drops),
-                (1, 1, 1)
-            );
-        }
     }
 
     #[test]
@@ -4696,7 +4483,6 @@ mod tests {
             worker: None,
             native_pty_close: None,
             schedule_input: ScheduleInput::default(),
-            runtime_observation: None,
         };
         let handle: &dyn TerminalSessionHandle = &session;
         let sender = handle.accessibility_selection_sender().unwrap();
@@ -4752,7 +4538,6 @@ mod tests {
             worker: None,
             native_pty_close: None,
             schedule_input: ScheduleInput::default(),
-            runtime_observation: None,
         };
 
         assert_eq!(

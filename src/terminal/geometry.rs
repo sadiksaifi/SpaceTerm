@@ -149,6 +149,7 @@ impl TerminalGeometry {
         self.backing_grid
     }
 
+    #[cfg(test)]
     pub(crate) fn logical_grid_size(self) -> LogicalSize {
         LogicalSize::new(
             self.logical_cell.width * f32::from(self.grid.cols),

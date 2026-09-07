@@ -195,18 +195,6 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
-        self.start_observed(geometry, launch_plan, None)
-    }
-
-    fn start_observed(
-        &self,
-        geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
-        observation: Option<crate::observation::SessionObservationLease>,
-    ) -> Result<StartedTerminalSession, SessionError> {
-        let observation =
-            observation.and_then(crate::observation::SessionObservationLease::consume);
-
         let launch = match launch_plan {
             TerminalLaunchPlan::Local(local) => SessionLaunch::local(
                 self.launch_planner.clone(),
@@ -220,7 +208,6 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
             launch,
-            observation,
             Arc::clone(&self.osc52_clipboard_factory),
             self.local_filesystem.clone(),
         )?;
@@ -237,10 +224,6 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
 }
 
 impl TerminalSession {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "independent session dependencies are injected at construction"
-    )]
     #[cfg(test)]
     pub(crate) fn start(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
@@ -248,7 +231,6 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         local_hostname: Option<&str>,
-        runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
@@ -262,7 +244,6 @@ impl TerminalSession {
             native_pty_adapter_factory,
             geometry,
             launch,
-            runtime_observation,
             osc52_clipboard_factory,
             local_filesystem,
         )
@@ -272,7 +253,6 @@ impl TerminalSession {
         factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
         launch: SessionLaunch,
-        observation: Option<RuntimeObservation>,
         clipboard: Arc<dyn Osc52ClipboardFactory>,
         filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
@@ -280,7 +260,6 @@ impl TerminalSession {
             geometry,
             launch.metadata,
             launch.fallback_title,
-            observation,
             clipboard,
             filesystem,
             move |size, output, close_handle| {
@@ -297,7 +276,6 @@ impl TerminalSession {
     pub(super) fn start_deferred_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
-        runtime_observation: Option<RuntimeObservation>,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
@@ -316,7 +294,6 @@ impl TerminalSession {
             geometry,
             metadata_context,
             test_launch_planner().fallback_title(),
-            runtime_observation,
             Arc::new(UnavailableOsc52ClipboardFactory),
             LocalFilesystemAuthority::testing(),
             move |size, output, close_handle| {
@@ -330,7 +307,6 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
-        runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
         start_native_pty: impl FnOnce(
@@ -352,7 +328,6 @@ impl TerminalSession {
         let worker_native_pty_close = native_pty_close.clone();
         let native_pty_output = reader_transport.output_sink();
         let worker_events = event_tx.clone();
-        let worker_observation = runtime_observation.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -377,7 +352,6 @@ impl TerminalSession {
                                 stage,
                                 message: error.to_string(),
                             }),
-                            worker_observation.as_ref(),
                         );
                         return;
                     }
@@ -398,9 +372,8 @@ impl TerminalSession {
                     TerminalWorkerPublishers {
                         events: event_tx,
                         accessibility: accessibility_tx,
-                        runtime_observation: worker_observation.clone(),
                     },
-                    StartupReporter::Events(worker_events, worker_observation),
+                    StartupReporter::Events(worker_events),
                 );
             })
             .map_err(SessionError::SpawnWorker)?;
@@ -411,7 +384,6 @@ impl TerminalSession {
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
                 schedule_input,
-                runtime_observation,
             },
             event_rx,
             accessibility_rx,
@@ -471,7 +443,6 @@ impl TerminalSession {
                     TerminalWorkerPublishers {
                         events: event_tx,
                         accessibility: accessibility_tx,
-                        runtime_observation: None,
                     },
                     StartupReporter::Blocking(startup_tx),
                 )
@@ -485,7 +456,6 @@ impl TerminalSession {
                     worker: Some(worker),
                     native_pty_close: Some(native_pty_close),
                     schedule_input,
-                    runtime_observation: None,
                 },
                 event_rx,
                 accessibility_rx,

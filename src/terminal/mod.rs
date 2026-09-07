@@ -22,7 +22,6 @@ pub(crate) mod metadata;
 pub(crate) mod native_services;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
-mod runtime_observation;
 pub(crate) use native_services::selection;
 mod pointer_input;
 mod session;
@@ -44,9 +43,11 @@ pub(crate) use emulator::{
 };
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
+#[cfg(test)]
+pub(crate) use failure::FailureClass;
 pub(crate) use failure::{
-    DiagnosticBundle, DiagnosticKeyEventKind, FailureClass, PaneTerminalState, Recoverability,
-    TerminalFailure, UnhandledKeyDiagnostic,
+    DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
+    UnhandledKeyDiagnostic,
 };
 pub(crate) use find::{
     FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
@@ -78,11 +79,6 @@ pub(crate) use paste::{
 };
 #[cfg(test)]
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
-#[cfg(test)]
-pub(crate) use runtime_observation::RuntimeEventKind;
-pub(crate) use runtime_observation::{
-    RuntimeLifecycle, RuntimeObservation, RuntimeSample, RuntimeTransition, RuntimeVisibility,
-};
 pub(crate) use selection::SelectionCopy;
 pub(crate) use session::AccessibilitySelectionSender;
 #[cfg_attr(
@@ -93,14 +89,14 @@ pub(crate) use session::AccessibilitySelectionSender;
     )
 )]
 pub(crate) use session::SessionFailure;
-pub(crate) use session::{
-    AcceptanceSessionFailure, NativeTerminalSessionFactory, SelectionCopyError, SessionEvent,
-    SessionExit, TerminalSessionFactory, TerminalSessionHandle,
-};
 #[cfg(test)]
 pub(crate) use session::{
-    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, StartedTerminalSession,
-    TerminalLaunchPlan,
+    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, SessionExit,
+    StartedTerminalSession, TerminalLaunchPlan,
+};
+pub(crate) use session::{
+    NativeTerminalSessionFactory, SelectionCopyError, SessionEvent, TerminalSessionFactory,
+    TerminalSessionHandle,
 };
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,

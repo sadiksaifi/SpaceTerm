@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    AcceptanceSessionFailure, FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy,
-    Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
-    SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
-    TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, Osc52AuthorizationDecision,
+    Osc52AuthorizationId, PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution,
+    PointerInput, PresentationGeneration, SelectionCopy, SelectionCopyError, SessionError,
+    SessionEvent, StartedTerminalSession, TerminalAccessibilityModel, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
@@ -144,7 +144,6 @@ pub(crate) enum RecordedSessionCommand {
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
-    InjectAcceptanceFailure(AcceptanceSessionFailure),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +169,7 @@ impl TestTerminalSessionRecords {
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
         self.selection_copies.borrow_mut().push_back(copy);
     }
+
     pub(crate) fn accessibility_selection_requests(
         &self,
         session_id: usize,
@@ -492,10 +492,6 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopyAt(generation));
         self.selection_response.clone()
-    }
-
-    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
-        self.record(RecordedSessionCommand::InjectAcceptanceFailure(failure));
     }
 }
 
