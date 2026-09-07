@@ -81,6 +81,7 @@ fn desktop_profile(
     DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         spaceterm_ui::ModalKeybindingProfile::MacOs,
+        spaceterm_ui::CommandPaletteKeybindingProfile::MacOs,
         spaceterm_ui::TextInputKeybindingProfile::MacOs,
         crate::desktop_profile::keybindings::bindings(),
         DesktopPresentation::new(
@@ -89,6 +90,7 @@ fn desktop_profile(
                 file_preview: "Quick Look",
                 local_project_description: "Pinned to a folder on this Mac",
             },
+            "⌘↩",
             vec![
                 ActionShortcut::new(CreateScratchWorkspace, "⇧⌘N"),
                 ActionShortcut::new(SearchWorkspaces, "⌘P"),
@@ -388,6 +390,7 @@ mod tests {
             assert_eq!(presentation.shortcut(&TogglePaneZoom), "⇧⌘↩");
             assert_eq!(presentation.shortcut(&ClosePane), "⌘W");
             assert_eq!(presentation.shortcut(&CloseTab), "⇧⌘W");
+            assert_eq!(presentation.command_palette_confirm_shortcut(), "⌘↩");
             assert_eq!(
                 presentation.wording().directory_selection,
                 "Choose with Finder"

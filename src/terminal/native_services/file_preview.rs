@@ -216,7 +216,7 @@ mod tests {
 
         assert_eq!(presenter.panel.dismissals, 1);
     }
-    #[cfg(all(target_os = "macos", feature = "macos-native-tests"))]
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../../platform/macos_adapter_tests/quick_look.rs");
     }

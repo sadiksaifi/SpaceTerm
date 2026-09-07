@@ -161,7 +161,8 @@ against pinned GPUI 0.2.2 is:
 | Remote Project SSH and AskPass | Rust owns host-fact validation, OpenSSH policy, process supervision, paths, managed hosts, protocol framing, prompt authority, cancellation, zeroization, and cleanup ordering; GPUI presents Authentication Prompts | Composition supplies the executable, runtime fallback, socket constraint, and independent process, secure-filesystem, local-IPC, and peer mechanics described in the completed SSH audit below. |
 
 One explicit macOS Keybinding Profile selects the application mappings and existing reusable
-Text Input and Modal profiles. Semantic Actions remain independent of their shortcuts. Show New
+Text Input, Modal, and Command Palette profiles. Semantic Actions remain independent of their
+shortcuts. Show New
 Workspace Panel uses `cmd-n`; Create Scratch Workspace uses `cmd-shift-n`; Open Local Project uses
 `cmd-o`. The other 141 installed binding/action/context pairs are unchanged and guarded by the
 original 144-binding GPUI baseline. Native menus dispatch the same Actions and obtain their key

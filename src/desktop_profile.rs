@@ -2,7 +2,10 @@
 pub(crate) mod keybindings;
 
 use gpui::{Action, App, KeyBinding};
-use spaceterm_ui::{ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile};
+use spaceterm_ui::{
+    CommandPaletteKeybindingProfile, ModalDesktopPolicy, ModalKeybindingProfile,
+    TextInputKeybindingProfile,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct DesktopWording {
@@ -29,12 +32,21 @@ impl ActionShortcut {
 #[derive(Clone)]
 pub(crate) struct DesktopPresentation {
     wording: DesktopWording,
+    command_palette_confirm_shortcut: &'static str,
     shortcuts: Vec<ActionShortcut>,
 }
 
 impl DesktopPresentation {
-    pub(crate) fn new(wording: DesktopWording, shortcuts: Vec<ActionShortcut>) -> Self {
-        Self { wording, shortcuts }
+    pub(crate) fn new(
+        wording: DesktopWording,
+        command_palette_confirm_shortcut: &'static str,
+        shortcuts: Vec<ActionShortcut>,
+    ) -> Self {
+        Self {
+            wording,
+            command_palette_confirm_shortcut,
+            shortcuts,
+        }
     }
 
     pub(crate) fn get(cx: &App) -> &Self {
@@ -43,6 +55,10 @@ impl DesktopPresentation {
 
     pub(crate) const fn wording(&self) -> DesktopWording {
         self.wording
+    }
+
+    pub(crate) const fn command_palette_confirm_shortcut(&self) -> &'static str {
+        self.command_palette_confirm_shortcut
     }
 
     pub(crate) fn shortcut<A: Action>(&self, action: &A) -> &'static str {
@@ -59,6 +75,7 @@ pub(crate) struct DesktopProfile {
     presentation: DesktopPresentation,
     modal_policy: ModalDesktopPolicy,
     modal_keys: ModalKeybindingProfile,
+    command_palette_keys: CommandPaletteKeybindingProfile,
     text_keys: TextInputKeybindingProfile,
     bindings: Vec<KeyBinding>,
     locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
@@ -76,6 +93,7 @@ impl DesktopProfile {
     pub(crate) fn new(
         modal_policy: ModalDesktopPolicy,
         modal_keys: ModalKeybindingProfile,
+        command_palette_keys: CommandPaletteKeybindingProfile,
         text_keys: TextInputKeybindingProfile,
         bindings: Vec<KeyBinding>,
         presentation: DesktopPresentation,
@@ -89,6 +107,9 @@ impl DesktopProfile {
             {
                 return Err(DesktopProfileError::DuplicateGlobalKey);
             }
+        }
+        if presentation.command_palette_confirm_shortcut.is_empty() {
+            return Err(DesktopProfileError::MissingCapability);
         }
         for (index, shortcut) in presentation.shortcuts.iter().enumerate() {
             if shortcut.display.is_empty()
@@ -114,6 +135,7 @@ impl DesktopProfile {
             presentation,
             modal_policy,
             modal_keys,
+            command_palette_keys,
             text_keys,
             bindings,
             locale,
@@ -126,6 +148,7 @@ impl DesktopProfile {
             self.modal_policy
                 .with_text_direction(self.locale.text_direction()),
         );
+        spaceterm_ui::install_command_palette_keybindings(cx, self.command_palette_keys);
         spaceterm_ui::install_modal_keybindings(cx, self.modal_keys);
         spaceterm_ui::install_text_input_keybindings(cx, self.text_keys);
         cx.bind_keys(self.bindings.clone());
@@ -168,6 +191,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             file_preview: "Preview File",
             local_project_description: "Pinned to a local folder",
         },
+        "Primary+Enter",
         vec![
             ActionShortcut::new(CreateScratchWorkspace, "Primary+Shift+N"),
             ActionShortcut::new(SearchWorkspaces, "Primary+P"),
@@ -189,6 +213,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
     DesktopProfile::new(
         ModalDesktopPolicy::mac_os(),
         ModalKeybindingProfile::MacOs,
+        CommandPaletteKeybindingProfile::MacOs,
         TextInputKeybindingProfile::MacOs,
         keybindings::bindings(),
         testing_presentation(),
@@ -254,6 +279,7 @@ mod tests {
         let result = DesktopProfile::new(
             ModalDesktopPolicy::mac_os(),
             ModalKeybindingProfile::MacOs,
+            CommandPaletteKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
             vec![
                 KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
@@ -277,6 +303,7 @@ mod tests {
         let result = DesktopProfile::new(
             ModalDesktopPolicy::mac_os(),
             ModalKeybindingProfile::MacOs,
+            CommandPaletteKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
             keybindings::bindings(),
             presentation,
@@ -286,5 +313,13 @@ mod tests {
         );
 
         assert_eq!(result.err(), Some(DesktopProfileError::MissingCapability));
+    }
+
+    #[test]
+    fn testing_presentation_uses_a_host_neutral_palette_confirmation_shortcut() {
+        assert_eq!(
+            testing_presentation().command_palette_confirm_shortcut(),
+            "Primary+Enter"
+        );
     }
 }

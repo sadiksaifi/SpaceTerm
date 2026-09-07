@@ -11,13 +11,29 @@ pub(crate) enum TerminalContextMenuCommand {
     FilePreview,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalContextPresentation {
+    copy_shortcut: &'static str,
+    file_preview_label: &'static str,
+}
+
+fn terminal_context_presentation(
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> TerminalContextPresentation {
+    TerminalContextPresentation {
+        copy_shortcut: presentation.shortcut(&spaceterm_ui::EditCopy),
+        file_preview_label: presentation.wording().file_preview,
+    }
+}
+
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
+    let presentation = terminal_context_presentation(presentation);
     vec![
         menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy)
-            .shortcut(presentation.shortcut(&spaceterm_ui::EditCopy)),
+            .shortcut(presentation.copy_shortcut),
         menu_entry(
             TerminalContextMenuCommand::OpenLink,
             "Open Link",
@@ -25,7 +41,7 @@ pub(crate) fn terminal_context_menu_entries(
         ),
         menu_entry(
             TerminalContextMenuCommand::FilePreview,
-            presentation.wording().file_preview,
+            presentation.file_preview_label,
             actions.file_preview,
         ),
     ]
@@ -83,5 +99,16 @@ mod tests {
             command_icon(TerminalContextMenuCommand::FilePreview),
             IconName::Eye
         ));
+    }
+
+    #[test]
+    fn terminal_surface_should_use_host_neutral_profile_presentation() {
+        assert_eq!(
+            terminal_context_presentation(&crate::desktop_profile::testing_presentation()),
+            TerminalContextPresentation {
+                copy_shortcut: "Primary+C",
+                file_preview_label: "Preview File",
+            }
+        );
     }
 }

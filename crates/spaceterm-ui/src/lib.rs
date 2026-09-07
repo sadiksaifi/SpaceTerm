@@ -26,9 +26,9 @@ pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteGeneration, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching,
-    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
-    CommandPaletteReplacementFocus, CommandPaletteTheme,
+    CommandPaletteItem, CommandPaletteKeybindingProfile, CommandPaletteLifecycleEvent,
+    CommandPaletteMatching, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
+    CommandPaletteReplacementFocus, CommandPaletteTheme, install_command_palette_keybindings,
 };
 pub use icon::{Icon, IconName};
 pub use menu::{
@@ -125,8 +125,8 @@ impl ControlThemeCatalog {
 /// Installs the complete shared control catalog and platform-neutral control behavior.
 ///
 /// Applications install desktop policy, modal key equivalents, and text-input keybindings
-/// explicitly with [`install_modal_policy`], [`install_modal_keybindings`], and
-/// [`install_text_input_keybindings`].
+/// explicitly with [`install_modal_policy`], [`install_modal_keybindings`],
+/// [`install_command_palette_keybindings`], and [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     icon::register_font(cx)?;
     cx.set_global(catalog.button);

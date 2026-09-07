@@ -10408,7 +10408,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.did_prompt_for_new_path());
     }
-    #[cfg(all(target_os = "macos", feature = "macos-native-tests"))]
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/terminal_pane.rs");
     }

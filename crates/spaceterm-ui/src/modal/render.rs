@@ -41,7 +41,7 @@ actions!(
     ]
 );
 
-/// Platform-specific modal key equivalents layered over the portable modal bindings.
+/// A platform-selected complete modal keybinding set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModalKeybindingProfile {
     /// Conventional macOS Command-Period cancellation. Selecting this profile is explicit and
@@ -49,29 +49,20 @@ pub enum ModalKeybindingProfile {
     MacOs,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
-///
-/// Generic control initialization already installs portable Tab, Shift-Tab, Return, and Escape
-/// behavior. Applications call this separately to opt into desktop-specific equivalents without
-/// requiring host-platform detection in the reusable library.
+/// Installs the modal key equivalents for `profile` without host-platform detection.
 pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) {
     match profile {
-        ModalKeybindingProfile::MacOs => cx.bind_keys([KeyBinding::new(
-            "cmd-.",
-            ActivatePlatformCancel,
-            Some(MODAL_KEY_CONTEXT),
-        )]),
+        ModalKeybindingProfile::MacOs => cx.bind_keys([
+            KeyBinding::new("tab", TraverseForward, Some(MODAL_KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", TraverseBackward, Some(MODAL_KEY_CONTEXT)),
+            KeyBinding::new("enter", ActivateDefault, Some(MODAL_KEY_CONTEXT)),
+            KeyBinding::new("escape", ActivateCancel, Some(MODAL_KEY_CONTEXT)),
+            KeyBinding::new("cmd-.", ActivatePlatformCancel, Some(MODAL_KEY_CONTEXT)),
+        ]),
     }
 }
 
-pub(super) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("tab", TraverseForward, Some(MODAL_KEY_CONTEXT)),
-        KeyBinding::new("shift-tab", TraverseBackward, Some(MODAL_KEY_CONTEXT)),
-        KeyBinding::new("enter", ActivateDefault, Some(MODAL_KEY_CONTEXT)),
-        KeyBinding::new("escape", ActivateCancel, Some(MODAL_KEY_CONTEXT)),
-    ]);
-}
+pub(super) fn init(_: &mut App) {}
 
 /// Final Operating-System Window layer for shared window-modal controls.
 ///

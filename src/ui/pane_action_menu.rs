@@ -17,6 +17,29 @@ pub(crate) enum CloseTarget {
     Tab,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PaneActionMenuPresentation {
+    split_right: &'static str,
+    split_down: &'static str,
+    toggle_zoom: &'static str,
+    close: &'static str,
+}
+
+fn pane_action_menu_presentation(
+    close_target: CloseTarget,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> PaneActionMenuPresentation {
+    PaneActionMenuPresentation {
+        split_right: presentation.shortcut(&crate::ui::SplitRight),
+        split_down: presentation.shortcut(&crate::ui::SplitDown),
+        toggle_zoom: presentation.shortcut(&crate::ui::TogglePaneZoom),
+        close: match close_target {
+            CloseTarget::Pane => presentation.shortcut(&crate::ui::ClosePane),
+            CloseTarget::Tab => presentation.shortcut(&crate::ui::CloseTab),
+        },
+    }
+}
+
 pub(crate) fn pane_action_menu_entries(
     debug_prefix: &'static str,
     zoomed: bool,
@@ -26,6 +49,7 @@ pub(crate) fn pane_action_menu_entries(
 ) -> Vec<MenuEntry<PaneActionMenuCommand>> {
     let (zoom_icon, zoom_label) = zoom_presentation(zoomed);
     let (close_label, close_selector) = close_presentation(close_target);
+    let shortcuts = pane_action_menu_presentation(close_target, presentation);
 
     vec![
         MenuEntry::action("Split Right", PaneActionMenuCommand::SplitRight)
@@ -33,18 +57,18 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::SplitRight,
                 zoomed,
             )))
-            .shortcut(presentation.shortcut(&crate::ui::SplitRight))
+            .shortcut(shortcuts.split_right)
             .debug_selector(format!("{debug_prefix}-row-split-right")),
         MenuEntry::action("Split Down", PaneActionMenuCommand::SplitDown)
             .icon(menu_icon(pane_action_icon(
                 PaneActionMenuCommand::SplitDown,
                 zoomed,
             )))
-            .shortcut(presentation.shortcut(&crate::ui::SplitDown))
+            .shortcut(shortcuts.split_down)
             .debug_selector(format!("{debug_prefix}-row-split-down")),
         MenuEntry::action(zoom_label, PaneActionMenuCommand::ToggleZoom)
             .icon(menu_icon(zoom_icon))
-            .shortcut(presentation.shortcut(&crate::ui::TogglePaneZoom))
+            .shortcut(shortcuts.toggle_zoom)
             .disabled(!zoom_enabled)
             .debug_selector(format!("{debug_prefix}-row-toggle-zoom")),
         MenuEntry::separator(),
@@ -53,10 +77,7 @@ pub(crate) fn pane_action_menu_entries(
                 PaneActionMenuCommand::Close,
                 zoomed,
             )))
-            .shortcut(match close_target {
-                CloseTarget::Pane => presentation.shortcut(&crate::ui::ClosePane),
-                CloseTarget::Tab => presentation.shortcut(&crate::ui::CloseTab),
-            })
+            .shortcut(shortcuts.close)
             .destructive(true)
             .debug_selector(format!("{debug_prefix}-row-{close_selector}")),
     ]
@@ -180,6 +201,24 @@ mod tests {
         assert_eq!(
             close_presentation(CloseTarget::Tab),
             ("Close Tab", "close-tab")
+        );
+    }
+
+    #[test]
+    fn menu_surfaces_should_use_host_neutral_profile_shortcuts() {
+        let profile = crate::desktop_profile::testing_presentation();
+        assert_eq!(
+            pane_action_menu_presentation(CloseTarget::Pane, &profile),
+            PaneActionMenuPresentation {
+                split_right: "Primary+D",
+                split_down: "Primary+Shift+D",
+                toggle_zoom: "Primary+Shift+Enter",
+                close: "Primary+W",
+            }
+        );
+        assert_eq!(
+            pane_action_menu_presentation(CloseTarget::Tab, &profile).close,
+            "Primary+Shift+W"
         );
     }
 

@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(result, Err(WorkspacePickerFilesystemError::NotDirectory));
     }
 
-    #[cfg(all(target_os = "macos", feature = "macos-native-tests"))]
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
         include!("../macos_adapter_tests/picker.rs");
     }
