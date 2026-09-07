@@ -421,7 +421,9 @@ fn help_menu() -> Menu {
 mod native {
     use cocoa::appkit::{NSApp, NSEventModifierFlags};
     use cocoa::base::{BOOL, YES, id, nil};
-    use cocoa::foundation::{NSAutoreleasePool, NSDictionary, NSString, NSUInteger};
+    use cocoa::foundation::{
+        NSAutoreleasePool, NSDictionary, NSInteger, NSRange, NSString, NSUInteger,
+    };
     use objc::{class, msg_send, sel, sel_impl};
 
     use super::{
@@ -430,6 +432,7 @@ mod native {
     };
 
     const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer built with Rust, GPUI, and libghostty-vt.";
+    const CENTER_TEXT_ALIGNMENT: NSInteger = 2;
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
     #[link(name = "AppKit", kind = "framework")]
@@ -496,9 +499,14 @@ mod native {
                 .init_str(ABOUT_DESCRIPTION)
                 .autorelease()
         };
-        let credits: id = unsafe { msg_send![class!(NSAttributedString), alloc] };
+        let credits: id = unsafe { msg_send![class!(NSMutableAttributedString), alloc] };
         let credits: id = unsafe { msg_send![credits, initWithString: description] };
         let credits: id = unsafe { msg_send![credits, autorelease] };
+        let credits_length: NSUInteger = unsafe { msg_send![credits, length] };
+        let _: () = unsafe {
+            msg_send![credits, setAlignment: CENTER_TEXT_ALIGNMENT
+                                      range: NSRange::new(0, credits_length)]
+        };
         let icon: id = unsafe { msg_send![application, applicationIconImage] };
         if icon == nil {
             return Err(ApplicationMenuError::Unavailable);
