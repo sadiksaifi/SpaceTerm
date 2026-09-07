@@ -1501,7 +1501,7 @@ fn find_background_spans(
                             .saturating_add(1),
                     ),
                     color: if current {
-                        ACTIVE_THEME.search_current_match_background
+                        ACTIVE_THEME.search_active_match_background
                     } else {
                         ACTIVE_THEME.search_match_background
                     },
@@ -2327,15 +2327,57 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
         (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
         (source, _) => source,
     };
-    let mut foreground = resolve_color_source(foreground_source, colors, colors.foreground);
+    let mut foreground = if cell.bold
+        && !cell.faint
+        && foreground_source == TerminalColor::Default
+        && colors.foreground == ACTIVE_THEME.terminal_foreground
+    {
+        ACTIVE_THEME.terminal_bright_foreground
+    } else {
+        resolve_color_source(foreground_source, colors, colors.foreground)
+    };
     let mut background = resolve_color_source(cell.background_source, colors, colors.background);
     if cell.inverse ^ colors.reversed {
         std::mem::swap(&mut foreground, &mut background);
     }
     if cell.faint {
-        foreground.a = foreground.a.div_ceil(2);
+        let source = if cell.inverse ^ colors.reversed {
+            cell.background_source
+        } else {
+            foreground_source
+        };
+        foreground = dim_color(foreground, source, colors);
     }
     (foreground, background)
+}
+
+fn dim_color(color: Color, source: TerminalColor, colors: &TerminalColorsSnapshot) -> Color {
+    match source {
+        TerminalColor::Default
+            if color == ACTIVE_THEME.terminal_foreground && colors.foreground == color =>
+        {
+            ACTIVE_THEME.terminal_dim_foreground
+        }
+        TerminalColor::Palette(index @ 0..=15) => {
+            let base = if index < 8 {
+                ACTIVE_THEME.terminal_normal()[usize::from(index)]
+            } else {
+                ACTIVE_THEME.terminal_bright()[usize::from(index - 8)]
+            };
+            if color == base {
+                ACTIVE_THEME.terminal_dim()[usize::from(index % 8)]
+            } else {
+                Color {
+                    a: color.a.div_ceil(2),
+                    ..color
+                }
+            }
+        }
+        _ => Color {
+            a: color.a.div_ceil(2),
+            ..color
+        },
+    }
 }
 
 fn effective_underline_color(
@@ -2556,6 +2598,51 @@ mod tests {
         assert_eq!(
             effective_colors(&subject, &reversed),
             (Color::rgb(0x12_34_56), colors.palette[200])
+        );
+    }
+
+    #[test]
+    fn theme_intensity_roles_preserve_application_supplied_colors() {
+        let mut colors = colors();
+        colors.foreground = ACTIVE_THEME.terminal_foreground;
+        let mut palette = *colors.palette;
+        palette[..8].copy_from_slice(&ACTIVE_THEME.terminal_normal());
+        palette[8..16].copy_from_slice(&ACTIVE_THEME.terminal_bright());
+        colors.palette = Arc::new(palette);
+        let mut subject = cell("x");
+        subject.bold = true;
+        assert_eq!(
+            effective_colors(&subject, &colors).0,
+            ACTIVE_THEME.terminal_bright_foreground
+        );
+        subject.faint = true;
+        assert_eq!(
+            effective_colors(&subject, &colors).0,
+            ACTIVE_THEME.terminal_dim_foreground
+        );
+        for index in 0..16 {
+            subject.foreground_source = TerminalColor::Palette(index);
+            assert_eq!(
+                effective_colors(&subject, &colors).0,
+                ACTIVE_THEME.terminal_dim()[usize::from(index % 8)]
+            );
+        }
+        let custom = Color::rgb(0x123456);
+        Arc::make_mut(&mut colors.palette)[9] = custom;
+        subject.foreground_source = TerminalColor::Palette(1);
+        assert_eq!(
+            effective_colors(&subject, &colors).0,
+            Color { a: 128, ..custom }
+        );
+        subject.foreground_source = TerminalColor::Default;
+        colors.foreground = custom;
+        subject.faint = false;
+        assert_eq!(effective_colors(&subject, &colors).0, custom);
+        subject.foreground_source = TerminalColor::Rgb(custom);
+        subject.faint = true;
+        assert_eq!(
+            effective_colors(&subject, &colors).0,
+            Color { a: 128, ..custom }
         );
     }
 
@@ -2817,7 +2904,7 @@ mod tests {
             (
                 vec![
                     ACTIVE_THEME.search_match_background,
-                    ACTIVE_THEME.search_current_match_background,
+                    ACTIVE_THEME.search_active_match_background,
                 ],
                 vec![
                     BackgroundPaintLayer::Terminal,

@@ -994,6 +994,8 @@ pub struct CommandPalettePaint {
     selected_background: Rgba,
     selected_foreground: Rgba,
     match_foreground: Rgba,
+    icon_foreground: Rgba,
+    disabled_icon_foreground: Rgba,
     section_foreground: Rgba,
     footer_foreground: Rgba,
     footer_key_foreground: Rgba,
@@ -1029,10 +1031,19 @@ impl CommandPalettePaint {
             selected_background,
             selected_foreground,
             match_foreground,
+            icon_foreground: foreground,
+            disabled_icon_foreground: disabled,
             section_foreground: muted,
             footer_foreground: muted,
             footer_key_foreground: disabled,
         }
+    }
+
+    /// Sets normal and disabled icon colors independently of result text.
+    pub fn icons(mut self, normal: Rgba, disabled: Rgba) -> Self {
+        self.icon_foreground = normal;
+        self.disabled_icon_foreground = disabled;
+        self
     }
 
     /// Sets the hairline color used under the editor, above the footer, and between sections.
@@ -1278,6 +1289,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     generation: CommandPaletteGeneration,
     loading: bool,
     dismissible: bool,
+    escape_cancellable: bool,
     open: bool,
     pending_open: Option<PendingCommandPaletteOpen>,
     suspended_by_modal: Option<u64>,
@@ -1540,7 +1552,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
             }
         });
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar"));
+        let scrollbar =
+            cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar").persistent());
         let scrollbar_subscription = cx.subscribe_in(
             &scrollbar,
             window,
@@ -1626,6 +1639,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             generation: CommandPaletteGeneration::default(),
             loading: false,
             dismissible: true,
+            escape_cancellable: false,
             open: false,
             pending_open: None,
             suspended_by_modal: None,
@@ -1955,8 +1969,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
     }
 
+    /// Allows explicit Escape cancellation while outside clicks and focus loss remain blocked.
+    pub fn set_escape_cancellable(&mut self, enabled: bool, cx: &mut gpui::Context<Self>) {
+        self.escape_cancellable = enabled;
+        cx.notify();
+    }
+
     /// Controls whether user, focus, or window transitions may dismiss the open palette.
-    ///
     /// Explicit owner dismissal, replacement, completion, and item activation remain available.
     pub fn set_dismissible(&mut self, dismissible: bool, cx: &mut gpui::Context<Self>) {
         if self.dismissible != dismissible {
@@ -2426,7 +2445,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if !self.open || (!self.dismissible && reason.is_implicit_dismissal()) {
+        if !self.open
+            || (!self.dismissible
+                && reason.is_implicit_dismissal()
+                && !(self.escape_cancellable && reason == CommandPaletteCloseReason::Escape))
+        {
             return false;
         }
         self.open = false;
@@ -2543,6 +2566,25 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .min(metrics.maximum_height)
             .min(available_height);
         let list_height = (panel_height - chrome_height).max(px(0.0));
+        let mut fitted = px(0.0);
+        if !self.loading && !self.matches.is_empty() {
+            for index in 0..self.presented_results.len() {
+                let Some(row) = self.presented_results.row(index) else {
+                    break;
+                };
+                let height = row.height(metrics);
+                if fitted + height > list_height {
+                    break;
+                }
+                fitted += height;
+            }
+        }
+        let list_height = if fitted > px(0.0) {
+            fitted
+        } else {
+            list_height
+        };
+        let panel_height = chrome_height + list_height;
 
         let panel_bounds = gpui::Bounds::new(
             gpui::point(left, top),
@@ -2733,7 +2775,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .when(self.has_footer(), |panel| {
                 panel
                     .child(separator_line(metrics, paint))
-                    .child(self.render_footer(theme, cx))
+                    .child(self.render_footer(width, theme, cx))
             })
             .into_any_element()
     }
@@ -2887,6 +2929,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn render_footer(
         &self,
+        width: Pixels,
         theme: CommandPaletteTheme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
@@ -2922,6 +2965,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     .children(
                         self.hints
                             .iter()
+                            .filter(|_| width >= px(540.0) || self.confirm.is_none())
                             .map(|hint| render_hint(hint, metrics, paint)),
                     )
                     .when_some(self.confirm.clone(), |trailing, confirm| {
@@ -3155,7 +3199,11 @@ fn render_row<I: Clone + Eq + 'static>(
             .items_center()
             .justify_center();
         if let Some(icon) = item.leading_icon.clone() {
-            leading = leading.child(icon(foreground));
+            leading = leading.child(icon(if item.disabled {
+                paint.disabled_icon_foreground
+            } else {
+                paint.icon_foreground
+            }));
         }
         row = row.child(leading);
     }
@@ -3308,7 +3356,7 @@ fn highlighted_text(
 fn render_accessory(
     accessory: CommandPaletteAccessory,
     color: Rgba,
-    status_background: Rgba,
+    _status_background: Rgba,
     metrics: CommandPaletteMetrics,
 ) -> AnyElement {
     match accessory {
@@ -3323,7 +3371,6 @@ fn render_accessory(
             .px(metrics.accessory_padding)
             .py(metrics.accessory_line_padding)
             .rounded(metrics.accessory_radius)
-            .bg(status_background)
             .text_size(metrics.secondary_size)
             .text_color(color)
             .child(text)

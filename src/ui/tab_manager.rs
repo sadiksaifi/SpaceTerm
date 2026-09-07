@@ -1182,7 +1182,7 @@ impl TabManager {
             } else {
                 ACTIVE_THEME.text_muted
             }))
-            .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
+            .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1274,7 +1274,7 @@ impl TabManager {
                         .left_0()
                         .w_full()
                         .h(px(TAB_BAR_DIVIDER_SIZE))
-                        .bg(gpui_color(ACTIVE_THEME.panel_focused_border)),
+                        .bg(gpui_color(ACTIVE_THEME.border_selected)),
                 )
             });
 
@@ -2311,7 +2311,7 @@ mod tests {
 
         assert_eq!(
             (split_title.as_ref(), restored_title.as_ref()),
-            ("2 Panes", "Claude Code")
+            ("Terminal · 2 Panes", "Claude Code")
         );
     }
 

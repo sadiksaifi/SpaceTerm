@@ -88,13 +88,12 @@ const SIDEBAR_HEADER_TRAILING_PADDING: f32 = SIDEBAR_TOGGLE_INSET;
 const SIDEBAR_HEADER_ACTION_GAP: f32 = 0.0;
 const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
-const SIDEBAR_ROW_PIN_ICON_SIZE: f32 = 10.0;
 /// Clearance for the native traffic lights that share the top-left chrome strip.
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
-const WORKSPACE_CHIP_ICON_SIZE: f32 = 11.0;
-const WORKSPACE_CHIP_TEXT_SIZE: f32 = 11.0;
+const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
+const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
-const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 11.0;
+const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 12.0;
 const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
@@ -2610,11 +2609,13 @@ impl WorkspaceManager {
         };
 
         let scope = target.scope();
+        let count = self.close_hierarchy(cx).affected_pane_count(target);
+        let noun = if count == 1 { "Pane" } else { "Panes" };
         let result = Alert::new(
             ModalId::new("close-confirmation"),
             scope.title(),
             scope.title(),
-            "One or more affected Panes may still have running processes. Closing will terminate their Terminal Sessions.",
+            format!("Close {count} {noun}? Running commands in these Panes will stop."),
             vec![
                 ModalAction::new(
                     CloseConfirmationAction::Confirm,
@@ -3318,7 +3319,6 @@ impl WorkspaceManager {
     /// chip would be duplicate chrome; with it closed nothing on screen does.
     fn render_workspace_chip(&self) -> AnyElement {
         let workspace = self.workspaces.active_workspace();
-        let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
         let workspace_icon = match workspace.kind() {
             WorkspaceKind::LocalProject { .. } => IconName::Folder,
             WorkspaceKind::RemoteProject { .. } => IconName::Globe,
@@ -3343,10 +3343,8 @@ impl WorkspaceManager {
         });
         let icon_color = gpui_color(if !available {
             ACTIVE_THEME.warning
-        } else if local_project {
-            ACTIVE_THEME.icon
         } else {
-            ACTIVE_THEME.icon_muted
+            ACTIVE_THEME.icon
         });
         let tooltip_detail = remote_status
             .map(|status| format!("{path}: {status}"))
@@ -3372,25 +3370,7 @@ impl WorkspaceManager {
                     .text_size(px(WORKSPACE_CHIP_TEXT_SIZE))
                     .text_color(foreground)
                     .child(name.clone()),
-            )
-            .when(local_project, |chip| {
-                chip.child(Icon::new(
-                    IconName::Pin,
-                    px(SIDEBAR_ROW_PIN_ICON_SIZE),
-                    gpui_color(ACTIVE_THEME.icon_muted),
-                ))
-            })
-            .when_some(remote_status, |chip, status| {
-                chip.child(
-                    div()
-                        .id("workspace-chip-remote-status")
-                        .debug_selector(|| "workspace-chip-remote-status".to_owned())
-                        .flex_shrink_0()
-                        .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
-                        .text_color(gpui_color(remote_color.unwrap_or(ACTIVE_THEME.text_muted)))
-                        .child(status),
-                )
-            });
+            );
 
         Tooltip::new("workspace-chip-tooltip", name)
             .detail(tooltip_detail)
@@ -3399,7 +3379,7 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_top_left_chrome(&self, manager: WeakEntity<Self>) -> AnyElement {
+    fn render_top_left_chrome(&self, manager: WeakEntity<Self>, window: &Window) -> AnyElement {
         let drag_manager = manager.clone();
         let toggle_manager = manager;
         let content = div()
@@ -3481,7 +3461,11 @@ impl WorkspaceManager {
             .left_0()
             .w(self.sidebar.width)
             .h(px(TOP_CHROME_HEIGHT))
-            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .bg(gpui_color(if window.is_window_active() {
+                ACTIVE_THEME.title_bar_background
+            } else {
+                ACTIVE_THEME.title_bar_inactive_background
+            }))
             .occlude()
             .child(drag_region)
             .into_any_element()
@@ -3533,7 +3517,7 @@ impl WorkspaceManager {
                 .overflow_hidden()
                 .rounded(px(4.0))
                 .border(px(1.0))
-                .border_color(gpui_color(ACTIVE_THEME.panel_focused_border))
+                .border_color(gpui_color(ACTIVE_THEME.border_focused))
                 .bg(gpui_color(ACTIVE_THEME.element_background))
                 .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
                 .text_color(gpui_color(ACTIVE_THEME.text))
@@ -3593,7 +3577,7 @@ impl WorkspaceManager {
             .when(active, |row| {
                 row.bg(gpui_color(ACTIVE_THEME.element_selected))
             })
-            .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
+            .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
                     if manager.activate_workspace(workspace_id, window, cx) {
@@ -3665,32 +3649,10 @@ impl WorkspaceManager {
                                     .flex_shrink_0()
                                     .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
                                     .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                                    .child(super::workspace_count_summary(tab_count, pane_count)),
-                            )
-                            .when_some(remote_status, |line, status| {
-                                line.child(
-                                    div()
-                                        .id(("workspace-row-remote-status", workspace_id.get()))
-                                        .debug_selector(move || {
-                                            format!(
-                                                "workspace-row-remote-status-{}",
-                                                workspace_id.get()
-                                            )
-                                        })
-                                        .flex_shrink_0()
-                                        .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
-                                        .text_color(gpui_color(
-                                            remote_color.unwrap_or(ACTIVE_THEME.text_muted),
-                                        ))
-                                        .child(status),
-                                )
-                            }),
+                                    .child(format!("{tab_count}T · {pane_count}P")),
+                            ),
                     )
                     .child(
-                        // The path carries the Workspace Kind: a Local Project is pinned to it,
-                        // so it reads as settled text with a pin, while a Scratch Workspace's
-                        // path follows its Directory Authority and stays muted. Watching one move
-                        // once teaches the difference that no label explains as well.
                         div()
                             .w_full()
                             .min_w_0()
@@ -3706,32 +3668,11 @@ impl WorkspaceManager {
                                     .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
                                     .text_color(gpui_color(if !available {
                                         ACTIVE_THEME.warning
-                                    } else if local_project {
-                                        ACTIVE_THEME.text
                                     } else {
                                         ACTIVE_THEME.text_muted
                                     }))
                                     .child(MiddleTruncatedText::new(path, maximum_path_characters)),
-                            )
-                            .when(local_project, |line| {
-                                line.child(
-                                    div()
-                                        .id(("workspace-row-pin", workspace_id.get()))
-                                        .debug_selector(move || {
-                                            format!("workspace-row-pin-{}", workspace_id.get())
-                                        })
-                                        .flex_shrink_0()
-                                        .child(Icon::new(
-                                            IconName::Pin,
-                                            px(SIDEBAR_ROW_PIN_ICON_SIZE),
-                                            gpui_color(if available {
-                                                ACTIVE_THEME.icon_muted
-                                            } else {
-                                                ACTIVE_THEME.warning
-                                            }),
-                                        )),
-                                )
-                            }),
+                            ),
                     ),
             )
             .child(
@@ -3743,7 +3684,7 @@ impl WorkspaceManager {
                     .left_0()
                     .w_full()
                     .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
+                    .bg(gpui_color(ACTIVE_THEME.border_variant)),
             );
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
@@ -4141,7 +4082,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
-            .child(self.render_top_left_chrome(manager.clone()))
+            .child(self.render_top_left_chrome(manager.clone(), window))
             .when(self.sidebar.visible, |root| {
                 root.child(self.render_sidebar(manager.clone(), window, cx))
             })
@@ -4287,9 +4228,7 @@ fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
     match phase {
         RemoteConnectionPhase::Reconnecting => ACTIVE_THEME.info,
         RemoteConnectionPhase::Connected => ACTIVE_THEME.success,
-        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => {
-            ACTIVE_THEME.text_muted
-        }
+        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => ACTIVE_THEME.icon,
         RemoteConnectionPhase::Failed => ACTIVE_THEME.error,
     }
 }

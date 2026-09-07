@@ -123,11 +123,17 @@ impl CloseHierarchy {
             .push((workspace, tab, pane, facts.requires_confirmation()));
     }
 
-    pub(crate) fn requires_confirmation(&self, target: CloseTarget) -> Option<bool> {
-        let mut found = matches!(target, CloseTarget::Window | CloseTarget::Application);
-        let mut requires = false;
-        for &(workspace, tab, pane, running) in &self.panes {
-            let matches = match target {
+    pub(crate) fn affected_pane_count(&self, target: CloseTarget) -> usize {
+        self.matching_panes(target).count()
+    }
+
+    fn matching_panes(
+        &self,
+        target: CloseTarget,
+    ) -> impl Iterator<Item = &(WorkspaceId, TabId, PaneId, bool)> {
+        self.panes
+            .iter()
+            .filter(move |&&(workspace, tab, pane, _)| match target {
                 CloseTarget::Pane {
                     workspace_id,
                     tab_id,
@@ -139,11 +145,15 @@ impl CloseHierarchy {
                 } => (workspace, tab) == (workspace_id, tab_id),
                 CloseTarget::Workspace(id) => workspace == id,
                 CloseTarget::Window | CloseTarget::Application => true,
-            };
-            if matches {
-                found = true;
-                requires |= running;
-            }
+            })
+    }
+
+    pub(crate) fn requires_confirmation(&self, target: CloseTarget) -> Option<bool> {
+        let mut found = matches!(target, CloseTarget::Window | CloseTarget::Application);
+        let mut requires = false;
+        for &(_, _, _, running) in self.matching_panes(target) {
+            found = true;
+            requires |= running;
         }
         found.then_some(requires)
     }

@@ -5160,6 +5160,7 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "same-file",
+ "serde_json",
  "smallvec",
  "spaceterm-ui",
  "thiserror 2.0.19",

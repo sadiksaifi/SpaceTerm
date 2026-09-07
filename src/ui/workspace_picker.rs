@@ -10,8 +10,8 @@ use gpui::{
 };
 use spaceterm_ui::{
     CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMatching, Icon, IconName, MenuEntry,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName, MenuEntry,
 };
 
 use super::{
@@ -159,7 +159,8 @@ impl WorkspacePicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Workspace path", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new("Open Local Project", Vec::new(), window, cx);
+            palette.set_hints(vec![CommandPaletteHint::new("Enter folder", "↵")], cx);
             // The query is an address, not a search term, so the picker filters and orders its own
             // rows, and activating one descends instead of completing the operation.
             palette.set_matching(CommandPaletteMatching::Caller, cx);
@@ -747,7 +748,7 @@ impl WorkspacePicker {
         if self.status == WorkspacePickerStatus::Missing {
             "Create & Open"
         } else {
-            "Open"
+            "Open This Folder"
         }
     }
 
@@ -1550,7 +1551,7 @@ mod tests {
         );
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.confirmation_label()),
-            "Open"
+            "Open This Folder"
         );
     }
 

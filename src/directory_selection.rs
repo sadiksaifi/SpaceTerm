@@ -14,6 +14,31 @@ pub(crate) trait SystemDirectorySelection {
 
 pub(crate) struct GpuiDirectorySelection;
 
+pub(crate) trait SystemFileSelection {
+    fn choose_file(&self, cx: &App) -> DirectorySelectionFuture;
+}
+
+pub(crate) struct GpuiFileSelection;
+
+impl SystemFileSelection for GpuiFileSelection {
+    fn choose_file(&self, cx: &App) -> DirectorySelectionFuture {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose Identity File".into()),
+        });
+        Box::pin(async move {
+            match selection.await {
+                Ok(Ok(Some(paths))) => Ok(paths.into_iter().next()),
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(_)) => Err(DirectoryChooserError::Rejected),
+                Err(_) => Err(DirectoryChooserError::Unavailable),
+            }
+        })
+    }
+}
+
 impl SystemDirectorySelection for GpuiDirectorySelection {
     fn choose(&self, cx: &App) -> DirectorySelectionFuture {
         let selection = cx.prompt_for_paths(PathPromptOptions {

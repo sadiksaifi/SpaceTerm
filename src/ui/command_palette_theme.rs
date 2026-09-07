@@ -15,12 +15,16 @@ pub(super) fn theme() -> CommandPaletteTheme {
             gpui_color(ACTIVE_THEME.text),
             gpui_color(ACTIVE_THEME.text_accent),
         )
+        .icons(
+            gpui_color(ACTIVE_THEME.icon),
+            gpui_color(ACTIVE_THEME.icon_disabled),
+        )
         .separator(gpui_color(ACTIVE_THEME.border_variant))
-        .hover_background(gpui_color(ACTIVE_THEME.ghost_element_selected))
+        .hover_background(gpui_color(ACTIVE_THEME.ghost_element_hover))
         .section_foreground(gpui_color(ACTIVE_THEME.text_muted))
         .footer(
             gpui_color(ACTIVE_THEME.text_muted),
-            gpui_color(ACTIVE_THEME.text_disabled),
+            gpui_color(ACTIVE_THEME.text_muted),
         ),
         CommandPaletteMetrics::new(px(600.0), px(48.0))
             .single_line_row_height(px(32.0))
@@ -33,7 +37,7 @@ pub(super) fn theme() -> CommandPaletteTheme {
             .section_spacing(px(22.0), px(9.0))
             .footer_height(px(30.0))
             .panel_shape(px(8.0), px(1.0))
-            .font_sizes(px(14.0), px(13.0), px(11.0)),
+            .font_sizes(px(14.0), px(13.0), px(12.0)),
     )
 }
 

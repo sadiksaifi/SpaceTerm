@@ -2565,6 +2565,8 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
 
         match command {
+            TerminalContextMenuCommand::Paste => self.paste_clipboard(&PasteClipboard, window, cx),
+            TerminalContextMenuCommand::Find => self.open_find(&OpenTerminalFind, window, cx),
             TerminalContextMenuCommand::Copy if actions.copy => {
                 if let Some(session) = &self.terminal_session.session {
                     self.publish_selection_copy(
@@ -2880,18 +2882,25 @@ impl TerminalPane {
             .find
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
-        let result_label = snapshot.map_or_else(
-            || "–/–".to_owned(),
-            |snapshot| {
-                format!(
-                    "{}/{}",
-                    snapshot
-                        .current_match
-                        .map_or_else(|| "–".to_owned(), |index| index.to_string()),
-                    snapshot.total_matches
-                )
-            },
-        );
+        let result_label = if input.read(cx).value().is_empty() {
+            "Find".to_owned()
+        } else {
+            snapshot.map_or_else(
+                || "Searching…".to_owned(),
+                |snapshot| {
+                    if snapshot.total_matches == 0 {
+                        return "No matches".to_owned();
+                    }
+                    format!(
+                        "{}/{}",
+                        snapshot
+                            .current_match
+                            .map_or_else(|| "–".to_owned(), |index| index.to_string()),
+                        snapshot.total_matches
+                    )
+                },
+            )
+        };
         let has_results = snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
         let pane = cx.entity().downgrade();
         let previous_pane = pane.clone();
@@ -2916,7 +2925,7 @@ impl TerminalPane {
                 .rounded(px(7.0))
                 .border_1()
                 .border_color(gpui_color(ACTIVE_THEME.border))
-                .bg(gpui_color(ACTIVE_THEME.background))
+                .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
                 .shadow_md()
                 .block_mouse_except_scroll()
                 .key_context(TERMINAL_FIND_KEY_CONTEXT)
@@ -2951,6 +2960,7 @@ impl TerminalPane {
                     div()
                         .debug_selector(|| "terminal-find-result-label".to_owned())
                         .min_w(px(42.0))
+                        .flex_shrink_0()
                         .text_size(px(11.0))
                         .text_color(gpui_color(ACTIVE_THEME.text_muted))
                         .child(result_label),
@@ -3340,6 +3350,11 @@ impl Render for TerminalPane {
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(cx);
         let status = self.authoritative_status();
+        let (status_color, status_icon) = match self.pane_state {
+            PaneTerminalState::Failed { .. } => (ACTIVE_THEME.error, IconName::TriangleAlert),
+            PaneTerminalState::Exited(_) => (ACTIVE_THEME.text_muted, IconName::Square),
+            PaneTerminalState::Running => (ACTIVE_THEME.info, IconName::Info),
+        };
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
         let recovery_available = self.pending_recovery.is_some();
@@ -3515,82 +3530,106 @@ impl Render for TerminalPane {
                         .border_color(gpui_color(ACTIVE_THEME.warning)),
                 )
             })
-            .when_some(active_hovered_link, |root, link| {
-                root.child(
-                    div()
-                        .debug_selector(|| "terminal-link-preview".to_owned())
-                        .absolute()
-                        .left(px(8.0))
-                        .bottom(px(8.0))
-                        .max_w(px(520.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(gpui_color(ACTIVE_THEME.border))
-                        .bg(gpui_color(ACTIVE_THEME.element_active))
-                        .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                        .text_sm()
-                        .overflow_hidden()
-                        .child(div().truncate().child(link.target.value)),
-                )
-            })
+            .when_some(
+                active_hovered_link.filter(|_| paste_confirmation.is_none() && status.is_none()),
+                |root, link| {
+                    root.child(
+                        div()
+                            .debug_selector(|| "terminal-link-preview".to_owned())
+                            .absolute()
+                            .left(px(8.0))
+                            .bottom(px(8.0))
+                            .max_w(px(520.0))
+                            .px(px(6.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(gpui_color(ACTIVE_THEME.border))
+                            .bg(gpui_color(ACTIVE_THEME.element_active))
+                            .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                            .text_sm()
+                            .overflow_hidden()
+                            .child(div().truncate().child(link.target.value)),
+                    )
+                },
+            )
             .when_some(paste_confirmation, |root, confirmation| {
                 root.child(render_paste_confirmation(
                     confirmation,
                     cx.entity().downgrade(),
                 ))
             })
-            .when_some(status, |root, status| {
-                root.child(
-                    div()
-                        .debug_selector(|| "terminal-status".to_owned())
-                        .absolute()
-                        .right(px(HORIZONTAL_PADDING))
-                        .bottom(px(VERTICAL_PADDING))
-                        .max_w(px(520.0))
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(gpui_color(ACTIVE_THEME.element_active))
-                        .text_color(gpui_color(ACTIVE_THEME.text))
-                        .text_sm()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(status)
-                        .when(recovery_available, |status| {
-                            status.child(
-                                Button::new("retry-terminal-recovery", "Retry")
-                                    .variant(ButtonVariant::Link)
-                                    .size(ButtonSize::Compact)
-                                    .debug_selector("retry-terminal-recovery")
-                                    .on_activate(move |_, window, cx| {
-                                        let _ = retry_pane.update(cx, |pane, cx| {
-                                            pane.retry_recovery(window, cx);
-                                        });
-                                    }),
+            .when_some(
+                status.filter(|_| paste_confirmation.is_none()),
+                |root, status| {
+                    root.child(
+                        div()
+                            .debug_selector(|| "terminal-status".to_owned())
+                            .absolute()
+                            .right(px(HORIZONTAL_PADDING))
+                            .bottom(px(VERTICAL_PADDING))
+                            .max_w(relative(0.94))
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(gpui_color(status_color))
+                            .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
+                            .text_color(gpui_color(ACTIVE_THEME.text))
+                            .text_sm()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(8.0))
+                                    .child(Icon::new(
+                                        status_icon,
+                                        px(14.0),
+                                        gpui_color(status_color),
+                                    ))
+                                    .child(div().min_w_0().whitespace_normal().child(status)),
                             )
-                        })
-                        .when(diagnostics_available, |status| {
-                            status.child(
-                                Button::new("export-terminal-diagnostics", "Export Diagnostics")
+                            .when(recovery_available, |status| {
+                                status.child(
+                                    Button::new("retry-terminal-recovery", "Retry")
+                                        .variant(ButtonVariant::Link)
+                                        .size(ButtonSize::Compact)
+                                        .debug_selector("retry-terminal-recovery")
+                                        .on_activate(move |_, window, cx| {
+                                            let _ = retry_pane.update(cx, |pane, cx| {
+                                                pane.retry_recovery(window, cx);
+                                            });
+                                        }),
+                                )
+                            })
+                            .when(diagnostics_available, |status| {
+                                status.child(
+                                    Button::new(
+                                        "export-terminal-diagnostics",
+                                        "Export Diagnostics",
+                                    )
                                     .variant(ButtonVariant::Link)
                                     .size(ButtonSize::Compact)
                                     .debug_selector("export-terminal-diagnostics")
-                                    .on_activate(move |_, window, cx| {
-                                        let _ = export_pane.update(cx, |pane, cx| {
-                                            pane.export_diagnostics(
-                                                &ExportTerminalDiagnostics,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            )
-                        }),
-                )
-            })
+                                    .on_activate(
+                                        move |_, window, cx| {
+                                            let _ = export_pane.update(cx, |pane, cx| {
+                                                pane.export_diagnostics(
+                                                    &ExportTerminalDiagnostics,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                )
+                            }),
+                    )
+                },
+            )
             .child(
                 div()
                     .absolute()
@@ -3609,21 +3648,11 @@ fn render_paste_confirmation(
     pane: gpui::WeakEntity<TerminalPane>,
 ) -> impl IntoElement {
     let cancel_pane = pane.clone();
-    let risks = [
-        confirmation.risk.multiline.then_some("multiple lines"),
-        confirmation
-            .risk
-            .control_bytes
-            .then_some("terminal control bytes"),
-        confirmation
-            .risk
-            .closing_fence
-            .then_some("a bracketed-paste closing fence"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(", ");
+    let explanation = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
+        "This text contains control sequences that may change terminal behavior or execute commands."
+    } else {
+        "Pasting multiple lines may execute commands in your shell."
+    };
 
     div()
         .debug_selector(|| "unsafe-paste-confirmation".to_owned())
@@ -3632,43 +3661,51 @@ fn render_paste_confirmation(
         .right(px(16.0))
         .bottom(px(16.0))
         .flex()
-        .items_center()
+        .flex_col()
+        .items_start()
         .gap(px(10.0))
         .px(px(12.0))
         .py(px(10.0))
         .rounded(px(8.0))
         .border_1()
         .border_color(gpui_color(ACTIVE_THEME.warning_border))
-        .bg(gpui_color(ACTIVE_THEME.warning_background))
+        .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
         .text_color(gpui_color(ACTIVE_THEME.text))
         .text_sm()
         .occlude()
-        .child(format!(
-            "Paste {} bytes across {} lines? Detected {risks}.",
+        .child(div().w_full().whitespace_normal().child(format!(
+            "Paste {} bytes across {} lines? {explanation}",
             confirmation.byte_len, confirmation.line_count
-        ))
+        )))
         .child(
-            Button::new("cancel-unsafe-paste", "Cancel")
-                .variant(ButtonVariant::Secondary)
-                .size(ButtonSize::Small)
-                .role(ButtonRole::Cancel)
-                .debug_selector("cancel-unsafe-paste")
-                .on_activate(move |_, window, cx| {
-                    let _ = cancel_pane.update(cx, |pane, cx| {
-                        pane.cancel_unsafe_paste(&CancelUnsafePaste, window, cx);
-                    });
-                }),
-        )
-        .child(
-            Button::new("confirm-unsafe-paste", "Paste")
-                .variant(ButtonVariant::Primary)
-                .size(ButtonSize::Small)
-                .debug_selector("confirm-unsafe-paste")
-                .on_activate(move |_, window, cx| {
-                    let _ = pane.update(cx, |pane, cx| {
-                        pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
-                    });
-                }),
+            div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .gap(px(8.0))
+                .child(
+                    Button::new("cancel-unsafe-paste", "Cancel")
+                        .variant(ButtonVariant::Secondary)
+                        .size(ButtonSize::Small)
+                        .role(ButtonRole::Cancel)
+                        .debug_selector("cancel-unsafe-paste")
+                        .on_activate(move |_, window, cx| {
+                            let _ = cancel_pane.update(cx, |pane, cx| {
+                                pane.cancel_unsafe_paste(&CancelUnsafePaste, window, cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("confirm-unsafe-paste", "Paste")
+                        .variant(ButtonVariant::Primary)
+                        .size(ButtonSize::Small)
+                        .debug_selector("confirm-unsafe-paste")
+                        .on_activate(move |_, window, cx| {
+                            let _ = pane.update(cx, |pane, cx| {
+                                pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
+                            });
+                        }),
+                ),
         )
 }
 

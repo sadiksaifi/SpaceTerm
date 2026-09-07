@@ -60,11 +60,12 @@ fn runtime_path_host_facts(
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
 ) -> Result<DesktopProfile, DesktopProfileError> {
+    use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
         ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
     };
-    use spaceterm_ui::EditCopy;
+    use spaceterm_ui::{EditCopy, EditPaste};
 
     DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
@@ -86,6 +87,8 @@ fn desktop_profile(
                 ActionShortcut::new(OpenLocalProject, "⌘O"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
+                ActionShortcut::new(EditPaste, "⌘V"),
+                ActionShortcut::new(OpenTerminalFind, "⌘F"),
                 ActionShortcut::new(SplitRight, "⌘D"),
                 ActionShortcut::new(SplitDown, "⇧⌘D"),
                 ActionShortcut::new(TogglePaneZoom, "⇧⌘↩"),

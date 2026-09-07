@@ -9,9 +9,9 @@ pub(super) fn theme() -> ResizeHandleTheme {
     ResizeHandleTheme::new(
         ResizeHandlePaint::new(
             gpui_color(ACTIVE_THEME.border),
-            gpui_color(ACTIVE_THEME.panel_indent_guide_hover),
-            gpui_color(ACTIVE_THEME.panel_indent_guide_active),
-            gpui_color(ACTIVE_THEME.panel_focused_border),
+            gpui_color(ACTIVE_THEME.border_focused),
+            gpui_color(ACTIVE_THEME.border_selected),
+            gpui_color(ACTIVE_THEME.border_focused),
             gpui_color(ACTIVE_THEME.border_disabled),
         ),
         ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0)),

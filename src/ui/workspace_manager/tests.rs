@@ -2143,13 +2143,13 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     );
     let status_selector: &'static str =
         Box::leak(format!("workspace-row-remote-status-{}", workspace_id.get()).into_boxed_str());
-    assert!(cx.debug_bounds(status_selector).is_some());
+    assert!(cx.debug_bounds(status_selector).is_none());
 
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
     assert!(
-        cx.debug_bounds("workspace-chip-remote-status").is_some(),
-        "hidden-sidebar identity chip must retain remote connection status"
+        cx.debug_bounds("workspace-chip-remote-status").is_none(),
+        "the globe conveys connection state without a separate status label"
     );
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
@@ -4903,7 +4903,7 @@ fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
 }
 
 #[gpui::test]
-fn only_a_pinned_workspace_row_should_carry_a_pin(cx: &mut TestAppContext) {
+fn workspace_kind_icons_should_not_have_redundant_pins(cx: &mut TestAppContext) {
     let project = temporary_directory("pinned-project");
     fs::create_dir_all(&project).unwrap();
     let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(project))], cx);
@@ -4928,8 +4928,8 @@ fn only_a_pinned_workspace_row_should_carry_a_pin(cx: &mut TestAppContext) {
 
     assert!(
         cx.debug_bounds(format!("workspace-row-pin-{project_id}").leak())
-            .is_some(),
-        "the Local Project row lost the pin that says its directory never moves"
+            .is_none(),
+        "the folder already identifies a Local Project"
     );
     assert!(
         cx.debug_bounds(format!("workspace-row-pin-{scratch_id}").leak())
@@ -5371,7 +5371,7 @@ fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestA
             WorkspaceId::new(1),
             false,
             None,
-            SharedString::from("2 Panes"),
+            SharedString::from("zsh · 2 Panes"),
             true,
         )
     );
@@ -5591,7 +5591,7 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
     });
     assert_eq!(
         (state.0, state.1.as_ref(), state.2),
-        (false, "2 Panes", Vec::new())
+        (false, "zsh · 2 Panes", Vec::new())
     );
 }
 

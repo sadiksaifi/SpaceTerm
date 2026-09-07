@@ -112,6 +112,7 @@ pub enum ButtonShape {
 pub struct ButtonPaint {
     background: Rgba,
     foreground: Rgba,
+    icon_foreground: Rgba,
     border: Rgba,
 }
 
@@ -121,6 +122,7 @@ impl ButtonPaint {
         Self {
             background,
             foreground,
+            icon_foreground: foreground,
             border,
         }
     }
@@ -133,6 +135,12 @@ impl ButtonPaint {
     /// Returns the state's foreground color.
     pub fn foreground(self) -> Rgba {
         self.foreground
+    }
+
+    /// Sets the foreground for icon-only controls independently of text buttons.
+    pub fn icon_foreground(mut self, foreground: Rgba) -> Self {
+        self.icon_foreground = foreground;
+        self
     }
 
     /// Returns the state's border color.
@@ -1126,7 +1134,11 @@ impl ButtonCore {
             .map(|selector| format!("{selector}-keyboard-focus"))
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let tooltip = self.tooltip;
-        let content = build_content(paint.foreground);
+        let content = build_content(if layout.icon_only {
+            paint.icon_foreground
+        } else {
+            paint.foreground
+        });
         let preserve_ancestor_hover = self.preserve_ancestor_hover;
 
         let button = div()

@@ -7,7 +7,7 @@ use gpui::{
     px,
 };
 
-const THUMB_WIDTH: f32 = 5.0;
+const THUMB_WIDTH: f32 = 7.0;
 const HITBOX_HORIZONTAL_PADDING: f32 = 4.0;
 const HITBOX_WIDTH: f32 = THUMB_WIDTH + HITBOX_HORIZONTAL_PADDING * 2.0;
 const THUMB_RIGHT_INSET: f32 = 4.0;
@@ -201,6 +201,8 @@ pub struct ScrollbarTheme {
     thumb: Rgba,
     hovered_thumb: Rgba,
     dragging_thumb: Rgba,
+    thumb_border: Rgba,
+    track_border: Rgba,
 }
 
 impl ScrollbarTheme {
@@ -210,7 +212,16 @@ impl ScrollbarTheme {
             thumb,
             hovered_thumb,
             dragging_thumb,
+            thumb_border: Rgba { a: 0.0, ..thumb },
+            track_border: Rgba { a: 0.0, ..thumb },
         }
+    }
+
+    /// Sets the Zed thumb and track border roles without imposing opaque default borders.
+    pub fn borders(mut self, thumb: Rgba, track: Rgba) -> Self {
+        self.thumb_border = thumb;
+        self.track_border = track;
+        self
     }
 
     fn resolve(self, dragging: bool) -> (Rgba, Rgba) {
@@ -243,6 +254,7 @@ pub struct OverlayScrollbar<O: ScrollOffset> {
     name: &'static str,
     metrics: Option<ScrollMetrics<O>>,
     visible: bool,
+    persistent: bool,
     hovered: bool,
     drag: Option<ScrollbarDrag<O>>,
     visibility_generation: u64,
@@ -256,11 +268,18 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             name,
             metrics: None,
             visible: false,
+            persistent: false,
             hovered: false,
             drag: None,
             visibility_generation: 0,
             _hide_task: None,
         }
+    }
+
+    /// Keeps the thumb visible whenever content overflows, suitable for bounded picker lists.
+    pub fn persistent(mut self) -> Self {
+        self.persistent = true;
+        self
     }
 
     /// Synchronizes the scroll range without changing transient visibility.
@@ -303,6 +322,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         }
         if self.metrics != Some(metrics) {
             self.metrics = Some(metrics);
+            self.visible |= self.persistent;
             if self.visible {
                 cx.notify();
             }
@@ -340,7 +360,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     }
 
     fn schedule_hide(&mut self, cx: &mut Context<Self>) {
-        if self.drag.is_some() || self.hovered {
+        if self.persistent || self.drag.is_some() || self.hovered {
             return;
         }
 
@@ -478,7 +498,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let thumb_id: SharedString = format!("{}-thumb", self.name).into();
         let hitbox_id: SharedString = format!("{}-thumb-hitbox", self.name).into();
         let dragging = self.drag.is_some();
-        let (thumb_color, hover_color) = cx.global::<ScrollbarTheme>().resolve(dragging);
+        let theme = *cx.global::<ScrollbarTheme>();
+        let (thumb_color, hover_color) = theme.resolve(dragging);
         let group = thumb_id.clone();
         let hover_group = group.clone();
         let thumb_debug = thumb_id.clone();
@@ -509,6 +530,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     .w(px(THUMB_WIDTH))
                     .h_full()
                     .rounded(px(THUMB_WIDTH / 2.0))
+                    .border_1()
+                    .border_color(theme.thumb_border)
                     .bg(thumb_color)
                     .group_hover(hover_group, move |thumb| thumb.bg(hover_color)),
             )
@@ -567,7 +590,21 @@ impl<O: ScrollOffset> EventEmitter<OverlayScrollbarEvent<O>> for OverlayScrollba
 impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match self.geometry() {
-            Some(geometry) => self.render_thumb(geometry, cx),
+            Some(geometry) => div()
+                .absolute()
+                .inset_0()
+                .child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top(px(geometry.track_top_px))
+                        .w(px(HITBOX_WIDTH))
+                        .h(px(geometry.track_height_px))
+                        .border_l_1()
+                        .border_color(cx.global::<ScrollbarTheme>().track_border),
+                )
+                .child(self.render_thumb(geometry, cx))
+                .into_any_element(),
             None => Empty.into_any_element(),
         }
     }

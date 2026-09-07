@@ -10,23 +10,27 @@ pub(super) fn theme() -> ButtonTheme {
         ButtonVariants::new(
             variant(
                 paint(
-                    ACTIVE_THEME.element_active,
+                    ACTIVE_THEME.element_selected,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.element_hover,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.element_selected,
+                    ACTIVE_THEME.element_active,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.element_disabled,
                     ACTIVE_THEME.text_disabled,
+                    ACTIVE_THEME.icon_disabled,
                     ACTIVE_THEME.border_transparent,
                 ),
             ),
@@ -34,21 +38,25 @@ pub(super) fn theme() -> ButtonTheme {
                 paint(
                     ACTIVE_THEME.element_background,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.element_hover,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.element_active,
                     ACTIVE_THEME.text,
+                    ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.element_disabled,
                     ACTIVE_THEME.text_disabled,
+                    ACTIVE_THEME.icon_disabled,
                     ACTIVE_THEME.border_transparent,
                 ),
             ),
@@ -56,21 +64,25 @@ pub(super) fn theme() -> ButtonTheme {
             variant(
                 paint(
                     ACTIVE_THEME.ghost_element_background,
+                    ACTIVE_THEME.text,
                     ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_hover,
+                    ACTIVE_THEME.text,
                     ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_active,
+                    ACTIVE_THEME.text,
                     ACTIVE_THEME.icon,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_disabled,
+                    ACTIVE_THEME.text_disabled,
                     ACTIVE_THEME.icon_disabled,
                     ACTIVE_THEME.border_transparent,
                 ),
@@ -79,21 +91,25 @@ pub(super) fn theme() -> ButtonTheme {
                 paint(
                     ACTIVE_THEME.error_background,
                     ACTIVE_THEME.error,
+                    ACTIVE_THEME.error,
                     ACTIVE_THEME.error_border,
                 ),
                 paint(
                     ACTIVE_THEME.element_hover,
+                    ACTIVE_THEME.error,
                     ACTIVE_THEME.error,
                     ACTIVE_THEME.error_border,
                 ),
                 paint(
                     ACTIVE_THEME.element_active,
                     ACTIVE_THEME.error,
+                    ACTIVE_THEME.error,
                     ACTIVE_THEME.error_border,
                 ),
                 paint(
                     ACTIVE_THEME.element_disabled,
                     ACTIVE_THEME.text_disabled,
+                    ACTIVE_THEME.icon_disabled,
                     ACTIVE_THEME.border_disabled,
                 ),
             ),
@@ -101,21 +117,25 @@ pub(super) fn theme() -> ButtonTheme {
                 paint(
                     ACTIVE_THEME.ghost_element_background,
                     ACTIVE_THEME.link_text_hover,
+                    ACTIVE_THEME.link_text_hover,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_background,
+                    ACTIVE_THEME.link_text_hover,
                     ACTIVE_THEME.link_text_hover,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_background,
                     ACTIVE_THEME.text_accent,
+                    ACTIVE_THEME.text_accent,
                     ACTIVE_THEME.border_transparent,
                 ),
                 paint(
                     ACTIVE_THEME.ghost_element_background,
                     ACTIVE_THEME.text_disabled,
+                    ACTIVE_THEME.icon_disabled,
                     ACTIVE_THEME.border_transparent,
                 ),
             ),
@@ -150,21 +170,25 @@ fn outline() -> ButtonVariantStyle {
     variant(
         paint(
             ACTIVE_THEME.element_background,
+            ACTIVE_THEME.text,
             ACTIVE_THEME.icon,
             ACTIVE_THEME.border,
         ),
         paint(
             ACTIVE_THEME.element_hover,
+            ACTIVE_THEME.text,
             ACTIVE_THEME.icon,
             ACTIVE_THEME.border,
         ),
         paint(
             ACTIVE_THEME.element_active,
+            ACTIVE_THEME.text,
             ACTIVE_THEME.icon,
             ACTIVE_THEME.border,
         ),
         paint(
             ACTIVE_THEME.element_disabled,
+            ACTIVE_THEME.text_disabled,
             ACTIVE_THEME.icon_disabled,
             ACTIVE_THEME.border_disabled,
         ),
@@ -180,12 +204,13 @@ fn variant(
     ButtonVariantStyle::new(normal, hovered, pressed, disabled)
 }
 
-fn paint(background: Color, foreground: Color, border: Color) -> ButtonPaint {
+fn paint(background: Color, foreground: Color, icon: Color, border: Color) -> ButtonPaint {
     ButtonPaint::new(
         gpui_color(background),
         gpui_color(foreground),
         gpui_color(border),
     )
+    .icon_foreground(gpui_color(icon))
 }
 
 fn gpui_color(color: Color) -> Rgba {
