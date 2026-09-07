@@ -4836,6 +4836,73 @@ fn dragging_the_collapsed_handle_should_reopen_from_the_top_chrome_edge(cx: &mut
 }
 
 #[gpui::test]
+fn collapsed_handle_should_preserve_the_remembered_width_when_dragged_left(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.resize_sidebar(px(320.0), window, cx);
+        });
+    });
+    click("toggle-sidebar-button", cx);
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+
+    drag_to(
+        "workspace-sidebar-resize-handle",
+        root.origin.x + chrome.size.width - px(20.0),
+        cx,
+    );
+    click("toggle-sidebar-button", cx);
+
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            (manager.sidebar.visible, manager.sidebar.width)
+        }),
+        (true, px(320.0))
+    );
+}
+
+#[gpui::test]
+fn escape_should_restore_the_collapsed_sidebar_and_its_remembered_width(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.resize_sidebar(px(320.0), window, cx);
+        });
+    });
+    click("toggle-sidebar-button", cx);
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    let handle = cx
+        .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+        .expect("the collapsed sidebar handle was rendered");
+
+    cx.simulate_mouse_down(handle.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(root.origin.x + px(240.0), handle.center().y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_keystrokes("escape");
+    cx.simulate_mouse_up(handle.center(), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            (manager.sidebar.visible, manager.sidebar.width)
+        }),
+        (false, px(320.0))
+    );
+}
+
+#[gpui::test]
 fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_session(
     cx: &mut TestAppContext,
 ) {
@@ -5133,6 +5200,70 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
         .debug_bounds("tab-manager-top-spacer")
         .expect("the new Workspace top-left spacer was not rendered");
     assert_eq!(spacer.size.width, chrome.size.width);
+}
+
+#[gpui::test]
+fn collapsed_top_chrome_should_follow_reported_workspace_directory_changes(
+    cx: &mut TestAppContext,
+) {
+    let directory = temporary_directory("reported-directory-with-a-long-name");
+    fs::create_dir_all(&directory).unwrap();
+    let (manager, _, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_directory_report(
+                WorkspaceId::new(1),
+                DirectoryAuthority::initial(),
+                &directory,
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let spacer = cx
+        .debug_bounds("tab-manager-top-spacer")
+        .expect("the Tab manager spacer was not rendered");
+    assert_eq!(spacer.size.width, chrome.size.width);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
+fn collapsed_top_chrome_should_follow_automatic_rename_after_inactive_shell_exit(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let inactive_sender = records
+        .event_sender(1)
+        .expect("the initial Workspace terminal session must have started");
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    click("toggle-sidebar-button", cx);
+
+    inactive_sender
+        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .expect("the inactive shell exit must be delivered");
+    cx.run_until_parked();
+
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered");
+    let spacer = cx
+        .debug_bounds("tab-manager-top-spacer")
+        .expect("the active Tab manager spacer was not rendered");
+    assert_eq!(
+        (
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+            spacer.size.width,
+        ),
+        (WorkspaceId::new(2), chrome.size.width)
+    );
 }
 
 #[gpui::test]
