@@ -1,49 +1,22 @@
 # SpaceTerm
 
-A native macOS terminal implemented as a Rust application with one internal UI library.
+SpaceTerm is a native macOS terminal written in Rust with GPUI and one internal UI library.
 
-## Required Context
+## Context
 
-- Read `CONTEXT.md` completely before changing application code, UI, platform integration,
-  packaging, or architecture. It is canonical for product intent, technology decisions, UI
-  constraints, and architectural principles.
-- Also read `docs/UBIQUITOUS_LANGUAGE.md` completely before changing domain behavior, hierarchy,
-  lifecycle, focus state, terminal ownership, or product-facing terminology.
-- When a design or domain decision changes, update its canonical document in the same change; do
-  not copy its definitions into this file.
+- Read [`CONTEXT.md`](CONTEXT.md) before changing product or architecture decisions.
+- Read [`docs/UBIQUITOUS_LANGUAGE.md`](docs/UBIQUITOUS_LANGUAGE.md) before changing domain behavior
+  or product terminology.
 
-## Commands
+Inspect the code for implementation details. Keep each durable decision in one canonical document
+and link to it instead of repeating it.
 
-- `just run` — primary development loop.
-- `just check` — compile every target and feature.
-- `just test` — run the complete test suite.
-- `just test-one <filter>` — run focused tests.
-- `just portable-validate` — validate shared policy without native tooling or evidence.
-- `just macos-validate` — validate macOS Adapter suites and native tooling.
-- `just validate` — run all required pre-commit validation.
-- `just package` — build and verify native macOS artifacts.
+## Work
 
-## Architecture
-
-- Shape: one macOS-only Rust application crate plus `crates/spaceterm-ui` for reusable controls.
-- Entry points: `src/main.rs` and `src/app.rs`.
-- Seams: `src/domain`, `src/ui`, `src/terminal`, `src/platform`, and `crates/spaceterm-ui`.
-- Packaging: `Justfile`, `scripts/`, `packaging/macos`, and `assets/macos`.
-
-## Working Rules
-
-- Use the `Justfile` commands instead of reproducing validation or packaging pipelines.
-- Treat `Cargo.lock` as Cargo-generated; do not edit generated `target/` or `dist/` contents.
-- Add focused tests for changed behavior and keep unrelated user changes intact.
-
-## Verification
-
-- Run `just validate` before handoff.
-- During iteration, run `just test-one <filter>` plus the narrowest relevant checks.
-
-## Sharp Edges
-
-- Run `just doctor` before packaging when local tool availability is uncertain.
-- Product terminology intentionally differs from tmux, browser, and GPUI terminology; follow the
-  ubiquitous language rather than visual analogy.
-- A user-installed `/Applications/SpaceTerm.app` is always present and may be an older build. Do not confuse it with test builds.
+- Use the `Justfile` as the command authority. Start with a focused check and finish with
+  `just validate`.
+- Add focused tests for changed behavior and preserve unrelated changes.
+- Let Cargo generate `Cargo.lock`; keep generated `target/` and `dist/` contents out of source
+  edits.
+- Debug the source build; `/Applications/SpaceTerm.app` may be stale.
+- Run `just doctor` before packaging when tool availability is uncertain.
