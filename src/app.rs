@@ -24,8 +24,8 @@ use crate::terminal::{
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
     ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
-    OpenLocalProject, OpenTerminalFind, RemoteWorkspaceSshRuntime, SearchWorkspaces,
-    ShowNewWorkspacePanel, WorkspaceManager,
+    NewWorkspace, OpenLocalProject, OpenTerminalFind, RemoteWorkspaceSshRuntime, SearchWorkspaces,
+    WorkspaceManager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -188,7 +188,7 @@ fn file_menu() -> Menu {
     Menu {
         name: "File".into(),
         items: vec![
-            MenuItem::action("New Workspace…", ShowNewWorkspacePanel),
+            MenuItem::action("New Workspace…", NewWorkspace),
             MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
             MenuItem::action("Open Local Project…", OpenLocalProject),
             MenuItem::action("Search Workspaces…", SearchWorkspaces),
@@ -323,6 +323,25 @@ pub(crate) fn open(
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
     Ok(window)
+}
+
+fn restore_default_window(cx: &mut App, host: &HostComposition) {
+    if !cx.windows().is_empty() {
+        return;
+    }
+    if let Err(error) = open(cx, host) {
+        eprintln!("failed to restore the default SpaceTerm window: {error}");
+    }
+}
+
+fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
+    let new_workspace_host = Rc::clone(&host);
+    cx.on_action(move |_: &NewWorkspace, cx| {
+        restore_default_window(cx, &new_workspace_host);
+    });
+    cx.on_action(move |_: &CreateScratchWorkspace, cx| {
+        restore_default_window(cx, &host);
+    });
 }
 
 #[cfg(test)]
@@ -607,10 +626,16 @@ pub(crate) fn launch<A: SshProcessAdapter>(
 pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let failure = Rc::new(std::cell::Cell::new(None));
     let reported_failure = Rc::clone(&failure);
-    gpui::Application::new().run(move |cx| {
+    let host = Rc::new(host);
+    let reopened_host = Rc::clone(&host);
+    let application = gpui::Application::new();
+    application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
+    application.run(move |cx| {
         if let Err(error) = start_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
+        } else {
+            install_headless_window_actions(cx, Rc::clone(&host));
         }
     });
     failure.get().map_or(Ok(()), Err)
@@ -761,6 +786,136 @@ mod runtime_tests {
         );
         assert!(cx.update(|cx| second.update(cx, |_, _, _| ()).is_ok()));
     }
+
+    #[gpui::test]
+    fn new_workspace_action_should_restore_a_default_window_when_headless(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+
+        let records = TestTerminalSessionRecords::default();
+        let services = Rc::new(RecordingServices::default());
+        let mut wiring = parts(Rc::clone(&services), Rc::default());
+        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let host = Rc::new(HostComposition::new(wiring).unwrap());
+        let original = cx.update(|cx| {
+            let original = start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
+            original
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            original
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| cx.dispatch_action(&NewWorkspace));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                cx.windows().len(),
+                records.session_count(),
+                services.calls.borrow().clone(),
+            ),
+            (1, 2, vec!["register", "install", "install"])
+        );
+    }
+
+    #[gpui::test]
+    fn create_scratch_workspace_action_should_restore_a_default_window_when_headless(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+
+        let records = TestTerminalSessionRecords::default();
+        let services = Rc::new(RecordingServices::default());
+        let mut wiring = parts(Rc::clone(&services), Rc::default());
+        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let host = Rc::new(HostComposition::new(wiring).unwrap());
+        let original = cx.update(|cx| {
+            let original = start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
+            original
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            original
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| cx.dispatch_action(&CreateScratchWorkspace));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                cx.windows().len(),
+                records.session_count(),
+                services.calls.borrow().clone(),
+            ),
+            (1, 2, vec!["register", "install", "install"])
+        );
+    }
+
+    #[gpui::test]
+    fn new_workspace_menu_actions_should_remain_available_when_headless(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = Rc::new(HostComposition::new(parts(Rc::default(), Rc::default())).unwrap());
+        let original = cx.update(|cx| {
+            let original = start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
+            original
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            original
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        let available = cx.update(|cx| {
+            (
+                cx.is_action_available(&NewWorkspace),
+                cx.is_action_available(&CreateScratchWorkspace),
+            )
+        });
+
+        assert_eq!(available, (true, true));
+    }
+
+    #[gpui::test]
+    fn default_window_restoration_should_not_duplicate_an_existing_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+
+        let records = TestTerminalSessionRecords::default();
+        let services = Rc::new(RecordingServices::default());
+        let mut wiring = parts(Rc::clone(&services), Rc::default());
+        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let host = HostComposition::new(wiring).unwrap();
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+            restore_default_window(cx, &host);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                cx.windows().len(),
+                records.session_count(),
+                services.calls.borrow().clone(),
+            ),
+            (1, 1, vec!["register", "install"])
+        );
+    }
+
     #[gpui::test]
     fn application_quit_checks_inactive_windows_and_discards_removed_roots(
         cx: &mut gpui::TestAppContext,
@@ -860,7 +1015,7 @@ mod runtime_tests {
             crate::ui::init(cx).unwrap();
             let file = file_menu().owned();
             for (item, shortcut, action) in [
-                (&file.items[0], "cmd-n", ShowNewWorkspacePanel.name()),
+                (&file.items[0], "cmd-n", NewWorkspace.name()),
                 (&file.items[1], "cmd-shift-n", CreateScratchWorkspace.name()),
                 (&file.items[2], "cmd-o", OpenLocalProject.name()),
             ] {

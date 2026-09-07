@@ -62,8 +62,8 @@ fn desktop_profile(
 ) -> Result<DesktopProfile, DesktopProfileError> {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject, SearchWorkspaces,
-        ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
+        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
@@ -83,7 +83,7 @@ fn desktop_profile(
             vec![
                 ActionShortcut::new(CreateScratchWorkspace, "⇧⌘N"),
                 ActionShortcut::new(SearchWorkspaces, "⌘P"),
-                ActionShortcut::new(ShowNewWorkspacePanel, "⌘N"),
+                ActionShortcut::new(NewWorkspace, "⌘N"),
                 ActionShortcut::new(OpenLocalProject, "⌘O"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
@@ -355,8 +355,8 @@ mod tests {
     #[gpui::test]
     fn desktop_profile_should_preserve_macos_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
         use crate::ui::{
-            ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, OpenLocalProject,
-            SearchWorkspaces, ShowNewWorkspacePanel, SplitDown, SplitRight, TogglePaneZoom,
+            ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
+            SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
         };
 
         cx.update(|cx| {
@@ -369,7 +369,7 @@ mod tests {
             let presentation = DesktopPresentation::get(cx);
             assert_eq!(presentation.shortcut(&CreateScratchWorkspace), "⇧⌘N");
             assert_eq!(presentation.shortcut(&SearchWorkspaces), "⌘P");
-            assert_eq!(presentation.shortcut(&ShowNewWorkspacePanel), "⌘N");
+            assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
             assert_eq!(presentation.shortcut(&OpenLocalProject), "⌘O");
             assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
             assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");

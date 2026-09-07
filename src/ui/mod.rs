@@ -96,7 +96,7 @@ actions!(
         CloseWorkspace,
         CreateScratchWorkspace,
         SearchWorkspaces,
-        ShowNewWorkspacePanel,
+        NewWorkspace,
         OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -266,7 +266,7 @@ mod tests {
         let expected = [
             ("cmd-shift-n", CreateScratchWorkspace.name()),
             ("cmd-p", SearchWorkspaces.name()),
-            ("cmd-n", ShowNewWorkspacePanel.name()),
+            ("cmd-n", NewWorkspace.name()),
             ("cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),
