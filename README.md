@@ -56,25 +56,33 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Try SpaceTerm
 
-You need macOS, a Rust toolchain, and [`just`](https://github.com/casey/just).
+You need macOS, Xcode 26 or newer, [Homebrew](https://brew.sh/), and
+[`mise`](https://mise.jdx.dev/). Homebrew temporarily supplies the patched Zig 0.15.2 build required
+by the pinned Ghostty source on current Xcode SDKs; mise manages the rest of the development tools.
 
 ```sh
-git clone --recurse-submodules https://github.com/sadiksaifi/SpaceTerm.git
+git clone https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
+mise trust
+
+# Install pinned tools, initialize submodules, and verify the development environment
+mise run setup
 
 # Run from source
-just run
+mise run dev
 
 # Build, verify, and install to /Applications
-just install-macos
+mise run package:install
 ```
 
-Run `just` to see the complete command list.
+Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`; the
+remaining development tools and project tasks are pinned in `.mise.toml`.
 
-Run `just validate` for the full validation suite, including SpaceTerm's patched terminal library.
-Inside a SpaceTerm Pane, `just kitty-graphics-smoke` displays image layering and scaling checks.
+Run `mise run validate` for the full validation suite, including SpaceTerm's patched terminal
+library. Inside a SpaceTerm Pane, `mise run smoke:kitty-graphics` displays image layering and
+scaling checks.
 
-The default theme is built from the pinned `third_party/vague-pro-zed` submodule.
-For an existing checkout, run `git submodule update --init --recursive` before building.
-The build embeds the theme, so the installed application needs no checkout or network access.
-UI colors follow Zed semantic roles; terminal font sizing remains independent of UI sizing.
+The default theme is built from the pinned `third_party/vague-pro-zed` submodule. `mise run setup`
+initializes it for new and existing checkouts. The build embeds the theme, so the installed
+application needs no checkout or network access. UI colors follow Zed semantic roles; terminal
+font sizing remains independent of UI sizing.

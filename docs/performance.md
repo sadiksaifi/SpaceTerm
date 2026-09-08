@@ -1,6 +1,6 @@
 # Terminal resource measurements
 
-Use optimized source builds (`just release`). Record the commit, macOS version,
+Use optimized source builds (`mise run build:release`). Record the commit, macOS version,
 hardware, display scale and refresh rate, terminal grid dimensions, font, and
 application versions. Keep these conditions fixed across SpaceTerm, Ghostty, and
 Muxy. Run one workload at a time and avoid builds or other heavy background work.
