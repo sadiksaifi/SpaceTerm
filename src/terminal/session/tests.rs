@@ -2454,7 +2454,8 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
             && placement.viewport_col == 0
             && placement.destination_width == u32::from(size.pixel_width)
     }));
-    session.shutdown();
+    // Keep the graphics test lock until the worker releases its native pixels.
+    session.shutdown_and_join();
 }
 
 #[test]

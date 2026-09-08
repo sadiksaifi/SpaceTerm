@@ -3298,6 +3298,45 @@ fn kitty_full_global_budget_preserves_an_uneven_existing_screen_allocation() {
 }
 
 #[test]
+fn kitty_rgb_frame_edit_cannot_exceed_the_full_application_budget() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.feed(b"\x1b_Ga=T,t=d,f=24,i=1,s=1,v=1;AQID\x1b\\");
+    emulator.take_pty_responses();
+    let pressure =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 3)
+            .unwrap();
+
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,r=1,X=1;BQYHCA==\x1b\\");
+
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [3, 0]
+    );
+    assert!(
+        emulator
+            .take_pty_responses()
+            .starts_with(b"\x1b_Gi=1;ENOMEM")
+    );
+    assert!(emulator.graphics_failure().is_none());
+
+    drop(pressure);
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,r=1,X=1;BQYHCA==\x1b\\");
+    assert!(
+        emulator
+            .take_pty_responses()
+            .windows(2)
+            .any(|bytes| bytes == b"OK")
+    );
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [4, 0]
+    );
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+}
+
+#[test]
 fn kitty_snapshots_retain_their_allocation_after_the_terminal_session_closes() {
     let _guard = crate::terminal::graphics::test_lock();
     let snapshot = {
@@ -3429,6 +3468,34 @@ fn kitty_animation_advances_without_output_and_stops_scheduling_when_stopped() {
         .unwrap();
     assert_eq!(emulator.graphics_animation_deadline(), None);
 }
+
+#[test]
+fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    let start = Instant::now();
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,z=40;BQYHCA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=a,i=1,r=1,z=40,s=3\x1b\\");
+    drop(emulator.snapshot_at(start).unwrap().unwrap());
+    emulator.take_pty_responses();
+
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,m=1;CQoL\x1b\\");
+    let second = emulator
+        .snapshot_at(start + Duration::from_millis(40))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+    emulator.feed(b"\x1b_Ga=f,m=0;DA==\x1b\\");
+
+    assert_eq!(emulator.take_pty_responses(), b"\x1b_Gi=1,r=3;OK\x1b\\");
+    let third = emulator
+        .snapshot_at(start + Duration::from_millis(80))
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
+}
+
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/emulator.rs");

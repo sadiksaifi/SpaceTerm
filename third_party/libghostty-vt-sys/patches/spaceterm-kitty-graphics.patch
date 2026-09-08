@@ -283,6 +283,34 @@ diff --git a/src/terminal/kitty/graphics_image.zig b/src/terminal/kitty/graphics
  
  /// An image that is still being loaded. The image should be initialized
  /// using init on the first chunk and then addData for each subsequent
+@@ -61,11 +63,10 @@
+         /// protocol's requirement that chunks repeat a=f.
+         cmd: command.AnimationFrameLoading,
+ 
+-        /// The generation of the target image when the load began.
+-        /// A different generation at completion means the image was
+-        /// replaced or evicted mid-transmission and the frame must be
+-        /// discarded rather than composed onto the wrong image.
+-        image_generation: u64,
++        /// The transmission generation of the target image when the load
++        /// began. Replacement or eviction invalidates the upload; displayed
++        /// content changes within the same image do not.
++        image_transmission_generation: u64,
+     };
+ 
+     /// The limits of the Kitty Graphics protocol we should allow.
+@@ -701,6 +702,11 @@
+     /// current frame), since consumers key texture caches off it.
+     generation: u64 = 0,
+ 
++    /// Unique stamp assigned only when added to ImageStorage. It pins the
++    /// target of a chunked frame upload while content generation changes
++    /// through animation playback, frame edits, or composition.
++    transmission_generation: u64 = 0,
++
+     /// Animation state, non-null once any animation command (a=f,
+     /// a=a) has attached animation state to this image. Owned by the
+     /// image; replaced/retransmitted images drop it, which implements
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
@@ -314,6 +342,493 @@ diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
                  else
                      0,
                  .kitty_image_loading_limits = if (comptime build_options.kitty_graphics)
+diff --git a/src/terminal/kitty/graphics_storage.zig b/src/terminal/kitty/graphics_storage.zig
+--- a/src/terminal/kitty/graphics_storage.zig
++++ b/src/terminal/kitty/graphics_storage.zig
+@@ -335,6 +335,7 @@
+         // (e.g. renderer texture caches) can detect content changes.
+         self.markMutated(io);
+         gop.value_ptr.generation = self.generation;
++        gop.value_ptr.transmission_generation = self.generation;
+     }
+ 
+     /// Add an image whose decoded payload bytes have not arrived yet.
+@@ -980,23 +981,49 @@
+     /// this is called before the first composition into an image.
+     ///
+     /// The pixels are unchanged visually but the stored representation
+-    /// changed, so the image is stamped with a fresh generation.
++    /// changed, so the image is stamped with a fresh generation. Growth
++    /// reserves storage before mutation and may evict other images. The
++    /// returned pointer replaces the caller's potentially invalidated pointer.
+     pub fn convertImageToRgba(
+         self: *ImageStorage,
+         io: std.Io,
+         alloc: Allocator,
++        s: *terminal.Screen,
+         img: *Image,
+-    ) Allocator.Error!void {
+-        if (img.format == .rgba) return;
+-        const old = img.data.bytes() orelse return;
+-
++    ) Allocator.Error!*Image {
++        if (img.format == .rgba) return img;
++        const old = img.data.bytes() orelse return img;
++
++        const pixel_bytes: usize = switch (img.format) {
++            .rgb => 3,
++            .gray_alpha => 2,
++            .gray => 1,
++            .rgba, .png => unreachable,
++        };
++        const rgba_len = std.math.mul(usize, old.len / pixel_bytes, 4) catch
++            return error.OutOfMemory;
++        const growth = rgba_len - old.len;
++        const image_bytes = img.storageSize();
++        // The target and all of its frames must fit even after every other
++        // image is evicted. Reject before allocating or changing storage.
++        if (image_bytes > self.total_limit or
++            growth > self.total_limit - image_bytes)
++        {
++            return error.OutOfMemory;
++        }
++
++        // Allocate before eviction so allocation failure preserves storage.
++        const image_id = img.id;
+         const rgba = try pixel.rgbaFromFormat(alloc, img.format, old);
+-        self.total_bytes -= old.len;
+-        self.total_bytes += rgba.len;
+-        img.data.deinit(alloc);
+-        img.data = .{ .complete = rgba };
+-        img.format = .rgba;
+-        self.markImageContentChanged(io, img);
++        errdefer alloc.free(rgba);
++        try self.reserveAnimationBytes(io, alloc, s, image_id, growth);
++
++        const stored = self.images.getPtr(image_id).?;
++        stored.data.deinit(alloc);
++        stored.data = .{ .complete = rgba };
++        stored.format = .rgba;
++        self.markImageContentChanged(io, stored);
++        return stored;
+     }
+ 
+     /// Reserve `bytes` of storage for animation frame data belonging
+@@ -4423,6 +4450,91 @@
+     }
+ }
+ 
++test "storage: RGBA conversion admits growth before changing the image" {
++    const testing = std.testing;
++    const io = testing.io;
++    const alloc = testing.allocator;
++    const cases = [_]struct {
++        format: command.Transmission.Format,
++        data: []const u8,
++        rgba: []const u8,
++    }{
++        .{ .format = .rgb, .data = &.{ 1, 2, 3 }, .rgba = &.{ 1, 2, 3, 255 } },
++        .{ .format = .gray_alpha, .data = &.{ 1, 2 }, .rgba = &.{ 1, 1, 1, 2 } },
++        .{ .format = .gray, .data = &.{1}, .rgba = &.{ 1, 1, 1, 255 } },
++    };
++    for (cases) |case| {
++        var t = try terminal.Terminal.init(io, alloc, .{ .rows = 3, .cols = 3 });
++        defer t.deinit(alloc);
++        const s = &t.screens.active.kitty_images;
++        s.setLimit(io, alloc, t.screens.active, case.data.len);
++        try s.addImage(io, alloc, t.screens.active, .{
++            .id = 1,
++            .width = 1,
++            .height = 1,
++            .format = case.format,
++            .data = .{ .complete = try alloc.dupe(u8, case.data) },
++        });
++        const generation = s.generation;
++        var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
++        try testing.expectError(error.OutOfMemory, s.convertImageToRgba(
++            io,
++            failing.allocator(),
++            t.screens.active,
++            s.images.getPtr(1).?,
++        ));
++        try testing.expect(!failing.has_induced_failure);
++        try testing.expectEqual(generation, s.generation);
++        try testing.expectEqual(case.data.len, s.total_bytes);
++        try testing.expectEqual(case.format, s.images.get(1).?.format);
++        try testing.expectEqualSlices(u8, case.data, s.images.get(1).?.data.bytes().?);
++
++        s.setLimit(io, alloc, t.screens.active, 4);
++        const img = try s.convertImageToRgba(io, alloc, t.screens.active, s.images.getPtr(1).?);
++        try testing.expectEqual(@as(usize, 4), s.total_bytes);
++        try testing.expectEqualSlices(u8, case.rgba, img.data.bytes().?);
++        try testing.expect(img.generation > generation);
++        try testing.expectEqual(generation, img.transmission_generation);
++        const converted_generation = img.generation;
++        _ = try s.convertImageToRgba(io, alloc, t.screens.active, img);
++        try testing.expectEqual(@as(usize, 4), s.total_bytes);
++        try testing.expectEqual(converted_generation, img.generation);
++    }
++}
++
++test "storage: RGBA conversion allocation failure preserves eviction candidates" {
++    const testing = std.testing;
++    const io = testing.io;
++    const alloc = testing.allocator;
++    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 3, .cols = 3 });
++    defer t.deinit(alloc);
++    const s = &t.screens.active.kitty_images;
++    s.setLimit(io, alloc, t.screens.active, 6);
++    for (1..3) |id| {
++        try s.addImage(io, alloc, t.screens.active, .{
++            .id = @intCast(id),
++            .width = 1,
++            .height = 1,
++            .format = .rgb,
++            .data = .{ .complete = try alloc.dupe(u8, &.{ 1, 2, 3 }) },
++        });
++    }
++    const generation = s.generation;
++    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
++    try testing.expectError(error.OutOfMemory, s.convertImageToRgba(
++        io,
++        failing.allocator(),
++        t.screens.active,
++        s.images.getPtr(1).?,
++    ));
++    try testing.expect(failing.has_induced_failure);
++    try testing.expectEqual(generation, s.generation);
++    try testing.expectEqual(@as(usize, 6), s.total_bytes);
++    try testing.expectEqual(@as(usize, 2), s.images.count());
++    try testing.expectEqual(command.Transmission.Format.rgb, s.images.get(1).?.format);
++    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, s.images.get(1).?.data.bytes().?);
++}
++
+ test "storage: animation tick advances and schedules" {
+     const testing = std.testing;
+     const alloc = testing.allocator;
+diff --git a/src/terminal/kitty/graphics_exec.zig b/src/terminal/kitty/graphics_exec.zig
+--- a/src/terminal/kitty/graphics_exec.zig
++++ b/src/terminal/kitty/graphics_exec.zig
+@@ -522,7 +522,7 @@
+     };
+     loading.frame = .{
+         .cmd = f,
+-        .image_generation = img.generation,
++        .image_transmission_generation = img.transmission_generation,
+     };
+     loading.response.id = img.id;
+ 
+@@ -563,15 +563,18 @@
+ 
+     // Re-resolve the image: it may have been deleted, evicted, or
+     // replaced while the frame data was being transmitted. The saved
+-    // generation pins the exact image the load started against.
++    // transmission generation pins the image the load started against;
++    // animation ticks and edits may change its displayed-content generation.
++    // Resolve the captured ID even when the command addressed an image number:
++    // a different image with that number must never take over this upload.
+     var img = storage.imagePtrByIdOrNumber(
+-        loading.image.id,
+-        loading.image.number,
++        loading.response.id,
++        0,
+     ) orelse {
+         result.message = "ENOENT: image not found";
+         return result;
+     };
+-    if (img.generation != loading.frame.?.image_generation) {
++    if (img.transmission_generation != loading.frame.?.image_transmission_generation) {
+         result.message = "ENOENT: image not found";
+         return result;
+     }
+@@ -610,7 +613,7 @@
+         frame_img.data = .{ .complete = rgba };
+         frame_img.format = .rgba;
+     }
+-    storage.convertImageToRgba(io, alloc, img) catch |err| {
++    img = storage.convertImageToRgba(io, alloc, terminal.screens.active, img) catch |err| {
+         encodeError(&result, err);
+         return result;
+     };
+@@ -850,7 +853,7 @@
+         result.message = "EINVAL: image ID or number required";
+         return result;
+     }
+-    const img = storage.imagePtrByIdOrNumber(
++    var img = storage.imagePtrByIdOrNumber(
+         c.image_id,
+         c.image_number,
+     ) orelse {
+@@ -905,9 +908,10 @@
+     }
+ 
+     // All composition happens in RGBA.
+-    storage.convertImageToRgba(
++    img = storage.convertImageToRgba(
+         io,
+         alloc,
++        terminal.screens.active,
+         img,
+     ) catch |err| {
+         encodeError(&result, err);
+@@ -2932,6 +2936,77 @@
+     const img = storage.imagePtrByIdOrNumber(1, 0).?;
+     try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, img.data.bytes().?);
+     try testing.expect(img.generation > gen1);
++}
++
++test "kittygfx animation: frame edit and composition enforce conversion quota" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++    const cases = [_]struct {
++        transmit: []const u8,
++        update: []const u8,
++        original: []const u8,
++        updated: []const u8,
++    }{
++        .{
++            .transmit = "a=t,f=24,s=1,v=1,i=1;AQID",
++            .update = "a=f,f=32,s=1,v=1,i=1,r=1,X=1;BQYHCA==",
++            .original = &.{ 1, 2, 3 },
++            .updated = &.{ 5, 6, 7, 8 },
++        },
++        .{
++            .transmit = "a=t,f=24,s=2,v=1,i=1;AQIDBAUG",
++            .update = "a=c,i=1,r=1,c=1,w=1,h=1,x=1",
++            .original = &.{ 1, 2, 3, 4, 5, 6 },
++            .updated = &.{ 1, 2, 3, 255, 1, 2, 3, 255 },
++        },
++    };
++    for (cases) |case| {
++        for ([_]enum { reject, fits, evict }{ .reject, .fits, .evict }) |mode| {
++            var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
++            defer t.deinit(alloc);
++            const storage = &t.screens.active.kitty_images;
++            const limit = switch (mode) {
++                .reject => case.original.len,
++                .fits => case.updated.len,
++                .evict => case.original.len + 3,
++            };
++            storage.setLimit(io, alloc, t.screens.active, limit);
++            {
++                const cmd = try command.Parser.parseString(alloc, case.transmit);
++                defer cmd.deinit(alloc);
++                try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
++            }
++            if (mode == .evict) {
++                const cmd = try command.Parser.parseString(alloc, "a=T,f=24,s=1,v=1,i=2;AQID");
++                defer cmd.deinit(alloc);
++                try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
++                try testing.expectEqual(@as(usize, 1), storage.placements.count());
++            }
++            const generation = storage.imageById(1).?.generation;
++            const cmd = try command.Parser.parseString(alloc, case.update);
++            defer cmd.deinit(alloc);
++            const resp = execute(io, alloc, &t, &cmd).?;
++            const img = storage.imageById(1).?;
++            if (mode == .reject) {
++                try testing.expectEqualStrings("ENOMEM: out of memory", resp.message);
++                try testing.expectEqual(case.original.len, storage.total_bytes);
++                try testing.expectEqualSlices(u8, case.original, img.data.bytes().?);
++                try testing.expectEqual(generation, img.generation);
++                try testing.expect(img.animation == null);
++            } else {
++                try testing.expect(resp.ok());
++                try testing.expectEqual(case.updated.len, storage.total_bytes);
++                try testing.expectEqualSlices(u8, case.updated, img.data.bytes().?);
++                try testing.expect(img.generation > generation);
++                if (mode == .evict) {
++                    try testing.expect(storage.imageById(2) == null);
++                    try testing.expectEqual(@as(usize, 0), storage.placements.count());
++                }
++            }
++            try testing.expect(storage.total_bytes <= storage.total_limit);
++        }
++    }
+ }
+ 
+ test "kittygfx animation: edit frame gap without data change" {
+@@ -3117,6 +3192,179 @@
+         &.{ 255, 0, 0, 255, 0, 0, 255, 255 },
+         anim.frames.items[0].data,
+     );
++}
++
++test "kittygfx animation: chunked frame survives content generation changes" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++    for ([_]enum { tick, control, compose }{ .tick, .control, .compose }) |change| {
++        var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
++        defer t.deinit(alloc);
++        const storage = &t.screens.active.kitty_images;
++        for ([_][]const u8{
++            "a=T,f=32,s=1,v=1,i=1;AQIDBA==",
++            "a=f,f=32,s=1,v=1,i=1,z=40;BQYHCA==",
++            "a=a,i=1,r=1,z=40,s=3",
++        }) |input| {
++            const cmd = try command.Parser.parseString(alloc, input);
++            defer cmd.deinit(alloc);
++            if (execute(io, alloc, &t, &cmd)) |resp| try testing.expect(resp.ok());
++        }
++        try testing.expectEqual(@as(?u64, 40), storage.animationTick(io, 0));
++        {
++            const cmd = try command.Parser.parseString(alloc, "a=f,f=32,s=1,v=1,i=1,m=1;CQoL");
++            defer cmd.deinit(alloc);
++            try testing.expect(execute(io, alloc, &t, &cmd) == null);
++        }
++        const generation = storage.imageById(1).?.generation;
++        const transmission_generation = storage.imageById(1).?.transmission_generation;
++        switch (change) {
++            .tick => try testing.expectEqual(@as(?u64, 40), storage.animationTick(io, 40)),
++            .control, .compose => {
++                const cmd = try command.Parser.parseString(alloc, if (change == .control)
++                    "a=a,i=1,c=2"
++                else
++                    "a=c,i=1,r=2,c=1,w=1,h=1");
++                defer cmd.deinit(alloc);
++                if (execute(io, alloc, &t, &cmd)) |resp| try testing.expect(resp.ok());
++            },
++        }
++        try testing.expect(storage.imageById(1).?.generation > generation);
++        try testing.expectEqual(transmission_generation, storage.imageById(1).?.transmission_generation);
++        {
++            const cmd = try command.Parser.parseString(alloc, "a=f,m=0;DA==");
++            defer cmd.deinit(alloc);
++            const resp = execute(io, alloc, &t, &cmd).?;
++            try testing.expect(resp.ok());
++            try testing.expectEqual(@as(u32, 3), resp.frame);
++        }
++        try testing.expect(storage.loading == null);
++        try testing.expectEqual(@as(usize, 12), storage.total_bytes);
++        try testing.expectEqualSlices(u8, &.{ 9, 10, 11, 12 }, storage.imageById(1).?.frameData(3).?);
++    }
++}
++
++test "kittygfx animation: numbered chunked frame pins the selected image" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++    for ([_]enum { complete, replace, delete }{ .complete, .replace, .delete }) |change| {
++        var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
++        defer t.deinit(alloc);
++        const storage = &t.screens.active.kitty_images;
++        for ([_][]const u8{
++            "a=t,f=32,s=1,v=1,I=7;AQIDBA==",
++            "a=f,f=32,s=1,v=1,i=1;BQYHCA==",
++            "a=t,f=32,s=1,v=1,I=7;AQIDBA==",
++        }) |input| {
++            const cmd = try command.Parser.parseString(alloc, input);
++            defer cmd.deinit(alloc);
++            try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
++        }
++        try testing.expectEqual(@as(u32, 2), storage.imageByNumber(7).?.id);
++        {
++            const cmd = try command.Parser.parseString(alloc, "a=f,f=32,s=1,v=1,I=7,m=1;CQoL");
++            defer cmd.deinit(alloc);
++            try testing.expect(execute(io, alloc, &t, &cmd) == null);
++        }
++        try testing.expectEqual(@as(u32, 2), storage.loading.?.response.id);
++        {
++            // Displaying the other image's second frame refreshes its content
++            // generation and changes the result of a fresh number lookup.
++            const cmd = try command.Parser.parseString(alloc, "a=a,i=1,c=2");
++            defer cmd.deinit(alloc);
++            try testing.expect(execute(io, alloc, &t, &cmd) == null);
++        }
++        try testing.expectEqual(@as(u32, 1), storage.imageByNumber(7).?.id);
++        switch (change) {
++            .complete => {},
++            .replace => try storage.addImage(io, alloc, t.screens.active, .{
++                .id = 2,
++                .number = 7,
++                .width = 1,
++                .height = 1,
++                .format = .rgba,
++                .data = .{ .complete = try alloc.dupe(u8, &.{ 5, 6, 7, 8 }) },
++            }),
++            .delete => storage.delete(io, alloc, &t, .{ .id = .{
++                .image_id = 2,
++                .delete = true,
++            } }),
++        }
++        const cmd = try command.Parser.parseString(alloc, "a=f,m=0;DA==");
++        defer cmd.deinit(alloc);
++        const resp = execute(io, alloc, &t, &cmd).?;
++        try testing.expectEqual(@as(u32, 2), resp.id);
++        if (change == .complete) {
++            try testing.expect(resp.ok());
++            try testing.expectEqual(@as(u32, 2), resp.frame);
++            try testing.expectEqualSlices(u8, &.{ 9, 10, 11, 12 }, storage.imageById(2).?.frameData(2).?);
++            try testing.expectEqual(@as(usize, 16), storage.total_bytes);
++        } else {
++            try testing.expectEqualStrings("ENOENT: image not found", resp.message);
++            if (change == .replace) {
++                try testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, storage.imageById(2).?.data.bytes().?);
++                try testing.expect(storage.imageById(2).?.animation == null);
++                try testing.expectEqual(@as(usize, 12), storage.total_bytes);
++            } else {
++                try testing.expect(storage.imageById(2) == null);
++                try testing.expectEqual(@as(usize, 8), storage.total_bytes);
++            }
++        }
++        try testing.expect(storage.loading == null);
++        try testing.expectEqual(@as(u32, 2), storage.imageById(1).?.animation.?.frameCount());
++        try testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, storage.imageById(1).?.frameData(2).?);
++    }
++}
++
++test "kittygfx animation: chunked frame rejects replacement and eviction" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++    for ([_]bool{ false, true }) |evict| {
++        var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
++        defer t.deinit(alloc);
++        const storage = &t.screens.active.kitty_images;
++        storage.setLimit(io, alloc, t.screens.active, 4);
++        for ([_][]const u8{
++            "a=t,f=32,s=1,v=1,i=1;AQIDBA==",
++            "a=f,f=32,s=1,v=1,i=1,m=1;CQoL",
++        }) |input| {
++            const cmd = try command.Parser.parseString(alloc, input);
++            defer cmd.deinit(alloc);
++            if (execute(io, alloc, &t, &cmd)) |resp| try testing.expect(resp.ok());
++        }
++        const transmission_generation = storage.imageById(1).?.transmission_generation;
++        // Exercise storage mutation independently of chunk routing: a new
++        // transmission command would itself continue the pending frame.
++        if (evict) {
++            try storage.addImage(io, alloc, t.screens.active, .{
++                .id = 2,
++                .width = 1,
++                .height = 1,
++                .format = .rgba,
++                .data = .{ .complete = try alloc.dupe(u8, &.{ 5, 6, 7, 8 }) },
++            });
++            try testing.expect(storage.imageById(1) == null);
++        }
++        try storage.addImage(io, alloc, t.screens.active, .{
++            .id = 1,
++            .width = 1,
++            .height = 1,
++            .format = .rgba,
++            .data = .{ .complete = try alloc.dupe(u8, &.{ 5, 6, 7, 8 }) },
++        });
++        try testing.expect(storage.imageById(1).?.transmission_generation != transmission_generation);
++        const cmd = try command.Parser.parseString(alloc, "a=f,m=0;DA==");
++        defer cmd.deinit(alloc);
++        const resp = execute(io, alloc, &t, &cmd).?;
++        try testing.expectEqualStrings("ENOENT: image not found", resp.message);
++        try testing.expect(storage.loading == null);
++        try testing.expectEqual(@as(usize, 4), storage.total_bytes);
++        try testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, storage.imageById(1).?.data.bytes().?);
++        try testing.expect(storage.imageById(1).?.animation == null);
++    }
+ }
+ 
+ test "kittygfx animation: chunked frame continuation without a=f" {
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig

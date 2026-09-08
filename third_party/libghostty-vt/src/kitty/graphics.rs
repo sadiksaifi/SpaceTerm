@@ -1043,15 +1043,13 @@ pub trait DecodePng: 'static {
 /// graphics::set_png_decoder(RustPngDecoder::new());
 /// ```
 #[cfg(all(feature = "kitty-graphics", feature = "png"))]
-#[derive(Clone, Debug)]
-pub struct RustPngDecoder {
-    buf: Vec<u8>,
-}
+#[derive(Clone, Copy, Debug)]
+pub struct RustPngDecoder;
 #[cfg(all(feature = "kitty-graphics", feature = "png"))]
 impl RustPngDecoder {
     /// Create a decoder with no retained scratch allocation.
     pub const fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self
     }
 }
 #[cfg(all(feature = "kitty-graphics", feature = "png"))]
@@ -1089,12 +1087,14 @@ impl DecodePng for RustPngDecoder {
         {
             return None;
         }
-        self.buf.resize(buf_size, 0);
+        // The decoder lives for the worker's lifetime. Keep scratch local so a
+        // deleted image cannot leave its peak allocation retained by each Pane.
+        let mut scratch = vec![0; buf_size];
 
-        let info = frame.next_frame(&mut self.buf).ok()?;
+        let info = frame.next_frame(&mut scratch).ok()?;
 
         frame.finish().ok()?;
-        let source = &self.buf[..info.buffer_size()];
+        let source = &scratch[..info.buffer_size()];
         let mut bytes = Bytes::new_with_alloc(alloc, rgba_len).ok()?;
         match info.color_type {
             ColorType::Rgba => bytes.copy_from_slice(source),

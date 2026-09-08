@@ -80,8 +80,12 @@ Graphics admission uses actual retained engine and snapshot bytes across Session
 receives an APC sequence, its native input feed holds a shared admission lock through decoding
 so concurrent Sessions cannot each claim the same capacity. This bounds residency but can
 serialize input processing across those Sessions.
+RGB-to-RGBA conversion for animation also admits its retained growth against the native limit.
+PNG decoding scratch is released when each decode finishes, including failed decodes.
 Animation schedules advance visible Panes without requiring new terminal output; hidden Panes
 suspend presentation work and resume when shown.
+Chunked frame uploads retain the image's identity across playback ticks, while actual image
+replacement invalidates the upload.
 Snapshots deferred by retained UI pixels retry when capacity is released, without polling or
 requiring further terminal output.
 
