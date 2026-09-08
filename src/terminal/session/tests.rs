@@ -257,6 +257,8 @@ enum LifecycleStep {
 
 #[derive(Clone, Debug, Default)]
 struct ScriptedPtyState {
+    hidden_input: bool,
+    hidden_input_polls: usize,
     take_reader_calls: usize,
     write_attempts: usize,
     written: Vec<u8>,
@@ -402,6 +404,10 @@ impl Write for ScriptedPty {
 }
 
 impl NativePtyAdapter for ScriptedPty {
+    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
+        self.records.update(|state| state.hidden_input_polls += 1);
+        Ok(self.records.snapshot().hidden_input)
+    }
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.records.update(|state| state.take_reader_calls += 1);
         if let Some(message) = self.reader_error.take() {
@@ -2612,4 +2618,31 @@ fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
         autoscrolled.generation,
     ));
     session.shutdown();
+}
+
+#[test]
+fn hidden_input_transitions_are_reported_on_output_and_focus_during_idle_backoff() {
+    let (started, reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = started.unwrap();
+    records.wait_for("initial hidden-input poll", |state| {
+        state.hidden_input_polls > 0
+    });
+    records.update(|state| state.hidden_input = true);
+    reader
+        .send(ReaderStep::Bytes(b"Password: ".to_vec()))
+        .unwrap();
+    receive_event(&events, "password prompt", |event| {
+        matches!(event, SessionEvent::HiddenInputChanged(true))
+    });
+    records.update(|state| state.hidden_input = false);
+    session.focus(false);
+    receive_event(&events, "focus transition", |event| {
+        matches!(event, SessionEvent::HiddenInputChanged(false))
+    });
+    records.update(|state| state.hidden_input = true);
+    session.focus(true);
+    receive_event(&events, "focus restoration", |event| {
+        matches!(event, SessionEvent::HiddenInputChanged(true))
+    });
+    session.shutdown_and_join();
 }

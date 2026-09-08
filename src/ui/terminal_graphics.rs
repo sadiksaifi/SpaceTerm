@@ -111,23 +111,32 @@ impl TerminalGraphicsCache {
         }
 
         let same_screen = self.presented.active_screen() == active_screen;
-        let retain = snapshot
+        let available = snapshot
             .images
             .iter()
             .map(|image| image.key)
             .collect::<HashSet<_>>();
-        if retain.len() != snapshot.images.len()
+        if available.len() != snapshot.images.len()
             || snapshot
                 .placements
                 .iter()
-                .any(|placement| !retain.contains(&placement.image))
+                .any(|placement| !available.contains(&placement.image))
         {
             return Err(GraphicsResourceError::MissingImage);
         }
         let token = self.next_token(active_screen, snapshot)?;
+        let retain = snapshot
+            .placements
+            .iter()
+            .map(|placement| placement.image)
+            .collect::<HashSet<_>>();
 
         let mut additions = HashMap::new();
-        for image in snapshot.images.iter() {
+        for image in snapshot
+            .images
+            .iter()
+            .filter(|image| retain.contains(&image.key))
+        {
             let reusable = same_screen
                 .then(|| self.images.get(&image.key))
                 .flatten()
@@ -218,6 +227,9 @@ impl TerminalGraphicsCache {
                 }
                 keep
             });
+            if self.images.is_empty() {
+                self.images = HashMap::new();
+            }
         }
         true
     }
@@ -250,7 +262,7 @@ impl TerminalGraphicsCache {
 
     pub(crate) fn clear(&mut self, cx: &mut App) {
         self.rollback_any_staged(None, cx);
-        for (_, image) in self.images.drain() {
+        for (_, image) in std::mem::take(&mut self.images) {
             cx.drop_image(Arc::clone(&image.render_image), None);
         }
         self.presented = PreparedGraphics::default();

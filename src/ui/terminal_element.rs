@@ -79,6 +79,10 @@ impl TerminalGridCache {
         self.preedit = None;
     }
 
+    pub(crate) fn evict(&mut self) {
+        *self = Self::new();
+    }
+
     fn prepare(
         &mut self,
         rows: &Arc<[RowSnapshot]>,
@@ -3795,5 +3799,23 @@ mod tests {
         let second = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
+    }
+}
+
+#[cfg(test)]
+mod idle_retention_tests {
+    use super::*;
+
+    #[test]
+    fn evict_releases_retained_rows_and_geometry_capacity() {
+        let mut cache = TerminalGridCache::new();
+        let row: RowSnapshot = Arc::from([]);
+        let retained = Arc::downgrade(&row);
+        cache.source_rows.push(row);
+        cache.prepared_geometry.resize_with(128, || None);
+        cache.evict();
+        assert!(retained.upgrade().is_none());
+        assert_eq!(cache.source_rows.capacity(), 0);
+        assert_eq!(cache.prepared_geometry.capacity(), 0);
     }
 }

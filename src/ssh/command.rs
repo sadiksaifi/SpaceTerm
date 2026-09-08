@@ -287,6 +287,7 @@ impl SshCommandContext {
         push_option(&mut arguments, OsString::from("ControlMaster=yes"));
         push_option(&mut arguments, self.control_path_option());
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
+        push_option(&mut arguments, OsString::from("ForkAfterAuthentication=no"));
         arguments.push(OsString::from("-N"));
         self.finish(arguments)
     }
@@ -1042,6 +1043,8 @@ mod tests {
                 "ControlPath=/private/runtime/spaceterm/ssh/control.sock",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "ForkAfterAuthentication=no",
                 "-N",
                 "--",
                 "root@fedora@orb",

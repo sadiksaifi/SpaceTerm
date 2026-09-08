@@ -1027,17 +1027,24 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
-            Command::PollHiddenInput => {
-                if let Some(active) = self
-                    .schedules
-                    .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
-                {
-                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
-                } else {
-                    true
-                }
-            }
+            Command::PollHiddenInput => self.poll_hidden_input(),
         }
+    }
+
+    fn poll_hidden_input(&mut self) -> bool {
+        if let Some(active) = self
+            .schedules
+            .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
+        {
+            send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+        } else {
+            true
+        }
+    }
+
+    fn hidden_input_transition(&mut self) -> bool {
+        self.schedules.hidden_input_transition(Instant::now());
+        self.poll_hidden_input()
     }
 
     fn process_paste_request(
@@ -1253,7 +1260,9 @@ impl TerminalWorker {
         }
 
         if received_output
-            && (!self.flush_ordered_terminal_replies(&mut focus_reports) || !self.publish_screen())
+            && (!self.flush_ordered_terminal_replies(&mut focus_reports)
+                || !self.hidden_input_transition()
+                || !self.publish_screen())
         {
             return false;
         }
@@ -1306,6 +1315,9 @@ impl TerminalWorker {
     }
 
     fn process_focus(&mut self, focused: bool) -> bool {
+        if !self.hidden_input_transition() {
+            return false;
+        }
         if self.terminal_input_focused == focused {
             return true;
         }
@@ -1348,6 +1360,9 @@ impl TerminalWorker {
             return false;
         }
         if !action.bytes.is_empty() && !self.write_pty(&action.bytes) {
+            return false;
+        }
+        if !action.bytes.is_empty() && !self.hidden_input_transition() {
             return false;
         }
         !action.screen_changed || self.publish_screen()
