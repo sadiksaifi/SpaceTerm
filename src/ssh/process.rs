@@ -182,7 +182,25 @@ pub(crate) struct SshProcessCleanup {
     completion: async_channel::Receiver<()>,
 }
 
+/// Keeps a cleanup barrier open through process creation, ownership, and reaping callbacks.
+#[derive(Clone)]
+pub(crate) struct SshProcessCleanupScope {
+    _alive: async_channel::Sender<()>,
+}
+
 impl SshProcessCleanup {
+    pub(crate) fn scope() -> (SshProcessCleanupScope, Self) {
+        let (alive, completion) = async_channel::bounded(1);
+        (
+            SshProcessCleanupScope { _alive: alive },
+            Self { completion },
+        )
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.completion.is_closed()
+    }
+
     pub(crate) fn completed() -> Self {
         let (sender, completion) = async_channel::bounded(1);
         drop(sender);
@@ -452,7 +470,7 @@ impl SshProcessEnvironment {
     }
 
     #[cfg(test)]
-    pub(super) fn new_without_authentication(
+    pub(crate) fn new_without_authentication(
         home: PathBuf,
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
@@ -551,6 +569,7 @@ pub(crate) struct SshProcessSupervisor<A: SshProcessAdapter> {
     executor: BackgroundExecutor,
     environment: SshProcessEnvironment,
     adapter: A,
+    cleanup_scope: SshProcessCleanupScope,
 }
 
 impl<A: SshProcessAdapter> SshProcessSupervisor<A> {
@@ -558,11 +577,13 @@ impl<A: SshProcessAdapter> SshProcessSupervisor<A> {
         executor: BackgroundExecutor,
         environment: SshProcessEnvironment,
         adapter: A,
+        cleanup_scope: SshProcessCleanupScope,
     ) -> Self {
         Self {
             executor,
             environment,
             adapter,
+            cleanup_scope,
         }
     }
 }
@@ -574,6 +595,7 @@ pub(crate) struct SupervisedSshChild<A: SshProcessAdapter> {
     stderr_reader: Option<JoinHandle<io::Result<Vec<u8>>>>,
     cleanup_sender: async_channel::Sender<CleanupOwnership<A>>,
     cleanup_receiver_guard: async_channel::Receiver<CleanupOwnership<A>>,
+    cleanup_scope: Option<SshProcessCleanupScope>,
 }
 
 impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
@@ -599,7 +621,8 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
             SshProcessStdio::Null,
             SshProcessStdio::Piped,
         );
-        async move { spawn_owned_process_off_thread(adapter, request).await }
+        let cleanup_scope = self.cleanup_scope.clone();
+        async move { spawn_owned_process_off_thread(adapter, request, cleanup_scope).await }
     }
 
     fn run(
@@ -693,6 +716,7 @@ impl<A: SshProcessAdapter> SupervisedSshChild<A> {
             readers: self.stderr_reader.take().into_iter().collect(),
             after,
             _completion_sender: completion_sender,
+            _cleanup_scope: self.cleanup_scope.take(),
         };
 
         // This guard keeps the unbounded queue open through the non-blocking send even if the
@@ -733,6 +757,7 @@ fn safe_absolute_path(path: &Path) -> bool {
 fn spawn_owned_process<A: SshProcessAdapter>(
     adapter: A,
     request: SshProcessSpawnRequest,
+    cleanup_scope: Option<SshProcessCleanupScope>,
 ) -> Result<SupervisedSshChild<A>, SshProcessMechanismError> {
     let SpawnedSshProcess { process, mut pipes } = adapter.spawn(request)?;
     let Some(stderr) = pipes.stderr.take() else {
@@ -772,6 +797,7 @@ fn spawn_owned_process<A: SshProcessAdapter>(
         stderr_reader: Some(stderr_reader),
         cleanup_sender,
         cleanup_receiver_guard,
+        cleanup_scope,
     })
 }
 
@@ -802,12 +828,13 @@ fn read_final_error_tail(mut stderr: impl Read) -> io::Result<Vec<u8>> {
 async fn spawn_owned_process_off_thread<A: SshProcessAdapter>(
     adapter: A,
     request: SshProcessSpawnRequest,
+    cleanup_scope: SshProcessCleanupScope,
 ) -> Result<SupervisedSshChild<A>, SshProcessMechanismError> {
     let (sender, receiver) = async_channel::bounded(1);
     std::thread::Builder::new()
         .name("spaceterm-ssh-spawn".to_owned())
         .spawn(move || {
-            let result = spawn_owned_process(adapter, request);
+            let result = spawn_owned_process(adapter, request, Some(cleanup_scope));
             let _ = sender.send_blocking(result);
         })
         .map_err(|_| SshProcessMechanismError::LaunchFailed)?;
@@ -823,6 +850,7 @@ struct CleanupOwnership<A: SshProcessAdapter> {
     readers: Vec<JoinHandle<io::Result<Vec<u8>>>>,
     after: Option<ProcessCleanupCallback>,
     _completion_sender: async_channel::Sender<()>,
+    _cleanup_scope: Option<SshProcessCleanupScope>,
 }
 
 fn cleanup_now<A: SshProcessAdapter>(
@@ -1562,7 +1590,7 @@ mod tests {
             SshProcessStdio::Piped,
         );
 
-        let error = match spawn_owned_process(adapter.clone(), request) {
+        let error = match spawn_owned_process(adapter.clone(), request, None) {
             Ok(_) => panic!("missing requested stderr should fail the spawn"),
             Err(error) => error,
         };
@@ -1583,7 +1611,7 @@ mod tests {
             SshProcessStdio::Null,
             SshProcessStdio::Piped,
         );
-        let mut child = spawn_owned_process(adapter.clone(), request).unwrap();
+        let mut child = spawn_owned_process(adapter.clone(), request, None).unwrap();
         let callback_ran = Arc::new(AtomicBool::new(false));
         let callback_observer = Arc::clone(&callback_ran);
 

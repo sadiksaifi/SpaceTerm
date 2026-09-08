@@ -35,7 +35,10 @@ use crate::ssh::host_config::{
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, LiveConnectionBinding};
 use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore, ManagedSshHost};
-use crate::ssh::process::{SshProcessAdapter, SshProcessEnvironment, SshProcessSupervisor};
+use crate::ssh::process::{
+    SshProcessAdapter, SshProcessCleanup, SshProcessCleanupScope, SshProcessEnvironment,
+    SshProcessSupervisor,
+};
 use crate::ssh::remote_utility::SshRemoteUtilityProcessRunner;
 use crate::ssh::remote_workspace_provider::SshRemoteWorkspaceProvider;
 use crate::ssh::startup_environment::StartupSshEnvironment;
@@ -301,7 +304,6 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
             return Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed));
         };
         self.executor.spawn(async move {
-            let _connecting = connecting;
             let authentication_cancellation =
                 SshCancellationToken::observing(observation.cancellation_flag());
             let cancellation =
@@ -334,6 +336,7 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 executor.clone(),
                 environment.clone(),
                 process_adapter.clone(),
+                connecting,
             ));
             let connection = OpenSshControlConnection::connect(
                 &paths,
@@ -486,15 +489,12 @@ struct NativeRemoteCleanupRegistry(Arc<Mutex<NativeRemoteCleanupState>>);
 #[derive(Default)]
 struct NativeRemoteCleanupState {
     sessions: Vec<Weak<NativeSessionResources>>,
-    connecting: Vec<(SshCancellationToken, async_channel::Receiver<()>)>,
+    connections: Vec<(SshCancellationToken, SshProcessCleanup)>,
     quitting: bool,
 }
 
 impl NativeRemoteCleanupRegistry {
-    fn begin_connect(
-        &self,
-        cancellation: SshCancellationToken,
-    ) -> Option<async_channel::Sender<()>> {
+    fn begin_connect(&self, cancellation: SshCancellationToken) -> Option<SshProcessCleanupScope> {
         let mut state = self
             .0
             .lock()
@@ -503,10 +503,10 @@ impl NativeRemoteCleanupRegistry {
             return None;
         }
         state
-            .connecting
-            .retain(|(_, completion)| !completion.is_closed());
-        let (finished, completion) = async_channel::bounded(1);
-        state.connecting.push((cancellation, completion));
+            .connections
+            .retain(|(_, completion)| !completion.is_complete());
+        let (finished, completion) = SshProcessCleanup::scope();
+        state.connections.push((cancellation, completion));
         Some(finished)
     }
 
@@ -517,24 +517,22 @@ impl NativeRemoteCleanupRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.sessions.retain(|entry| entry.strong_count() != 0);
         state.sessions.push(Arc::downgrade(resources));
+        if state.quitting {
+            resources.close();
+        }
     }
 
     async fn shutdown(&self) {
-        let connecting = {
+        let connections = {
             let mut state = self
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.quitting = true;
-            std::mem::take(&mut state.connecting)
+            std::mem::take(&mut state.connections)
         };
-        for (cancellation, _) in &connecting {
+        for (cancellation, _) in &connections {
             cancellation.cancel();
-        }
-        // A connection completing concurrently must publish its resource owner before this
-        // barrier completes, so it is included in the subsequent close pass.
-        for (_, completion) in connecting {
-            let _ = completion.recv().await;
         }
         let resources: Vec<_> = self
             .0
@@ -550,6 +548,11 @@ impl NativeRemoteCleanupRegistry {
             .collect();
         for completion in completions {
             let _ = completion.recv().await;
+        }
+        // Late successful connections close on registration. Failed or cancelled connects
+        // retain this barrier through native spawn, process reaping, and runtime cleanup.
+        for (_, completion) in connections {
+            completion.wait().await;
         }
     }
 }
@@ -1259,6 +1262,137 @@ mod tests {
         drop(connecting);
         cx.run_until_parked();
         assert!(completion.is_closed());
+    }
+
+    #[derive(Clone)]
+    struct PendingConnectReaper {
+        inner: RecordingAdapter,
+        cancellation: SshCancellationToken,
+        cancel_on_spawn: bool,
+        reaping: async_channel::Sender<()>,
+        release: async_channel::Receiver<()>,
+        reaped: Arc<AtomicUsize>,
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl SshProcessAdapter for PendingConnectReaper {
+        type Process = crate::ssh::process::testing::RecordingProcess;
+
+        fn spawn(
+            &self,
+            request: crate::ssh::process::SshProcessSpawnRequest,
+        ) -> Result<
+            crate::ssh::process::SpawnedSshProcess<Self::Process>,
+            crate::ssh::process::SshProcessMechanismError,
+        > {
+            let child = self.inner.spawn(request)?;
+            if self.cancel_on_spawn {
+                self.cancellation.cancel();
+            }
+            Ok(child)
+        }
+
+        fn try_status(
+            &self,
+            _: &mut Self::Process,
+        ) -> Result<
+            Option<crate::ssh::process::ProcessExit>,
+            crate::ssh::process::SshProcessMechanismError,
+        > {
+            Err(crate::ssh::process::SshProcessMechanismError::StatusFailed)
+        }
+
+        fn signal(
+            &self,
+            process: &mut Self::Process,
+            signal: crate::ssh::process::ProcessSignal,
+        ) -> Result<(), crate::ssh::process::SshProcessMechanismError> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            self.inner.signal(process, signal)
+        }
+
+        fn reap(
+            &self,
+            process: Self::Process,
+        ) -> Result<(), crate::ssh::process::SshProcessMechanismError> {
+            self.reaping.try_send(()).unwrap();
+            self.release.recv_blocking().unwrap();
+            self.inner.reap(process)?;
+            self.reaped.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[gpui::test]
+    fn quit_waits_for_connect_failure_reaper_and_runtime_artifact_cleanup(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for cancel_on_spawn in [true, false] {
+            let registry = NativeRemoteCleanupRegistry::default();
+            let cancellation = SshCancellationToken::default();
+            let scope = registry.begin_connect(cancellation.clone()).unwrap();
+            let filesystem = Arc::new(RecordingFilesystem::default());
+            let paths = AppPaths::resolve(
+                &AppPathEnvironment {
+                    home: Some("/fixture/home".into()),
+                    ..Default::default()
+                },
+                &AppPathHostFacts::new(PathBuf::from("/fixture/tmp"), 103).unwrap(),
+                filesystem.clone(),
+            )
+            .unwrap();
+            let (release, released) = async_channel::bounded(1);
+            let (reaping, started) = async_channel::bounded(1);
+            let reaped = Arc::new(AtomicUsize::new(0));
+            let killed = Arc::new(AtomicUsize::new(0));
+            let backend = Arc::new(SshProcessSupervisor::new(
+                cx.executor(),
+                SshProcessEnvironment::new_without_authentication(
+                    PathBuf::from("/fixture/home"),
+                    None,
+                )
+                .unwrap(),
+                PendingConnectReaper {
+                    inner: RecordingAdapter::default(),
+                    cancellation: cancellation.clone(),
+                    cancel_on_spawn,
+                    reaping,
+                    release: released,
+                    reaped: Arc::clone(&reaped),
+                    killed: Arc::clone(&killed),
+                },
+                scope,
+            ));
+            let result = cx.executor().block(OpenSshControlConnection::connect(
+                &paths,
+                OpenSshExecutable::for_test(),
+                &RecordingControlSocketProbe(Arc::clone(&filesystem)),
+                SshDestination::new("fixture".to_owned()).unwrap(),
+                backend,
+                &cancellation,
+                ControlConnectionTiming::default(),
+            ));
+            assert!(if cancel_on_spawn {
+                matches!(result, Err(ControlConnectionError::Cancelled))
+            } else {
+                matches!(result, Err(ControlConnectionError::MasterStatus { .. }))
+            });
+            cx.executor().block(started.recv()).unwrap();
+            let (finished, completion) = async_channel::bounded::<()>(1);
+            let quit = cx.executor().spawn(async move {
+                registry.shutdown().await;
+                drop(finished);
+            });
+            cx.run_until_parked();
+            assert!(!completion.is_closed());
+            assert_eq!(killed.load(Ordering::SeqCst), 1);
+            assert_eq!(reaped.load(Ordering::SeqCst), 0);
+            assert!(!filesystem.events.lock().unwrap().contains(&"remove-owner"));
+            release.try_send(()).unwrap();
+            cx.executor().block(quit);
+            assert!(completion.is_closed());
+            assert_eq!(reaped.load(Ordering::SeqCst), 1);
+            assert!(filesystem.events.lock().unwrap().contains(&"remove-owner"));
+        }
     }
 
     struct NativeCloseHarness {
