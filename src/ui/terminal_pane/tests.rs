@@ -2707,10 +2707,10 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.handle_event(
-                SessionEvent::Screen(blinking_cursor_screen(false, true)),
-                cx,
-            );
+            let mut screen = blinking_cursor_screen(false, true);
+            Arc::make_mut(&mut screen).generation =
+                crate::terminal::PresentationGeneration::test(2);
+            pane.handle_event(SessionEvent::Screen(screen), cx);
             cx.notify();
         });
     });
@@ -2719,7 +2719,10 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+            let mut screen = blinking_cursor_screen(true, true);
+            Arc::make_mut(&mut screen).generation =
+                crate::terminal::PresentationGeneration::test(3);
+            pane.handle_event(SessionEvent::Screen(screen), cx);
             cx.notify();
         });
     });
@@ -5379,4 +5382,99 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/terminal_pane.rs");
+}
+
+#[gpui::test]
+fn repeated_same_generation_delivery_preserves_snapshot_identity_and_does_not_submit(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let events = records.last_event_sender().unwrap();
+    let original = text_screen(1, &["stable"]);
+    events
+        .try_send(SessionEvent::Screen(Arc::clone(&original)))
+        .unwrap();
+    cx.run_until_parked();
+    let submissions = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+    for _ in 0..16 {
+        let redundant = Arc::new((*original).clone());
+        let released = Arc::downgrade(&redundant);
+        events.try_send(SessionEvent::Screen(redundant)).unwrap();
+        cx.run_until_parked();
+        assert!(released.upgrade().is_none());
+    }
+    assert!(pane.read_with(cx, |pane, _| Arc::ptr_eq(&pane.screen, &original)));
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len()),
+        submissions
+    );
+}
+
+#[gpui::test]
+fn occlusion_evicts_image_resources_and_restore_reuploads_without_new_output(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let events = records.last_event_sender().unwrap();
+    events
+        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .unwrap();
+    cx.run_until_parked();
+    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+    let retained = cache.read_with(cx, |cache, _| cache.retained_bytes());
+    assert!(retained > 0);
+    pane.update(cx, |pane, cx| {
+        pane.update_runtime_visibility(
+            WindowVisibility {
+                minimized: false,
+                occluded: true,
+                live_resize: false,
+            },
+            cx,
+        )
+    });
+    assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
+    assert!(pane.read_with(cx, |pane, _| pane.grid_bounds.is_none()));
+    pane.update(cx, |pane, cx| {
+        pane.update_runtime_visibility(
+            WindowVisibility {
+                minimized: false,
+                occluded: false,
+                live_resize: false,
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cache.read_with(cx, |cache, _| cache.retained_bytes()),
+        retained
+    );
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.render_lifecycle
+            .is_presented(crate::terminal::PresentationGeneration::test(1))
+    }));
+}
+
+#[gpui::test]
+fn graphics_without_presented_images_reserves_zero_bytes_and_releases_previous_images(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let events = records.last_event_sender().unwrap();
+    events
+        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .unwrap();
+    cx.run_until_parked();
+    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+    assert!(cache.read_with(cx, |cache, _| cache.retained_bytes()) > 0);
+    let mut no_placements = (*graphics_screen(2, 2)).clone();
+    no_placements.graphics.placements = Arc::from([]);
+    no_placements.graphics.placement_generation += 1;
+    events
+        .try_send(SessionEvent::Screen(Arc::new(no_placements)))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
+    assert!(cache.read_with(cx, |cache, _| cache.cached_image_keys().is_empty()));
 }

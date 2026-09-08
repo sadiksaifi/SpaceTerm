@@ -35,7 +35,10 @@ use crate::ssh::host_config::{
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, LiveConnectionBinding};
 use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore, ManagedSshHost};
-use crate::ssh::process::{SshProcessAdapter, SshProcessEnvironment, SshProcessSupervisor};
+use crate::ssh::process::{
+    SshProcessAdapter, SshProcessCleanup, SshProcessCleanupScope, SshProcessEnvironment,
+    SshProcessSupervisor,
+};
 use crate::ssh::remote_utility::SshRemoteUtilityProcessRunner;
 use crate::ssh::remote_workspace_provider::SshRemoteWorkspaceProvider;
 use crate::ssh::startup_environment::StartupSshEnvironment;
@@ -69,6 +72,7 @@ pub(super) struct NativeRemoteWorkspaceFlowBackend<A: SshProcessAdapter> {
     runtime: RemoteWorkspaceSshRuntime<A>,
     askpass: Arc<dyn AskPassAttemptFactory>,
     executor: BackgroundExecutor,
+    cleanup: NativeRemoteCleanupRegistry,
 }
 
 impl<A: SshProcessAdapter> NativeRemoteWorkspaceFlowBackend<A> {
@@ -82,6 +86,7 @@ impl<A: SshProcessAdapter> NativeRemoteWorkspaceFlowBackend<A> {
             runtime,
             askpass,
             executor,
+            cleanup: NativeRemoteCleanupRegistry::default(),
         }
     }
 
@@ -176,11 +181,20 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackendFactory
             .askpass
             .create(window, cx)
             .map_err(|_| RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
-        Ok(Arc::new(NativeRemoteWorkspaceFlowBackend::new(
+        let backend = NativeRemoteWorkspaceFlowBackend::new(
             self.runtime.clone(),
             askpass,
             cx.background_executor().clone(),
-        )))
+        );
+        let cleanup = backend.cleanup.clone();
+        cx.on_app_quit(move |cx| {
+            // GPUI only polls returned quit futures for 100 ms. Complete owned SSH cleanup
+            // here, while its executor is alive, before permitting process exit.
+            cx.background_executor().block(cleanup.shutdown());
+            async {}
+        })
+        .detach();
+        Ok(Arc::new(backend))
     }
 }
 
@@ -248,6 +262,7 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
         destination: SshDestination,
         context: RemoteWorkspaceConnectContext,
     ) -> Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>> {
+        let cleanup = self.cleanup.clone();
         context.report(RemoteWorkspaceConnectionProgress::CheckingCompatibility);
         if !matches!(self.runtime.startup_capability, SshCapability::Available(_)) {
             return Task::ready(Err(RemoteWorkspaceFlowBackendError::OpenSshUnavailable));
@@ -284,8 +299,11 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
         let process_adapter = self.runtime.process_adapter.clone();
         let control_socket_probe = Arc::clone(&self.runtime.control_socket_probe);
         let executor = self.executor.clone();
+        let flow_cancellation = SshCancellationToken::default();
+        let Some(connecting) = cleanup.begin_connect(flow_cancellation.clone()) else {
+            return Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed));
+        };
         self.executor.spawn(async move {
-            let flow_cancellation = SshCancellationToken::default();
             let authentication_cancellation =
                 SshCancellationToken::observing(observation.cancellation_flag());
             let cancellation =
@@ -318,6 +336,7 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 executor.clone(),
                 environment.clone(),
                 process_adapter.clone(),
+                connecting,
             ));
             let connection = OpenSshControlConnection::connect(
                 &paths,
@@ -368,15 +387,19 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 ));
             let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
                 Arc::new(Mutex::new(Some(Box::new(connection))));
-            let owner = NativeRemoteWorkspaceSessionOwner {
+            let resources = Arc::new(NativeSessionResources {
                 control,
-                lifecycle: Some(lifecycle),
-                utility: Arc::clone(&provider),
-                authentication: Some(authentication),
-                alias: alias_lease,
+                authentication: Mutex::new(Some(authentication)),
+                alias: Mutex::new(alias_lease),
                 cancellation,
                 executor,
-                closed: false,
+                completion: Mutex::new(None),
+            });
+            cleanup.register(&resources);
+            let owner = NativeRemoteWorkspaceSessionOwner {
+                resources,
+                lifecycle: Some(lifecycle),
+                utility: Arc::clone(&provider),
             };
             Ok(RemoteWorkspaceConnectedSession::new(
                 Box::new(owner),
@@ -455,21 +478,147 @@ fn map_control_connection_error(
 /// releases the session alias lease only after cleanup. Workspace-lifetime alias pins are acquired
 /// as independent registry counts.
 struct NativeRemoteWorkspaceSessionOwner {
-    control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>>,
+    resources: Arc<NativeSessionResources>,
     lifecycle: Option<ControlConnectionObserver>,
     utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
-    authentication: Option<AskPassBrokerLease>,
-    alias: Option<ActiveSshAliasLease>,
+}
+
+#[derive(Clone, Default)]
+struct NativeRemoteCleanupRegistry(Arc<Mutex<NativeRemoteCleanupState>>);
+
+#[derive(Default)]
+struct NativeRemoteCleanupState {
+    sessions: Vec<Weak<NativeSessionResources>>,
+    connections: Vec<(SshCancellationToken, SshProcessCleanup)>,
+    quitting: bool,
+}
+
+impl NativeRemoteCleanupRegistry {
+    fn begin_connect(&self, cancellation: SshCancellationToken) -> Option<SshProcessCleanupScope> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.quitting {
+            return None;
+        }
+        state
+            .connections
+            .retain(|(_, completion)| !completion.is_complete());
+        let (finished, completion) = SshProcessCleanup::scope();
+        state.connections.push((cancellation, completion));
+        Some(finished)
+    }
+
+    fn register(&self, resources: &Arc<NativeSessionResources>) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.sessions.retain(|entry| entry.strong_count() != 0);
+        state.sessions.push(Arc::downgrade(resources));
+        if state.quitting {
+            resources.close();
+        }
+    }
+
+    async fn shutdown(&self) {
+        let connections = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.quitting = true;
+            std::mem::take(&mut state.connections)
+        };
+        for (cancellation, _) in &connections {
+            cancellation.cancel();
+        }
+        let resources: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let completions: Vec<_> = resources
+            .iter()
+            .map(NativeSessionResources::close)
+            .collect();
+        for completion in completions {
+            let _ = completion.recv().await;
+        }
+        // Late successful connections close on registration. Failed or cancelled connects
+        // retain this barrier through native spawn, process reaping, and runtime cleanup.
+        for (_, completion) in connections {
+            completion.wait().await;
+        }
+    }
+}
+
+struct NativeSessionResources {
+    control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>>,
+    authentication: Mutex<Option<AskPassBrokerLease>>,
+    alias: Mutex<Option<ActiveSshAliasLease>>,
     cancellation: SshCancellationToken,
     executor: BackgroundExecutor,
-    closed: bool,
+    completion: Mutex<Option<async_channel::Receiver<()>>>,
+}
+
+impl NativeSessionResources {
+    fn close(self: &Arc<Self>) -> async_channel::Receiver<()> {
+        let mut completion = self
+            .completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(completion) = &*completion {
+            return completion.clone();
+        }
+        self.cancellation.cancel();
+        let connection = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let authentication = self
+            .authentication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let alias = self
+            .alias
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let (finished, receiver) = async_channel::bounded::<()>(1);
+        *completion = Some(receiver.clone());
+        let resources = Arc::clone(self);
+        self.executor
+            .spawn(async move {
+                if let Some(authentication) = authentication {
+                    authentication.cancel();
+                }
+                if let Some(connection) = connection {
+                    connection.shutdown().await;
+                }
+                drop(alias);
+                drop(finished);
+                drop(resources);
+            })
+            .detach();
+        receiver
+    }
 }
 
 impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
     fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
-        self.alias
+        self.resources
+            .alias
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|alias| {
                 alias
@@ -490,12 +639,12 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
             .build()
             .map_err(|_| RemoteWorkspaceFlowBackendError::IncompatibleServer)?;
         Ok(Arc::new(NativeRemoteTerminalChannelProvider {
-            control: Arc::downgrade(&self.control),
+            control: Arc::downgrade(&self.resources.control),
             directory: directory.clone(),
             expected_identity: expected_identity.clone(),
             utility: Arc::clone(&self.utility),
             login_shell: login_shell.clone(),
-            executor: self.executor.clone(),
+            executor: self.resources.executor.clone(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         }))
     }
@@ -505,31 +654,7 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
     }
 
     fn close(&mut self) {
-        if self.closed {
-            return;
-        }
-        self.closed = true;
-        self.cancellation.cancel();
-        let connection = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let authentication = self.authentication.take();
-        let alias = self.alias.take();
-        if connection.is_some() || authentication.is_some() || alias.is_some() {
-            self.executor
-                .spawn(async move {
-                    if let Some(authentication) = authentication {
-                        authentication.cancel();
-                    }
-                    if let Some(connection) = connection {
-                        connection.shutdown().await;
-                    }
-                    drop(alias);
-                })
-                .detach();
-        }
+        self.resources.close();
     }
 }
 
@@ -1060,6 +1185,216 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn quit_waits_for_live_and_already_closing_workspace_cleanup(cx: &mut TestAppContext) {
+        for close_workspace_first in [false, true] {
+            let registry = NativeRemoteCleanupRegistry::default();
+            let (release, released) = async_channel::bounded(1);
+            let started = Arc::new(AtomicUsize::new(0));
+            let terminated = Arc::new(AtomicUsize::new(0));
+            let reaped = Arc::new(AtomicUsize::new(0));
+            let artifacts_removed = Arc::new(AtomicUsize::new(0));
+            let resources = Arc::new(NativeSessionResources {
+                control: Arc::new(Mutex::new(Some(Box::new(PendingShutdownControl {
+                    release: released,
+                    started: Arc::clone(&started),
+                    terminated: Arc::clone(&terminated),
+                    reaped: Arc::clone(&reaped),
+                    artifacts_removed: Arc::clone(&artifacts_removed),
+                })))),
+                authentication: Mutex::new(None),
+                alias: Mutex::new(None),
+                cancellation: SshCancellationToken::default(),
+                executor: cx.executor(),
+                completion: Mutex::new(None),
+            });
+            registry.register(&resources);
+            if close_workspace_first {
+                resources.close();
+                drop(resources);
+            }
+            let (quit_finished, finished) = async_channel::bounded::<()>(1);
+            let cleanup = registry.clone();
+            cx.executor()
+                .spawn(async move {
+                    cleanup.shutdown().await;
+                    drop(quit_finished);
+                })
+                .detach();
+            cx.run_until_parked();
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(!finished.is_closed());
+            assert_eq!(reaped.load(Ordering::SeqCst), 0);
+            release.try_send(()).unwrap();
+            cx.run_until_parked();
+            assert!(finished.is_closed());
+            assert_eq!(terminated.load(Ordering::SeqCst), 1);
+            assert_eq!(reaped.load(Ordering::SeqCst), 1);
+            assert_eq!(artifacts_removed.load(Ordering::SeqCst), 1);
+            cx.executor().block(registry.shutdown());
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[gpui::test]
+    fn quit_cancels_and_awaits_connecting_work_and_refuses_new_connections(
+        cx: &mut TestAppContext,
+    ) {
+        let registry = NativeRemoteCleanupRegistry::default();
+        let cancellation = SshCancellationToken::default();
+        let connecting = registry.begin_connect(cancellation.clone()).unwrap();
+        let (finished, completion) = async_channel::bounded::<()>(1);
+        let cleanup = registry.clone();
+        cx.executor()
+            .spawn(async move {
+                cleanup.shutdown().await;
+                drop(finished);
+            })
+            .detach();
+        cx.run_until_parked();
+        assert!(cancellation.is_cancelled());
+        assert!(!completion.is_closed());
+        assert!(
+            registry
+                .begin_connect(SshCancellationToken::default())
+                .is_none()
+        );
+        drop(connecting);
+        cx.run_until_parked();
+        assert!(completion.is_closed());
+    }
+
+    #[derive(Clone)]
+    struct PendingConnectReaper {
+        inner: RecordingAdapter,
+        cancellation: SshCancellationToken,
+        cancel_on_spawn: bool,
+        reaping: async_channel::Sender<()>,
+        release: async_channel::Receiver<()>,
+        reaped: Arc<AtomicUsize>,
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl SshProcessAdapter for PendingConnectReaper {
+        type Process = crate::ssh::process::testing::RecordingProcess;
+
+        fn spawn(
+            &self,
+            request: crate::ssh::process::SshProcessSpawnRequest,
+        ) -> Result<
+            crate::ssh::process::SpawnedSshProcess<Self::Process>,
+            crate::ssh::process::SshProcessMechanismError,
+        > {
+            let child = self.inner.spawn(request)?;
+            if self.cancel_on_spawn {
+                self.cancellation.cancel();
+            }
+            Ok(child)
+        }
+
+        fn try_status(
+            &self,
+            _: &mut Self::Process,
+        ) -> Result<
+            Option<crate::ssh::process::ProcessExit>,
+            crate::ssh::process::SshProcessMechanismError,
+        > {
+            Err(crate::ssh::process::SshProcessMechanismError::StatusFailed)
+        }
+
+        fn signal(
+            &self,
+            process: &mut Self::Process,
+            signal: crate::ssh::process::ProcessSignal,
+        ) -> Result<(), crate::ssh::process::SshProcessMechanismError> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            self.inner.signal(process, signal)
+        }
+
+        fn reap(
+            &self,
+            process: Self::Process,
+        ) -> Result<(), crate::ssh::process::SshProcessMechanismError> {
+            self.reaping.try_send(()).unwrap();
+            self.release.recv_blocking().unwrap();
+            self.inner.reap(process)?;
+            self.reaped.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[gpui::test]
+    fn quit_waits_for_connect_failure_reaper_and_runtime_artifact_cleanup(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for cancel_on_spawn in [true, false] {
+            let registry = NativeRemoteCleanupRegistry::default();
+            let cancellation = SshCancellationToken::default();
+            let scope = registry.begin_connect(cancellation.clone()).unwrap();
+            let filesystem = Arc::new(RecordingFilesystem::default());
+            let paths = AppPaths::resolve(
+                &AppPathEnvironment {
+                    home: Some("/fixture/home".into()),
+                    ..Default::default()
+                },
+                &AppPathHostFacts::new(PathBuf::from("/fixture/tmp"), 103).unwrap(),
+                filesystem.clone(),
+            )
+            .unwrap();
+            let (release, released) = async_channel::bounded(1);
+            let (reaping, started) = async_channel::bounded(1);
+            let reaped = Arc::new(AtomicUsize::new(0));
+            let killed = Arc::new(AtomicUsize::new(0));
+            let backend = Arc::new(SshProcessSupervisor::new(
+                cx.executor(),
+                SshProcessEnvironment::new_without_authentication(
+                    PathBuf::from("/fixture/home"),
+                    None,
+                )
+                .unwrap(),
+                PendingConnectReaper {
+                    inner: RecordingAdapter::default(),
+                    cancellation: cancellation.clone(),
+                    cancel_on_spawn,
+                    reaping,
+                    release: released,
+                    reaped: Arc::clone(&reaped),
+                    killed: Arc::clone(&killed),
+                },
+                scope,
+            ));
+            let result = cx.executor().block(OpenSshControlConnection::connect(
+                &paths,
+                OpenSshExecutable::for_test(),
+                &RecordingControlSocketProbe(Arc::clone(&filesystem)),
+                SshDestination::new("fixture".to_owned()).unwrap(),
+                backend,
+                &cancellation,
+                ControlConnectionTiming::default(),
+            ));
+            assert!(if cancel_on_spawn {
+                matches!(result, Err(ControlConnectionError::Cancelled))
+            } else {
+                matches!(result, Err(ControlConnectionError::MasterStatus { .. }))
+            });
+            cx.executor().block(started.recv()).unwrap();
+            let (finished, completion) = async_channel::bounded::<()>(1);
+            let quit = cx.executor().spawn(async move {
+                registry.shutdown().await;
+                drop(finished);
+            });
+            cx.run_until_parked();
+            assert!(!completion.is_closed());
+            assert_eq!(killed.load(Ordering::SeqCst), 1);
+            assert_eq!(reaped.load(Ordering::SeqCst), 0);
+            assert!(!filesystem.events.lock().unwrap().contains(&"remove-owner"));
+            release.try_send(()).unwrap();
+            cx.executor().block(quit);
+            assert!(completion.is_closed());
+            assert_eq!(reaped.load(Ordering::SeqCst), 1);
+            assert!(filesystem.events.lock().unwrap().contains(&"remove-owner"));
+        }
+    }
+
     struct NativeCloseHarness {
         session: Option<RemoteWorkspaceConnectedSession>,
         prior_focus: FocusHandle,
@@ -1106,14 +1441,16 @@ mod tests {
                 artifacts_removed: Arc::clone(&artifacts_removed),
             }))));
         let owner = NativeRemoteWorkspaceSessionOwner {
-            control,
+            resources: Arc::new(NativeSessionResources {
+                control,
+                authentication: Mutex::new(None),
+                alias: Mutex::new(Some(alias_lease)),
+                cancellation: SshCancellationToken::default(),
+                executor: cx.executor(),
+                completion: Mutex::new(None),
+            }),
             lifecycle: None,
             utility: Arc::new(FakeIdentityProvider::returning([])),
-            authentication: None,
-            alias: Some(alias_lease),
-            cancellation: SshCancellationToken::default(),
-            executor: cx.executor(),
-            closed: false,
         };
         let session = RemoteWorkspaceConnectedSession::new(
             Box::new(owner),
@@ -1190,16 +1527,18 @@ mod tests {
             }))));
         let cancellation = SshCancellationToken::default();
         let mut owner = NativeRemoteWorkspaceSessionOwner {
-            control: Arc::clone(&control),
+            resources: Arc::new(NativeSessionResources {
+                control: Arc::clone(&control),
+                authentication: Mutex::new(None),
+                alias: Mutex::new(Some(alias_lease)),
+                cancellation: cancellation.clone(),
+                executor: cx.executor(),
+                completion: Mutex::new(None),
+            }),
             lifecycle: None,
             utility: Arc::new(FakeIdentityProvider::returning([Ok(
                 RemoteDirectoryIdentity::new("/home/test/src".to_owned()).unwrap(),
             )])),
-            authentication: None,
-            alias: Some(alias_lease),
-            cancellation: cancellation.clone(),
-            executor: cx.executor(),
-            closed: false,
         };
         let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         let provider = owner

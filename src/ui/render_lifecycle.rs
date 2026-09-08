@@ -72,6 +72,9 @@ impl RenderLifecycle {
     ) -> RenderLifecycleEffects {
         let was_presentable = self.visibility.presentable();
         self.visibility = visibility;
+        if was_presentable && !visibility.presentable() {
+            self.presented = None;
+        }
         let restored = !was_presentable && visibility.presentable();
         self.effects_with_redraw(restored && self.has_pending_frame())
     }

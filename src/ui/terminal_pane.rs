@@ -305,10 +305,11 @@ impl PaneSessionLifecycle {
                 }
                 if this
                     .update(cx, |this, cx| {
+                        let mut changed = false;
                         for event in events {
-                            this.handle_session_event(session_epoch, event, cx);
+                            changed |= this.handle_session_event(session_epoch, event, cx);
                         }
-                        if this.render_lifecycle.can_present() {
+                        if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
                     })
@@ -1699,6 +1700,9 @@ impl TerminalPane {
             pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let effects = self.render_lifecycle.update_visibility(surface);
+        if was_presentable && !self.render_lifecycle.can_present() {
+            self.evict_presentation_resources(cx);
+        }
         if !effects.animations_active {
             self.stop_surface_animations();
         }
@@ -1710,6 +1714,15 @@ impl TerminalPane {
         if effects.request_redraw || accessibility_restored {
             cx.notify();
         }
+    }
+
+    fn evict_presentation_resources(&mut self, cx: &mut Context<Self>) {
+        self.latest_presentation_operation = None;
+        self.render_cache.update(cx, |cache, _| cache.evict());
+        self.fallback_render_cache
+            .update(cx, |cache, _| cache.evict());
+        self.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
+        self.grid_bounds = None;
     }
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
@@ -1736,15 +1749,15 @@ impl TerminalPane {
         self.accessibility_needs_presentation = false;
     }
 
-    fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
             SessionEvent::Screen(screen) => {
                 if self
                     .terminal_session
                     .accepted_screen_generation
-                    .is_some_and(|generation| screen.generation < generation)
+                    .is_some_and(|generation| screen.generation <= generation)
                 {
-                    return;
+                    return false;
                 }
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
                 if self.title.as_ref() != title {
@@ -1794,7 +1807,7 @@ impl TerminalPane {
             }
             SessionEvent::Exited(status) => {
                 if self.suspend_if_remote_channel_unavailable(cx) {
-                    return;
+                    return false;
                 }
                 self.context_menu = None;
                 self.file_preview.dismiss();
@@ -1804,7 +1817,7 @@ impl TerminalPane {
                         .failure()
                         .is_some_and(TerminalFailure::is_fatal)
                 {
-                    return;
+                    return false;
                 }
                 self.hidden_input = false;
                 self.sync_secure_input();
@@ -1817,7 +1830,7 @@ impl TerminalPane {
             }
             SessionEvent::Failed(failure) => {
                 if self.suspend_if_remote_channel_unavailable(cx) {
-                    return;
+                    return false;
                 }
                 self.context_menu = None;
                 self.file_preview.dismiss();
@@ -1827,6 +1840,7 @@ impl TerminalPane {
                 self.present_failure(failure, true, None);
             }
         }
+        true
     }
 
     fn handle_session_event(
@@ -1834,10 +1848,8 @@ impl TerminalPane {
         session_epoch: u64,
         event: SessionEvent,
         cx: &mut Context<Self>,
-    ) {
-        if self.terminal_session.session_epoch == session_epoch {
-            self.handle_event(event, cx);
-        }
+    ) -> bool {
+        self.terminal_session.session_epoch == session_epoch && self.handle_event(event, cx)
     }
 
     fn handle_session_accessibility(
@@ -3254,6 +3266,13 @@ impl Render for TerminalPane {
             terminal_input_focused,
             cx,
         );
+        if !self.render_lifecycle.can_present() {
+            self.evict_presentation_resources(cx);
+            return div()
+                .size_full()
+                .bg(gpui_color(self.screen.background))
+                .into_any_element();
+        }
         let recovery_holds_presentation = self.pending_recovery.is_some_and(|pending| {
             matches!(
                 pending.action,

@@ -3,7 +3,8 @@ use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use std::sync::{Mutex, MutexGuard};
 
-const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
+const HIDDEN_INPUT_IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 
 /// The Session handle can enqueue coalesced work without accessing worker schedules.
@@ -84,6 +85,10 @@ impl WorkerSchedules {
         result: Result<bool, NativePtyOperationFailure>,
     ) -> Option<bool> {
         self.hidden_input.update(now, result)
+    }
+
+    pub(super) fn hidden_input_transition(&mut self, now: Instant) {
+        self.hidden_input.transition(now);
     }
 
     pub(super) fn request_paste_confirmation(
@@ -203,7 +208,46 @@ mod tests {
             ),
             Some(false)
         );
-        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_POLL_INTERVAL);
+        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_IDLE_INTERVAL);
+    }
+
+    #[test]
+    fn hidden_input_idles_for_thirty_seconds_after_one_transition_followup() {
+        let now = Instant::now();
+        let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
+        schedules.update_hidden_input(now, Ok(false));
+        assert_eq!(
+            schedules.deadline(None),
+            Some(now + Duration::from_secs(30))
+        );
+        assert!(schedules.take_due(now + Duration::from_secs(29)).is_none());
+
+        let prompt = now + Duration::from_secs(1);
+        schedules.hidden_input_transition(prompt);
+        assert!(matches!(
+            schedules.take_due(prompt),
+            Some(Command::PollHiddenInput)
+        ));
+        assert_eq!(schedules.update_hidden_input(prompt, Ok(false)), None);
+        let settled = prompt + Duration::from_millis(200);
+        assert_eq!(schedules.deadline(None), Some(settled));
+        assert!(matches!(
+            schedules.take_due(settled),
+            Some(Command::PollHiddenInput)
+        ));
+        assert_eq!(schedules.update_hidden_input(settled, Ok(true)), Some(true));
+        assert_eq!(
+            schedules.deadline(None),
+            Some(settled + Duration::from_secs(30))
+        );
+
+        let focused = settled + Duration::from_secs(1);
+        schedules.hidden_input_transition(focused);
+        assert_eq!(schedules.deadline(None), Some(focused));
+        assert_eq!(
+            schedules.update_hidden_input(focused, Ok(false)),
+            Some(false)
+        );
     }
 
     #[test]
@@ -295,6 +339,7 @@ impl AccessibilityContinuationSchedule {
 struct HiddenInputSchedule {
     active: bool,
     deadline: Instant,
+    settle: bool,
 }
 
 impl HiddenInputSchedule {
@@ -302,7 +347,15 @@ impl HiddenInputSchedule {
         Self {
             active: false,
             deadline: now,
+            settle: false,
         }
+    }
+
+    fn transition(&mut self, now: Instant) {
+        self.deadline = now;
+        // Programs may write their prompt before changing termios. Check again once the
+        // transition has settled, then return to the long fallback for silent changes.
+        self.settle = true;
     }
 
     fn update(
@@ -310,13 +363,16 @@ impl HiddenInputSchedule {
         now: Instant,
         result: Result<bool, NativePtyOperationFailure>,
     ) -> Option<bool> {
-        self.deadline = now + HIDDEN_INPUT_POLL_INTERVAL;
+        self.deadline = now
+            + if std::mem::take(&mut self.settle) {
+                HIDDEN_INPUT_SETTLE_INTERVAL
+            } else {
+                HIDDEN_INPUT_IDLE_INTERVAL
+            };
         let active = match result {
             Ok(active) => active,
-            Err(error) => {
-                eprintln!(
-                    "failed to inspect PTY hidden-input state; releasing secure input: {error}"
-                );
+            Err(_) => {
+                eprintln!("PTY hidden-input inspection failed; releasing secure input");
                 false
             }
         };

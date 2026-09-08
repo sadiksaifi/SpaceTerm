@@ -287,6 +287,12 @@ impl SshCommandContext {
         push_option(&mut arguments, OsString::from("ControlMaster=yes"));
         push_option(&mut arguments, self.control_path_option());
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
+        // Clients predating this key cannot enable it in their configuration.
+        push_option(
+            &mut arguments,
+            OsString::from("IgnoreUnknown=ForkAfterAuthentication"),
+        );
+        push_option(&mut arguments, OsString::from("ForkAfterAuthentication=no"));
         arguments.push(OsString::from("-N"));
         self.finish(arguments)
     }
@@ -1042,6 +1048,10 @@ mod tests {
                 "ControlPath=/private/runtime/spaceterm/ssh/control.sock",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "IgnoreUnknown=ForkAfterAuthentication",
+                "-o",
+                "ForkAfterAuthentication=no",
                 "-N",
                 "--",
                 "root@fedora@orb",
