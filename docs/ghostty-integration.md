@@ -35,7 +35,7 @@ can be selected explicitly with `GHOSTTY_SOURCE_DIR` while developing the integr
 ## Updating the engine
 
 1. Select an official Ghostty commit and check its `build.zig.zon` compiler requirement. Check out
-   that commit in `third_party/ghostty` and update the Zig pin and doctor check together if needed.
+   that commit in `third_party/ghostty` and update the Zig pin in `.mise.toml` if needed.
    Record the source change in the parent repository's gitlink.
 2. Review upstream C headers, terminal behavior, and relevant wrapper improvements. Rebase the
    patches in `third_party/libghostty-vt-sys/patches`; remove extensions replaced by upstream.

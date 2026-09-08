@@ -23,10 +23,6 @@ cargo --version
 cargo clippy --version
 rustfmt --version
 cargo packager --version
-test "$(zig version)" = "0.16.0" || {
-  echo "Zig 0.16.0 is required, got: $(zig version)" >&2
-  exit 1
-}
 zig version
 python3 --version
 shellcheck --version | head -n 1
