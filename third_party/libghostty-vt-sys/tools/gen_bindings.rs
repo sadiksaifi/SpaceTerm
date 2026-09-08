@@ -7,52 +7,12 @@ use bindgen::callbacks::{EnumVariantValue, IntKind, ItemInfo, ItemKind, ParseCal
 use heck::ToShoutySnakeCase;
 
 fn main() {
-    // The include directory is produced by build.rs. After a successful
-    // `cargo build -p libghostty-vt-sys`, the headers live in:
-    //   target/<profile>/build/libghostty-vt-sys-<hash>/out/ghostty-install/include
-    //
-    // For convenience, also allow GHOSTTY_SOURCE_DIR/include or
-    // an explicit GHOSTTY_INCLUDE_DIR override.
-    let include_dir = if let Ok(dir) = env::var("GHOSTTY_INCLUDE_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(src) = env::var("GHOSTTY_SOURCE_DIR") {
-        PathBuf::from(src).join("include")
-    } else {
-        // Walk target/debug/build/ to find the libghostty-vt-sys output.
-        let manifest_dir =
-            PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root must exist")
-            .to_path_buf();
-
-        let build_dir = workspace_root.join("target").join("debug").join("build");
-        let mut found = None;
-        if let Ok(entries) = std::fs::read_dir(&build_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with("libghostty-vt-sys-") {
-                    let candidate = entry
-                        .path()
-                        .join("out")
-                        .join("ghostty-install")
-                        .join("include");
-                    if candidate.join("ghostty").join("vt.h").exists() {
-                        found = Some(candidate);
-                        break;
-                    }
-                }
-            }
-        }
-        found.unwrap_or_else(|| {
-            panic!(
-                "could not find ghostty headers; run `cargo build -p libghostty-vt-sys` first, \
-                 or set GHOSTTY_INCLUDE_DIR or GHOSTTY_SOURCE_DIR"
-            )
-        })
-    };
+    // The build script identifies the headers produced from the exact source
+    // revision and patch set. Never select an arbitrary cached build directory.
+    let include_dir = env::var_os("GHOSTTY_INCLUDE_DIR")
+        .or_else(|| option_env!("SPACETERM_GHOSTTY_INCLUDE_DIR").map(Into::into))
+        .map(PathBuf::from)
+        .expect("matching Ghostty headers unavailable; build the integration first");
 
     let header = include_dir.join("ghostty").join("vt.h");
     let manifest_dir =

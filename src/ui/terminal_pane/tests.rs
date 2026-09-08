@@ -199,6 +199,7 @@ fn graphics_screen_with_images(generation: u64, image_ids: &[u32]) -> Arc<Screen
                     width: 1,
                     height: 1,
                     rgba: Arc::from([10, 20, 30, 255]),
+                    reservation: None,
                 })
             })
             .collect::<Vec<_>>()

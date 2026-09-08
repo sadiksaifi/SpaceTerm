@@ -3009,7 +3009,6 @@ dependencies = [
  "bindgen 0.72.1",
  "heck 0.5.0",
  "libc",
- "pkg-config",
 ]
 
 [[package]]

@@ -675,6 +675,7 @@ mod tests {
             width: 100,
             height: 80,
             rgba: Arc::from(vec![0; 100 * 80 * 4]),
+            reservation: None,
         });
         let image = Arc::new(upload_image(Arc::clone(&image_snapshot)).unwrap());
         let placement = ImagePlacementSnapshot {
@@ -744,6 +745,79 @@ mod tests {
         assert_eq!(paint.full_image.size, size(px(100.0), px(80.0)));
     }
 
+    #[gpui::test]
+    fn kitty_placeholder_protocol_preserves_image_crops_across_text_gaps_and_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        use crate::terminal::testing::{TerminalEmulator, graphics_test_lock};
+
+        let _guard = graphics_test_lock();
+        let mut emulator = TerminalEmulator::new(TerminalGeometry::from_grid(
+            CellGridSize::new(8, 4),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::new(2.0).unwrap(),
+        ))
+        .unwrap();
+        let image = format!(
+            "\x1b_Ga=T,t=d,f=24,i=42,s=4,v=4,U=1,c=4,r=2,q=2;{}\x1b\\",
+            "AAAA".repeat(16)
+        );
+        emulator.feed(image.as_bytes());
+        emulator.feed(
+            concat!(
+                "\x1b[38;5;42m",
+                "\u{10eeee}\u{305}\u{305}\u{10eeee}\u{305}\u{30d}",
+                "x\u{10eeee}\u{305}\u{310}\r\n",
+                "\u{10eeee}\u{30d}\u{305}\u{10eeee}\u{10eeee}\u{10eeee}",
+                "\x1b[39m",
+            )
+            .as_bytes(),
+        );
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.graphics.placements.len(), 3);
+
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, cx| {
+                let mut cache = TerminalGraphicsCache::default();
+                let preparation = cache
+                    .sync(snapshot.active_screen, &snapshot.graphics, window, cx)
+                    .unwrap();
+                let bounds = Bounds::new(point(px(5.0), px(7.0)), size(px(80.0), px(80.0)));
+                let plan = preparation
+                    .graphics
+                    .paint_plan(bounds, px(10.0), px(20.0), 2.0);
+
+                assert_eq!(
+                    plan.paints
+                        .iter()
+                        .map(|paint| paint.destination)
+                        .collect::<Vec<_>>(),
+                    [
+                        Bounds::new(point(px(5.0), px(7.0)), size(px(20.0), px(20.0))),
+                        Bounds::new(point(px(35.0), px(7.0)), size(px(10.0), px(20.0))),
+                        Bounds::new(point(px(5.0), px(27.0)), size(px(40.0), px(20.0))),
+                    ]
+                );
+                let full_image = Bounds::new(point(px(5.0), px(7.0)), size(px(40.0), px(40.0)));
+                assert!(
+                    plan.paints
+                        .iter()
+                        .all(|paint| paint.full_image == full_image)
+                );
+                assert!(
+                    plan.paints
+                        .iter()
+                        .all(|paint| paint.layer == GraphicsLayer::BelowText)
+                );
+                cache.rollback(preparation.token, Some(window), cx);
+            })
+            .expect("the test window should remain available");
+    }
+
     #[test]
     fn unchanged_geometry_reuses_the_arc_backed_paint_plan() {
         let prepared = prepared_graphics();
@@ -810,6 +884,7 @@ mod tests {
             width: 1,
             height: 1,
             rgba: Arc::from([10, 20, 30, 40]),
+            reservation: None,
         });
 
         let uploaded = upload_image(snapshot).unwrap();

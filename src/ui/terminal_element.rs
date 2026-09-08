@@ -1113,7 +1113,12 @@ fn prepare_row_text(
             .symbols
             .iter()
             .any(|symbol| symbol.start == usize::from(position.column));
-        if recolor_text && !cursor_contains_symbol && !cell.spacer_tail && !cell.invisible {
+        if recolor_text
+            && !cursor_contains_symbol
+            && !cell.spacer_tail
+            && !cell.invisible
+            && !is_kitty_placeholder(cell)
+        {
             cursor_text.push(PreparedShapedText {
                 line: Arc::new(
                     window.text_system().shape_line(
@@ -2377,6 +2382,7 @@ fn hyperlink_hover_underline_spans(
         .take(end_column.saturating_sub(start_column) + 1)
     {
         if cell.invisible
+            || is_kitty_placeholder(cell)
             || cell.underline != TerminalUnderlineSnapshot::None
             || cell
                 .hyperlink
@@ -2426,6 +2432,7 @@ fn prepare_row_cached(
 
     for (column, cell) in row.iter().enumerate() {
         let cursor = cursor_column == Some(column);
+        let placeholder = is_kitty_placeholder(cell);
         let (_, background) = effective_colors(cell, colors);
         if background != colors.effective_background() {
             if let Some(previous) = backgrounds.last_mut()
@@ -2457,7 +2464,7 @@ fn prepare_row_cached(
             }
         }
 
-        if !cell.invisible {
+        if !cell.invisible && !placeholder {
             let (foreground, _) = effective_colors(cell, colors);
             if cell.underline != TerminalUnderlineSnapshot::None {
                 push_decoration(
@@ -2497,7 +2504,7 @@ fn prepare_row_cached(
             }
         }
 
-        if cell.spacer_tail || cell.invisible {
+        if cell.spacer_tail || cell.invisible || placeholder {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
@@ -2560,6 +2567,12 @@ fn prepare_row_cached(
         under_text_decorations: underlines,
         over_text_decorations: strikethroughs,
     }
+}
+
+fn is_kitty_placeholder(cell: &CellSnapshot) -> bool {
+    // The entire grapheme encodes image placement, including its diacritics.
+    // It must remain blank even when its image is missing or has been deleted.
+    cell.text.starts_with('\u{10eeee}')
 }
 
 fn is_bidi_sensitive(character: char) -> bool {
@@ -3076,6 +3089,67 @@ mod tests {
             ),
             (px(5.5), px(5.5), px(90.0))
         );
+    }
+
+    #[test]
+    fn kitty_placeholder_graphemes_leave_gaps_without_shaping_ids_or_diacritics() {
+        let rows = Arc::from([
+            cell("a"),
+            cell("\u{10eeee}\u{305}\u{30d}\u{30e}"),
+            cell("\u{10eeee}"),
+            cell("e\u{301}"),
+            cell("z"),
+        ]);
+
+        let prepared = prepare_row(&rows, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            prepared
+                .fragments
+                .iter()
+                .map(|fragment| (fragment.start, fragment.text.as_ref()))
+                .collect::<Vec<_>>(),
+            [(0, "a"), (3, "e\u{301}"), (4, "z")]
+        );
+    }
+
+    #[test]
+    fn kitty_placeholder_retains_background_and_selection_without_text_decorations() {
+        let mut placeholder = cell("\u{10eeee}\u{305}\u{30d}");
+        placeholder.foreground_source = TerminalColor::Rgb(Color::rgb(0x12_34_56));
+        placeholder.background_source = TerminalColor::Rgb(Color::rgb(0x65_43_21));
+        placeholder.underline_source = TerminalColor::Palette(200);
+        placeholder.underline = TerminalUnderlineSnapshot::Double;
+        placeholder.strikethrough = true;
+        placeholder.overline = true;
+        placeholder.selected = true;
+
+        let prepared = prepare_row(&Arc::from([placeholder]), &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            (
+                prepared.backgrounds.as_slice(),
+                prepared.selections.as_slice()
+            ),
+            (
+                [BackgroundSpan {
+                    start: 0,
+                    len: 1,
+                    color: Color::rgb(0x65_43_21),
+                }]
+                .as_slice(),
+                [BackgroundSpan {
+                    start: 0,
+                    len: 1,
+                    color: ACTIVE_THEME.players[0].selection,
+                }]
+                .as_slice(),
+            )
+        );
+        assert!(prepared.fragments.is_empty());
+        assert!(prepared.symbols.is_empty());
+        assert!(prepared.under_text_decorations.is_empty());
+        assert!(prepared.over_text_decorations.is_empty());
     }
 
     #[test]
@@ -3937,6 +4011,68 @@ mod tests {
 
         assert!(matched.iter().all(Option::is_none));
         assert!(comparisons.get() <= current.len() * 3);
+    }
+
+    #[gpui::test]
+    fn kitty_placeholder_protocol_never_reaches_text_or_block_cursor_shaping(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        use crate::terminal::testing::{TerminalEmulator, graphics_test_lock};
+
+        let _guard = graphics_test_lock();
+        let mut emulator = TerminalEmulator::new(TerminalGeometry::from_grid(
+            CellGridSize::new(3, 2),
+            LogicalCellSize::new(8.0, 20.0),
+            BackingScale::ONE,
+        ))
+        .unwrap();
+        emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=42,s=1,v=1,U=1,c=1,r=1,q=2;AQIDBA==\x1b\\");
+        emulator.feed("a\x1b[38;5;42m\u{10eeee}\u{305}\u{305}\x1b[39mz\r\x1b[C".as_bytes());
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.graphics.placements.len(), 1);
+        let position = snapshot.cursor.position.unwrap();
+        assert_eq!(position.column, 1);
+        let cursor = (position, snapshot.rows[0][1].clone());
+
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let font_family: SharedString = "Menlo".into();
+                let mut cache = TerminalGridCache::new();
+                let rows = cache.prepare(
+                    &snapshot.rows,
+                    &snapshot.colors,
+                    &font_family,
+                    snapshot.cursor.position,
+                    grid_metrics(),
+                );
+                let geometry = cache.prepare_visible_geometry(
+                    &rows,
+                    1,
+                    prepared_grid_layout(&font_family, px(14.0), px(8.0)),
+                    Some(&cursor),
+                    CursorSnapshot {
+                        visible: true,
+                        shape: CursorShapeSnapshot::Block,
+                        ..snapshot.cursor
+                    },
+                    window,
+                );
+
+                assert_eq!(
+                    geometry[0]
+                        .text
+                        .iter()
+                        .map(|text| (text.origin.x, text.line.text.as_ref()))
+                        .collect::<Vec<_>>(),
+                    [(px(0.0), "a"), (px(16.0), "z")]
+                );
+                assert!(geometry[0].cursor_text.is_empty());
+            })
+            .expect("the test window should remain available");
     }
 
     #[gpui::test]

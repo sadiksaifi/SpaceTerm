@@ -56,9 +56,9 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Try SpaceTerm
 
-You need macOS, Xcode 26 or newer, [Homebrew](https://brew.sh/), and
-[`mise`](https://mise.jdx.dev/). Homebrew temporarily supplies the patched Zig 0.15.2 build required
-by the pinned Ghostty source on current Xcode SDKs; mise manages the rest of the development tools.
+You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
+Mise manages the official Zig compiler and the remaining development tools. Xcode supplies
+the Metal compiler, macOS SDK, and icon packaging tools.
 
 ```sh
 git clone https://github.com/sadiksaifi/SpaceTerm.git
@@ -82,6 +82,10 @@ platform segment such as `:macos`.
 Run `mise run validate:macos` for the full macOS validation suite, including SpaceTerm's patched
 terminal library. Inside a SpaceTerm Pane, `mise run smoke:unix:kitty-graphics` displays image
 layering and scaling checks.
+
+The terminal engine is pinned in the `third_party/ghostty` submodule and built from source.
+SpaceTerm maintains its Rust integration as local workspace dependencies. See
+[the Ghostty integration guide](docs/ghostty-integration.md) for source, binding, and patch updates.
 
 The default theme is built from the pinned `third_party/vague-pro-zed` submodule.
 `mise run setup:macos` initializes it for new and existing checkouts. The build embeds the theme, so

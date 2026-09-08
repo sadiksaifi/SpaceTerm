@@ -57,12 +57,15 @@ const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 
 fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
     let grid = geometry.grid();
-    let backing = geometry.backing_grid_size();
+    let cell = geometry.backing_cell_size();
+    // Clients such as icat infer integer cell dimensions from the PTY extent.
+    // Match the engine's pixel grid while retaining fractional geometry in the UI.
+    // Zero means unavailable if the extent cannot fit the PTY's pixel field.
     NativePtySize {
         rows: grid.rows,
         columns: grid.cols,
-        pixel_width: backing.width.min(u32::from(u16::MAX)) as u16,
-        pixel_height: backing.height.min(u32::from(u16::MAX)) as u16,
+        pixel_width: u16::try_from(u64::from(grid.cols) * u64::from(cell.width)).unwrap_or(0),
+        pixel_height: u16::try_from(u64::from(grid.rows) * u64::from(cell.height)).unwrap_or(0),
     }
 }
 
@@ -643,6 +646,8 @@ enum Command {
     PublishAccessibility,
     SelectionAutoscrollTick(PresentationGeneration),
     PublishPendingScreen,
+    GraphicsAnimationTick,
+    GraphicsBudgetAvailable,
     SetPresentable(bool),
     ReaderReady,
     Shutdown,
@@ -688,6 +693,8 @@ impl fmt::Debug for Command {
             Self::PublishAccessibility => "PublishAccessibility",
             Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
+            Self::GraphicsAnimationTick => "GraphicsAnimationTick",
+            Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
             Self::ReaderReady => "ReaderReady",
             Self::Shutdown => "Shutdown",
@@ -856,11 +863,11 @@ impl TerminalWorker {
             accessibility,
         } = publishers;
         let ReaderTransport {
-            output: _output,
+            output,
             event_rx: reader_event_rx,
         } = reader_transport;
 
-        let emulator = match TerminalEmulator::new_with_local_filesystem(
+        let mut emulator = match TerminalEmulator::new_with_local_filesystem(
             initial_geometry,
             metadata_context,
             &fallback_title,
@@ -876,6 +883,11 @@ impl TerminalWorker {
                 return;
             }
         };
+
+        let graphics_commands = output.commands.clone();
+        emulator.set_graphics_budget_wakeup(move || {
+            let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);
+        });
 
         let mut worker = Self {
             native_pty,
@@ -1132,6 +1144,15 @@ impl TerminalWorker {
                 }
             }
             Command::PublishPendingScreen => self.publish_screen(),
+            Command::GraphicsAnimationTick => {
+                self.emulator.synchronized_output_deadline().is_some()
+                    || self.request_presentation()
+            }
+            Command::GraphicsBudgetAvailable => {
+                !self.emulator.take_graphics_budget_wakeup()
+                    || self.emulator.synchronized_output_deadline().is_some()
+                    || self.request_presentation()
+            }
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
                 self.schedules.set_presentable(presentable, now);
@@ -1394,6 +1415,12 @@ impl TerminalWorker {
 
     fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
         self.emulator.feed(bytes);
+        if let Some(error) = self.emulator.graphics_failure() {
+            self.send_runtime_failure(format!(
+                "failed to update terminal graphics storage: {error}"
+            ));
+            return false;
+        }
         for event in self.emulator.take_attention_events() {
             if !self.send_terminal_event(SessionEvent::Attention(event)) {
                 return false;
@@ -1522,7 +1549,10 @@ impl TerminalWorker {
             return false;
         }
 
-        match self.emulator.snapshot() {
+        let snapshot = self.emulator.snapshot();
+        self.schedules
+            .update_graphics_animation(self.emulator.graphics_animation_deadline());
+        match snapshot {
             Ok(Some(snapshot)) => {
                 let result = self
                     .events

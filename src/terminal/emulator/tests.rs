@@ -1122,10 +1122,76 @@ fn incremental_snapshots_match_a_full_snapshot_of_the_same_terminal_state() {
 fn resize_emits_in_band_size_responses() {
     let mut emulator = emulator(10, 2);
     emulator.feed(b"\x1b[?2048h");
-    assert!(emulator.take_pty_responses().is_empty());
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[48;2;10;40;100t");
 
     emulator.resize(geometry(20, 4, 8.0, 18.0)).unwrap();
     assert_eq!(emulator.take_pty_responses(), b"\x1b[48;4;20;72;160t");
+}
+
+#[test]
+fn size_queries_report_current_engine_cells_while_preserving_fractional_ui_geometry() {
+    let initial = geometry(57, 20, 21.6, 40.0);
+    assert_eq!(initial.backing_grid_size().width, 1232);
+    let mut emulator = TerminalEmulator::new(initial).unwrap();
+    emulator.feed(b"\x1b[14t\x1b[16t\x1b[18t");
+    assert_eq!(
+        emulator.take_pty_responses(),
+        b"\x1b[4;800;1254t\x1b[6;40;22t\x1b[8;20;57t",
+    );
+
+    let resized = geometry(43, 12, 15.2, 31.1);
+    emulator.resize(resized).unwrap();
+    emulator.feed(b"\x1b[14t\x1b[16t\x1b[18t");
+    assert_eq!(
+        emulator.take_pty_responses(),
+        b"\x1b[4;384;688t\x1b[6;32;16t\x1b[8;12;43t",
+    );
+    assert_eq!(emulator.geometry, resized);
+    assert_eq!(resized.backing_grid_size().width, 654);
+}
+
+#[test]
+fn kitty_auto_sized_placeholder_rows_use_size_replies_without_extra_wrapping() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let geometry = geometry(57, 20, 21.6, 40.0);
+    let mut emulator = TerminalEmulator::new(geometry).unwrap();
+    emulator.feed(b"\x1b[16t");
+    let response = String::from_utf8(emulator.take_pty_responses()).unwrap();
+    let reported_cell_width: u32 = response
+        .strip_prefix("\x1b[6;")
+        .unwrap()
+        .strip_suffix('t')
+        .unwrap()
+        .split(';')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pixel_width = geometry.backing_grid_size().width;
+    let fallback_cell_width = pixel_width / u32::from(geometry.grid().cols);
+    assert_eq!(pixel_width.div_ceil(fallback_cell_width), 59);
+    let image_columns = pixel_width.div_ceil(reported_cell_width);
+    assert_eq!(image_columns, 56);
+
+    let mut stream = format!(
+        "\x1b_Ga=T,t=d,f=24,i=1,U=1,s={image_columns},v=2,c={image_columns},r=2,q=2;{}\x1b\\",
+        "AAAA".repeat(image_columns as usize * 2),
+    );
+    for row in ['\u{305}', '\u{30d}'] {
+        stream.push_str(&format!("\x1b[38;5;1m\u{10eeee}{row}\u{305}"));
+        stream.push_str(&"\u{10eeee}".repeat(image_columns as usize - 1));
+        stream.push_str("\x1b[0m\r\n");
+    }
+    emulator.feed(stream.as_bytes());
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.cursor.position.unwrap().row, 2);
+    assert_eq!(snapshot.graphics.placements.len(), 2);
+    assert!(snapshot.graphics.placements.iter().all(|placement| {
+        matches!(placement.viewport_row, 0 | 1)
+            && placement.viewport_col >= 0
+            && placement.viewport_col < i32::from(geometry.grid().cols)
+            && placement.destination_width == image_columns * reported_cell_width
+    }));
 }
 
 #[test]
@@ -1510,14 +1576,17 @@ fn function_key_byte_tables_cover_legacy_and_extended_kitty_ranges() {
         PhysicalKey::F24,
         PhysicalKey::F25,
     ];
-    for physical_key in extended {
-        assert!(
+    for (physical_key, code) in extended
+        .into_iter()
+        .zip([25, 26, 28, 29, 31, 32, 33, 34, 42, 43, 44, 45, 46])
+    {
+        assert_eq!(
             emulator
                 .key(key(physical_key, InputModifiers::default()))
                 .unwrap()
-                .bytes
-                .is_empty(),
-            "legacy must not invent bytes for {physical_key:?}"
+                .bytes,
+            format!("\x1b[{code}~").into_bytes(),
+            "{physical_key:?}"
         );
     }
 
@@ -3087,8 +3156,8 @@ fn kitty_later_display_resolves_crop_offsets_size_and_z() {
     assert_eq!(placement.source_width, 1);
     assert_eq!(placement.cell_offset_x, 3);
     assert_eq!(placement.cell_offset_y, 4);
-    assert_eq!(placement.destination_width, 20);
-    assert_eq!(placement.destination_height, 60);
+    assert_eq!(placement.destination_width, 17);
+    assert_eq!(placement.destination_height, 56);
     assert_eq!(placement.z, -1_073_741_825);
     assert_eq!(displayed.cursor.position.unwrap().column, 0);
 }
@@ -3163,15 +3232,16 @@ fn kitty_q_policy_and_unsupported_media_remain_safe() {
 }
 
 #[test]
-fn kitty_probe_stays_silent_when_application_budget_is_exhausted() {
+fn kitty_probe_stays_responsive_when_application_budget_is_exhausted() {
     let _guard = crate::terminal::graphics::test_lock();
-    let _first = GraphicsReservation::try_acquire().unwrap();
-    let _second = GraphicsReservation::try_acquire().unwrap();
+    let _reservation =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT)
+            .unwrap();
     let mut emulator = emulator(8, 4);
 
     emulator.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
 
-    assert!(emulator.take_pty_responses().is_empty());
+    assert_eq!(emulator.take_pty_responses(), b"\x1b_Gi=31;OK\x1b\\");
     assert!(
         emulator
             .snapshot()
@@ -3182,6 +3252,250 @@ fn kitty_probe_stays_silent_when_application_budget_is_exhausted() {
             .is_empty()
     );
 }
+
+#[test]
+fn kitty_small_images_work_in_more_than_two_terminal_sessions() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulators: Vec<_> = (0..12).map(|_| emulator(8, 4)).collect();
+    let snapshots: Vec<_> = emulators
+        .iter_mut()
+        .map(|emulator| {
+            emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+            emulator.snapshot().unwrap().unwrap()
+        })
+        .collect();
+    for snapshot in snapshots {
+        assert_eq!(snapshot.graphics.images.len(), 1);
+        assert_eq!(snapshot.graphics.images[0].rgba.as_ref(), &[1, 2, 3, 4]);
+    }
+}
+
+#[test]
+fn kitty_full_global_budget_preserves_an_uneven_existing_screen_allocation() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=2,v=1;AQIDBAUGBwg=\x1b\\");
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [8, 0]
+    );
+    let reservation =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 8)
+            .unwrap();
+
+    emulator.feed(b"still running");
+
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [8, 0]
+    );
+    drop(reservation);
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        snapshot.graphics.images[0].rgba.as_ref(),
+        &[1, 2, 3, 4, 5, 6, 7, 8]
+    );
+}
+
+#[test]
+fn kitty_rgb_frame_edit_cannot_exceed_the_full_application_budget() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.feed(b"\x1b_Ga=T,t=d,f=24,i=1,s=1,v=1;AQID\x1b\\");
+    emulator.take_pty_responses();
+    let pressure =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 3)
+            .unwrap();
+
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,r=1,X=1;BQYHCA==\x1b\\");
+
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [3, 0]
+    );
+    assert!(
+        emulator
+            .take_pty_responses()
+            .starts_with(b"\x1b_Gi=1;ENOMEM")
+    );
+    assert!(emulator.graphics_failure().is_none());
+
+    drop(pressure);
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,r=1,X=1;BQYHCA==\x1b\\");
+    assert!(
+        emulator
+            .take_pty_responses()
+            .windows(2)
+            .any(|bytes| bytes == b"OK")
+    );
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [4, 0]
+    );
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+}
+
+#[test]
+fn kitty_snapshots_retain_their_allocation_after_the_terminal_session_closes() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let snapshot = {
+        let mut emulator = emulator(8, 4);
+        emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+        emulator.snapshot().unwrap().unwrap()
+    };
+    assert!(
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT,)
+            .is_none()
+    );
+    let remaining =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 4)
+            .unwrap();
+    drop(snapshot);
+    assert!(GraphicsReservation::try_acquire(4).is_some());
+    drop(remaining);
+}
+
+#[test]
+fn kitty_replacement_releases_superseded_cache_before_requesting_pixel_capacity() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+    drop(emulator.snapshot().unwrap().unwrap());
+    let _pressure =
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 8)
+            .unwrap();
+
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;BQYHCA==\x1b\\");
+    let replacement = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(replacement.graphics.images.len(), 1);
+    assert_eq!(replacement.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+}
+
+#[test]
+fn kitty_reset_reclaims_inactive_screen_pixels_without_revisiting_that_screen() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.feed(b"\x1b[?1049h\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+    let old_ui_snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(old_ui_snapshot.graphics.images.len(), 1);
+
+    emulator.feed(b"\x1bc");
+    let primary = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(primary.active_screen, ActiveScreenSnapshot::Primary);
+    assert!(primary.graphics.images.is_empty());
+    assert_eq!(
+        emulator.terminal.kitty_image_storage_bytes().unwrap(),
+        [0, 0]
+    );
+    assert!(
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT,)
+            .is_none()
+    );
+    drop(old_ui_snapshot);
+    assert!(
+        GraphicsReservation::try_acquire(crate::terminal::graphics::APPLICATION_DECODED_LIMIT,)
+            .is_some()
+    );
+}
+
+#[test]
+fn kitty_remote_graphics_cannot_enable_local_file_or_shared_memory_transports() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let metadata_context = TerminalMetadataContext::Remote(
+        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+            crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+            crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+        ),
+    );
+    let mut emulator = TerminalEmulator::new_with_local_filesystem(
+        geometry(8, 4, 10.0, 20.0),
+        metadata_context,
+        "remote",
+        identity::TERM_FALLBACK,
+        Instant::now(),
+        LocalFilesystemAuthority::testing_without_access(),
+    )
+    .unwrap();
+    for medium in ["f", "t", "s"] {
+        emulator.feed(
+            format!("\x1b_Ga=q,t={medium},f=32,i=1,s=1,v=1;L3RtcC9raXR0eS1maXh0dXJl\x1b\\")
+                .as_bytes(),
+        );
+        let reply = emulator.take_pty_responses();
+        assert!(reply.starts_with(b"\x1b_Gi=1;"));
+        assert!(!reply.windows(2).any(|window| window == b"OK"));
+    }
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=2,s=1,v=1;AQIDBA==\x1b\\");
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.graphics.images[0].rgba.as_ref(), &[1, 2, 3, 4]);
+}
+
+#[test]
+fn kitty_animation_advances_without_output_and_stops_scheduling_when_stopped() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    let start = Instant::now();
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,z=40;BQYHCA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=a,i=1,r=1,z=40,s=3\x1b\\");
+    let first = emulator.snapshot_at(start).unwrap().unwrap();
+    assert_eq!(first.graphics.images[0].rgba.as_ref(), &[1, 2, 3, 4]);
+    assert_eq!(
+        emulator.graphics_animation_deadline(),
+        Some(start + Duration::from_millis(40))
+    );
+    assert!(
+        emulator
+            .snapshot_at(start + Duration::from_millis(39))
+            .unwrap()
+            .is_none()
+    );
+
+    let next = emulator
+        .snapshot_at(start + Duration::from_millis(40))
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+    assert_ne!(next.graphics.images[0].key, first.graphics.images[0].key);
+    assert!(next.damage.graphics_content);
+
+    emulator.feed(b"\x1b_Ga=a,i=1,s=1\x1b\\");
+    let _ = emulator
+        .snapshot_at(start + Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(emulator.graphics_animation_deadline(), None);
+}
+
+#[test]
+fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    let start = Instant::now();
+    emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,z=40;BQYHCA==\x1b\\");
+    emulator.feed(b"\x1b_Ga=a,i=1,r=1,z=40,s=3\x1b\\");
+    drop(emulator.snapshot_at(start).unwrap().unwrap());
+    emulator.take_pty_responses();
+
+    emulator.feed(b"\x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,m=1;CQoL\x1b\\");
+    let second = emulator
+        .snapshot_at(start + Duration::from_millis(40))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+    emulator.feed(b"\x1b_Ga=f,m=0;DA==\x1b\\");
+
+    assert_eq!(emulator.take_pty_responses(), b"\x1b_Gi=1,r=3;OK\x1b\\");
+    let third = emulator
+        .snapshot_at(start + Duration::from_millis(80))
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
+}
+
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/emulator.rs");

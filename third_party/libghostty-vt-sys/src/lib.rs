@@ -33,6 +33,18 @@ where
 }
 
 impl bindings::String {
+    /// Borrow binary data without assuming UTF-8 or a non-null empty pointer.
+    ///
+    /// # Safety
+    /// The caller must ensure nonempty data is valid for the returned lifetime.
+    pub unsafe fn to_bytes<'a>(self) -> &'a [u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: The caller guarantees valid storage for the borrowed lifetime.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
     /// # Safety
     ///
     /// The caller must uphold that the associated lifetime is valid
@@ -40,8 +52,7 @@ impl bindings::String {
     /// valid UTF-8 data.
     pub unsafe fn to_str<'a>(self) -> &'a str {
         // SAFETY: To be upheld by caller
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
-        unsafe { std::str::from_utf8_unchecked(slice) }
+        unsafe { std::str::from_utf8_unchecked(self.to_bytes()) }
     }
 }
 
@@ -61,9 +72,9 @@ mod abi_tests {
             HyperlinkResolution::SUPPRESS
         }
 
-        assert_eq!(TerminalOption::HYPERLINK_RESOLVE, 27);
-        assert_eq!(TerminalOption::SEMANTIC_PROMPT, 28);
-        assert_eq!(TerminalOption::PROGRESS_REPORT, 29);
+        assert_eq!(TerminalOption::HYPERLINK_RESOLVE, 1000);
+        assert_eq!(TerminalOption::SEMANTIC_PROMPT, 1001);
+        assert_eq!(TerminalOption::PROGRESS_REPORT, 30);
         assert_eq!(HyperlinkResolution::PASSTHROUGH, 0);
         assert_eq!(HyperlinkResolution::REPLACE, 1);
         assert_eq!(HyperlinkResolution::SUPPRESS, 2);

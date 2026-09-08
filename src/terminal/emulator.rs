@@ -39,8 +39,8 @@ use crate::terminal::attention::AttentionEvent;
 use crate::terminal::find::TerminalFindState;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::graphics::{
-    APC_TRANSMISSION_LIMIT, GraphicsReservation, GraphicsSnapshot, GraphicsState,
-    IMAGE_STORAGE_LIMIT, starts_apc,
+    APC_TRANSMISSION_LIMIT, GraphicsBudgetWake, GraphicsReservation, GraphicsSnapshot,
+    GraphicsState, starts_apc,
 };
 use crate::terminal::hyperlink::{HyperlinkTarget, has_file_scheme};
 use crate::terminal::identity::{self, XtGetTcapObserver};
@@ -592,6 +592,10 @@ pub(crate) struct TerminalEmulator {
     primary_graphics: GraphicsState,
     alternate_graphics: GraphicsState,
     graphics_reservation: Option<GraphicsReservation>,
+    graphics_failure: Option<Error>,
+    graphics_budget_wake: Option<Arc<GraphicsBudgetWake>>,
+    graphics_clock: Instant,
+    graphics_animation_deadline: Option<Instant>,
     previous_feed_byte: Option<u8>,
     cached_cols: u16,
     cached_rows: u16,
@@ -799,6 +803,10 @@ impl TerminalEmulator {
             let pty_responses = Rc::clone(&pty_responses);
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
         })?;
+        // Image clients need the engine's integer cell geometry. Deriving cells
+        // by dividing the fractional PTY pixel extent can underestimate their size
+        // and make Unicode-placeholder rows wrap beyond the terminal grid.
+        terminal.on_size(|terminal| terminal.size_report().ok())?;
         terminal.on_title_changed({
             let pending_metadata = Rc::clone(&pending_metadata);
             move |terminal| {
@@ -947,6 +955,10 @@ impl TerminalEmulator {
             primary_graphics: GraphicsState::default(),
             alternate_graphics: GraphicsState::default(),
             graphics_reservation: None,
+            graphics_failure: None,
+            graphics_budget_wake: None,
+            graphics_clock: Instant::now(),
+            graphics_animation_deadline: None,
             previous_feed_byte: None,
             cached_cols: 0,
             cached_rows: 0,
@@ -973,7 +985,6 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
-        self.enable_graphics_for_apc(bytes);
         if !bytes.is_empty()
             && matches!(
                 self.active_pointer,
@@ -999,7 +1010,16 @@ impl TerminalEmulator {
                     )
                 });
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        self.terminal.vt_write(bytes);
+        if self.graphics_reservation.is_none() && starts_apc(self.previous_feed_byte, bytes) {
+            self.graphics_reservation = Some(GraphicsReservation::default());
+        }
+        if let Some(reservation) = &mut self.graphics_reservation {
+            if let Err(error) = reservation.write(&mut self.terminal, bytes) {
+                self.graphics_failure = Some(error);
+            }
+        } else {
+            self.terminal.vt_write(bytes);
+        }
         for event in self.pending_metadata.borrow_mut().drain(..) {
             match event {
                 MetadataEvent::Title(title) => {
@@ -1049,20 +1069,38 @@ impl TerminalEmulator {
         }
     }
 
-    fn enable_graphics_for_apc(&mut self, bytes: &[u8]) {
-        if self.graphics_reservation.is_some() || !starts_apc(self.previous_feed_byte, bytes) {
-            return;
+    pub(crate) fn graphics_animation_deadline(&self) -> Option<Instant> {
+        self.graphics_animation_deadline
+    }
+
+    pub(crate) fn graphics_failure(&self) -> Option<Error> {
+        self.graphics_failure
+    }
+
+    pub(crate) fn set_graphics_budget_wakeup(&mut self, notify: impl Fn() + Send + Sync + 'static) {
+        self.graphics_budget_wake = Some(GraphicsBudgetWake::new(notify));
+    }
+
+    pub(crate) fn take_graphics_budget_wakeup(&self) -> bool {
+        self.graphics_budget_wake
+            .as_ref()
+            .is_some_and(|wake| wake.take())
+    }
+
+    fn advance_graphics_animations(&mut self, now: Instant) -> Result<(), Error> {
+        if self.graphics_reservation.is_none() {
+            return Ok(());
         }
-        let Some(reservation) = GraphicsReservation::try_acquire() else {
-            return;
-        };
-        if self
+        let now_ms = u64::try_from(
+            now.saturating_duration_since(self.graphics_clock)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        self.graphics_animation_deadline = self
             .terminal
-            .set_kitty_image_storage_limit(IMAGE_STORAGE_LIMIT as u64)
-            .is_ok()
-        {
-            self.graphics_reservation = Some(reservation);
-        }
+            .tick_kitty_animations(now_ms)?
+            .and_then(|delay| now.checked_add(Duration::from_millis(delay.max(1))));
+        Ok(())
     }
 
     pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
@@ -1913,9 +1951,18 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
+        self.snapshot_at(Instant::now())
+    }
+
+    fn snapshot_at(&mut self, now: Instant) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
+        if let Some(error) = self.graphics_failure {
+            return Err(error);
+        }
         if self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(None);
         }
+
+        self.advance_graphics_animations(now)?;
 
         self.find
             .refresh(&self.terminal, self.geometry.grid().cols)?;
@@ -1949,22 +1996,42 @@ impl TerminalEmulator {
         };
         let size = ScreenSizeSnapshot { cols, rows };
         let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
-        let previous_graphics = match active_screen {
-            ActiveScreenSnapshot::Primary => self.primary_graphics.published().clone(),
-            ActiveScreenSnapshot::Alternate => self.alternate_graphics.published().clone(),
+        if self.graphics_reservation.is_some() {
+            let resident = self.terminal.kitty_image_storage_bytes()?;
+            // Reset can destroy the inactive screen without presenting it again.
+            // Release its cached pixels while existing UI snapshots retain their
+            // own reservations, so cleared images cannot consume capacity forever.
+            match active_screen {
+                ActiveScreenSnapshot::Primary if resident[1] == 0 => {
+                    self.alternate_graphics = GraphicsState::default();
+                }
+                ActiveScreenSnapshot::Alternate if resident[0] == 0 => {
+                    self.primary_graphics = GraphicsState::default();
+                }
+                _ => {}
+            }
+        }
+        let (previous_graphics_generation, previous_graphics_placements) = {
+            let previous = match active_screen {
+                ActiveScreenSnapshot::Primary => self.primary_graphics.published(),
+                ActiveScreenSnapshot::Alternate => self.alternate_graphics.published(),
+            };
+            (previous.generation, Arc::clone(&previous.placements))
         };
         let graphics = if self.graphics_reservation.is_some() {
             match active_screen {
-                ActiveScreenSnapshot::Primary => self.primary_graphics.snapshot(&self.terminal)?,
-                ActiveScreenSnapshot::Alternate => {
-                    self.alternate_graphics.snapshot(&self.terminal)?
-                }
+                ActiveScreenSnapshot::Primary => self
+                    .primary_graphics
+                    .snapshot(&self.terminal, self.graphics_budget_wake.as_ref())?,
+                ActiveScreenSnapshot::Alternate => self
+                    .alternate_graphics
+                    .snapshot(&self.terminal, self.graphics_budget_wake.as_ref())?,
             }
         } else {
             GraphicsSnapshot::default()
         };
-        let graphics_content_changed = previous_graphics.generation != graphics.generation;
-        let graphics_geometry_changed = previous_graphics.placements != graphics.placements;
+        let graphics_content_changed = previous_graphics_generation != graphics.generation;
+        let graphics_geometry_changed = previous_graphics_placements != graphics.placements;
         let mouse_tracking = self.terminal.is_mouse_tracking()?;
         let selection_present = self.terminal.has_selection()?;
         let row_cache = match active_screen {

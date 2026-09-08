@@ -1760,6 +1760,127 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
 }
 
 #[test]
+fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    drop(accessibility_receiver);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker
+        .schedules
+        .update_hidden_input(Instant::now(), Ok(false));
+    worker.emulator.feed(
+        b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\\
+          \x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,z=40;BQYHCA==\x1b\\\
+          \x1b_Ga=a,i=1,r=1,z=40,s=3\x1b\\",
+    );
+    assert!(worker.publish_screen());
+    let SessionEvent::Screen(first) = receiver.try_recv().unwrap() else {
+        panic!("expected initial screen");
+    };
+    assert_eq!(first.graphics.images[0].rgba.as_ref(), &[1, 2, 3, 4]);
+
+    let command = worker.receive_next_command().unwrap();
+    assert!(matches!(command, Command::GraphicsAnimationTick));
+    assert!(worker.process_command(command));
+    let SessionEvent::Screen(next) = receiver.try_recv().unwrap() else {
+        panic!("expected animated screen");
+    };
+    assert_eq!(next.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+    worker.finish();
+}
+
+#[test]
+fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_output() {
+    let _guard = crate::terminal::graphics::test_lock();
+    for hidden in [false, true] {
+        let (command_tx, commands) = mpsc::channel();
+        let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+        drop(accessibility_receiver);
+        let mut emulator = TerminalEmulator::new(test_geometry()).unwrap();
+        emulator.set_graphics_budget_wakeup(move || {
+            let _ = command_tx.send(Command::GraphicsBudgetAvailable);
+        });
+        let mut worker = TerminalWorker {
+            native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            emulator,
+            commands,
+            reader_events,
+            events,
+            accessibility,
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+            osc52_filter: Osc52Filter::default(),
+        };
+        worker
+            .schedules
+            .update_hidden_input(Instant::now(), Ok(false));
+        worker
+            .emulator
+            .feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
+        assert!(worker.publish_screen());
+        let old_pixels = receiver.try_recv().unwrap();
+        let _pressure = crate::terminal::graphics::GraphicsReservation::try_acquire(
+            crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 8,
+        )
+        .unwrap();
+        worker
+            .emulator
+            .feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;BQYHCA==\x1b\\");
+        assert!(worker.publish_screen());
+        let SessionEvent::Screen(deferred) = receiver.try_recv().unwrap() else {
+            panic!("expected a screen releasing the superseded image");
+        };
+        assert!(deferred.graphics.images.is_empty());
+        assert!(worker.commands.try_recv().is_err());
+        if hidden {
+            assert!(worker.process_command(Command::SetPresentable(false)));
+        }
+
+        drop(old_pixels);
+
+        let command = worker.commands.try_recv().unwrap();
+        assert!(matches!(command, Command::GraphicsBudgetAvailable));
+        assert!(worker.process_command(command));
+        if hidden {
+            assert!(receiver.is_empty());
+            assert!(worker.process_command(Command::SetPresentable(true)));
+        }
+        if receiver.is_empty() {
+            let command = worker.receive_next_command().unwrap();
+            assert!(matches!(command, Command::PublishPendingScreen));
+            assert!(worker.process_command(command));
+        }
+        let SessionEvent::Screen(replacement) = receiver.try_recv().unwrap() else {
+            panic!("expected the deferred image to be published");
+        };
+        assert_eq!(replacement.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
+        assert!(worker.commands.try_recv().is_err());
+        worker.finish();
+    }
+}
+
+#[test]
 fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -2232,7 +2353,7 @@ fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
 }
 
 #[test]
-fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() {
+fn fractional_backing_geometry_should_export_the_engine_pixel_grid_to_the_pty() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, _events, _accessibility) = result.unwrap();
     let resized = TerminalGeometry::from_grid(
@@ -2246,16 +2367,95 @@ fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() 
         state.resizes.len() == 1
     });
 
+    assert_eq!(resized.backing_grid_size().width, 113);
     assert_eq!(
         state.resizes,
         vec![NativePtySize {
             rows: 2,
             columns: 10,
-            pixel_width: 113,
+            pixel_width: 120,
             pixel_height: 60,
         }]
     );
     session.shutdown();
+}
+
+#[test]
+fn pty_size_should_report_unrepresentable_pixel_extents_as_unavailable() {
+    let size = pty_size(geometry(u16::MAX, 2, 2.0, 40.0));
+    assert_eq!(size.pixel_width, 0);
+    assert_eq!(size.pixel_height, 80);
+}
+
+#[test]
+fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    let resized = geometry(57, 20, 21.6, 40.0);
+    assert_eq!(resized.backing_grid_size().width, 1232);
+    session.resize(resized);
+    let state = records.wait_for("the icat PTY geometry", |state| state.resizes.len() == 1);
+    let size = state.resizes[0];
+    assert_eq!(
+        size,
+        NativePtySize {
+            rows: 20,
+            columns: 57,
+            pixel_width: 1254,
+            pixel_height: 800,
+        },
+    );
+
+    reader_steps
+        .send(ReaderStep::Bytes(b"\x1b[14t\x1b[16t\x1b[18t".to_vec()))
+        .unwrap();
+    let state = records.wait_for("size query replies for the icat geometry", |state| {
+        state.written.ends_with(b"\x1b[8;20;57t")
+    });
+    let cell_width = size.pixel_width / size.columns;
+    let cell_height = size.pixel_height / size.rows;
+    assert_eq!(
+        state.written,
+        format!(
+            "\x1b[4;{};{}t\x1b[6;{cell_height};{cell_width}t\x1b[8;{};{}t",
+            size.pixel_height, size.pixel_width, size.rows, size.columns,
+        )
+        .as_bytes(),
+    );
+
+    // icat fits the image to the PTY pixel width, then floors pixel_width/columns
+    // to infer cell width. A fractional extent previously produced 59 columns.
+    let image_columns = size.pixel_width.div_ceil(cell_width);
+    assert_eq!(image_columns, 57);
+    let mut stream = format!(
+        "\x1b_Ga=T,t=d,f=24,i=1,U=1,s={image_columns},v=2,c={image_columns},r=2,q=2;{}\x1b\\",
+        "AAAA".repeat(usize::from(image_columns) * 2),
+    );
+    for row in ['\u{305}', '\u{30d}'] {
+        stream.push_str(&format!("\x1b[38;5;1m\u{10eeee}{row}\u{305}"));
+        stream.push_str(&"\u{10eeee}".repeat(usize::from(image_columns) - 1));
+        stream.push_str("\x1b[0m\r\n");
+    }
+    reader_steps
+        .send(ReaderStep::Bytes(stream.into_bytes()))
+        .unwrap();
+    let event = receive_event(
+        &events,
+        "the complete automatic icat image",
+        |event| matches!(event, SessionEvent::Screen(screen) if screen.cursor.position.is_some_and(|position| position.row == 2) && !screen.graphics.images.is_empty()),
+    );
+    let SessionEvent::Screen(snapshot) = event else {
+        unreachable!()
+    };
+    assert_eq!(snapshot.graphics.placements.len(), 2);
+    assert!(snapshot.graphics.placements.iter().all(|placement| {
+        matches!(placement.viewport_row, 0 | 1)
+            && placement.viewport_col == 0
+            && placement.destination_width == u32::from(size.pixel_width)
+    }));
+    // Keep the graphics test lock until the worker releases its native pixels.
+    session.shutdown_and_join();
 }
 
 #[test]
@@ -2358,7 +2558,7 @@ fn pending_pty_responses_should_precede_later_input_through_the_session_interfac
     );
     session.resize(resized);
     records.wait_for("the in-band terminal resize response", |state| {
-        state.written == b"\x1b[48;4;20;72;160t"
+        state.written == b"\x1b[48;24;80;480;640t\x1b[48;4;20;72;160t"
     });
     assert_eq!(
         session
@@ -2371,7 +2571,10 @@ fn pending_pty_responses_should_precede_later_input_through_the_session_interfac
         state.written.ends_with(b"later")
     });
 
-    assert_eq!(state.written, b"\x1b[48;4;20;72;160tlater");
+    assert_eq!(
+        state.written,
+        b"\x1b[48;24;80;480;640t\x1b[48;4;20;72;160tlater"
+    );
     session.shutdown();
 }
 

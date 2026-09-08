@@ -2,19 +2,10 @@
 idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
-zig = { version = "0.15.2", os = ["linux", "windows"] }
+zig = "0.16.0"
 shellcheck = "0.11.0"
 python = "3.13.15"
 "cargo:cargo-packager" = "0.11.8"
-
-# The pinned Ghostty source requires Zig 0.15.2 exactly, while its official macOS archive cannot
-# link against Xcode 26.4+ SDKs. Homebrew carries the required patches. Remove this workaround once
-# the pinned Ghostty source supports an official Zig release containing those fixes.
-[bootstrap.packages]
-"brew:zig@0.15" = "latest"
-
-[env]
-_.path = ["/opt/homebrew/opt/zig@0.15/bin", "/usr/local/opt/zig@0.15/bin"]
 
 [tasks.setup]
 description = "Prepare the shared development environment"
@@ -32,10 +23,6 @@ cargo --version
 cargo clippy --version
 rustfmt --version
 cargo packager --version
-test "$(zig version)" = "0.15.2" || {
-  echo "Zig 0.15.2 is required, got: $(zig version)" >&2
-  exit 1
-}
 zig version
 python3 --version
 shellcheck --version | head -n 1
@@ -44,6 +31,51 @@ shellcheck --version | head -n 1
 [tasks."deps:fetch"]
 description = "Download locked Rust dependencies"
 run = "cargo fetch --locked"
+
+[tasks."deps:build"]
+description = "Build the pinned Ghostty source and SpaceTerm C bindings"
+run = "cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
+
+[tasks."deps:engine"]
+description = "Build a prepared Ghostty source copy while updating native patches"
+usage = '''
+arg "<source>" help="Prepared Ghostty source directory"
+flag "--features <features>" help="Upstream VT feature selection" default="all"
+'''
+run = '''
+cd "${usage_source?}"
+zig build -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline -Doptimize=Debug "-Dvt-features=${usage_features?}"
+'''
+
+[tasks."deps:bindings"]
+description = "Regenerate Rust bindings from the matching patched Ghostty headers"
+run = "cargo run --package libghostty-vt-sys --features bindgen-tool,kitty-graphics --bin gen-bindings --locked"
+
+[tasks."deps:engine:test"]
+description = "Run upstream native VT tests in a prepared Ghostty source copy"
+usage = '''
+arg "<source>" help="Prepared Ghostty source directory"
+'''
+run = '''
+cd "${usage_source?}"
+zig build test-lib-vt -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline
+'''
+
+[tasks."deps:check"]
+description = "Check every feature of the locally maintained Ghostty wrappers"
+run = "cargo check --package libghostty-vt --all-features --locked"
+
+[tasks."deps:lock"]
+description = "Refresh the local Ghostty dependency entries without upgrading unrelated packages"
+run = "cargo update --package libghostty-vt-sys --offline"
+
+[tasks."deps:fmt"]
+description = "Format the locally maintained Ghostty integration"
+run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys"
+
+[tasks."deps:fmt:check"]
+description = "Check formatting of the locally maintained Ghostty integration"
+run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
 [tasks.dev]
 description = "Run SpaceTerm from source"
@@ -60,6 +92,13 @@ run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --no
 [tasks.fmt]
 description = "Format shared Rust sources"
 run = "cargo fmt --package spaceterm --package spaceterm-ui"
+
+[tasks."fmt:files"]
+description = "Format selected Rust files during focused changes"
+usage = '''
+arg "<files>..." help="Rust files to format"
+'''
+run = '''python3 -c 'import os, shlex, subprocess; subprocess.run(["rustfmt", "--edition", "2024", *shlex.split(os.environ["usage_files"])], check=True)' '''
 
 [tasks."fmt:check"]
 description = "Check shared Rust formatting"
@@ -84,6 +123,10 @@ run = 'cargo test --package spaceterm --package spaceterm-ui --all-targets --all
 description = "Test terminal-library patches with the application feature set"
 run = "cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
 
+[tasks."test:vendor:no-graphics"]
+description = "Test the owned Rust wrappers with graphics disabled"
+run = "cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt-sys/vendored --locked"
+
 [tasks."test:conformance"]
 description = "Run terminal protocol conformance tests"
 run = "cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
@@ -101,7 +144,7 @@ description = "Check shared scripts"
 run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/terminal-resource-workload.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
 '''
 
 [tasks."lint:diff"]
@@ -134,11 +177,23 @@ run = [
   { task = "test" },
   { task = "lint" },
   { task = "test:vendor" },
+  { task = "test:vendor:no-graphics" },
+  { task = "deps:fmt:check" },
 ]
 
 [tasks."smoke:unix:kitty-graphics"]
 description = "Display Kitty graphics checks inside a running SpaceTerm Pane on Unix"
-run = "./scripts/kitty-graphics-smoke-unix.sh"
+usage = '''
+arg "[scenario]" help="Scenario: all, basics, placeholders, relative, animation, lifecycle, screens" default="all"
+flag "--dump" help="Emit a fixture without prompts or delays"
+'''
+run = '''
+if [ "${usage_dump:-false}" = "true" ]; then
+  ./scripts/kitty-graphics-smoke-unix.sh "${usage_scenario?}" --dump
+else
+  ./scripts/kitty-graphics-smoke-unix.sh "${usage_scenario?}"
+fi
+'''
 
 [tasks."build:release"]
 description = "Build the optimized executable for the current platform"
@@ -156,7 +211,6 @@ run = 'python3 scripts/terminal-resource-workload.py --mode "${usage_mode}" --du
 [tasks."setup:macos"]
 description = "Prepare the macOS development environment"
 run = [
-  "mise bootstrap packages apply --yes",
   { task = "setup" },
   { task = "doctor:macos" },
 ]
