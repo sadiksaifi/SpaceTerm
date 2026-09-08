@@ -7,7 +7,9 @@ shellcheck = "0.11.0"
 python = "3.13.15"
 "cargo:cargo-packager" = "0.11.8"
 
-# Homebrew carries the Zig patches required by Xcode 26.4 and newer.
+# The pinned Ghostty source requires Zig 0.15.2 exactly, while its official macOS archive cannot
+# link against Xcode 26.4+ SDKs. Homebrew carries the required patches. Remove this workaround once
+# the pinned Ghostty source supports an official Zig release containing those fixes.
 [bootstrap.packages]
 "brew:zig@0.15" = "latest"
 

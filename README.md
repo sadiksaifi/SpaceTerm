@@ -56,7 +56,9 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Try SpaceTerm
 
-You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
+You need macOS, Xcode 26 or newer, [Homebrew](https://brew.sh/), and
+[`mise`](https://mise.jdx.dev/). Homebrew temporarily supplies the patched Zig 0.15.2 build required
+by the pinned Ghostty source on current Xcode SDKs; mise manages the rest of the development tools.
 
 ```sh
 git clone https://github.com/sadiksaifi/SpaceTerm.git
