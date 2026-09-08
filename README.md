@@ -65,24 +65,25 @@ git clone https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
 mise trust
 
-# Install pinned tools, initialize submodules, and verify the development environment
-mise run setup
+# Install pinned tools, initialize submodules, and verify the macOS development environment
+mise run setup:macos
 
 # Run from source
 mise run dev
 
 # Build, verify, and install to /Applications
-mise run package:install
+mise run package:macos:install
 ```
 
-Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`; the
-remaining development tools and project tasks are pinned in `.mise.toml`.
+Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
+development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
+platform segment such as `:macos`.
 
-Run `mise run validate` for the full validation suite, including SpaceTerm's patched terminal
-library. Inside a SpaceTerm Pane, `mise run smoke:kitty-graphics` displays image layering and
-scaling checks.
+Run `mise run validate:macos` for the full macOS validation suite, including SpaceTerm's patched
+terminal library. Inside a SpaceTerm Pane, `mise run smoke:unix:kitty-graphics` displays image
+layering and scaling checks.
 
-The default theme is built from the pinned `third_party/vague-pro-zed` submodule. `mise run setup`
-initializes it for new and existing checkouts. The build embeds the theme, so the installed
-application needs no checkout or network access. UI colors follow Zed semantic roles; terminal
+The default theme is built from the pinned `third_party/vague-pro-zed` submodule.
+`mise run setup:macos` initializes it for new and existing checkouts. The build embeds the theme, so
+the installed application needs no checkout or network access. UI colors follow Zed semantic roles; terminal
 font sizing remains independent of UI sizing.

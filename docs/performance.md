@@ -10,7 +10,7 @@ Muxy. Run one workload at a time and avoid builds or other heavy background work
 Run in a dedicated Pane, since the workload clears and fills its terminal screen:
 
 ```sh
-python3 scripts/terminal-resource-workload.py --mode scroll --duration 60 --rate 60
+mise run bench:workload scroll 60 60
 ```
 
 `idle` fills forty lines and waits. `partial` updates a fixed row. `scroll` writes
@@ -39,7 +39,7 @@ may close that Pane. A short redirected syntax/output check is available with
 Choose the application PID, then sample from a separate terminal:
 
 ```sh
-python3 scripts/measure-terminal-resources.py 12345 --duration 20 --interval 1
+mise run bench:macos:resources 12345 20 1
 ```
 
 This macOS-only sampler needs Python 3 and no third-party packages or administrator
@@ -81,7 +81,7 @@ The `image` workload displays one fixed synthetic 2048 x 2048 RGBA PNG through
 Kitty graphics, using synchronized output and complete buffered writes:
 
 ```sh
-python3 scripts/terminal-resource-workload.py --mode image --duration 120
+mise run bench:workload image 120
 ```
 
 Image mode uses a one-second startup delay to let launch geometry settle, emits
