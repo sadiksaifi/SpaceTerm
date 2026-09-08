@@ -33,4 +33,6 @@ important durable decisions.
 ## Work
 
 - Use the tasks in `.mise.toml` through `mise run` as the command authority.
+- Keep generic mise tasks platform-neutral. Give every Operating-System-specific task an explicit
+  platform segment and every Operating-System-specific script an explicit platform marker.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.
