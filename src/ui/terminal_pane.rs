@@ -717,7 +717,11 @@ impl TerminalPane {
             .set(self.native_service_focus_epoch.get().wrapping_add(1));
     }
 
-    pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) -> bool {
+    pub(crate) fn set_product_focus(
+        &mut self,
+        product_focus: TerminalProductFocus,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.product_focus == product_focus {
             return false;
         }
@@ -753,6 +757,11 @@ impl TerminalPane {
             .render_lifecycle
             .update_product_visibility(product_focus.active_workspace, pane_visible);
         self.sync_session_presentability(was_presentable);
+        if was_presentable && !self.render_lifecycle.can_present() {
+            // Hidden Tabs and zoomed-out Panes leave the render tree, so cleanup
+            // must happen at the visibility transition without another render.
+            self.evict_presentation_resources(cx);
+        }
         if !self.render_lifecycle.effects().animations_active {
             self.stop_surface_animations();
         }
@@ -1735,6 +1744,7 @@ impl TerminalPane {
 
     fn evict_presentation_resources(&mut self, cx: &mut Context<Self>) {
         self.latest_presentation_operation = None;
+        self.grid_presentation.evict();
         self.render_cache.update(cx, |cache, _| cache.evict());
         self.fallback_render_cache
             .update(cx, |cache, _| cache.evict());

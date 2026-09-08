@@ -1105,7 +1105,7 @@ impl PaneHost {
                 blocker,
             };
             terminal.update(cx, |terminal, cx| {
-                let product_focus_changed = terminal.set_product_focus(product_focus);
+                let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
                 terminal.set_accessibility_hierarchy(
                     self.active && presentation_order.contains_key(&pane_id),

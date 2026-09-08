@@ -67,6 +67,25 @@ impl TerminalGridPresentation {
         }
     }
 
+    pub(crate) fn evict(&mut self) {
+        self.cursor.clear();
+        self.grid = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resource_liveness(&self) -> impl Fn() -> (bool, bool) + use<> {
+        let grid = self.grid.as_ref().map(Entity::downgrade);
+        let cursor = self.cursor.batch.borrow().as_ref().map(Rc::downgrade);
+        move || {
+            (
+                grid.as_ref().is_some_and(|grid| grid.upgrade().is_some()),
+                cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.upgrade().is_some()),
+            )
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn paint_counts(&self) -> (usize, usize) {
         self.cursor.counts.get()
@@ -116,8 +135,7 @@ impl TerminalGridPresentation {
         let phase = configuration.blink_phase_visible;
         let line_height = configuration.line_height;
         if !eligible {
-            self.cursor.clear();
-            self.grid = None;
+            self.evict();
             return TerminalGridElement::new(screen, cache, configuration, cx).into_any_element();
         }
         if !presentation_unchanged {
