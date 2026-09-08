@@ -1477,11 +1477,24 @@ impl FragmentBuilder {
         }
 
         let (foreground, _) = effective_colors(cell, colors);
-        let cell_font = terminal_cell_font(font_family, cell.bold, cell.italic);
         let color = gpui_color(foreground).into();
+        let weight = if cell.bold {
+            gpui::FontWeight::BOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        };
+        let style = if cell.italic {
+            gpui::FontStyle::Italic
+        } else {
+            gpui::FontStyle::Normal
+        };
 
+        // Every run uses terminal_cell_font's fixed features and fallbacks. Check
+        // the varying fields before allocating another identical descriptor.
         if let Some(previous) = self.runs.last_mut()
-            && previous.font == cell_font
+            && previous.font.family == *font_family
+            && previous.font.weight == weight
+            && previous.font.style == style
             && previous.color == color
             && previous.background_color.is_none()
             && previous.underline.is_none()
@@ -1491,7 +1504,7 @@ impl FragmentBuilder {
         } else {
             self.runs.push(TextRun {
                 len,
-                font: cell_font,
+                font: terminal_cell_font(font_family, cell.bold, cell.italic),
                 color,
                 background_color: None,
                 underline: None,
@@ -1511,7 +1524,14 @@ impl FragmentBuilder {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_FONT_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
+    #[cfg(test)]
+    TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
     let mut cell_font = font(family.clone());
     cell_font.features = FontFeatures::disable_ligatures();
     cell_font.fallbacks = Some(FontFallbacks::from_fonts(
@@ -2851,6 +2871,85 @@ mod tests {
                 .sum::<usize>(),
             input.fragments[0].text.len()
         );
+    }
+
+    #[test]
+    fn text_runs_preserve_font_and_color_transitions() {
+        let colors = colors();
+        let family: SharedString = "JetBrains Mono".into();
+        let mut fragment = FragmentBuilder::new(0, false, false, false);
+        let styles = [(false, false), (true, false), (true, true), (false, true)];
+        let mut expected = Vec::new();
+        for (bold, italic) in styles {
+            for foreground in [Color::rgb(0x12_34_56), Color::rgb(0x65_43_21)] {
+                let mut subject = cell("é");
+                subject.bold = bold;
+                subject.italic = italic;
+                subject.foreground_source = TerminalColor::Rgb(foreground);
+                fragment.push(&subject, &colors, &family);
+                fragment.push(&subject, &colors, &family);
+                expected.push(TextRun {
+                    len: 4,
+                    font: terminal_cell_font(&family, bold, italic),
+                    color: gpui_color(foreground).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+        }
+
+        let fragment = fragment.finish(true);
+
+        assert_eq!(fragment.runs, expected);
+        assert_eq!(fragment.text.as_ref(), "é".repeat(16));
+    }
+
+    #[test]
+    fn text_runs_keep_family_changes_and_ignore_empty_cells() {
+        let colors = colors();
+        let first_family: SharedString = "Menlo".into();
+        let second_family: SharedString = "JetBrains Mono".into();
+        let mut fragment = FragmentBuilder::new(0, false, false, false);
+        fragment.push(&cell("a"), &colors, &first_family);
+        let mut empty = cell("");
+        empty.bold = true;
+        empty.italic = true;
+        fragment.push(&empty, &colors, &second_family);
+        fragment.push(&cell("b"), &colors, &first_family);
+        fragment.push(&cell("é"), &colors, &second_family);
+        fragment.push(&cell("c"), &colors, &second_family);
+
+        let fragment = fragment.finish(true);
+
+        assert_eq!(fragment.text.as_ref(), "abéc");
+        assert_eq!(fragment.runs.len(), 2);
+        assert_eq!(fragment.runs[0].len, 2);
+        assert_eq!(
+            fragment.runs[0].font,
+            terminal_cell_font(&first_family, false, false)
+        );
+        assert_eq!(fragment.runs[1].len, 3);
+        assert_eq!(
+            fragment.runs[1].font,
+            terminal_cell_font(&second_family, false, false)
+        );
+    }
+
+    #[test]
+    fn row_preparation_constructs_fonts_per_run_instead_of_per_cell() {
+        let row = Arc::<[CellSnapshot]>::from(vec![cell("é"); 192]);
+        let colors = colors();
+        let family: SharedString = "Menlo".into();
+        let before = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get);
+
+        let input = prepare_row(&row, &colors, &family, None);
+
+        let prepared = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get) - before;
+        assert_eq!(prepared, 1);
+        assert_eq!(input.fragments.len(), 1);
+        assert_eq!(input.fragments[0].runs.len(), 1);
+        assert_eq!(input.fragments[0].runs[0].len, 384);
     }
 
     #[test]

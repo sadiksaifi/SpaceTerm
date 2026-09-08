@@ -102,6 +102,8 @@ scripts-check:
         scripts/kitty-graphics-smoke.sh
     shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh \
         scripts/kitty-graphics-smoke.sh
+    python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' \
+        scripts/measure-terminal-resources.py scripts/terminal-resource-workload.py
     plutil -lint packaging/macos/Info.plist
 
 # Check the diff for whitespace errors.
@@ -124,6 +126,14 @@ kitty-graphics-smoke:
 # Build the optimized executable.
 release:
     cargo build --release --locked
+
+# Run a paced workload in a dedicated terminal Pane.
+bench-workload mode="scroll" duration="60" rate="60":
+    python3 scripts/terminal-resource-workload.py --mode "{{ mode }}" --duration "{{ duration }}" --rate "{{ rate }}"
+
+# Sample one macOS application process without administrator privileges.
+bench-resources pid duration="20" interval="1":
+    python3 scripts/measure-terminal-resources.py "{{ pid }}" --duration "{{ duration }}" --interval "{{ interval }}"
 
 # Build and verify the macOS app and disk image.
 package build_number="1":

@@ -384,15 +384,18 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| pane.render_lifecycle.can_present()));
     assert_eq!(latest_recorded_presentability(&records), Some(true));
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_tab: false,
-            ..TerminalProductFocus::default()
-        });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_tab: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
     });
     assert_eq!(latest_recorded_presentability(&records), Some(false));
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus::default());
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
     });
     assert_eq!(latest_recorded_presentability(&records), Some(true));
     assert!(notifications.get() > 0);
@@ -1588,12 +1591,18 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
 ) {
     let (pane, cx) = terminal_pane(cx);
     let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            pane_visible: false,
-            focused_pane: false,
-            ..TerminalProductFocus::default()
-        });
+    let layout_bounds = pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.expect("initial presentation has geometry")
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                pane_visible: false,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
         pane.set_accessibility_hierarchy(false, usize::MAX);
         for index in 0..4_096 {
             pane.handle_accessibility(accessibility_model(index));
@@ -1614,13 +1623,29 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
         (2, true, "update-4095x".to_owned())
     );
 
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus::default());
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
         pane.set_accessibility_hierarchy(true, 0);
     });
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
     });
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.is_none()
+            && pane.pending_accessibility_notifications.len() == 2
+            && !accessibility_record.borrow().visible
+            && accessibility_record.borrow().delivered.is_empty()
+            && accessibility_record.borrow().model.text() == "update-4095x"
+    }));
+    // Production restores geometry in on_children_prepainted before publishing
+    // native accessibility. Exercise that order instead of using hidden bounds.
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.update_grid_bounds(layout_bounds, cx);
+            pane.sync_native_accessibility(window, false);
+        });
+    });
+    assert!(accessibility_record.borrow().visible);
     assert_eq!(
         pane.read_with(cx, |pane, _| {
             (
@@ -1650,14 +1675,20 @@ fn inactive_workspace_retains_only_bounded_accessibility_state_until_restore(
 ) {
     let (pane, cx) = terminal_pane(cx);
     let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_workspace: false,
-            active_tab: false,
-            pane_visible: false,
-            focused_pane: false,
-            blocker: None,
-        });
+    let layout_bounds = pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.expect("initial presentation has geometry")
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: false,
+                active_tab: false,
+                pane_visible: false,
+                focused_pane: false,
+                blocker: None,
+            },
+            cx,
+        );
         pane.set_accessibility_hierarchy(false, usize::MAX);
         for index in 0..4_096 {
             pane.handle_accessibility(accessibility_model(index));
@@ -1678,13 +1709,29 @@ fn inactive_workspace_retains_only_bounded_accessibility_state_until_restore(
         (2, true, "update-4095x".to_owned())
     );
 
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus::default());
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
         pane.set_accessibility_hierarchy(true, 0);
     });
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
     });
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.is_none()
+            && pane.pending_accessibility_notifications.len() == 2
+            && !accessibility_record.borrow().visible
+            && accessibility_record.borrow().delivered.is_empty()
+            && accessibility_record.borrow().model.text() == "update-4095x"
+    }));
+    // Production restores geometry in on_children_prepainted before publishing
+    // native accessibility. Exercise that order instead of using hidden bounds.
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.update_grid_bounds(layout_bounds, cx);
+            pane.sync_native_accessibility(window, false);
+        });
+    });
+    assert!(accessibility_record.borrow().visible);
     assert_eq!(
         pane.read_with(cx, |pane, _| {
             (
@@ -1761,11 +1808,14 @@ fn focus_out_and_in_between_presentations_delivers_one_retained_focus_notificati
 
     cx.update(|window, cx| {
         pane.update(cx, |pane, pane_cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                blocker: Some(TerminalFocusBlocker::Modal),
-                ..TerminalProductFocus::default()
-            });
-            pane.set_product_focus(TerminalProductFocus::default());
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    blocker: Some(TerminalFocusBlocker::Modal),
+                    ..TerminalProductFocus::default()
+                },
+                pane_cx,
+            );
+            pane.set_product_focus(TerminalProductFocus::default(), pane_cx);
             assert!(pane.synchronize_terminal_input_focus(window, pane_cx));
             pane.sync_native_accessibility(window, true);
         });
@@ -2102,23 +2152,29 @@ fn dropped_old_terminal_find_input_cannot_change_a_later_find(cx: &mut TestAppCo
 #[gpui::test]
 fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_workspace: true,
-            active_tab: true,
-            focused_pane: true,
-            ..TerminalProductFocus::default()
-        });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: true,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
     });
     cx.dispatch_action(OpenTerminalFind);
 
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_workspace: true,
-            active_tab: true,
-            focused_pane: false,
-            ..TerminalProductFocus::default()
-        });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
     });
 
     assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
@@ -2438,11 +2494,14 @@ fn text_blink_uses_an_injected_clock_only_while_visible_content_demands_it(
     let (pane, cx) = terminal_pane(cx);
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: true,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             pane.handle_event(SessionEvent::Screen(blinking_screen()), cx);
             cx.notify();
         });
@@ -2458,11 +2517,14 @@ fn text_blink_uses_an_injected_clock_only_while_visible_content_demands_it(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: false,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: false,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             cx.notify();
         });
     });
@@ -2481,12 +2543,15 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
     let (pane, cx) = terminal_pane(cx);
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: true,
-                focused_pane: true,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
             cx.notify();
         });
@@ -2546,6 +2611,91 @@ fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAp
         pane.read_with(cx, |pane, _| pane.pane_state.clone()),
         PaneTerminalState::Running
     );
+}
+
+#[gpui::test]
+fn product_hiding_releases_cursor_resources_before_redraw_and_restores_latest_screen(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let visible = pane.read_with(cx, |pane, _| pane.product_focus);
+    for (index, hidden) in [
+        TerminalProductFocus {
+            active_tab: false,
+            ..visible
+        },
+        TerminalProductFocus {
+            active_workspace: false,
+            ..visible
+        },
+        TerminalProductFocus {
+            pane_visible: false,
+            ..visible
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let previous_resources =
+            pane.read_with(cx, |pane, _| pane.grid_presentation.resource_liveness());
+        assert_eq!(previous_resources(), (true, true));
+
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(hidden, cx);
+            assert_eq!(pane.grid_presentation.resource_liveness()(), (false, false));
+            assert!(pane.grid_bounds.is_none());
+            assert!(pane.latest_presentation_operation.is_none());
+        });
+        // Hidden product branches need not render again. GPUI may hold its old
+        // view until a frame boundary, but our shared cursor batch must be gone.
+        assert!(!previous_resources().1);
+
+        let mut latest = blinking_cursor_screen(true, true);
+        Arc::make_mut(&mut latest).generation =
+            crate::terminal::PresentationGeneration::test(42 + index as u64);
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Screen(Arc::clone(&latest)), cx);
+            pane.set_product_focus(visible, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| {
+            Arc::ptr_eq(&pane.last_valid_screen, &latest)
+                && pane.grid_presentation.cursor_storage().is_some()
+        }));
+    }
+}
+
+#[gpui::test]
+fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let previous_resources =
+        pane.read_with(cx, |pane, _| pane.grid_presentation.resource_liveness());
+    assert_eq!(previous_resources(), (true, true));
+    pane.update(cx, |pane, cx| {
+        pane.update_runtime_visibility(
+            WindowVisibility {
+                minimized: false,
+                occluded: true,
+                live_resize: false,
+            },
+            cx,
+        );
+    });
+    assert!(!previous_resources().1);
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_none()
+    }));
 }
 
 #[gpui::test]
@@ -2656,12 +2806,15 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
     let (pane, cx, _records) = connected_terminal_pane(cx);
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: true,
-                focused_pane: true,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
             cx.notify();
         });
@@ -2695,12 +2848,15 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: true,
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             cx.notify();
         });
     });
@@ -2710,12 +2866,15 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                active_workspace: true,
-                active_tab: true,
-                focused_pane: true,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
             cx.notify();
         });
     });
@@ -2742,7 +2901,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(focused);
+            pane.set_product_focus(focused, cx);
             pane.handle_event(
                 SessionEvent::Screen(blinking_cursor_screen(true, false)),
                 cx,
@@ -2779,10 +2938,13 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(TerminalProductFocus {
-                focused_pane: false,
-                ..focused
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..focused
+                },
+                cx,
+            );
             cx.notify();
         });
     });
@@ -2792,7 +2954,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
 
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_product_focus(focused);
+            pane.set_product_focus(focused, cx);
             cx.notify();
         });
     });
@@ -3302,11 +3464,14 @@ fn native_service_return_is_rejected_without_terminal_input_focus(cx: &mut TestA
         Ok(PasteResolution::Written),
     );
     let origin = current_native_service_origin(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_workspace: false,
-            ..TerminalProductFocus::default()
-        });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
     });
 
     let accepted = cx.update(|window, cx| {
@@ -3455,11 +3620,14 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
-    pane.update(cx, |pane, _| {
-        pane.set_product_focus(TerminalProductFocus {
-            active_workspace: false,
-            ..TerminalProductFocus::default()
-        });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
     });
     cx.run_until_parked();
 
@@ -3675,10 +3843,13 @@ fn authoritative_focus_transitions_share_one_deduplicated_session_path(cx: &mut 
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
-            pane.set_product_focus(TerminalProductFocus {
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                app,
+            );
             app.notify();
         });
     });
@@ -3687,10 +3858,13 @@ fn authoritative_focus_transitions_share_one_deduplicated_session_path(cx: &mut 
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
-            pane.set_product_focus(TerminalProductFocus {
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                app,
+            );
             app.notify();
         });
     });
@@ -3699,7 +3873,7 @@ fn authoritative_focus_transitions_share_one_deduplicated_session_path(cx: &mut 
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
-            pane.set_product_focus(TerminalProductFocus::default());
+            pane.set_product_focus(TerminalProductFocus::default(), app);
             app.notify();
         });
     });
@@ -4009,10 +4183,13 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
     mark(&pane, cx);
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
-            pane.set_product_focus(TerminalProductFocus {
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            });
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                app,
+            );
             app.notify();
         });
     });
@@ -5502,6 +5679,106 @@ fn occlusion_evicts_image_resources_and_restore_reuploads_without_new_output(
         pane.render_lifecycle
             .is_presented(crate::terminal::PresentationGeneration::test(1))
     }));
+}
+
+#[gpui::test]
+fn visible_focus_changes_preserve_graphics_resources_and_geometry(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    records
+        .last_event_sender()
+        .unwrap()
+        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .unwrap();
+    cx.run_until_parked();
+    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+    let retained = cache.read_with(cx, |cache, _| cache.retained_bytes());
+    let keys = cache.read_with(cx, |cache, _| cache.cached_image_keys());
+    let bounds = pane.read_with(cx, |pane, _| pane.grid_bounds);
+    let focused = pane.read_with(cx, |pane, _| pane.product_focus);
+    assert!(retained > 0 && bounds.is_some());
+
+    for focus in [
+        TerminalProductFocus {
+            focused_pane: false,
+            ..focused
+        },
+        focused,
+        TerminalProductFocus {
+            blocker: Some(TerminalFocusBlocker::Modal),
+            ..focused
+        },
+        focused,
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(focus, cx);
+            assert!(pane.render_lifecycle.can_present());
+            assert_eq!(pane.grid_bounds, bounds);
+            assert_eq!(pane.graphics_cache.read(cx).retained_bytes(), retained);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cache.read_with(cx, |cache, _| cache.retained_bytes()),
+            retained
+        );
+        assert_eq!(
+            cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+            keys
+        );
+    }
+}
+
+#[gpui::test]
+fn product_hiding_releases_graphics_before_redraw_and_restores_without_output(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    records
+        .last_event_sender()
+        .unwrap()
+        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .unwrap();
+    cx.run_until_parked();
+    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+    let retained = cache.read_with(cx, |cache, _| cache.retained_bytes());
+    assert!(retained > 0);
+    let visible = pane.read_with(cx, |pane, _| pane.product_focus);
+
+    for hidden in [
+        TerminalProductFocus {
+            active_tab: false,
+            ..visible
+        },
+        TerminalProductFocus {
+            active_workspace: false,
+            ..visible
+        },
+        TerminalProductFocus {
+            pane_visible: false,
+            ..visible
+        },
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(hidden, cx);
+        });
+        assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
+        assert!(cache.read_with(cx, |cache, _| cache.cached_image_keys().is_empty()));
+        assert!(cache.read_with(cx, |cache, _| cache.staged_image_keys().is_empty()));
+
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(visible, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cache.read_with(cx, |cache, _| cache.retained_bytes()),
+            retained
+        );
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.render_lifecycle
+                .is_presented(crate::terminal::PresentationGeneration::test(1))
+        }));
+    }
 }
 
 #[gpui::test]
