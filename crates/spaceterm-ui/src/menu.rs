@@ -14,6 +14,11 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 
+pub use crate::anchored_placement::{
+    AnchoredAlignment as MenuAlignment, AnchoredPlacement as MenuPlacement,
+    AnchoredPlacementConfig as MenuPlacementConfig,
+};
+use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
 use crate::{Icon, IconName};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
@@ -191,71 +196,6 @@ pub enum MenuSize {
     Regular,
     /// Wide menus, conventionally 248 logical pixels.
     Wide,
-}
-
-/// Preferred side of a root menu relative to its trigger.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MenuPlacement {
-    /// Place below the trigger.
-    #[default]
-    Bottom,
-    /// Place above the trigger.
-    Top,
-    /// Place to the left of the trigger.
-    Left,
-    /// Place to the right of the trigger.
-    Right,
-}
-
-/// Cross-axis alignment between a root menu and its trigger.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MenuAlignment {
-    /// Align leading edges.
-    #[default]
-    Start,
-    /// Align centers.
-    Center,
-    /// Align trailing edges.
-    End,
-}
-
-/// Narrow placement policy for a root menu.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MenuPlacementConfig {
-    placement: MenuPlacement,
-    alignment: MenuAlignment,
-    offset: Pixels,
-    viewport_margin: Pixels,
-}
-
-impl MenuPlacementConfig {
-    /// Creates placement with a four-pixel trigger offset and twelve-pixel viewport margin.
-    pub fn new(placement: MenuPlacement, alignment: MenuAlignment) -> Self {
-        Self {
-            placement,
-            alignment,
-            offset: px(4.0),
-            viewport_margin: px(12.0),
-        }
-    }
-
-    /// Sets the gap between trigger and menu.
-    pub fn offset(mut self, offset: Pixels) -> Self {
-        self.offset = offset.max(px(0.0));
-        self
-    }
-
-    /// Sets the minimum distance from the viewport edge.
-    pub fn viewport_margin(mut self, margin: Pixels) -> Self {
-        self.viewport_margin = margin.max(px(0.0));
-        self
-    }
-}
-
-impl Default for MenuPlacementConfig {
-    fn default() -> Self {
-        Self::new(MenuPlacement::default(), MenuAlignment::default())
-    }
 }
 
 /// Bounded paint values shared by menus, context menus, and pickers.
@@ -2351,6 +2291,7 @@ fn open_menu(
     window: &mut Window,
     cx: &mut App,
 ) {
+    crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx);
     let Some(entity) = state.upgrade() else {
         return;
     };
@@ -2959,12 +2900,7 @@ fn constrain_panel_size(
     viewport: gpui::Size<Pixels>,
     margin: Pixels,
 ) -> gpui::Size<Pixels> {
-    let available_width = (viewport.width - margin * 2.0).max(px(1.0));
-    let available_height = (viewport.height - margin * 2.0).max(px(1.0));
-    size(
-        panel.width.min(available_width),
-        panel.height.min(available_height),
-    )
+    constrain_anchored_size(panel, viewport, margin)
 }
 
 fn entry_offset(entries: &[InternalEntry], index: usize, metrics: MenuMetrics) -> Pixels {
@@ -2986,64 +2922,7 @@ fn place_root(
     viewport: gpui::Size<Pixels>,
     config: MenuPlacementConfig,
 ) -> Bounds<Pixels> {
-    let margin = config.viewport_margin;
-    let max_x = viewport.width - margin;
-    let max_y = viewport.height - margin;
-    let clamp_x = |x: Pixels| x.max(margin).min((max_x - panel.width).max(margin));
-    let clamp_y = |y: Pixels| y.max(margin).min((max_y - panel.height).max(margin));
-    let aligned_x = match config.alignment {
-        MenuAlignment::Start => anchor.left(),
-        MenuAlignment::Center => anchor.center().x - panel.width / 2.0,
-        MenuAlignment::End => anchor.right() - panel.width,
-    };
-    let aligned_y = match config.alignment {
-        MenuAlignment::Start => anchor.top(),
-        MenuAlignment::Center => anchor.center().y - panel.height / 2.0,
-        MenuAlignment::End => anchor.bottom() - panel.height,
-    };
-    let (preferred, alternate, vertical) = match config.placement {
-        MenuPlacement::Bottom => (
-            anchor.bottom() + config.offset,
-            anchor.top() - config.offset - panel.height,
-            true,
-        ),
-        MenuPlacement::Top => (
-            anchor.top() - config.offset - panel.height,
-            anchor.bottom() + config.offset,
-            true,
-        ),
-        MenuPlacement::Left => (
-            anchor.left() - config.offset - panel.width,
-            anchor.right() + config.offset,
-            false,
-        ),
-        MenuPlacement::Right => (
-            anchor.right() + config.offset,
-            anchor.left() - config.offset - panel.width,
-            false,
-        ),
-    };
-    if vertical {
-        let fits = |y: Pixels| y >= margin && y + panel.height <= max_y;
-        let y = if fits(preferred) {
-            preferred
-        } else if fits(alternate) {
-            alternate
-        } else {
-            clamp_y(preferred)
-        };
-        Bounds::new(point(clamp_x(aligned_x), y), panel)
-    } else {
-        let fits = |x: Pixels| x >= margin && x + panel.width <= max_x;
-        let x = if fits(preferred) {
-            preferred
-        } else if fits(alternate) {
-            alternate
-        } else {
-            clamp_x(preferred)
-        };
-        Bounds::new(point(x, clamp_y(aligned_y)), panel)
-    }
+    place_anchored(anchor, panel, viewport, config)
 }
 
 fn place_submenu(
@@ -3054,23 +2933,7 @@ fn place_submenu(
     margin: Pixels,
     gap: Pixels,
 ) -> Bounds<Pixels> {
-    let right = parent.right() + gap;
-    let left = parent.left() - gap - panel.width;
-    let limit_right = viewport.width - margin;
-    let x = if right + panel.width <= limit_right {
-        right
-    } else if left >= margin {
-        left
-    } else {
-        right
-            .max(margin)
-            .min((limit_right - panel.width).max(margin))
-    };
-    let limit_bottom = viewport.height - margin;
-    let y = row_top
-        .max(margin)
-        .min((limit_bottom - panel.height).max(margin));
-    Bounds::new(point(x, y), panel)
+    place_adjacent(parent, row_top, panel, viewport, margin, gap)
 }
 
 #[cfg(test)]

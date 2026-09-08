@@ -1661,7 +1661,7 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 }
 
 #[gpui::test]
-fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_input(
+fn sidebar_combo_box_and_command_shortcut_should_each_block_terminal_input(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -1670,7 +1670,7 @@ fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_i
     let sidebar_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.new_workspace.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -1679,6 +1679,7 @@ fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_i
         let manager = manager.read(cx);
         (
             manager.transient.new_workspace.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -1687,8 +1688,30 @@ fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_i
         (sidebar_state, repeated_state),
         (
             (true, Some(TerminalFocusBlocker::CommandPalette)),
-            (true, Some(TerminalFocusBlocker::CommandPalette)),
+            (true, false, Some(TerminalFocusBlocker::CommandPalette)),
         )
+    );
+}
+
+#[gpui::test]
+fn hiding_the_sidebar_should_release_the_combo_box_and_terminal_focus_blocker(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    click("new-workspace-button", cx);
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            (
+                manager.read(cx).sidebar.visible,
+                window_combo_box_is_open(window, cx),
+                manager.read(cx).terminal_focus_blocker(window, cx),
+            )
+        }),
+        (false, false, None)
     );
 }
 
@@ -4993,7 +5016,7 @@ fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
+fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_box(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -5006,10 +5029,10 @@ fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
     click("new-workspace-button", cx);
 
     assert_eq!(
-        manager.read_with(cx, |manager, cx| {
+        cx.update(|window, cx| {
             (
-                manager.workspaces.len(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                manager.read(cx).workspaces.len(),
+                window_combo_box_is_open(window, cx),
             )
         }),
         (1, true)

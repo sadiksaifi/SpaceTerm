@@ -76,12 +76,14 @@ struct CommandPaletteRegistration(u64);
 type SuspendPalette = Rc<dyn Fn(u64, &mut App) -> Option<WeakFocusHandle>>;
 type ResumePalette = Rc<dyn Fn(u64, CommandPaletteRegistration, &mut App)>;
 type ReplacePalette = Rc<dyn Fn(&mut App)>;
+type ReplacePaletteNow = Rc<dyn Fn(&mut Window, &mut App) -> Option<WeakFocusHandle>>;
 
 struct ErasedPaletteRegistration {
     token: CommandPaletteRegistration,
     suspend: SuspendPalette,
     resume: ResumePalette,
     replace: ReplacePalette,
+    replace_now: ReplacePaletteNow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -275,6 +277,17 @@ fn register_open_palette<I: Clone + Eq + 'static>(
             });
         });
     });
+    let replace_now_owner = owner.clone();
+    let replace_now: ReplacePaletteNow = Rc::new(move |window, cx| {
+        replace_now_owner
+            .update(cx, |palette, cx| {
+                palette
+                    .dismiss_for_replacement(window, cx)
+                    .and_then(|replacement| replacement.restore_focus)
+            })
+            .ok()
+            .flatten()
+    });
     let resume_window_id = window_id;
     let resume_retry_generation = Rc::new(Cell::new(None));
     let resume: ResumePalette = Rc::new(move |generation, registration, cx| {
@@ -326,6 +339,7 @@ fn register_open_palette<I: Clone + Eq + 'static>(
                         suspend,
                         resume,
                         replace,
+                        replace_now,
                     },
                 )
                 .map(|registration| registration.replace);
@@ -343,6 +357,21 @@ fn register_open_palette<I: Clone + Eq + 'static>(
         replaced(cx);
     }
     (token, modal_suspension)
+}
+
+pub(crate) fn dismiss_active_command_palette_for_replacement(
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<WeakFocusHandle> {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        return None;
+    }
+    let replace = cx
+        .global::<CommandPaletteCoordinator>()
+        .registrations
+        .get(&window.window_handle().window_id())
+        .map(|registration| registration.replace_now.clone());
+    replace.and_then(|replace| replace(window, cx))
 }
 
 fn unregister_palette(
@@ -679,6 +708,26 @@ pub struct CommandPaletteItem<I> {
     leading_icon: Option<IconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
+}
+
+/// A query-aware provider for the command palette's pinned fallback row.
+///
+/// The provider receives the exact editor text. Its typed item is appended after ordinary matches
+/// without participating in filtering or scoring.
+#[derive(Clone)]
+pub struct CommandPaletteFallback<I>(CommandPaletteFallbackProvider<I>);
+
+type CommandPaletteFallbackProvider<I> = Rc<dyn Fn(&str) -> CommandPaletteItem<I>>;
+
+impl<I> CommandPaletteFallback<I> {
+    /// Creates a provider whose row is rebuilt whenever the accepted query changes.
+    pub fn new(provider: impl Fn(&str) -> CommandPaletteItem<I> + 'static) -> Self {
+        Self(Rc::new(provider))
+    }
+
+    fn item(&self, query: &str) -> CommandPaletteItem<I> {
+        (self.0)(query)
+    }
 }
 
 impl<I> CommandPaletteItem<I> {
@@ -1273,6 +1322,10 @@ impl Global for CommandPaletteTheme {}
 pub struct CommandPalette<I: Clone + Eq + 'static> {
     no_results_text: SharedString,
     items: Rc<[CommandPaletteItem<I>]>,
+    presented_items: Rc<[CommandPaletteItem<I>]>,
+    fallback: Option<CommandPaletteFallback<I>>,
+    fallback_item_id: Option<I>,
+    ordinary_match_count: usize,
     matches: Rc<[CommandPaletteMatch]>,
     presented_results: Rc<PresentedResults>,
     leading_reserved: bool,
@@ -1622,7 +1675,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
             no_results_text: "No matching items".into(),
+            presented_items: Rc::clone(&items),
             items,
+            fallback: None,
+            fallback_item_id: None,
+            ordinary_match_count: matches.len(),
             matches,
             presented_results,
             leading_reserved,
@@ -1691,6 +1748,20 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.no_results_text = text.into();
+        cx.notify();
+    }
+
+    /// Pins one query-aware item after all ordinary matches.
+    ///
+    /// The fallback remains present for every query. Ordinary matches retain initial-selection
+    /// precedence; with no ordinary match, an enabled fallback becomes selected.
+    pub fn set_fallback(
+        &mut self,
+        fallback: Option<CommandPaletteFallback<I>>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.fallback = fallback;
+        self.recompute_matches();
         cx.notify();
     }
 
@@ -1831,11 +1902,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ) -> bool {
         self.restore_on_activation = None;
         let menu_replacement = crate::menu::dismiss_active_menu_for_replacement(window, cx);
+        let combo_replacement =
+            crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx);
         self.restore_focus = match replacement {
             Some(replacement) => replacement.restore_focus,
             None => match menu_replacement {
                 Some(crate::menu::MenuReplacementFocus(focus)) => focus,
-                None => window.focused(cx).map(|focus| focus.downgrade()),
+                None => {
+                    combo_replacement.or_else(|| window.focused(cx).map(|focus| focus.downgrade()))
+                }
             },
         };
         self.open = true;
@@ -1955,7 +2030,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     /// Replaces items immediately and preserves selection by stable identity when possible.
     pub fn set_items(&mut self, items: Vec<CommandPaletteItem<I>>, cx: &mut gpui::Context<Self>) {
         self.items = unique_items(items).into();
-        self.leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
         self.loading = false;
         self.recompute_matches();
         cx.notify();
@@ -2058,8 +2132,42 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     }
 
     fn recompute_matches(&mut self) {
-        self.matches = match_command_palette_items(&self.items, &self.query, self.matching).into();
-        self.presented_results = Rc::new(PresentedResults::new(&self.items, &self.matches));
+        let selected_was_fallback = self
+            .fallback_item_id
+            .as_ref()
+            .is_some_and(|id| self.selected.as_ref() == Some(id));
+        let mut presented = self.items.to_vec();
+        let mut matches = match_command_palette_items(&self.items, &self.query, self.matching);
+        self.ordinary_match_count = matches.len();
+        if let Some(item) = self
+            .fallback
+            .as_ref()
+            .map(|fallback| fallback.item(&self.query))
+            && !presented.iter().any(|existing| existing.id == item.id)
+        {
+            let item_index = presented.len();
+            self.fallback_item_id = Some(item.id.clone());
+            presented.push(item);
+            matches.push(CommandPaletteMatch {
+                item_index,
+                score: i64::MIN,
+                label_highlights: Vec::new(),
+                description_highlights: Vec::new(),
+            });
+        } else {
+            self.fallback_item_id = None;
+        }
+        self.presented_items = presented.into();
+        self.matches = matches.into();
+        self.leading_reserved = self
+            .presented_items
+            .iter()
+            .any(|item| item.leading_icon.is_some());
+        if selected_was_fallback && self.ordinary_match_count > 0 {
+            self.selected = None;
+        }
+        self.presented_results =
+            Rc::new(PresentedResults::new(&self.presented_items, &self.matches));
         self.list.reset(self.presented_results.len());
         self.repair_selection();
         self.reveal_selected();
@@ -2088,7 +2196,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn repair_selection(&mut self) {
         let stable = self.selected.as_ref().is_some_and(|selected| {
             self.matches.iter().any(|matched| {
-                self.items
+                self.presented_items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled && item.id == *selected)
             })
@@ -2098,13 +2206,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.selected = self.preferred.as_ref().and_then(|preferred| {
             self.matches.iter().find_map(|matched| {
-                self.items.get(matched.item_index).and_then(|item| {
-                    (!item.disabled && item.id == *preferred).then(|| item.id.clone())
-                })
+                self.presented_items
+                    .get(matched.item_index)
+                    .and_then(|item| {
+                        (!item.disabled && item.id == *preferred).then(|| item.id.clone())
+                    })
             })
         });
         if self.selected.is_none() {
-            self.selected = first_enabled_id(&self.items, &self.matches);
+            self.selected = first_enabled_id(&self.presented_items, &self.matches);
         }
     }
 
@@ -2172,7 +2282,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .iter()
             .enumerate()
             .filter_map(|(position, matched)| {
-                self.items
+                self.presented_items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled)
                     .then_some(position)
@@ -2183,7 +2293,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn selected_match_position(&self) -> Option<usize> {
         let selected = self.selected.as_ref()?;
         self.matches.iter().position(|matched| {
-            self.items
+            self.presented_items
                 .get(matched.item_index)
                 .is_some_and(|item| item.id == *selected)
         })
@@ -2193,7 +2303,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let next = self
             .matches
             .get(position)
-            .and_then(|matched| self.items.get(matched.item_index))
+            .and_then(|matched| self.presented_items.get(matched.item_index))
             .filter(|item| !item.disabled)
             .map(|item| item.id.clone());
         if next.is_some() && self.selected != next {
@@ -2257,7 +2367,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         }
         let position = self.matches.iter().position(|matched| {
-            self.items
+            self.presented_items
                 .get(matched.item_index)
                 .is_some_and(|item| !item.disabled && item.id == *id)
         });
@@ -2278,7 +2388,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.pointer_press = None;
         inside
             && self.matches.iter().any(|matched| {
-                self.items
+                self.presented_items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled && item.id == *id)
             })
@@ -2331,7 +2441,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         };
         let enabled = self.matches.iter().any(|matched| {
-            self.items
+            self.presented_items
                 .get(matched.item_index)
                 .is_some_and(|item| item.id == item_id && !item.disabled)
         });
@@ -2827,7 +2937,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         theme: CommandPaletteTheme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
-        let items = Rc::clone(&self.items);
+        let items = Rc::clone(&self.presented_items);
         let matches = Rc::clone(&self.matches);
         let presented_results = Rc::clone(&self.presented_results);
         let selected = self.selected.clone();

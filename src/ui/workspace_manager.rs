@@ -65,15 +65,16 @@ use gpui::{
     SharedString, Task, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu,
-    Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
+    Alert, AlertIntent, AlertOutcome, ButtonSize, ButtonVariant, ComboBox, ContextMenu, Icon,
+    IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
     ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
     OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation,
     ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate,
     ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
     ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
     TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    window_combo_box_is_open, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -442,6 +443,7 @@ pub(crate) struct WorkspaceManager {
     default_workspace_identity: WorkspaceDirectoryIdentity,
     directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
+    remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
@@ -663,7 +665,7 @@ impl WorkspaceManager {
         };
         let new_workspace_panel = cx.new(|cx| {
             NewWorkspacePanel::new_with_remote_unavailable_reason(
-                remote_unavailable_reason,
+                remote_unavailable_reason.clone(),
                 window,
                 cx,
             )
@@ -697,6 +699,7 @@ impl WorkspaceManager {
             default_workspace_identity,
             directory_selection_fallback,
             remote_workspace_backend,
+            remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
@@ -1093,7 +1096,8 @@ impl WorkspaceManager {
                 .transient
                 .new_workspace
                 .read(cx)
-                .blocks_terminal_input(),
+                .blocks_terminal_input()
+                || window_combo_box_is_open(window, cx),
             search: self.transient.search.read(cx).blocks_terminal_input(),
             window_drag: self.window_drag_status.is_active(),
             sidebar_resize: self.sidebar.resizing,
@@ -1512,15 +1516,60 @@ impl WorkspaceManager {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
-            NewWorkspacePanelEvent::SourceSelected(source) => match source {
-                NewWorkspaceSource::LocalProject => {
-                    self.transient.picker_entered_from_panel = true;
-                    self.present_workspace_picker(window, cx);
-                }
-                NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
-                NewWorkspaceSource::RemoteProject => self.present_remote_workspace_flow(window, cx),
-            },
+            NewWorkspacePanelEvent::SourceSelected(source) => {
+                self.handle_new_workspace_source(*source, true, window, cx);
+            }
         }
+    }
+
+    fn handle_new_workspace_source(
+        &mut self,
+        source: NewWorkspaceSource,
+        entered_from_panel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match source {
+            NewWorkspaceSource::LocalProject => {
+                self.transient.picker_entered_from_panel = entered_from_panel;
+                self.present_workspace_picker(window, cx);
+            }
+            NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
+            NewWorkspaceSource::RemoteProject if entered_from_panel => {
+                self.present_remote_workspace_flow(window, cx);
+            }
+            NewWorkspaceSource::RemoteProject => {
+                self.present_remote_workspace_flow_from_combo_box(window, cx);
+            }
+        }
+    }
+
+    fn present_remote_workspace_flow_from_combo_box(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.remote_workspace_backend.as_ref().map(Arc::clone) else {
+            self.sync_terminal_focus_blocker(window, cx);
+            return;
+        };
+        let flow = self.remote_workspace_flow.get_or_insert_with(|| {
+            let flow = cx.new(|cx| RemoteWorkspaceFlow::new(backend, window, cx));
+            cx.subscribe_in(
+                &flow,
+                window,
+                |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
+                    manager.handle_remote_workspace_flow_event(flow, event, window, cx);
+                },
+            )
+            .detach();
+            flow
+        });
+        if !flow.update(cx, |flow, cx| flow.open(window, cx)) {
+            self.remote_workspace_flow = None;
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
     }
 
     fn present_remote_workspace_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3951,8 +4000,13 @@ impl WorkspaceManager {
 
         let scrollbar = self.sidebar.scrollbar.clone();
         let panel_manager = manager.clone();
+        let combo_lifecycle_manager = manager.clone();
+        let combo_lifecycle_window = window.window_handle();
         let search_manager = manager.clone();
-        let new_workspace_shortcut = shortcuts.new_workspace_button;
+        let new_workspace_items = NewWorkspaceSource::combo_box_items(
+            self.remote_workspace_unavailable_reason.clone(),
+            presentation,
+        );
         let header = div()
             .id("workspace-sidebar-header")
             .debug_selector(|| "workspace-sidebar-header".to_owned())
@@ -4024,27 +4078,40 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        Button::new("new-workspace-button", "New Workspace")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Large)
-                            .shape(ButtonShape::Square)
-                            .full_width(true)
-                            .debug_selector("new-workspace-button")
-                            .leading(|foreground| {
-                                Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
-                            })
-                            .trailing(move |_| {
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(gpui_color(ACTIVE_THEME.icon))
-                                    .child(new_workspace_shortcut)
-                                    .into_any_element()
-                            })
-                            .on_activate(move |_, window, cx| {
-                                let _ = panel_manager.update(cx, |manager, cx| {
-                                    manager.show_new_workspace_panel(window, cx);
-                                });
-                            }),
+                        ComboBox::new(
+                            "new-workspace-button",
+                            "New Workspace source",
+                            None,
+                            "New Workspace",
+                            new_workspace_items,
+                        )
+                        .full_width(true)
+                        .debug_selector("new-workspace-button")
+                        .leading(|foreground| {
+                            Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
+                        })
+                        .on_lifecycle(move |_, cx| {
+                            let manager = combo_lifecycle_manager.clone();
+                            cx.defer(move |cx| {
+                                let _ =
+                                    cx.update_window(combo_lifecycle_window, |_, window, cx| {
+                                        let _ = manager.update(cx, |manager, cx| {
+                                            manager.sync_terminal_focus_blocker(window, cx);
+                                            cx.notify();
+                                        });
+                                    });
+                            });
+                        })
+                        .on_accept(move |acceptance, window, cx| {
+                            let _ = panel_manager.update(cx, |manager, cx| {
+                                manager.handle_new_workspace_source(
+                                    *acceptance.item_id(),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
                     )
                     .child(
                         div()

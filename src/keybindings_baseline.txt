@@ -8,6 +8,14 @@ right	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::MoveRight
 enter	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Activate
 space	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Activate
 escape	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Dismiss
+up	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MoveUp
+down	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MoveDown
+pageup	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MovePageUp
+pagedown	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MovePageDown
+home	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MoveHome
+end	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::MoveEnd
+enter	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::Accept
+escape	Some(Identifier("SpaceTermComboBox"))	spaceterm_combo_box::Dismiss
 up	Some(Identifier("SpaceTermCommandPalette"))	spaceterm_command_palette::MoveUp
 ctrl-p	Some(Identifier("SpaceTermCommandPalette"))	spaceterm_command_palette::MoveUp
 down	Some(Identifier("SpaceTermCommandPalette"))	spaceterm_command_palette::MoveDown
@@ -43,8 +51,8 @@ left	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveLeft
 right	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveRight
 ctrl-b	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveLeft
 ctrl-f	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveRight
-home	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveToBeginning
-end	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveToEnd
+home	Some(And(Identifier("SpaceTermTextInput"), Equal("home_end", "edit")))	spaceterm_text_input::MoveToBeginning
+end	Some(And(Identifier("SpaceTermTextInput"), Equal("home_end", "edit")))	spaceterm_text_input::MoveToEnd
 cmd-left	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveToBeginning
 cmd-up	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveToBeginning
 cmd-right	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::MoveToEnd

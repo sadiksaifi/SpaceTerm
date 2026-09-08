@@ -1,0 +1,1925 @@
+//! A controlled, searchable, single-value selector with an anchored popup.
+//!
+//! The Module owns provisional navigation and popup lifecycle. Callers own the committed value and
+//! receive acceptance only after the popup has closed. [`TextInput`] owns editing, clipboard,
+//! grapheme, and input-method behavior. GPUI 0.2.2 does not expose listbox roles or active-option
+//! relationships for ordinary elements, so this Module retains those facts without claiming native
+//! assistive-technology publication.
+
+use std::{collections::HashMap, rc::Rc};
+
+use gpui::{
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
+    FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Styled as _,
+    Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
+    deferred, div, list, prelude::FluentBuilder as _, px, size,
+};
+
+use crate::{
+    Icon, IconName, TextInput, TextInputEvent, TextInputHomeEndBehavior, TextInputTabBehavior,
+    TextInputVariant,
+    anchored_placement::{
+        AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
+        constrain_anchored_size, place_anchored,
+    },
+};
+
+const KEY_CONTEXT: &str = "SpaceTermComboBox";
+const OVERLAY_PRIORITY: usize = 2;
+
+actions!(
+    spaceterm_combo_box,
+    [
+        MoveUp,
+        MoveDown,
+        MovePageUp,
+        MovePageDown,
+        MoveHome,
+        MoveEnd,
+        Accept,
+        Dismiss
+    ]
+);
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("home", MoveHome, Some(KEY_CONTEXT)),
+        KeyBinding::new("end", MoveEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("enter", Accept, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
+    ]);
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        cx.set_global(ComboBoxCoordinator::default());
+    }
+}
+
+/// The input path that accepted a ComboBox item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComboBoxActivationSource {
+    /// Return accepted the provisional item.
+    Keyboard,
+    /// A primary pointer press and release on the same row accepted it.
+    Pointer,
+}
+
+/// A typed ComboBox acceptance delivered after popup closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComboBoxAcceptance<I> {
+    item_id: I,
+    source: ComboBoxActivationSource,
+}
+
+impl<I> ComboBoxAcceptance<I> {
+    /// Returns the caller-owned stable item identity.
+    pub fn item_id(&self) -> &I {
+        &self.item_id
+    }
+
+    /// Returns the input path that accepted the item.
+    pub fn source(&self) -> ComboBoxActivationSource {
+        self.source
+    }
+
+    /// Consumes the event and returns its caller-owned identity.
+    pub fn into_item_id(self) -> I {
+        self.item_id
+    }
+}
+
+/// Why an open ComboBox popup closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComboBoxCloseReason {
+    /// An enabled provisional item was accepted.
+    Accepted,
+    /// Escape dismissed the popup.
+    Escape,
+    /// A pointer press outside the trigger and popup dismissed it.
+    Outside,
+    /// Focus moved outside the control.
+    FocusLost,
+    /// Tab or Shift-Tab continued focus traversal.
+    TabTraversal,
+    /// Another ComboBox in the same Operating-System Window replaced it.
+    Replaced,
+    /// The trigger disappeared while its popup was open.
+    TargetDisappeared,
+    /// Synchronization disabled the open control.
+    Disabled,
+    /// The Operating-System Window deactivated.
+    Deactivated,
+}
+
+/// One exact ComboBox lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComboBoxLifecycleEvent {
+    /// The popup became open.
+    Opened,
+    /// The popup became closed for the supplied reason.
+    Closed(ComboBoxCloseReason),
+}
+
+/// Standardized semantic content at a row's trailing edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ComboBoxAccessory {
+    /// Secondary explanatory text.
+    Text(SharedString),
+    /// Compact status text such as `Unavailable`.
+    Status(SharedString),
+    /// A display-only keyboard equivalent.
+    Shortcut(SharedString),
+}
+
+/// Application-owned copy used by the searchable popup.
+///
+/// Keeping these strings outside the Module lets products localize status and editor text without
+/// replacing any ComboBox behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComboBoxCopy {
+    filter_name: SharedString,
+    filter_placeholder: SharedString,
+    busy_status: SharedString,
+    empty_status: SharedString,
+}
+
+impl ComboBoxCopy {
+    /// Creates the complete bounded copy catalog.
+    pub fn new(
+        filter_name: impl Into<SharedString>,
+        filter_placeholder: impl Into<SharedString>,
+        busy_status: impl Into<SharedString>,
+        empty_status: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            filter_name: filter_name.into(),
+            filter_placeholder: filter_placeholder.into(),
+            busy_status: busy_status.into(),
+            empty_status: empty_status.into(),
+        }
+    }
+}
+
+impl Default for ComboBoxCopy {
+    fn default() -> Self {
+        Self::new(
+            "Filter options",
+            "Search",
+            "Loading\u{2026}",
+            "No matching options",
+        )
+    }
+}
+
+type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+
+/// One typed semantic ComboBox item.
+///
+/// Identities must remain stable. Later duplicate identities are discarded so provisional
+/// selection and pointer ownership always refer to exactly one row.
+#[derive(Clone)]
+pub struct ComboBoxItem<I> {
+    id: I,
+    label: SharedString,
+    description: Option<SharedString>,
+    keywords: Vec<SharedString>,
+    disabled: bool,
+    leading_icon: Option<IconBuilder>,
+    trailing: Option<ComboBoxAccessory>,
+    debug_selector: Option<String>,
+}
+
+impl<I> ComboBoxItem<I> {
+    /// Creates an enabled item. The label is also its logical accessibility name.
+    pub fn new(id: I, label: impl Into<SharedString>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            description: None,
+            keywords: Vec::new(),
+            disabled: false,
+            leading_icon: None,
+            trailing: None,
+            debug_selector: None,
+        }
+    }
+
+    /// Adds one line of secondary descriptive text.
+    pub fn description(mut self, value: impl Into<SharedString>) -> Self {
+        self.description = Some(value.into());
+        self
+    }
+
+    /// Replaces non-presentational strings considered by search.
+    pub fn keywords(mut self, values: impl IntoIterator<Item = impl Into<SharedString>>) -> Self {
+        self.keywords = values.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Controls whether the item remains visible but is skipped by navigation and activation.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Adds a bounded leading icon built with the resolved row foreground color.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+        self.leading_icon = Some(Rc::new(build));
+        self
+    }
+
+    /// Adds standardized semantic content at the trailing edge.
+    pub fn trailing(mut self, accessory: ComboBoxAccessory) -> Self {
+        self.trailing = Some(accessory);
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Returns the stable caller-owned identity.
+    pub fn id(&self) -> &I {
+        &self.id
+    }
+
+    /// Returns the primary label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the secondary description, when present.
+    pub fn description_text(&self) -> Option<&str> {
+        self.description.as_ref().map(AsRef::as_ref)
+    }
+
+    /// Returns whether the item is visible but inert.
+    pub const fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+/// A query-aware provider for the pinned row at the end of a ComboBox.
+///
+/// The provider receives the editor's exact text, including case and whitespace. Its typed item is
+/// never filtered. Ordinary matches retain initial-selection precedence; when none exist, an
+/// enabled fallback becomes provisional and can be accepted through the ordinary typed callback.
+#[derive(Clone)]
+pub struct ComboBoxFallback<I>(ComboBoxFallbackProvider<I>);
+
+type ComboBoxFallbackProvider<I> = Rc<dyn Fn(&str) -> ComboBoxItem<I>>;
+
+impl<I> ComboBoxFallback<I> {
+    /// Creates a provider whose row is rebuilt whenever the accepted query changes.
+    pub fn new(provider: impl Fn(&str) -> ComboBoxItem<I> + 'static) -> Self {
+        Self(Rc::new(provider))
+    }
+
+    fn item(&self, query: &str) -> ComboBoxItem<I> {
+        (self.0)(query)
+    }
+}
+
+/// Application-owned ComboBox paint values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComboBoxPaint {
+    background: Rgba,
+    border: Rgba,
+    foreground: Rgba,
+    muted: Rgba,
+    disabled: Rgba,
+    selected_background: Rgba,
+    selected_foreground: Rgba,
+    trigger_background: Rgba,
+    trigger_hover_background: Rgba,
+    trigger_border: Rgba,
+    focus_border: Rgba,
+}
+
+impl ComboBoxPaint {
+    /// Creates the complete bounded paint catalog.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the bounded paint catalog is one theme fact"
+    )]
+    pub fn new(
+        background: Rgba,
+        border: Rgba,
+        foreground: Rgba,
+        muted: Rgba,
+        disabled: Rgba,
+        selected_background: Rgba,
+        selected_foreground: Rgba,
+        trigger_background: Rgba,
+        trigger_hover_background: Rgba,
+        trigger_border: Rgba,
+        focus_border: Rgba,
+    ) -> Self {
+        Self {
+            background,
+            border,
+            foreground,
+            muted,
+            disabled,
+            selected_background,
+            selected_foreground,
+            trigger_background,
+            trigger_hover_background,
+            trigger_border,
+            focus_border,
+        }
+    }
+}
+
+/// Bounded dimensions for every ComboBox instance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComboBoxMetrics {
+    panel_width: Pixels,
+    maximum_height: Pixels,
+    trigger_height: Pixels,
+    input_height: Pixels,
+    row_height: Pixels,
+    described_row_height: Pixels,
+    panel_padding: Pixels,
+    horizontal_padding: Pixels,
+    leading_width: Pixels,
+    gap: Pixels,
+    corner_radius: Pixels,
+    border_width: Pixels,
+    label_size: Pixels,
+    secondary_size: Pixels,
+}
+
+impl ComboBoxMetrics {
+    /// Creates compact native defaults around a panel width and trigger height.
+    pub fn new(panel_width: Pixels, trigger_height: Pixels) -> Self {
+        Self {
+            panel_width,
+            maximum_height: px(320.0),
+            trigger_height,
+            input_height: px(34.0),
+            row_height: px(30.0),
+            described_row_height: px(46.0),
+            panel_padding: px(4.0),
+            horizontal_padding: px(10.0),
+            leading_width: px(18.0),
+            gap: px(8.0),
+            corner_radius: px(7.0),
+            border_width: px(1.0),
+            label_size: px(12.0),
+            secondary_size: px(11.0),
+        }
+    }
+
+    /// Sets maximum panel, editor, plain-row, and described-row heights.
+    pub fn geometry(
+        mut self,
+        maximum_height: Pixels,
+        input_height: Pixels,
+        row_height: Pixels,
+        described_row_height: Pixels,
+    ) -> Self {
+        self.maximum_height = maximum_height;
+        self.input_height = input_height;
+        self.row_height = row_height;
+        self.described_row_height = described_row_height;
+        self
+    }
+
+    /// Sets panel padding, content padding, leading-slot width, and column gap.
+    pub fn spacing(
+        mut self,
+        panel_padding: Pixels,
+        horizontal_padding: Pixels,
+        leading_width: Pixels,
+        gap: Pixels,
+    ) -> Self {
+        self.panel_padding = panel_padding;
+        self.horizontal_padding = horizontal_padding;
+        self.leading_width = leading_width;
+        self.gap = gap;
+        self
+    }
+
+    /// Sets panel corner radius and border width.
+    pub fn shape(mut self, corner_radius: Pixels, border_width: Pixels) -> Self {
+        self.corner_radius = corner_radius;
+        self.border_width = border_width;
+        self
+    }
+
+    /// Sets primary and secondary font sizes.
+    pub fn font_sizes(mut self, label: Pixels, secondary: Pixels) -> Self {
+        self.label_size = label;
+        self.secondary_size = secondary;
+        self
+    }
+
+    fn row_height(self, described: bool) -> Pixels {
+        if described {
+            self.described_row_height
+        } else {
+            self.row_height
+        }
+    }
+
+    fn row_radius(self) -> Pixels {
+        (self.corner_radius - self.panel_padding).max(px(0.0))
+    }
+}
+
+/// Application-owned presentation installed once for every ComboBox.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComboBoxTheme {
+    paint: ComboBoxPaint,
+    metrics: ComboBoxMetrics,
+}
+
+impl ComboBoxTheme {
+    /// Creates a complete ComboBox theme.
+    pub fn new(paint: ComboBoxPaint, metrics: ComboBoxMetrics) -> Self {
+        Self { paint, metrics }
+    }
+}
+
+impl Global for ComboBoxTheme {}
+
+type AcceptanceHandler<I> = Rc<dyn Fn(&ComboBoxAcceptance<I>, &mut Window, &mut App)>;
+type LifecycleHandler = Rc<dyn Fn(&ComboBoxLifecycleEvent, &mut App)>;
+
+/// A reusable controlled ComboBox with a searchable anchored popup.
+///
+/// The caller supplies `selected` on every render. Acceptance proposes a new identity but never
+/// mutates caller state. Passing `None` creates an ephemeral chooser that returns to its prompt.
+#[derive(IntoElement)]
+pub struct ComboBox<I: Clone + Eq + 'static> {
+    id: ElementId,
+    accessibility_name: SharedString,
+    selected: Option<I>,
+    prompt: SharedString,
+    items: Vec<ComboBoxItem<I>>,
+    fallback: Option<ComboBoxFallback<I>>,
+    copy: ComboBoxCopy,
+    disabled: bool,
+    busy: bool,
+    placement: AnchoredPlacementConfig,
+    full_width: bool,
+    trigger_leading: Option<IconBuilder>,
+    debug_selector: Option<String>,
+    on_accept: Option<AcceptanceHandler<I>>,
+    on_lifecycle: Option<LifecycleHandler>,
+}
+
+impl<I: Clone + Eq + 'static> ComboBox<I> {
+    /// Creates an enabled controlled selector.
+    pub fn new(
+        id: impl Into<ElementId>,
+        accessibility_name: impl Into<SharedString>,
+        selected: Option<I>,
+        prompt: impl Into<SharedString>,
+        items: Vec<ComboBoxItem<I>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            accessibility_name: accessibility_name.into(),
+            selected,
+            prompt: prompt.into(),
+            items,
+            fallback: None,
+            copy: ComboBoxCopy::default(),
+            disabled: false,
+            busy: false,
+            placement: AnchoredPlacementConfig::new(
+                AnchoredPlacement::Top,
+                AnchoredAlignment::Start,
+            )
+            .offset(px(0.0)),
+            full_width: false,
+            trigger_leading: None,
+            debug_selector: None,
+            on_accept: None,
+            on_lifecycle: None,
+        }
+    }
+
+    /// Pins one query-aware item after all ordinary matches.
+    pub fn fallback(mut self, fallback: ComboBoxFallback<I>) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+
+    /// Controls whether the complete selector is inert.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Controls whether the popup presents a busy status and blocks acceptance.
+    pub fn busy(mut self, busy: bool) -> Self {
+        self.busy = busy;
+        self
+    }
+
+    /// Replaces the popup's localizable editor and status copy.
+    pub fn copy(mut self, copy: ComboBoxCopy) -> Self {
+        self.copy = copy;
+        self
+    }
+
+    /// Selects the shared anchored placement policy.
+    pub fn placement(mut self, placement: AnchoredPlacementConfig) -> Self {
+        self.placement = placement;
+        self
+    }
+
+    /// Resolves logical Start and End placement right-to-left.
+    pub fn right_to_left(mut self, right_to_left: bool) -> Self {
+        self.placement = self.placement.direction(if right_to_left {
+            AnchoredTextDirection::RightToLeft
+        } else {
+            AnchoredTextDirection::LeftToRight
+        });
+        self
+    }
+
+    /// Makes the trigger fill the width allocated by its parent.
+    pub fn full_width(mut self, full_width: bool) -> Self {
+        self.full_width = full_width;
+        self
+    }
+
+    /// Adds optional leading trigger content using the resolved foreground color.
+    pub fn leading(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+        self.trigger_leading = Some(Rc::new(build));
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Handles a typed acceptance after the popup has closed and released transient focus.
+    pub fn on_accept(
+        mut self,
+        handler: impl Fn(&ComboBoxAcceptance<I>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_accept = Some(Rc::new(handler));
+        self
+    }
+
+    /// Handles exact open and close lifecycle transitions.
+    pub fn on_lifecycle(
+        mut self,
+        handler: impl Fn(&ComboBoxLifecycleEvent, &mut App) + 'static,
+    ) -> Self {
+        self.on_lifecycle = Some(Rc::new(handler));
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ComboBoxRegistration(u64);
+
+type ReplaceComboBox = Rc<dyn Fn(&mut App) -> Option<WeakFocusHandle>>;
+type ComboBoxIsOpen = Rc<dyn Fn(&App) -> bool>;
+
+struct ErasedComboBoxRegistration {
+    token: ComboBoxRegistration,
+    replace: ReplaceComboBox,
+    is_open: ComboBoxIsOpen,
+}
+
+#[derive(Default)]
+struct ComboBoxCoordinator {
+    owners: HashMap<WindowId, ErasedComboBoxRegistration>,
+    next_registration: u64,
+}
+
+impl Global for ComboBoxCoordinator {}
+
+/// Returns whether a ComboBox popup currently owns this Operating-System Window.
+pub fn window_combo_box_is_open(window: &Window, cx: &App) -> bool {
+    cx.has_global::<ComboBoxCoordinator>()
+        && cx
+            .global::<ComboBoxCoordinator>()
+            .owners
+            .get(&window.window_handle().window_id())
+            .is_some_and(|owner| (owner.is_open)(cx))
+}
+
+fn register_combo_box<I: Clone + Eq + 'static>(
+    owner: WeakEntity<ComboBoxState<I>>,
+    window: &Window,
+    cx: &mut App,
+) -> (ComboBoxRegistration, Option<WeakFocusHandle>) {
+    let window_id = window.window_handle().window_id();
+    let open_owner = owner.clone();
+    let replace = Rc::new(move |cx: &mut App| {
+        owner
+            .update(cx, |state, cx| {
+                let predecessor = state.restore_focus.clone();
+                state.close(ComboBoxCloseReason::Replaced, false, None, cx);
+                predecessor
+            })
+            .ok()
+            .flatten()
+    });
+    let is_open = Rc::new(move |cx: &App| {
+        open_owner
+            .read_with(cx, |state, _| state.open)
+            .unwrap_or(false)
+    });
+    let (registration, previous) = cx.update_global::<ComboBoxCoordinator, _>(|coordinator, _| {
+        coordinator.next_registration = coordinator.next_registration.wrapping_add(1);
+        let registration = ComboBoxRegistration(coordinator.next_registration);
+        let previous = coordinator.owners.insert(
+            window_id,
+            ErasedComboBoxRegistration {
+                token: registration,
+                replace,
+                is_open,
+            },
+        );
+        (registration, previous.map(|owner| owner.replace))
+    });
+    let predecessor = previous.and_then(|previous| previous(cx));
+    (registration, predecessor)
+}
+
+pub(crate) fn dismiss_active_combo_box_for_replacement(
+    window: &Window,
+    cx: &mut App,
+) -> Option<WeakFocusHandle> {
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        return None;
+    }
+    let replace = cx
+        .global::<ComboBoxCoordinator>()
+        .owners
+        .get(&window.window_handle().window_id())
+        .map(|owner| owner.replace.clone());
+    replace.and_then(|replace| replace(cx))
+}
+
+fn unregister_combo_box(window_id: WindowId, registration: ComboBoxRegistration, cx: &mut App) {
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        return;
+    }
+    cx.update_global::<ComboBoxCoordinator, _>(|coordinator, _| {
+        if coordinator
+            .owners
+            .get(&window_id)
+            .is_some_and(|owner| owner.token == registration)
+        {
+            coordinator.owners.remove(&window_id);
+        }
+    });
+}
+
+#[derive(Clone)]
+struct PointerPress<I> {
+    id: I,
+    generation: u64,
+}
+
+struct ComboBoxState<I: Clone + Eq + 'static> {
+    accessibility_name: SharedString,
+    selected: Option<I>,
+    prompt: SharedString,
+    copy: ComboBoxCopy,
+    items: Rc<[ComboBoxItem<I>]>,
+    presented_items: Rc<[ComboBoxItem<I>]>,
+    fallback: Option<ComboBoxFallback<I>>,
+    fallback_item_id: Option<I>,
+    ordinary_match_count: usize,
+    matches: Rc<[usize]>,
+    provisional: Option<I>,
+    query: String,
+    disabled: bool,
+    busy: bool,
+    open: bool,
+    model_generation: u64,
+    trigger_bounds: Option<BoundsPixels>,
+    placement: AnchoredPlacementConfig,
+    trigger_focus: FocusHandle,
+    popup_focus: FocusHandle,
+    input: Entity<TextInput>,
+    list: ListState,
+    pointer_press: Option<PointerPress<I>>,
+    registration: Option<ComboBoxRegistration>,
+    window_id: WindowId,
+    restore_focus: Option<WeakFocusHandle>,
+    restore_on_activation: Option<WeakFocusHandle>,
+    on_accept: Option<AcceptanceHandler<I>>,
+    on_lifecycle: Option<LifecycleHandler>,
+    _input_subscription: Subscription,
+    _focus_subscription: Subscription,
+}
+
+type BoundsPixels = Bounds<Pixels>;
+
+impl<I: Clone + Eq + 'static> ComboBoxState<I> {
+    fn new(window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
+        let input = cx.new(|cx| {
+            TextInput::new("combo-box-input", "Filter options", "", window, cx)
+                .placeholder("Search")
+                .variant(TextInputVariant::Bare)
+                .tab_behavior(TextInputTabBehavior::Propagate)
+                .home_end_behavior(TextInputHomeEndBehavior::Propagate)
+                .context_menu(false)
+                .debug_selector("combo-box-input")
+        });
+        let input_subscription = cx.subscribe_in(
+            &input,
+            window,
+            |state, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::ValueChanged(_) => {
+                    state.set_query(input.read(cx).value().to_owned(), cx);
+                }
+                TextInputEvent::Submitted => {
+                    state.accept(ComboBoxActivationSource::Keyboard, window, cx);
+                }
+                TextInputEvent::Cancelled => {
+                    state.close(ComboBoxCloseReason::Escape, true, Some(window), cx);
+                }
+                TextInputEvent::TabForwardRequested => {
+                    if state.close(ComboBoxCloseReason::TabTraversal, true, Some(window), cx) {
+                        window.defer(cx, |window, _| window.focus_next());
+                    }
+                }
+                TextInputEvent::TabBackwardRequested => {
+                    if state.close(ComboBoxCloseReason::TabTraversal, true, Some(window), cx) {
+                        window.defer(cx, |window, _| window.focus_prev());
+                    }
+                }
+                _ => {}
+            },
+        );
+        let trigger_focus = cx.focus_handle();
+        let popup_focus = cx.focus_handle();
+        let focus_subscription = cx.on_focus_out(&popup_focus, window, |state, _, window, cx| {
+            if state.open && !crate::menu::window_menu_is_open(window, cx) {
+                state.close(ComboBoxCloseReason::FocusLost, false, Some(window), cx);
+            }
+        });
+        cx.observe_window_activation(window, |state, window, cx| {
+            if state.open && !window.is_window_active() {
+                state.restore_on_activation = state.restore_focus.clone();
+                state.close(ComboBoxCloseReason::Deactivated, false, Some(window), cx);
+            } else if !state.open
+                && window.is_window_active()
+                && let Some(focus) = state
+                    .restore_on_activation
+                    .take()
+                    .and_then(|focus| focus.upgrade())
+            {
+                focus.focus(window);
+            }
+        })
+        .detach();
+        let window_id = window.window_handle().window_id();
+        let release_window = window.window_handle();
+        cx.on_release(move |state, cx| {
+            if let Some(registration) = state.registration.take() {
+                unregister_combo_box(window_id, registration, cx);
+            }
+            if state.open {
+                state.open = false;
+                if let Some(focus) = state.restore_focus.take().and_then(|focus| focus.upgrade()) {
+                    cx.defer(move |cx| {
+                        let _ = cx.update_window(release_window, |_, window, _| {
+                            focus.focus(window);
+                        });
+                    });
+                }
+                state.emit_lifecycle(
+                    ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::TargetDisappeared),
+                    cx,
+                );
+            }
+        })
+        .detach();
+        Self {
+            accessibility_name: SharedString::default(),
+            selected: None,
+            prompt: SharedString::default(),
+            copy: ComboBoxCopy::default(),
+            items: Vec::new().into(),
+            presented_items: Vec::new().into(),
+            fallback: None,
+            fallback_item_id: None,
+            ordinary_match_count: 0,
+            matches: Vec::new().into(),
+            provisional: None,
+            query: String::new(),
+            disabled: true,
+            busy: false,
+            open: false,
+            model_generation: 0,
+            trigger_bounds: None,
+            placement: AnchoredPlacementConfig::default(),
+            trigger_focus,
+            popup_focus,
+            input,
+            list: ListState::new(0, ListAlignment::Top, px(0.0)).measure_all(),
+            pointer_press: None,
+            registration: None,
+            window_id,
+            restore_focus: None,
+            restore_on_activation: None,
+            on_accept: None,
+            on_lifecycle: None,
+            _input_subscription: input_subscription,
+            _focus_subscription: focus_subscription,
+        }
+    }
+
+    fn emit_lifecycle(&self, event: ComboBoxLifecycleEvent, cx: &mut App) {
+        let Some(handler) = self.on_lifecycle.clone() else {
+            return;
+        };
+        cx.defer(move |cx| handler(&event, cx));
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private synchronization seam receives one complete controlled snapshot"
+    )]
+    fn synchronize(
+        &mut self,
+        accessibility_name: SharedString,
+        selected: Option<I>,
+        prompt: SharedString,
+        items: Vec<ComboBoxItem<I>>,
+        fallback: Option<ComboBoxFallback<I>>,
+        copy: ComboBoxCopy,
+        disabled: bool,
+        busy: bool,
+        placement: AnchoredPlacementConfig,
+        on_accept: Option<AcceptanceHandler<I>>,
+        on_lifecycle: Option<LifecycleHandler>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let items = unique_items(items);
+        let model_changed = !same_model(&self.items, &items);
+        let provisional_was_fallback = self
+            .fallback_item_id
+            .as_ref()
+            .is_some_and(|id| self.provisional.as_ref() == Some(id));
+        self.items = items.into();
+        self.fallback = fallback;
+        let results_changed = self.recompute_matches(provisional_was_fallback && model_changed);
+        if model_changed || results_changed {
+            self.model_generation = self.model_generation.wrapping_add(1);
+            self.pointer_press = None;
+        }
+        self.accessibility_name = accessibility_name;
+        self.selected = selected;
+        self.prompt = prompt;
+        if self.copy != copy {
+            self.input.update(cx, |input, cx| {
+                input.set_accessibility_name(copy.filter_name.clone(), cx);
+                input.set_placeholder(copy.filter_placeholder.clone(), cx);
+            });
+            self.copy = copy;
+        }
+        self.disabled = disabled;
+        self.busy = busy;
+        self.placement = placement;
+        self.on_accept = on_accept;
+        self.on_lifecycle = on_lifecycle;
+        self.trigger_focus = self.trigger_focus.clone().tab_stop(!disabled);
+        self.repair_provisional();
+        if self.open && disabled {
+            self.close(ComboBoxCloseReason::Disabled, false, Some(window), cx);
+            window.defer(cx, |window, _| window.focus_next());
+        }
+    }
+
+    fn enabled_item(&self, id: &I) -> Option<&ComboBoxItem<I>> {
+        self.presented_items
+            .iter()
+            .find(|item| item.id == *id && !item.disabled)
+    }
+
+    fn trigger_label(&self) -> SharedString {
+        self.selected
+            .as_ref()
+            .and_then(|selected| self.enabled_item(selected))
+            .map_or_else(|| self.prompt.clone(), |item| item.label.clone())
+    }
+
+    fn set_query(&mut self, query: String, cx: &mut gpui::Context<Self>) {
+        if self.query == query {
+            return;
+        }
+        self.query = query;
+        self.model_generation = self.model_generation.wrapping_add(1);
+        self.pointer_press = None;
+        self.recompute_matches(true);
+        self.repair_provisional();
+        cx.notify();
+    }
+
+    fn recompute_matches(&mut self, reset_fallback_selection: bool) -> bool {
+        let mut presented = self.items.to_vec();
+        if let Some(item) = self
+            .fallback
+            .as_ref()
+            .map(|fallback| fallback.item(&self.query))
+            && !presented.iter().any(|existing| existing.id == item.id)
+        {
+            self.fallback_item_id = Some(item.id.clone());
+            presented.push(item);
+        } else {
+            self.fallback_item_id = None;
+        }
+        let mut matches = filter_items(&self.items, &self.query);
+        self.ordinary_match_count = matches.len();
+        if presented.len() > self.items.len() {
+            matches.push(self.items.len());
+        }
+        let changed = !same_model(&self.presented_items, &presented)
+            || self.matches.as_ref() != matches.as_slice();
+        self.presented_items = presented.into();
+        self.matches = matches.into();
+        if reset_fallback_selection && self.ordinary_match_count > 0 {
+            self.provisional = None;
+        }
+        if changed {
+            self.list.reset(self.matches.len());
+        }
+        changed
+    }
+
+    fn repair_provisional(&mut self) {
+        let remains = self.provisional.as_ref().is_some_and(|id| {
+            self.matches.iter().any(|index| {
+                self.presented_items
+                    .get(*index)
+                    .is_some_and(|item| item.id == *id && !item.disabled)
+            })
+        });
+        if !remains {
+            self.provisional = self
+                .selected
+                .as_ref()
+                .filter(|id| {
+                    self.matches.iter().any(|index| {
+                        self.presented_items
+                            .get(*index)
+                            .is_some_and(|item| item.id == **id && !item.disabled)
+                    })
+                })
+                .cloned()
+                .or_else(|| self.first_enabled_match().map(|item| item.id.clone()));
+        }
+    }
+
+    fn first_enabled_match(&self) -> Option<&ComboBoxItem<I>> {
+        self.matches
+            .iter()
+            .filter_map(|index| self.presented_items.get(*index))
+            .find(|item| !item.disabled)
+    }
+
+    fn last_enabled_match(&self) -> Option<&ComboBoxItem<I>> {
+        self.matches
+            .iter()
+            .rev()
+            .filter_map(|index| self.presented_items.get(*index))
+            .find(|item| !item.disabled)
+    }
+
+    fn open(
+        &mut self,
+        query: Option<String>,
+        from_end: bool,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.open
+            || self.disabled
+            || self.trigger_bounds.is_none()
+            || crate::modal::window_modal_is_open(window, cx)
+        {
+            return false;
+        }
+        let palette_predecessor =
+            crate::command_palette::dismiss_active_command_palette_for_replacement(window, cx);
+        let menu_predecessor = crate::menu::dismiss_active_menu_for_replacement(window, cx)
+            .and_then(|replacement| replacement.0);
+        self.open = true;
+        self.pointer_press = None;
+        if let Some(query) = query {
+            self.input
+                .update(cx, |input, cx| input.set_value(query, cx));
+        } else if !self.query.is_empty() {
+            self.input.update(cx, |input, cx| input.set_value("", cx));
+        }
+        self.query = self.input.read(cx).value().to_owned();
+        self.recompute_matches(false);
+        self.provisional = if from_end {
+            self.last_enabled_match().map(|item| item.id.clone())
+        } else {
+            self.selected
+                .as_ref()
+                .and_then(|id| self.enabled_item(id))
+                .filter(|item| {
+                    self.matches
+                        .iter()
+                        .any(|index| self.presented_items[*index].id == item.id)
+                })
+                .map(|item| item.id.clone())
+                .or_else(|| self.first_enabled_match().map(|item| item.id.clone()))
+        };
+        if let Some(position) = self.provisional_position() {
+            self.list.scroll_to_reveal_item(position);
+        }
+        let (registration, combo_predecessor) =
+            register_combo_box(cx.entity().downgrade(), window, cx);
+        self.registration = Some(registration);
+        self.restore_focus = palette_predecessor
+            .or(menu_predecessor)
+            .or(combo_predecessor)
+            .or_else(|| window.focused(cx).map(|focus| focus.downgrade()));
+        self.input.read(cx).focus_handle().focus(window);
+        self.emit_lifecycle(ComboBoxLifecycleEvent::Opened, cx);
+        cx.notify();
+        true
+    }
+
+    fn close(
+        &mut self,
+        reason: ComboBoxCloseReason,
+        restore_focus: bool,
+        window: Option<&mut Window>,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if !self.open {
+            return false;
+        }
+        self.open = false;
+        self.pointer_press = None;
+        self.provisional = None;
+        if let Some(registration) = self.registration.take() {
+            unregister_combo_box(self.window_id, registration, cx);
+        }
+        let predecessor = self.restore_focus.take();
+        if restore_focus
+            && let (Some(window), Some(focus)) =
+                (window, predecessor.and_then(|focus| focus.upgrade()))
+        {
+            focus.focus(window);
+        }
+        self.emit_lifecycle(ComboBoxLifecycleEvent::Closed(reason), cx);
+        cx.notify();
+        true
+    }
+
+    fn accept(
+        &mut self,
+        source: ComboBoxActivationSource,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        let Some(item_id) = self.provisional.clone() else {
+            return;
+        };
+        if self.enabled_item(&item_id).is_none() {
+            return;
+        }
+        let handler = self.on_accept.clone();
+        if !self.close(ComboBoxCloseReason::Accepted, true, Some(window), cx) {
+            return;
+        }
+        if let Some(handler) = handler {
+            let window_handle = window.window_handle();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    handler(&ComboBoxAcceptance { item_id, source }, window, cx);
+                });
+            });
+        }
+    }
+
+    fn enabled_positions(&self) -> Vec<usize> {
+        self.matches
+            .iter()
+            .enumerate()
+            .filter_map(|(position, index)| {
+                self.presented_items
+                    .get(*index)
+                    .is_some_and(|item| !item.disabled)
+                    .then_some(position)
+            })
+            .collect()
+    }
+
+    fn provisional_position(&self) -> Option<usize> {
+        let provisional = self.provisional.as_ref()?;
+        self.matches.iter().position(|index| {
+            self.presented_items
+                .get(*index)
+                .is_some_and(|item| item.id == *provisional)
+        })
+    }
+
+    fn move_by(&mut self, delta: isize, cx: &mut gpui::Context<Self>) {
+        let enabled = self.enabled_positions();
+        if enabled.is_empty() {
+            self.provisional = None;
+            return;
+        }
+        let current = self
+            .provisional_position()
+            .and_then(|position| enabled.iter().position(|candidate| *candidate == position));
+        let next = match (current, delta.is_negative()) {
+            (Some(current), false) => (current + delta.unsigned_abs()).min(enabled.len() - 1),
+            (Some(current), true) => current.saturating_sub(delta.unsigned_abs()),
+            (None, false) => 0,
+            (None, true) => enabled.len() - 1,
+        };
+        self.select_position(enabled[next], cx);
+    }
+
+    fn move_edge(&mut self, first: bool, cx: &mut gpui::Context<Self>) {
+        let position = if first {
+            self.enabled_positions().first().copied()
+        } else {
+            self.enabled_positions().last().copied()
+        };
+        if let Some(position) = position {
+            self.select_position(position, cx);
+        }
+    }
+
+    fn move_page(
+        &mut self,
+        direction: isize,
+        metrics: ComboBoxMetrics,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let enabled = self.enabled_positions();
+        if enabled.is_empty() {
+            return;
+        }
+        let current = self.provisional_position().unwrap_or_else(|| {
+            if direction < 0 {
+                *enabled.last().unwrap_or(&0)
+            } else {
+                *enabled.first().unwrap_or(&0)
+            }
+        });
+        let viewport = self.list.viewport_bounds().size.height;
+        let page = if viewport > px(0.0) {
+            viewport
+        } else {
+            metrics.row_height * 8.0
+        };
+        let top = |position: usize| {
+            self.matches
+                .iter()
+                .take(position)
+                .filter_map(|index| self.presented_items.get(*index))
+                .fold(px(0.0), |top, item| {
+                    top + metrics.row_height(item.description.is_some())
+                })
+        };
+        let current_top = top(current);
+        let target = if direction < 0 {
+            (current_top - page).max(px(0.0))
+        } else {
+            current_top + page
+        };
+        let next = if direction < 0 {
+            enabled
+                .iter()
+                .copied()
+                .take_while(|position| *position < current)
+                .find(|position| top(*position) >= target)
+                .or_else(|| enabled.iter().copied().take_while(|p| *p < current).last())
+        } else {
+            enabled
+                .iter()
+                .copied()
+                .filter(|position| *position > current)
+                .take_while(|position| top(*position) <= target)
+                .last()
+                .or_else(|| enabled.iter().copied().find(|p| *p > current))
+        };
+        if let Some(next) = next {
+            self.select_position(next, cx);
+        }
+    }
+
+    fn select_position(&mut self, position: usize, cx: &mut gpui::Context<Self>) {
+        let next = self
+            .matches
+            .get(position)
+            .and_then(|index| self.presented_items.get(*index))
+            .filter(|item| !item.disabled)
+            .map(|item| item.id.clone());
+        if next.is_some() && self.provisional != next {
+            self.provisional = next;
+            self.list.scroll_to_reveal_item(position);
+            cx.notify();
+        }
+    }
+
+    fn hover(&mut self, id: &I, cx: &mut gpui::Context<Self>) {
+        if let Some(position) = self.matches.iter().position(|index| {
+            self.presented_items
+                .get(*index)
+                .is_some_and(|item| item.id == *id && !item.disabled)
+        }) {
+            self.select_position(position, cx);
+        }
+    }
+
+    fn pointer_down(&mut self, id: I) {
+        self.pointer_press = Some(PointerPress {
+            id,
+            generation: self.model_generation,
+        });
+    }
+
+    fn pointer_up(&mut self, id: &I, inside: bool) -> bool {
+        let matched = self
+            .pointer_press
+            .as_ref()
+            .is_some_and(|press| press.id == *id && press.generation == self.model_generation);
+        self.pointer_press = None;
+        matched
+            && inside
+            && self.matches.iter().any(|index| {
+                self.presented_items
+                    .get(*index)
+                    .is_some_and(|item| item.id == *id && !item.disabled)
+            })
+    }
+}
+
+impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(self.id.clone(), cx, ComboBoxState::new);
+        state.update(cx, |state, cx| {
+            state.synchronize(
+                self.accessibility_name.clone(),
+                self.selected,
+                self.prompt,
+                self.items,
+                self.fallback,
+                self.copy,
+                self.disabled,
+                self.busy,
+                self.placement,
+                self.on_accept,
+                self.on_lifecycle,
+                window,
+                cx,
+            );
+        });
+        let theme = *cx.global::<ComboBoxTheme>();
+        let snapshot = state.read(cx);
+        let open = snapshot.open;
+        let enabled = !snapshot.disabled;
+        let label = snapshot.trigger_label();
+        let focus = snapshot.trigger_focus.clone();
+        let focused = focus.is_focused(window);
+
+        let bounds_state = state.downgrade();
+        let pointer_state = state.downgrade();
+        let trigger_tracker = canvas(
+            move |bounds, window, _| {
+                let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                (bounds, hitbox)
+            },
+            move |_, (bounds, hitbox), window, cx| {
+                let _ = bounds_state.update(cx, |state, cx| {
+                    if state.trigger_bounds != Some(bounds) {
+                        state.trigger_bounds = Some(bounds);
+                        if state.open {
+                            cx.notify();
+                        }
+                    }
+                });
+                let hitbox = hitbox.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if !phase.capture()
+                        || event.button != MouseButton::Left
+                        || event.modifiers.control
+                        || !hitbox.is_hovered(window)
+                        || !enabled
+                    {
+                        return;
+                    }
+                    window.prevent_default();
+                    let _ = pointer_state.update(cx, |state, cx| {
+                        if state.open {
+                            state.close(ComboBoxCloseReason::Outside, true, Some(window), cx);
+                        } else {
+                            state.open(None, false, window, cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+        let key_state = state.downgrade();
+        let debug_selector = self.debug_selector;
+        let accessibility_name = self.accessibility_name;
+        let paint = theme.paint;
+        let metrics = theme.metrics;
+        let trigger = div()
+            .id(self.id)
+            .debug_selector(move || {
+                debug_selector.unwrap_or_else(|| accessibility_name.to_string())
+            })
+            .relative()
+            .h(metrics.trigger_height)
+            .when(self.full_width, |trigger| trigger.w_full())
+            .when(!self.full_width, |trigger| {
+                trigger.min_w(metrics.panel_width)
+            })
+            .px(metrics.horizontal_padding)
+            .flex()
+            .items_center()
+            .gap(metrics.gap)
+            .rounded(metrics.corner_radius)
+            .border(metrics.border_width)
+            .border_color(if focused {
+                paint.focus_border
+            } else {
+                paint.trigger_border
+            })
+            .bg(if open {
+                paint.trigger_hover_background
+            } else {
+                paint.trigger_background
+            })
+            .text_color(if enabled {
+                paint.foreground
+            } else {
+                paint.disabled
+            })
+            .text_size(metrics.label_size)
+            .cursor_default()
+            .track_focus(&focus)
+            .when(enabled && !open, |trigger| {
+                trigger.hover(move |style| style.bg(paint.trigger_hover_background))
+            })
+            .children(self.trigger_leading.map(|leading| {
+                leading(if enabled {
+                    paint.foreground
+                } else {
+                    paint.disabled
+                })
+            }))
+            .child(div().min_w_0().flex_1().truncate().child(label))
+            .child(Icon::new(IconName::ChevronDown, px(12.0), paint.muted))
+            .child(trigger_tracker)
+            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                if !enabled || key_event_is_modified(event) {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                let (query, from_end) = match key {
+                    "space" | "enter" | "down" => (None, false),
+                    "up" => (None, true),
+                    _ => {
+                        let Some(text) = printable_text(event) else {
+                            return;
+                        };
+                        (Some(text.to_owned()), false)
+                    }
+                };
+                window.prevent_default();
+                let _ = key_state.update(cx, |state, cx| {
+                    state.open(query, from_end, window, cx);
+                });
+                cx.stop_propagation();
+            });
+
+        div()
+            .relative()
+            .when(self.full_width, |root| root.w_full())
+            .child(trigger)
+            .when(open, |root| root.child(render_overlay(state, window, cx)))
+            .into_any_element()
+    }
+}
+
+fn key_event_is_modified(event: &KeyDownEvent) -> bool {
+    event.keystroke.modifiers.control
+        || event.keystroke.modifiers.alt
+        || event.keystroke.modifiers.platform
+        || event.keystroke.modifiers.function
+}
+
+fn printable_text(event: &KeyDownEvent) -> Option<&str> {
+    event.keystroke.key_char.as_deref().or_else(|| {
+        (event.keystroke.key.chars().count() == 1).then_some(event.keystroke.key.as_str())
+    })
+}
+
+fn unique_items<I: Clone + Eq>(items: Vec<ComboBoxItem<I>>) -> Vec<ComboBoxItem<I>> {
+    let mut unique = Vec::with_capacity(items.len());
+    for item in items {
+        if !unique
+            .iter()
+            .any(|existing: &ComboBoxItem<I>| existing.id == item.id)
+        {
+            unique.push(item);
+        }
+    }
+    unique
+}
+
+fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> bool {
+    current.len() == next.len()
+        && current.iter().zip(next).all(|(current, next)| {
+            current.id == next.id
+                && current.label == next.label
+                && current.description == next.description
+                && current.keywords == next.keywords
+                && current.disabled == next.disabled
+                && current.trailing == next.trailing
+        })
+}
+
+fn filter_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<usize> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .collect();
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let label = item.label.to_lowercase();
+            let description = item
+                .description
+                .as_ref()
+                .map_or("", AsRef::as_ref)
+                .to_lowercase();
+            let keywords: Vec<String> = item
+                .keywords
+                .iter()
+                .map(|keyword| keyword.to_lowercase())
+                .collect();
+            tokens
+                .iter()
+                .all(|token| {
+                    label.contains(token)
+                        || description.contains(token)
+                        || keywords.iter().any(|keyword| keyword.contains(token))
+                })
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn render_overlay<I: Clone + Eq + 'static>(
+    state: Entity<ComboBoxState<I>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let theme = *cx.global::<ComboBoxTheme>();
+    let snapshot = state.read(cx);
+    let Some(target) = snapshot.trigger_bounds else {
+        return div().into_any_element();
+    };
+    let viewport = window.viewport_size();
+    let content_height = if snapshot.busy || snapshot.matches.is_empty() {
+        theme.metrics.row_height
+    } else {
+        snapshot.matches.iter().fold(px(0.0), |height, index| {
+            height
+                + snapshot
+                    .presented_items
+                    .get(*index)
+                    .map_or(theme.metrics.row_height, |item| {
+                        theme.metrics.row_height(item.description.is_some())
+                    })
+        })
+    };
+    let desired = size(
+        theme.metrics.panel_width.max(target.size.width),
+        theme.metrics.input_height
+            + theme.metrics.border_width
+            + content_height
+            + theme.metrics.panel_padding * 2.0
+            + theme.metrics.border_width * 2.0,
+    );
+    let panel_size = constrain_anchored_size(
+        size(
+            desired.width,
+            desired.height.min(theme.metrics.maximum_height),
+        ),
+        viewport,
+        snapshot.placement.viewport_margin,
+    );
+    let bounds = place_anchored(target, panel_size, viewport, snapshot.placement);
+    let popup_focus = snapshot.popup_focus.clone();
+    let outside_state = state.downgrade();
+    let outside = canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let release_state = outside_state.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.capture()
+                    || bounds.contains(&event.position)
+                    || target.contains(&event.position)
+                {
+                    return;
+                }
+                window.prevent_default();
+                let _ = outside_state.update(cx, |state, cx| {
+                    state.close(ComboBoxCloseReason::Outside, true, Some(window), cx);
+                });
+                cx.stop_propagation();
+            });
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase.capture()
+                    && event.button == MouseButton::Left
+                    && !bounds.contains(&event.position)
+                {
+                    let _ = release_state.update(cx, |state, _| state.pointer_press = None);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0();
+
+    let input = state.read(cx).input.clone();
+    let matches = Rc::clone(&state.read(cx).matches);
+    let items = Rc::clone(&state.read(cx).presented_items);
+    let provisional = state.read(cx).provisional.clone();
+    let busy = state.read(cx).busy;
+    let copy = state.read(cx).copy.clone();
+    let list_state = state.read(cx).list.clone();
+    let rows_height = (panel_size.height
+        - theme.metrics.input_height
+        - theme.metrics.border_width
+        - theme.metrics.panel_padding * 2.0
+        - theme.metrics.border_width * 2.0)
+        .max(px(0.0));
+    let row_owner = state.downgrade();
+    let content = if busy {
+        status_row(copy.busy_status, "combo-box-loading", theme).into_any_element()
+    } else if matches.is_empty() {
+        status_row(copy.empty_status, "combo-box-empty", theme).into_any_element()
+    } else {
+        list(list_state, move |position, _, _| {
+            matches
+                .get(position)
+                .and_then(|index| items.get(*index))
+                .map(|item| {
+                    render_row(
+                        row_owner.clone(),
+                        position,
+                        item,
+                        provisional.as_ref() == Some(&item.id),
+                        theme,
+                    )
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .h(rows_height)
+        .w_full()
+        .into_any_element()
+    };
+    let panel = div()
+        .debug_selector(|| "combo-box-panel".to_owned())
+        .absolute()
+        .left(bounds.left())
+        .top(bounds.top())
+        .w(bounds.size.width)
+        .h(bounds.size.height)
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded(theme.metrics.corner_radius)
+        .shadow_lg()
+        .border(theme.metrics.border_width)
+        .border_color(theme.paint.border)
+        .bg(theme.paint.background)
+        .block_mouse_except_scroll()
+        .child(
+            div()
+                .h(theme.metrics.input_height)
+                .flex_shrink_0()
+                .px(theme.metrics.horizontal_padding)
+                .flex()
+                .items_center()
+                .child(input),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(theme.metrics.border_width)
+                .flex_shrink_0()
+                .bg(theme.paint.border),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .py(theme.metrics.panel_padding)
+                .child(content),
+        );
+
+    let up = state.downgrade();
+    let down = state.downgrade();
+    let page_up = state.downgrade();
+    let page_down = state.downgrade();
+    let home = state.downgrade();
+    let end = state.downgrade();
+    let accept = state.downgrade();
+    let dismiss = state.downgrade();
+    let overlay = div()
+        .relative()
+        .w(viewport.width)
+        .h(viewport.height)
+        .key_context(KEY_CONTEXT)
+        .track_focus(&popup_focus)
+        .child(outside)
+        .child(panel)
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .on_action(move |_: &MoveUp, _, cx| {
+            let _ = up.update(cx, |state, cx| state.move_by(-1, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &MoveDown, _, cx| {
+            let _ = down.update(cx, |state, cx| state.move_by(1, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &MovePageUp, _, cx| {
+            let _ = page_up.update(cx, |state, cx| state.move_page(-1, theme.metrics, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &MovePageDown, _, cx| {
+            let _ = page_down.update(cx, |state, cx| state.move_page(1, theme.metrics, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &MoveHome, _, cx| {
+            let _ = home.update(cx, |state, cx| state.move_edge(true, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &MoveEnd, _, cx| {
+            let _ = end.update(cx, |state, cx| state.move_edge(false, cx));
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &Accept, window, cx| {
+            let _ = accept.update(cx, |state, cx| {
+                state.accept(ComboBoxActivationSource::Keyboard, window, cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &Dismiss, window, cx| {
+            let _ = dismiss.update(cx, |state, cx| {
+                state.close(ComboBoxCloseReason::Escape, true, Some(window), cx);
+            });
+            cx.stop_propagation();
+        });
+
+    deferred(
+        anchored()
+            .anchor(Corner::TopLeft)
+            .position(gpui::point(px(0.0), px(0.0)))
+            .snap_to_window()
+            .child(overlay),
+    )
+    .with_priority(OVERLAY_PRIORITY)
+    .into_any_element()
+}
+
+fn status_row(
+    text: SharedString,
+    selector: &'static str,
+    theme: ComboBoxTheme,
+) -> impl IntoElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .h(theme.metrics.row_height)
+        .px(theme.metrics.horizontal_padding)
+        .flex()
+        .items_center()
+        .text_size(theme.metrics.secondary_size)
+        .text_color(theme.paint.muted)
+        .child(text)
+}
+
+fn render_row<I: Clone + Eq + 'static>(
+    state: WeakEntity<ComboBoxState<I>>,
+    position: usize,
+    item: &ComboBoxItem<I>,
+    provisional: bool,
+    theme: ComboBoxTheme,
+) -> AnyElement {
+    let foreground = if item.disabled {
+        theme.paint.disabled
+    } else if provisional {
+        theme.paint.selected_foreground
+    } else {
+        theme.paint.foreground
+    };
+    let secondary = if item.disabled {
+        theme.paint.disabled
+    } else {
+        theme.paint.muted
+    };
+    let id = item.id.clone();
+    let logical_name = item.label.clone();
+    let debug_selector = item.debug_selector.clone();
+    let hover_state = state.clone();
+    let mut row = div()
+        .id(("combo-box-row", position))
+        .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
+        .relative()
+        .w_full()
+        .h(theme.metrics.row_height(item.description.is_some()))
+        .mx(theme.metrics.panel_padding)
+        .px(theme.metrics.horizontal_padding)
+        .flex()
+        .items_center()
+        .gap(theme.metrics.gap)
+        .rounded(theme.metrics.row_radius())
+        .text_color(foreground)
+        .cursor_default()
+        .when(provisional, |row| row.bg(theme.paint.selected_background))
+        .when(!item.disabled, |row| {
+            let id = id.clone();
+            row.on_mouse_move(move |_, _, cx| {
+                let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
+            })
+        });
+    let mut leading = div()
+        .w(theme.metrics.leading_width)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center();
+    if let Some(icon) = &item.leading_icon {
+        leading = leading.child(icon(foreground));
+    }
+    row = row.child(leading).child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .child(
+                div()
+                    .truncate()
+                    .text_size(theme.metrics.label_size)
+                    .child(item.label.clone()),
+            )
+            .when_some(item.description.clone(), |text, description| {
+                text.child(
+                    div()
+                        .truncate()
+                        .text_size(theme.metrics.secondary_size)
+                        .text_color(secondary)
+                        .child(description),
+                )
+            }),
+    );
+    if let Some(accessory) = item.trailing.clone() {
+        let text = match accessory {
+            ComboBoxAccessory::Text(text)
+            | ComboBoxAccessory::Status(text)
+            | ComboBoxAccessory::Shortcut(text) => text,
+        };
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .text_size(theme.metrics.secondary_size)
+                .text_color(secondary)
+                .child(text),
+        );
+    }
+    if !item.disabled {
+        let down_state = state.clone();
+        let up_state = state.clone();
+        let move_state = state;
+        let down_id = item.id.clone();
+        let up_id = item.id.clone();
+        row = row.child(
+            canvas(
+                |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                move |_, hitbox, window, _| {
+                    let down_hitbox = hitbox.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if !phase.capture()
+                            || event.button != MouseButton::Left
+                            || !down_hitbox.is_hovered(window)
+                        {
+                            return;
+                        }
+                        window.prevent_default();
+                        let _ = down_state.update(cx, |state, _| {
+                            state.pointer_down(down_id.clone());
+                        });
+                        cx.stop_propagation();
+                    });
+                    let up_hitbox = hitbox.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                        if !phase.capture()
+                            || event.button != MouseButton::Left
+                            || !up_hitbox.is_hovered(window)
+                        {
+                            return;
+                        }
+                        let accepted = up_state
+                            .update(cx, |state, _| {
+                                state.pointer_up(&up_id, up_hitbox.is_hovered(window))
+                            })
+                            .unwrap_or(false);
+                        if accepted {
+                            window.prevent_default();
+                            let _ = up_state.update(cx, |state, cx| {
+                                state.provisional = Some(up_id.clone());
+                                state.accept(ComboBoxActivationSource::Pointer, window, cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase.capture() && event.pressed_button != Some(MouseButton::Left) {
+                            let _ = move_state.update(cx, |state, _| state.pointer_press = None);
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
+    }
+    div()
+        .w_full()
+        .px(theme.metrics.panel_padding)
+        .child(row)
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtering_should_match_unicode_case_without_slicing_text() {
+        let items = vec![
+            ComboBoxItem::new(1, "Ångström").keywords(["measurement"]),
+            ComboBoxItem::new(2, "Remote over SSH"),
+        ];
+
+        assert_eq!(filter_items(&items, "ång"), vec![0]);
+    }
+
+    #[test]
+    fn filtering_should_require_every_token_across_semantic_fields() {
+        let items = vec![
+            ComboBoxItem::new(1, "Local Project")
+                .description("Open a directory")
+                .keywords(["workspace"]),
+        ];
+
+        assert_eq!(filter_items(&items, "local directory workspace"), vec![0]);
+    }
+
+    #[test]
+    fn duplicate_identities_should_keep_only_the_first_item() {
+        let items = unique_items(vec![
+            ComboBoxItem::new(1, "First"),
+            ComboBoxItem::new(1, "Later"),
+        ]);
+
+        assert_eq!(items[0].label(), "First");
+    }
+
+    #[test]
+    fn fallback_provider_should_preserve_exact_query_in_typed_identity() {
+        let fallback =
+            ComboBoxFallback::new(|query| ComboBoxItem::new(query.to_owned(), "Use exact query"));
+
+        assert_eq!(fallback.item(" Mixed Case ").id(), " Mixed Case ");
+    }
+}

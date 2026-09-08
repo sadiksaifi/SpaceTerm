@@ -175,6 +175,15 @@ fn duplicate_item_identity_should_keep_only_the_first_semantic_item() {
 }
 
 #[test]
+fn fallback_provider_should_preserve_exact_query_in_typed_identity() {
+    let fallback = CommandPaletteFallback::new(|query| {
+        CommandPaletteItem::new(query.to_owned(), "Use exact query")
+    });
+
+    assert_eq!(fallback.item(" Mixed Case ").id(), " Mixed Case ");
+}
+
+#[test]
 fn matcher_should_search_description_and_keywords() {
     let items = items();
 
@@ -408,6 +417,133 @@ fn open_palette(
     });
     cx.run_until_parked();
     prior
+}
+
+#[gpui::test]
+fn pinned_fallback_should_receive_exact_query_and_yield_to_ordinary_matches(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    let queries = Rc::new(RefCell::new(Vec::new()));
+    let recorded_queries = Rc::clone(&queries);
+    palette.update(cx, |palette, cx| {
+        palette.set_fallback(
+            Some(CommandPaletteFallback::new(move |query| {
+                recorded_queries.borrow_mut().push(query.to_owned());
+                CommandPaletteItem::new(9, format!("Create {query}")).debug_selector("row-fallback")
+            })),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| palette.set_query(" Mixed Case ", cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        queries.borrow().last().map(String::as_str),
+        Some(" Mixed Case ")
+    );
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(9)
+    );
+    assert!(cx.debug_bounds("row-fallback").is_some());
+
+    events.borrow_mut().clear();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        events
+            .borrow()
+            .contains(&CommandPaletteEvent::Activated(CommandPaletteActivation {
+                item_id: 9,
+                source: CommandPaletteActivationSource::Keyboard,
+            }))
+    );
+
+    palette.update(cx, |palette, cx| palette.set_query("open", cx));
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| palette.open(window, cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+    let ordinary = cx
+        .debug_bounds("row-open")
+        .expect("the ordinary match should render");
+    let fallback = cx
+        .debug_bounds("row-fallback")
+        .expect("the pinned fallback should remain visible");
+    assert!(fallback.top() >= ordinary.bottom());
+}
+
+#[gpui::test]
+fn disabled_command_palette_fallback_should_render_without_selection(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_fallback(
+            Some(CommandPaletteFallback::new(|query| {
+                CommandPaletteItem::new(9, format!("Create {query}"))
+                    .disabled(true)
+                    .debug_selector("row-fallback")
+            })),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_query("no ordinary result", cx)
+    });
+    cx.run_until_parked();
+    events.borrow_mut().clear();
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        None
+    );
+    assert!(cx.debug_bounds("row-fallback").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .all(|event| !matches!(event, CommandPaletteEvent::Activated(_)))
+    );
+}
+
+#[gpui::test]
+fn pointer_should_accept_the_command_palette_fallback(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_fallback(
+            Some(CommandPaletteFallback::new(|query| {
+                CommandPaletteItem::new(9, format!("Create {query}")).debug_selector("row-fallback")
+            })),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    events.borrow_mut().clear();
+    let fallback = cx
+        .debug_bounds("row-fallback")
+        .expect("the fallback row should render");
+
+    cx.simulate_click(fallback.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert!(
+        events
+            .borrow()
+            .contains(&CommandPaletteEvent::Activated(CommandPaletteActivation {
+                item_id: 9,
+                source: CommandPaletteActivationSource::Pointer,
+            }))
+    );
 }
 
 #[gpui::test]
@@ -2330,6 +2466,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                     }),
                     resume: Rc::new(|_, _, _| {}),
                     replace: Rc::new(|_| {}),
+                    replace_now: Rc::new(|_, _| None),
                 },
             );
             coordinator.registrations.insert(
@@ -2342,6 +2479,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                     }),
                     resume: Rc::new(|_, _, _| {}),
                     replace: Rc::new(|_| {}),
+                    replace_now: Rc::new(|_, _| None),
                 },
             );
         });

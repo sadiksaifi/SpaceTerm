@@ -1,4 +1,5 @@
 mod button_theme;
+mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
 mod menu_theme;
