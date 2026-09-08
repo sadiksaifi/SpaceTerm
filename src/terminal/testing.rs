@@ -142,6 +142,7 @@ pub(crate) enum RecordedSessionCommand {
     ResolvePaste(PasteConfirmationId, PasteDecision),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
+    SetPresentable(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -480,6 +481,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopyAt(generation));
         self.selection_response.clone()
+    }
+
+    fn set_presentable(&self, presentable: bool) {
+        self.record(RecordedSessionCommand::SetPresentable(presentable));
     }
 }
 

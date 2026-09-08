@@ -1,6 +1,7 @@
 //! Application-selected Terminal Accessibility construction and publication boundary.
 use crate::terminal::{
-    AccessibilityNotifications, AccessibilitySelectionSender, TerminalAccessibilityModel,
+    AccessibilityDemandSender, AccessibilityNotifications, AccessibilitySelectionSender,
+    TerminalAccessibilityModel,
 };
 use gpui::{Bounds, Pixels, Window};
 
@@ -34,6 +35,7 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) focused: bool,
     pub(crate) notifications: AccessibilityNotifications,
     pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
+    pub(crate) demand_sender: Option<AccessibilityDemandSender>,
 }
 
 #[cfg(test)]
@@ -60,6 +62,7 @@ pub(crate) mod testing {
         pub(crate) focused: bool,
         pub(crate) delivered: AccessibilityNotifications,
         pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
+        pub(crate) demand_sender: Option<AccessibilityDemandSender>,
         pub(crate) dropped: bool,
     }
 
@@ -84,6 +87,7 @@ pub(crate) mod testing {
                 focused: false,
                 delivered: AccessibilityNotifications::default(),
                 selection_sender: None,
+                demand_sender: None,
                 dropped: false,
             }));
             self.records.borrow_mut().push(Rc::clone(&record));
@@ -102,6 +106,7 @@ pub(crate) mod testing {
             record.focused &= presented;
             if !presented {
                 record.selection_sender = None;
+                record.demand_sender = None;
             }
         }
 
@@ -119,6 +124,7 @@ pub(crate) mod testing {
             record.cell_width = update.cell_width;
             record.line_height = update.line_height;
             record.selection_sender = update.selection_sender.filter(|_| record.presented);
+            record.demand_sender = update.demand_sender.filter(|_| record.presented);
             record.visible = record.presented && update.bounds.is_some();
             record.focused = record.visible && update.focused;
             record.delivered = AccessibilityNotifications::default();
@@ -148,6 +154,7 @@ pub(crate) mod testing {
             record.visible = false;
             record.focused = false;
             record.selection_sender = None;
+            record.demand_sender = None;
         }
     }
 }

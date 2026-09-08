@@ -90,7 +90,7 @@ pub(crate) struct CellSnapshot {
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
     pub(crate) semantic_content: CellSemanticSnapshot,
-    pub(crate) hyperlink: Option<crate::terminal::HyperlinkTarget>,
+    pub(crate) hyperlink: Option<Arc<crate::terminal::HyperlinkTarget>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1608,6 +1608,9 @@ impl TerminalEmulator {
         &mut self,
         request: AccessibilitySelectionRequest,
     ) -> Result<EmulatorAction, String> {
+        if request.generation != self.presentation_generation {
+            return Ok(EmulatorAction::none());
+        }
         if self
             .terminal
             .mode(Mode::SYNC_OUTPUT)
@@ -1895,6 +1898,20 @@ impl TerminalEmulator {
         Ok((model, more))
     }
 
+    pub(crate) fn accessibility_snapshot_for_current_presentation(
+        &mut self,
+    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), String> {
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok((None, false));
+        }
+        self.accessibility_generation = self.presentation_generation;
+        self.accessibility_snapshot(false)
+    }
+
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
         if self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(None);
@@ -2017,9 +2034,9 @@ impl TerminalEmulator {
             row_cache.clone()
         };
         let mut web_hyperlink_targets =
-            HashMap::<String, Option<crate::terminal::HyperlinkTarget>>::new();
+            HashMap::<String, Option<Arc<crate::terminal::HyperlinkTarget>>>::new();
         let mut local_hyperlink_targets =
-            HashMap::<Vec<u8>, Option<crate::terminal::HyperlinkTarget>>::new();
+            HashMap::<Vec<u8>, Option<Arc<crate::terminal::HyperlinkTarget>>>::new();
         let mut row_soft_wrapped = Vec::with_capacity(usize::from(rows));
         let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
@@ -2078,7 +2095,8 @@ impl TerminalEmulator {
                                         if let Some(target) = web_hyperlink_targets.get(uri) {
                                             return target.clone();
                                         }
-                                        let target = crate::terminal::HyperlinkTarget::url(uri);
+                                        let target = crate::terminal::HyperlinkTarget::url(uri)
+                                            .map(Arc::new);
                                         web_hyperlink_targets
                                             .insert(uri.to_owned(), target.clone());
                                         return target;
@@ -2094,7 +2112,8 @@ impl TerminalEmulator {
                                         userdata,
                                         self.local_file_capabilities,
                                         &self.local_file_emissions.borrow(),
-                                    );
+                                    )
+                                    .map(Arc::new);
                                     local_hyperlink_targets
                                         .insert(userdata.to_vec(), target.clone());
                                     target
@@ -2128,10 +2147,7 @@ impl TerminalEmulator {
                     }
 
                     let detected = crate::terminal::hyperlink::detect_url_cells(
-                        &rendered_cells
-                            .iter()
-                            .map(|cell| cell.text.clone())
-                            .collect::<Vec<_>>(),
+                        rendered_cells.iter().map(|cell| cell.text.as_str()),
                     );
                     for (cell, detected) in rendered_cells.iter_mut().zip(detected) {
                         if cell.hyperlink.is_none() {

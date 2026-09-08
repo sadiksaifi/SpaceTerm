@@ -775,7 +775,7 @@ fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
 #[test]
 fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_event() {
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-    let (mut session, events, _accessibility) = result.unwrap();
+    let (mut session, events, accessibility) = result.unwrap();
 
     for index in 0..32 {
         reader_steps
@@ -793,11 +793,16 @@ fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_e
     let first = events.try_recv().unwrap();
     let second = events.try_recv().unwrap();
     let result = match (first, second) {
-        (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => (
-            screen_text(&screen).contains("bounded line 31"),
-            status == SessionExit::Success,
-            events.try_recv().is_err(),
-        ),
+        (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => {
+            let model = accessibility.try_recv().unwrap();
+            assert!(model.text().contains("bounded line 31"));
+            assert_eq!(model.generation(), screen.generation);
+            (
+                screen_text(&screen).contains("bounded line 31"),
+                status == SessionExit::Success,
+                events.try_recv().is_err(),
+            )
+        }
         events => panic!("expected the latest Screen followed by Exited, got {events:?}"),
     };
 
@@ -1493,6 +1498,7 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
 
     assert!(worker.process_output_chunks(vec![b"after\x1b[5n\r\nlater\x1b[6n".to_vec(),]));
     assert_eq!(records.snapshot().written, b"\x1b[0n\x1b[2;6R");
+    assert!(worker.publish_screen());
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("ordinary terminal output must continue after denied clipboard operations");
     };
@@ -1551,6 +1557,333 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
 }
 
 #[test]
+fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records.clone()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker
+        .schedules
+        .mark_presented(Instant::now() + Duration::from_secs(1));
+
+    for index in 0..64 {
+        assert!(worker.process_output_chunks(vec![format!("line {index}\r\n").into_bytes()]));
+    }
+    assert!(worker.process_output_chunks(vec![b"\x1b[5n".to_vec()]));
+
+    assert_eq!(records.snapshot().written, b"\x1b[0n");
+    assert!(receiver.try_recv().is_err());
+    assert!(accessibility_receiver.try_recv().is_err());
+    assert!(worker.schedules.take_presentation_barrier());
+    assert!(worker.publish_screen());
+    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("the coalesced presentation must publish one Screen")
+    };
+    assert!(screen_text(&screen).contains("line 63"));
+    assert!(receiver.try_recv().is_err());
+    assert!(accessibility_receiver.try_recv().is_err());
+    worker.finish();
+}
+
+#[test]
+fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: Some(Command::Key(text_key(KeyAction::Press))),
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker.schedules.request_presentation();
+    worker.schedules.update_accessibility(true);
+    for _ in 0..8 {
+        worker.schedules.note_normal_command();
+    }
+
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::Key(_))
+    ));
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(matches!(
+        worker.pending_command,
+        Some(Command::PublishAccessibility)
+    ));
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishAccessibility)
+    ));
+    worker.finish();
+}
+
+#[test]
+fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let schedule_input = ScheduleInput::default();
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    worker
+        .schedules
+        .mark_accessibility_presented(Instant::now(), true);
+    worker
+        .schedules
+        .mark_presented(Instant::now() + Duration::from_secs(1));
+    worker.emulator.feed(b"new generation");
+    worker.schedules.request_presentation();
+    let requested_at = Instant::now();
+    assert!(schedule_input.enqueue_accessibility_demand(requested_at));
+    worker.schedules.accessibility_demand_received(requested_at);
+
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
+    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("the visual presentation must precede its accessibility model")
+    };
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishAccessibility)
+    ));
+    assert!(worker.process_command(Command::PublishAccessibility));
+    while accessibility_receiver.is_empty() {
+        assert!(worker.process_command(Command::AccessibilityContinue));
+    }
+    let model = accessibility_receiver.try_recv().unwrap();
+    assert_eq!(
+        model.selection_request(0..0).unwrap().generation,
+        screen.generation
+    );
+    assert!(
+        !worker
+            .schedules
+            .accessibility_presentation_due(Instant::now())
+    );
+    worker.finish();
+}
+
+#[test]
+fn hidden_output_builds_one_latest_presentation_only_after_restore() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker.schedules.set_presentable(false, Instant::now());
+
+    assert!(worker.process_output_chunks(vec![b"hidden one\r\n".to_vec()]));
+    assert!(worker.process_output_chunks(vec![b"hidden latest".to_vec()]));
+    assert!(receiver.try_recv().is_err());
+    assert!(accessibility_receiver.try_recv().is_err());
+
+    assert!(worker.process_command(Command::SetPresentable(true)));
+    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("restoration must publish the latest hidden state")
+    };
+    assert!(screen_text(&screen).contains("hidden latest"));
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishAccessibility)
+    ));
+    assert!(worker.process_command(Command::PublishAccessibility));
+    while accessibility_receiver.is_empty() {
+        let Some(command) = worker.take_accessibility_continuation() else {
+            panic!("restored accessibility construction must continue to completion")
+        };
+        assert!(worker.process_command(command));
+    }
+    assert!(accessibility_receiver.try_recv().is_ok());
+    worker.finish();
+}
+
+#[test]
+fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker.emulator.feed(b"seed");
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_command(Command::PublishAccessibility));
+    assert!(worker.schedules.accessibility_pending());
+    assert!(accessibility_receiver.is_empty());
+
+    let started = Instant::now();
+    worker.emulator.feed_at(b"\x1b[?2026htransaction", started);
+    let continuation = worker.take_accessibility_continuation().unwrap();
+    assert!(worker.process_command(continuation));
+    assert!(accessibility_receiver.is_empty());
+
+    worker.emulator.feed_at(b" complete\x1b[?2026l", started);
+    assert!(worker.publish_screen());
+    let due = Instant::now() + Duration::from_millis(100);
+    assert!(worker.schedules.accessibility_presentation_due(due));
+    assert!(worker.process_command(Command::PublishAccessibility));
+    while accessibility_receiver.is_empty() {
+        let Some(command) = worker.take_accessibility_continuation() else {
+            panic!("the eager accessibility seed must survive synchronized output")
+        };
+        assert!(worker.process_command(command));
+    }
+    worker.finish();
+}
+
+#[test]
+fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_output() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker.emulator.feed(b"visible state");
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_command(Command::PublishAccessibility));
+    assert!(worker.schedules.accessibility_pending());
+
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(!worker.schedules.accessibility_pending());
+    assert!(worker.process_command(Command::SetPresentable(true)));
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishAccessibility)
+    ));
+    assert!(worker.process_command(Command::PublishAccessibility));
+    while accessibility_receiver.is_empty() {
+        let Some(command) = worker.take_accessibility_continuation() else {
+            panic!("restoration must restart the interrupted accessibility update")
+        };
+        assert!(worker.process_command(command));
+    }
+    worker.finish();
+}
+
+#[test]
+fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(1);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    worker.emulator.feed(b"unobserved");
+    let generation = worker.emulator.presentation_generation();
+    drop(receiver);
+
+    assert!(!worker.publish_screen());
+    assert_eq!(worker.emulator.presentation_generation(), generation);
+    assert!(accessibility_receiver.try_recv().is_err());
+    worker.finish();
+}
+
+#[test]
 fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -1594,6 +1927,47 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         panic!("the synchronized-output deadline must publish a screen")
     };
     assert!(screen_text(&screen).contains("long remote redraw"));
+    worker.finish();
+}
+
+#[test]
+fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        native_pty: direct_native_pty(records),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events: reader_event_rx,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_command(Command::SetPresentable(false)));
+
+    let started = Instant::now();
+    worker
+        .emulator
+        .feed_at(b"\x1b[?2026hhidden redraw", started);
+    assert!(worker.release_synchronized_output_if_due(started + MAX_SYNCHRONIZED_OUTPUT_DURATION));
+    assert!(receiver.try_recv().is_err());
+
+    assert!(worker.process_command(Command::SetPresentable(true)));
+    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("restoration must publish the completed synchronized redraw")
+    };
+    assert!(screen_text(&screen).contains("hidden redraw"));
+    assert!(receiver.try_recv().is_err());
     worker.finish();
 }
 
@@ -2472,6 +2846,57 @@ fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
 }
 
 #[test]
+fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
+    let (commands, receiver) = mpsc::channel();
+    let schedule_input = ScheduleInput::default();
+    let session = TerminalSession {
+        commands: Some(commands),
+        worker: None,
+        native_pty_close: None,
+        schedule_input: schedule_input.clone(),
+    };
+    let sender = session.accessibility_demand_sender().unwrap();
+    let latest = Instant::now() + Duration::from_millis(1);
+
+    sender.request();
+    sender.request_at(latest);
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::AccessibilityDemand)
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    let mut schedules = WorkerSchedules::new(latest, schedule_input);
+    schedules.accessibility_demand_received(latest);
+    assert!(schedules.accessibility_presentation_due(latest));
+
+    session.set_presentable(false);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPresentable(false))
+    ));
+    sender.request();
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+
+    session.set_presentable(true);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPresentable(true))
+    ));
+    sender.request();
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::AccessibilityDemand)
+    ));
+}
+
+#[test]
 fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -2493,11 +2918,14 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         osc52_filter: Osc52Filter::default(),
     };
     worker.emulator.feed("a😀b".as_bytes());
-    let (_, more) = worker.emulator.accessibility_snapshot(true).unwrap();
-    assert!(more);
-    let (model, more) = worker.emulator.accessibility_snapshot(false).unwrap();
-    assert!(!more);
     let _ = worker.emulator.snapshot().unwrap();
+    let (mut model, mut more) = worker
+        .emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    while more {
+        (model, more) = worker.emulator.accessibility_snapshot(false).unwrap();
+    }
     let request = model.unwrap().selection_request(2..3).unwrap();
     assert_eq!(request.range, 1..3);
     let (commands, receiver) = mpsc::channel();
@@ -2536,6 +2964,32 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         "😀"
     );
     assert!(records.snapshot().written.is_empty());
+}
+
+#[test]
+fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
+    let mut emulator = TerminalEmulator::new(test_geometry()).unwrap();
+    emulator.feed(b"old text");
+    let _ = emulator.snapshot().unwrap();
+    let (mut model, mut more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    while more {
+        (model, more) = emulator.accessibility_snapshot(false).unwrap();
+    }
+    let request = model.unwrap().selection_request(0..3).unwrap();
+
+    emulator.feed(b" changed");
+    let _ = emulator.snapshot().unwrap();
+    let action = emulator.set_accessibility_selection(request).unwrap();
+
+    assert!(!action.screen_changed);
+    assert!(
+        emulator
+            .selection_copy(SelectionCopyOptions::default())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
