@@ -14,6 +14,9 @@ use super::{
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
+pub(crate) use super::emulator::TerminalEmulator;
+pub(crate) use super::graphics::test_lock as graphics_test_lock;
+
 pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
     ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::for_test(0))
 }

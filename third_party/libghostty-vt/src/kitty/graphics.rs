@@ -307,6 +307,51 @@ impl Terminal<'_, '_> {
         Ok(placements)
     }
 
+    /// Advance active-screen animations using one monotonic millisecond clock.
+    /// Returns the delay until another tick is needed, or None when idle.
+    pub fn tick_kitty_animations(&mut self, now_ms: u64) -> Result<Option<u64>> {
+        let mut delay = MaybeUninit::uninit();
+        // SAFETY: Exclusive terminal access and a writable output for this call.
+        let code = unsafe {
+            ffi::ghostty_terminal_kitty_graphics_animation_tick(
+                self.inner.as_raw(),
+                now_ms,
+                delay.as_mut_ptr(),
+            )
+        };
+        from_optional_result_uninit(code, delay)
+    }
+
+    /// Resident image payload bytes, including frames, in primary/alternate order.
+    /// In-flight APC and image decoding buffers are bounded separately.
+    pub fn kitty_image_storage_bytes(&self) -> Result<[usize; 2]> {
+        let mut bytes = [0; 2];
+        // SAFETY: The output has exactly the two elements required by the C API.
+        from_result(unsafe {
+            ffi::ghostty_terminal_kitty_graphics_storage_bytes(
+                self.inner.as_raw(),
+                bytes.as_mut_ptr(),
+            )
+        })?;
+        Ok(bytes)
+    }
+
+    /// Set resident payload limits independently for the primary and alternate screens.
+    pub fn set_kitty_image_storage_limits(
+        &mut self,
+        primary: usize,
+        alternate: usize,
+    ) -> Result<()> {
+        // SAFETY: Exclusive terminal access for the duration of the mutation.
+        from_result(unsafe {
+            ffi::ghostty_terminal_kitty_graphics_storage_limits(
+                self.inner.as_raw(),
+                primary,
+                alternate,
+            )
+        })
+    }
+
     /// The Kitty graphics image storage for the active screen.
     ///
     /// Returns a borrowed reference to the image storage.
@@ -333,7 +378,8 @@ impl Terminal<'_, '_> {
     /// Whether the temporary file medium is enabled for Kitty image loading
     /// on the active screen.
     pub fn is_kitty_image_from_temp_file_allowed(&self) -> Result<bool> {
-        self.get(ffi::TerminalData::KITTY_IMAGE_MEDIUM_TEMP_FILE)
+        let directory: ffi::String = self.get(ffi::TerminalData::KITTY_IMAGE_MEDIUM_TEMP_FILE)?;
+        Ok(directory.len > 0)
     }
     /// Whether the shared memory medium is enabled for Kitty image loading
     /// on the active screen.
@@ -356,11 +402,15 @@ impl Terminal<'_, '_> {
         self.set(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_FILE, &allowed)?;
         Ok(self)
     }
-    /// Enable or disable Kitty image loading via the temporary file medium.
+    /// Disable Kitty image loading via the temporary file medium.
+    /// Enabling requires explicit directory authority and is rejected here.
     ///
     /// Has no effect when Kitty graphics are disabled at build time.
     pub fn set_kitty_image_from_temp_file_allowed(&mut self, allowed: bool) -> Result<&mut Self> {
-        self.set(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_TEMP_FILE, &allowed)?;
+        if allowed {
+            return Err(Error::InvalidValue);
+        }
+        self.set_optional::<ffi::String>(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_TEMP_FILE, None)?;
         Ok(self)
     }
     /// Enable or disable Kitty image loading via the shared memory medium.
@@ -484,11 +534,32 @@ impl<'t> Image<'t> {
     ///
     /// Valid as long as the underlying terminal is not mutated.
     pub fn data(&self) -> Result<&'t [u8]> {
-        let ptr = self.get::<*const u8>(ffi::KittyGraphicsImageData::DATA_PTR)?;
-        let len = self.get::<usize>(ffi::KittyGraphicsImageData::DATA_LEN)?;
+        self.data_if_ready()?.ok_or(Error::InvalidValue)
+    }
 
-        // SAFETY: We trust libghostty to return valid results
-        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    /// Borrow decoded pixels, or None when a stored payload is still pending.
+    pub fn data_if_ready(&self) -> Result<Option<&'t [u8]>> {
+        let mut ptr = MaybeUninit::<*const u8>::uninit();
+        // SAFETY: The image is borrowed from an immutable terminal and the output is writable.
+        let code = unsafe {
+            ffi::ghostty_kitty_graphics_image_get(
+                self.inner.as_raw(),
+                ffi::KittyGraphicsImageData::DATA_PTR,
+                ptr.as_mut_ptr().cast(),
+            )
+        };
+        let Some(ptr) = from_optional_result_uninit(code, ptr)? else {
+            return Ok(None);
+        };
+        let len = self.get::<usize>(ffi::KittyGraphicsImageData::DATA_LEN)?;
+        if len == 0 {
+            return Ok(Some(&[]));
+        }
+        if ptr.is_null() {
+            return Err(Error::InvalidValue);
+        }
+        // SAFETY: Native decoded storage is valid until the borrowed terminal is mutated.
+        Ok(Some(unsafe { std::slice::from_raw_parts(ptr, len) }))
     }
 }
 
@@ -840,7 +911,7 @@ pub struct SourceRect {
 
 /// Z-layer classification for kitty graphics placements.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum Layer {
     /// Match all placements; apply no filtering (default behavior).
     #[default]
@@ -857,7 +928,7 @@ pub enum Layer {
 /// Pixel format of a Kitty graphics image.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, int_enum::IntEnum)]
 #[non_exhaustive]
-#[repr(u32)]
+#[repr(i32)]
 #[expect(missing_docs, reason = "missing upstream docs")]
 pub enum ImageFormat {
     #[default]
@@ -871,7 +942,7 @@ pub enum ImageFormat {
 /// Compression of a Kitty graphics image.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, int_enum::IntEnum)]
 #[non_exhaustive]
-#[repr(u32)]
+#[repr(i32)]
 #[expect(missing_docs, reason = "missing upstream docs")]
 pub enum Compression {
     #[default]
@@ -879,13 +950,13 @@ pub enum Compression {
     ZlibDeflate = ffi::KittyImageCompression::ZLIB_DEFLATE,
 }
 
-// Unlike other sys functions (e.g. `log::set_logger`), the decoder
-// callback will only ever be called on
+// Native PNG callbacks run synchronously on the calling terminal worker.
 thread_local! {
     static DECODE_PNG: RefCell<Option<Box<dyn DecodePng>>> = RefCell::new(None);
 }
 
-/// Set the PNG decoder.
+/// Set the PNG decoder for the current thread. Disabling one thread does not
+/// affect decoders registered by other terminal workers.
 ///
 /// When set, the terminal can accept PNG images via the Kitty Graphics Protocol.
 /// When cleared (`None` value), PNG decoding is unsupported and PNG image data
@@ -930,19 +1001,22 @@ pub fn set_png_decoder(f: Option<Box<dyn DecodePng>>) -> Result<()> {
         })
     }
 
-    // Write out the matches here to coerce function items into function
-    // pointers, and trait impls into boxed trait objects. Yes, this is
-    // the simplest way to do so.
-    let ptr: ffi::SysDecodePngFn = match f {
-        None => None,
-        Some(_) => Some(callback),
-    };
+    // Native hooks are process-global and may already be read by another
+    // Terminal Session. Install one immutable trampoline, then change only this
+    // thread's decoder. Each terminal worker registers before processing VT.
+    static REGISTERED: std::sync::OnceLock<Result<()>> = std::sync::OnceLock::new();
+    let registered = REGISTERED.get_or_init(|| {
+        let callback: ffi::SysDecodePngFn = Some(callback);
+        crate::sys_set(
+            ffi::SysOption::GHOSTTY_SYS_OPT_DECODE_PNG,
+            callback.map_or(std::ptr::null(), |callback| {
+                callback as *const std::ffi::c_void
+            }),
+        )
+    });
+    (*registered)?;
     DECODE_PNG.replace(f);
-
-    crate::sys_set(
-        ffi::SysOption::GHOSTTY_SYS_OPT_DECODE_PNG,
-        ptr.map_or(std::ptr::null(), |p| p as *const std::ffi::c_void),
-    )
+    Ok(())
 }
 
 /// A PNG decoder that can be used by the Kitty graphics protocol
@@ -993,29 +1067,54 @@ impl DecodePng for RustPngDecoder {
         alloc: &'alloc Allocator<'_>,
         data: &[u8],
     ) -> Option<DecodedImage<'alloc>> {
-        use png::{Decoder, Transformations};
+        use png::{ColorType, Decoder, Transformations};
         use std::io::Cursor;
 
         let mut decoder = Decoder::new(Cursor::new(data));
 
-        // libghostty only accepts RGBA8 data, so we have to apply some
-        // transformations to accept images in other formats, namely
-        // expanding palette and grayscale colors to RGBA8 and stripping
-        // 16-bit color depth information back down into 8-bit.
+        // Expand palettes and transparency and strip 16-bit channels. The PNG
+        // decoder keeps grayscale channels, so convert those to RGBA below.
         decoder.set_transformations(Transformations::ALPHA | Transformations::STRIP_16);
 
         let mut frame = decoder.read_info().ok()?;
         let buf_size = frame.output_buffer_size()?;
-        if frame.info().width > 8192 || frame.info().height > 8192 || buf_size > 96 * 1024 * 1024 {
+        let rgba_len = usize::try_from(frame.info().width)
+            .ok()?
+            .checked_mul(usize::try_from(frame.info().height).ok()?)?
+            .checked_mul(4)?;
+        if frame.info().width > 8192
+            || frame.info().height > 8192
+            || rgba_len > 96 * 1024 * 1024
+            || buf_size > rgba_len
+        {
             return None;
         }
         self.buf.resize(buf_size, 0);
 
         let info = frame.next_frame(&mut self.buf).ok()?;
 
-        let mut bytes = Bytes::new_with_alloc(alloc, info.buffer_size()).ok()?;
-        bytes.copy_from_slice(&self.buf[..info.buffer_size()]);
         frame.finish().ok()?;
+        let source = &self.buf[..info.buffer_size()];
+        let mut bytes = Bytes::new_with_alloc(alloc, rgba_len).ok()?;
+        match info.color_type {
+            ColorType::Rgba => bytes.copy_from_slice(source),
+            ColorType::Rgb => {
+                for (out, rgb) in bytes.chunks_exact_mut(4).zip(source.chunks_exact(3)) {
+                    out.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                }
+            }
+            ColorType::GrayscaleAlpha => {
+                for (out, gray) in bytes.chunks_exact_mut(4).zip(source.chunks_exact(2)) {
+                    out.copy_from_slice(&[gray[0], gray[0], gray[0], gray[1]]);
+                }
+            }
+            ColorType::Grayscale => {
+                for (out, &gray) in bytes.chunks_exact_mut(4).zip(source) {
+                    out.copy_from_slice(&[gray, gray, gray, 255]);
+                }
+            }
+            ColorType::Indexed => return None,
+        }
 
         Some(DecodedImage {
             width: info.width,
@@ -1039,13 +1138,121 @@ pub struct DecodedImage<'alloc> {
     /// Byte buffer containing the decoded RGBA pixel data.
     pub data: Bytes<'alloc>,
 }
-impl From<DecodedImage<'_>> for ffi::SysImage {
-    fn from(mut value: DecodedImage<'_>) -> Self {
-        Self {
-            width: value.width,
-            height: value.height,
-            data: value.data.as_mut_ptr(),
-            data_len: value.data.len(),
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TerminalOptions;
+
+    fn terminal() -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 10,
+            rows: 6,
+            max_scrollback: 32,
+        })
+        .expect("terminal initializes");
+        terminal.resize(10, 6, 10, 20).expect("geometry updates");
+        terminal
+    }
+
+    #[cfg(feature = "png")]
+    fn png_fixture(color: png::ColorType, data: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(data).unwrap();
         }
+        bytes
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn png_grayscale_and_alpha_are_normalized_to_rgba() {
+        for (color, input, expected) in [
+            (png::ColorType::Grayscale, vec![73], [73, 73, 73, 255]),
+            (
+                png::ColorType::GrayscaleAlpha,
+                vec![73, 19],
+                [73, 73, 73, 19],
+            ),
+            (png::ColorType::Rgb, vec![1, 2, 3], [1, 2, 3, 255]),
+            (png::ColorType::Rgba, vec![1, 2, 3, 4], [1, 2, 3, 4]),
+        ] {
+            let png = png_fixture(color, &input);
+            let image = RustPngDecoder::new()
+                .decode_png(&Allocator::GLOBAL, &png)
+                .unwrap();
+            assert_eq!(&*image.data, &expected);
+        }
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn disabling_another_threads_png_decoder_does_not_disable_this_thread() {
+        set_png_decoder(Some(Box::new(RustPngDecoder::new()))).unwrap();
+        std::thread::spawn(|| set_png_decoder(None).unwrap())
+            .join()
+            .unwrap();
+        let mut terminal = terminal();
+        terminal.set_kitty_image_storage_limit(4096).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,t=d,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+        let graphics = terminal.kitty_graphics().unwrap();
+        let image = graphics
+            .image(1)
+            .expect("another worker cannot disable decoding");
+        assert_eq!(image.data().unwrap(), &[255, 0, 0, 255]);
+        set_png_decoder(None).unwrap();
+    }
+
+    #[test]
+    fn independent_screen_limits_survive_lazy_initialization_and_reset() {
+        let mut terminal = terminal();
+        terminal.set_kitty_image_storage_limits(1024, 3).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=1;/wAA/w==\x1b\\");
+        assert_eq!(terminal.kitty_image_storage_bytes().unwrap(), [4, 0]);
+
+        // The alternate screen is created during this write. A 4-byte payload
+        // must not inherit the primary screen's larger allowance.
+        terminal.vt_write(b"\x1b[?1049h\x1b_Ga=T,f=32,s=1,v=1,i=2;/wAA/w==\x1b\\");
+        assert_eq!(terminal.kitty_image_storage_limit().unwrap(), 3);
+        assert_eq!(terminal.kitty_image_storage_bytes().unwrap(), [4, 0]);
+
+        // RIS destroys the alternate screen. Recreating it within the same
+        // parser write must still honor the retained allowance.
+        terminal.vt_write(b"\x1bc\x1b[?1049h\x1b_Ga=T,f=32,s=1,v=1,i=3;/wAA/w==\x1b\\");
+        assert_eq!(terminal.kitty_image_storage_limit().unwrap(), 3);
+        assert_eq!(terminal.kitty_image_storage_bytes().unwrap(), [0, 0]);
+    }
+
+    #[test]
+    fn relative_placement_uses_pinned_parent_with_signed_offsets() {
+        let mut terminal = terminal();
+        terminal.set_kitty_image_storage_limit(4096).unwrap();
+        terminal.vt_write(b"\x1b[3;3H\x1b_Ga=T,f=32,s=1,v=1,i=1,p=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+        terminal
+            .vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=2,p=1,P=1,Q=1,H=-1,V=1,c=1,r=1;AAD//w==\x1b\\");
+        let placements = terminal.resolved_kitty_placements().unwrap();
+        let child = placements.iter().find(|p| p.image_id == 2).unwrap();
+        assert_eq!((child.viewport_col, child.viewport_row), (1, 3));
+    }
+
+    #[test]
+    fn relative_placement_uses_visible_virtual_parent_origin() {
+        let mut terminal = terminal();
+        terminal.set_kitty_image_storage_limit(4096).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=1,p=1,U=1,c=1,r=1;/wAA/w==\x1b\\");
+        terminal.vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=2,p=1,P=1,Q=1,H=1,V=1,c=1,r=1;AAD//w==\x1b\\");
+        // Image ID 1 in foreground RGB, placement ID 1 in underline RGB.
+        terminal.vt_write(
+            "\x1b[2;3H\x1b[38;2;0;0;1m\x1b[58;2;0;0;1m\u{10eeee}\u{305}\u{305}".as_bytes(),
+        );
+        let placements = terminal.resolved_kitty_placements().unwrap();
+        let parent = placements.iter().find(|p| p.image_id == 1).unwrap();
+        assert!(parent.is_virtual);
+        let child = placements.iter().find(|p| p.image_id == 2).unwrap();
+        assert_eq!((child.viewport_col, child.viewport_row), (3, 2));
     }
 }

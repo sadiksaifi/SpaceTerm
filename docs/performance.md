@@ -99,9 +99,10 @@ contains 16 MiB of decoded pixels; process footprint can include additional nati
 snapshot, upload, and GPU representations, and should be measured rather than
 estimated by multiplying that size.
 
-Keep this fixture at two graphics-enabled Sessions. The current application-wide
-decoded-image budget and per-Session reservation admit at most two such Sessions;
-a third image being rejected is quota enforcement, not a rendering benchmark.
+Use the same number of graphics-enabled Sessions when comparing runs. Graphics
+admission tracks retained native and RGBA snapshot bytes across Sessions against
+a 384 MiB aggregate limit; it does not impose a fixed two-Session limit. Keep the
+fixture below that budget when measuring rendering rather than quota behavior.
 
 Optional native power captures require the user's available privileges and should
 use matching workload and sampling windows. Whole-system CPU/GPU power includes

@@ -245,18 +245,8 @@ pub struct Options {
     pub max_scrollback: usize,
 }
 
-impl From<Options> for ffi::TerminalOptions {
-    fn from(value: Options) -> Self {
-        Self {
-            cols: value.cols,
-            rows: value.rows,
-            max_scrollback: value.max_scrollback,
-        }
-    }
-}
-
 /// Default visual style used when the cursor style is reset.
-#[repr(u32)]
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
 #[non_exhaustive]
 pub enum CursorStyle {
@@ -291,12 +281,15 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 
     unsafe fn new_inner(alloc: *const ffi::Allocator, opts: Options) -> Result<Self> {
         let mut raw: ffi::Terminal = std::ptr::null_mut();
-        let result = unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.into()) };
+        let result =
+            unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
-        Ok(Self {
+        let terminal = Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),
-        })
+        };
+        terminal.set(Opt::SCROLLBACK_MAX_LINES, &opts.max_scrollback)?;
+        Ok(terminal)
     }
 
     /// Write VT-encoded data to the terminal for processing.
@@ -445,18 +438,38 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 
     /// Get the current value of a terminal mode.
     pub fn mode(&self, mode: Mode) -> Result<bool> {
-        let mut value = false;
+        let mut mode = ffi::TerminalModeConfig {
+            mode: mode.into(),
+            value: false,
+        };
+
         let result = unsafe {
-            ffi::ghostty_terminal_mode_get(self.inner.as_raw(), mode.into(), &raw mut value)
+            ffi::ghostty_terminal_get(
+                self.inner.as_raw(),
+                Data::MODE,
+                &raw mut mode as *mut std::ffi::c_void,
+            )
         };
         from_result(result)?;
-        Ok(value)
+        Ok(mode.value)
     }
 
-    /// Set the value of a terminal mode.
+    /// Set the current value of a terminal mode.
+    ///
+    /// This does not change the value restored by a full terminal reset (RIS).
     pub fn set_mode(&mut self, mode: Mode, value: bool) -> Result<&mut Self> {
-        let result =
-            unsafe { ffi::ghostty_terminal_mode_set(self.inner.as_raw(), mode.into(), value) };
+        let mode = ffi::TerminalModeConfig {
+            mode: mode.into(),
+            value,
+        };
+
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.inner.as_raw(),
+                Opt::MODE,
+                &raw const mode as *const std::ffi::c_void,
+            )
+        };
         from_result(result)?;
         Ok(self)
     }
@@ -561,6 +574,28 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     pub fn rows(&self) -> Result<u16> {
         self.get(Data::ROWS)
     }
+
+    /// Get the current grid and integer cell dimensions used by the engine.
+    ///
+    /// This can be returned from [`Terminal::on_size`] to keep size replies
+    /// consistent with image placement geometry after every resize.
+    pub fn size_report(&self) -> Result<SizeReportSize> {
+        let columns = self.cols()?;
+        let rows = self.rows()?;
+        let width: u32 = self.get(Data::WIDTH_PX)?;
+        let height: u32 = self.get(Data::HEIGHT_PX)?;
+        Ok(SizeReportSize {
+            rows,
+            columns,
+            cell_width: width
+                .checked_div(u32::from(columns))
+                .ok_or(Error::InvalidValue)?,
+            cell_height: height
+                .checked_div(u32::from(rows))
+                .ok_or(Error::InvalidValue)?,
+        })
+    }
+
     /// Get the cursor column position (inner-indexed).
     pub fn cursor_x(&self) -> Result<u16> {
         self.get(Data::CURSOR_X)
@@ -1158,7 +1193,7 @@ impl From<TertiaryDeviceAttributes> for ffi::DeviceAttributesTertiary {
 
 /// Color scheme reported in response to a CSI ? 996 n query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
+#[repr(i32)]
 #[expect(missing_docs, reason = "self-explanatory")]
 pub enum ColorScheme {
     Light = ffi::ColorScheme::LIGHT,
@@ -1204,7 +1239,7 @@ impl From<ColorScheme> for ffi::ColorScheme::Type {
 
 /// Amount of compression work to perform before returning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum CompressionMode {
     /// Perform one bounded compression step suitable for idle scheduling.
     Incremental = ffi::TerminalCompressionMode::INCREMENTAL,
@@ -1214,7 +1249,7 @@ pub enum CompressionMode {
 
 /// Scheduling result from terminal compression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum CompressionResult {
     /// Retained-mapping reclamation is unavailable on this target.
     Unsupported = ffi::TerminalCompressionResult::UNSUPPORTED,
@@ -1267,9 +1302,13 @@ impl<'t> ClipboardWrite<'t> {
     pub fn contents(&self) -> ClipboardContents<'t> {
         // SAFETY: We trust libghostty to give us a valid pointer and length
         // within the lifetime of the callback.
-        ClipboardContents(unsafe {
-            std::slice::from_raw_parts((*self.ptr).contents, (*self.ptr).contents_len).iter()
-        })
+        let request = unsafe { &*self.ptr };
+        let contents = if request.contents_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(request.contents, request.contents_len) }
+        };
+        ClipboardContents(contents.iter())
     }
 }
 
@@ -1309,7 +1348,7 @@ pub struct ClipboardContent<'t> {
     /// MIME type of the representation.
     pub mime: &'t str,
     /// Decoded, binary-safe representation data.
-    pub data: &'t str,
+    pub data: &'t [u8],
 }
 impl<'t> ClipboardContent<'t> {
     /// # Safety
@@ -1321,7 +1360,7 @@ impl<'t> ClipboardContent<'t> {
         unsafe {
             Self {
                 mime: value.mime.to_str(),
-                data: value.data.to_str(),
+                data: value.data.to_bytes(),
             }
         }
     }
@@ -1332,7 +1371,7 @@ impl<'t> ClipboardContent<'t> {
 /// Protocol-specific destination identifiers are normalized to these values
 /// before the clipboard write callback is invoked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum ClipboardLocation {
     /// The standard system clipboard.
     Standard = ffi::ClipboardLocation::STANDARD,
@@ -1347,7 +1386,7 @@ pub enum ClipboardLocation {
 /// Protocols without write acknowledgements, including OSC 52 and iTerm2
 /// OSC 1337 Copy, ignore this result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum ClipboardWriteError {
     /// The clipboard write was denied by policy or the user.
     Denied = ffi::ClipboardWriteResult::DENIED,
@@ -1665,9 +1704,13 @@ handlers! {
     pub fn on_progress_report(
         &mut self,
         tag = PROGRESS_REPORT,
-        from = GhosttyTerminalProgressReportFn(state: std::os::raw::c_int, progress: i16),
+        from = GhosttyTerminalProgressReportFn(report: *const ffi::TerminalProgressReport),
         to = ProgressReportFn(ProgressState, Option<u8>),
     ) |term, func| {
+        // SAFETY: The native callback borrows this report for its duration.
+        let Some(report) = (unsafe { report.as_ref() }) else { return; };
+        let state = report.state;
+        let progress = report.progress;
         let state = ([ProgressState::Remove, ProgressState::Set, ProgressState::Error,
             ProgressState::Indeterminate, ProgressState::Pause]).get(state as usize).copied();
         let progress = u8::try_from(progress).ok().filter(|value| *value <= 100);
@@ -1825,12 +1868,21 @@ handlers! {
         tag = CLIPBOARD_WRITE,
         from = GhosttyTerminalClipboardWriteFn(
             write: *const ffi::ClipboardWrite
-        ) -> ffi::ClipboardWriteResult::Type,
+        ),
         to = <'t>ClipboardWriteFn(ClipboardWrite<'t>) -> std::result::Result<(), ClipboardWriteError>,
     ) |term, func| {
-        match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
-            Ok(_) => ffi::ClipboardWriteResult::SUCCESS,
-            Err(e) => e.into()
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            func(&term, unsafe { ClipboardWrite::from_raw(write) })
+        ));
+        let mut reply = ffi::sized!(ffi::ClipboardWriteReply);
+        reply.result = match result {
+            Ok(Ok(())) => ffi::ClipboardWriteResult::SUCCESS,
+            Ok(Err(error)) => error.into(),
+            Err(_) => ffi::ClipboardWriteResult::IO_ERROR,
+        };
+        // SAFETY: The request and reply callback are borrowed for this call.
+        if let Some(callback) = unsafe { (*write).reply } {
+            unsafe { callback(write, &reply) };
         }
     }
 }
@@ -1979,6 +2031,62 @@ mod tests {
         terminal.vt_write(b"\x1b]7;file://localhost/tmp/other\x1b\\");
         assert_eq!(callback_count.get(), 2);
         assert_eq!(*captured_pwd.borrow(), "file://localhost/tmp/other");
+    }
+
+    #[test]
+    fn clipboard_write_callback_preserves_binary_payloads_and_empty_requests() {
+        let captured = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal
+            .on_clipboard_write(|_, request| {
+                for content in request.contents() {
+                    captured.borrow_mut().extend_from_slice(content.data);
+                }
+                Ok(())
+            })
+            .unwrap();
+        terminal.vt_write(b"\x1b]52;c;/wA=\x07");
+        assert_eq!(captured.borrow().as_slice(), &[255, 0]);
+
+        let empty = ffi::sized!(ffi::ClipboardWrite);
+        // SAFETY: Empty is borrowed for this expression; a zero-length request
+        // may contain a null contents pointer in the native interface.
+        let request = unsafe { ClipboardWrite::from_raw(&empty) };
+        assert_eq!(request.contents().count(), 0);
+    }
+
+    #[test]
+    fn size_callback_reports_current_engine_geometry_after_resize() {
+        let replies = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(Options {
+            cols: 57,
+            rows: 20,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal
+            .on_pty_write(|_, bytes| replies.borrow_mut().extend_from_slice(bytes))
+            .unwrap();
+        terminal.on_size(|term| term.size_report().ok()).unwrap();
+        terminal.resize(57, 20, 22, 40).unwrap();
+        terminal.vt_write(b"\x1b[14t\x1b[16t\x1b[18t");
+        assert_eq!(
+            replies.borrow().as_slice(),
+            b"\x1b[4;800;1254t\x1b[6;40;22t\x1b[8;20;57t"
+        );
+
+        replies.borrow_mut().clear();
+        terminal.resize(81, 24, 18, 32).unwrap();
+        terminal.vt_write(b"\x1b[14t\x1b[16t\x1b[18t");
+        assert_eq!(
+            replies.borrow().as_slice(),
+            b"\x1b[4;768;1458t\x1b[6;32;18t\x1b[8;24;81t"
+        );
     }
 
     #[test]

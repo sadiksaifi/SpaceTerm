@@ -1,9 +1,7 @@
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
-index 404059123..f4e5aee65 100644
 --- a/include/ghostty/vt.h
 +++ b/include/ghostty/vt.h
-@@ -127,7 +127,8 @@
- extern "C" {
+@@ -141,6 +141,7 @@
  #endif
  
  #include <ghostty/vt/types.h>
@@ -13,7 +11,6 @@ index 404059123..f4e5aee65 100644
  #include <ghostty/vt/color.h>
 diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibility.h
 new file mode 100644
-index 000000000..172f23eac
 --- /dev/null
 +++ b/include/ghostty/vt/accessibility.h
 @@ -0,0 +1,133 @@
@@ -150,24 +147,8 @@ index 000000000..172f23eac
 +    bool* out_changed);
 +
 +#endif /* GHOSTTY_VT_ACCESSIBILITY_H */
-diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index e01cdbb89..3984476bb 100644
---- a/src/lib_vt.zig
-+++ b/src/lib_vt.zig
-@@ -245,6 +245,10 @@ comptime {
-         @export(&c.render_state_row_cells_get_multi, .{ .name = "ghostty_render_state_row_cells_get_multi" });
-         @export(&c.render_state_row_cells_free, .{ .name = "ghostty_render_state_row_cells_free" });
-         @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
-+        @export(&c.accessibility_state_new, .{ .name = "ghostty_accessibility_state_new" });
-+        @export(&c.accessibility_state_free, .{ .name = "ghostty_accessibility_state_free" });
-+        @export(&c.accessibility_state_update, .{ .name = "ghostty_accessibility_state_update" });
-+        @export(&c.accessibility_state_set_selection, .{ .name = "ghostty_accessibility_state_set_selection" });
-         @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
-         @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
-         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });
 diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
-index 000000000..73d31354f
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
 @@ -0,0 +1,671 @@
@@ -842,12 +823,24 @@ index 000000000..73d31354f
 +        out.selection_rectangle = selection.rectangle;
 +    }
 +}
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -252,6 +252,10 @@
+         @export(&c.sys_set, .{ .name = "ghostty_sys_set" });
+         if (features.grid_introspection) {
+             @export(&c.grid_ref_hyperlink_userdata, .{ .name = "ghostty_grid_ref_hyperlink_userdata" });
++            @export(&c.accessibility_state_new, .{ .name = "ghostty_accessibility_state_new" });
++            @export(&c.accessibility_state_free, .{ .name = "ghostty_accessibility_state_free" });
++            @export(&c.accessibility_state_update, .{ .name = "ghostty_accessibility_state_update" });
++            @export(&c.accessibility_state_set_selection, .{ .name = "ghostty_accessibility_state_set_selection" });
+             @export(&c.cell_get, .{ .name = "ghostty_cell_get" });
+             @export(&c.cell_get_multi, .{ .name = "ghostty_cell_get_multi" });
+             @export(&c.row_get, .{ .name = "ghostty_row_get" });
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index 37dc57684..f22d27470 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
-@@ -1,7 +1,12 @@
- const lib = @import("../lib.zig");
+@@ -2,6 +2,11 @@
  const CAllocator = lib.alloc.Allocator;
  
  const buildpkg = @import("build_info.zig");

@@ -52,6 +52,7 @@ pub(super) struct WorkerSchedules {
     paste_confirmations: PasteConfirmationSchedule,
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
+    graphics_animation: Option<Instant>,
 }
 
 impl WorkerSchedules {
@@ -150,12 +151,19 @@ impl WorkerSchedules {
         self.presentation.mark_presented(now);
     }
 
+    pub(super) fn update_graphics_animation(&mut self, deadline: Option<Instant>) {
+        self.graphics_animation = deadline.filter(|_| self.presentation.presentable);
+    }
+
     pub(super) fn set_presentable(&mut self, presentable: bool, now: Instant) {
         self.input.set_accessibility_demand_enabled(presentable);
         self.presentation.set_presentable(presentable, now);
         self.accessibility_presentation
             .set_presentable(presentable, now);
         if !presentable {
+            if self.graphics_animation.take().is_some() {
+                self.presentation.request();
+            }
             self.accessibility_continuation.update(false);
             self.input.accessibility_demand.clear();
             self.selection_autoscroll.cancel();
@@ -198,6 +206,7 @@ impl WorkerSchedules {
             paste_confirmations: PasteConfirmationSchedule::default(),
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
+            graphics_animation: None,
         }
     }
 
@@ -208,6 +217,7 @@ impl WorkerSchedules {
             self.paste_confirmations.deadline(),
             self.presentation.deadline(),
             self.accessibility_presentation.deadline(),
+            self.graphics_animation,
             Some(self.hidden_input.deadline),
         ]
         .into_iter()
@@ -224,6 +234,13 @@ impl WorkerSchedules {
         }
         if self.presentation.take_due(now) {
             return Some(Command::PublishPendingScreen);
+        }
+        if self
+            .graphics_animation
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.graphics_animation = None;
+            return Some(Command::GraphicsAnimationTick);
         }
         if self.accessibility_presentation.take_due(now) {
             return Some(Command::PublishAccessibility);
@@ -404,6 +421,44 @@ mod tests {
         assert!(!schedule.take_due(start + PRESENTATION_INTERVAL - Duration::from_micros(1)));
         assert!(schedule.take_due(start + PRESENTATION_INTERVAL));
         assert!(!schedule.take_due(start + PRESENTATION_INTERVAL));
+    }
+
+    #[test]
+    fn graphics_animation_wakes_once_at_the_engine_deadline() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        let due = start + Duration::from_millis(40);
+        schedules.update_graphics_animation(Some(due));
+
+        assert_eq!(schedules.deadline(None), Some(due));
+        assert!(schedules.take_due(due - Duration::from_millis(1)).is_none());
+        assert!(matches!(
+            schedules.take_due(due),
+            Some(Command::GraphicsAnimationTick)
+        ));
+        assert!(schedules.take_due(due).is_none());
+    }
+
+    #[test]
+    fn hidden_graphics_stop_waking_and_resume_with_a_fresh_presentation() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_graphics_animation(Some(start + Duration::from_millis(40)));
+        schedules.set_presentable(false, start);
+
+        assert!(
+            schedules
+                .take_due(start + Duration::from_millis(40))
+                .is_none()
+        );
+        let shown = start + Duration::from_millis(80);
+        schedules.set_presentable(true, shown);
+        assert!(matches!(
+            schedules.take_due(shown),
+            Some(Command::PublishPendingScreen)
+        ));
     }
 
     #[test]
