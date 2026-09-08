@@ -47,7 +47,15 @@ struct GridView(TerminalGridElement);
 
 impl Render for GridView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.0.clone()
+        let element = self.0.clone();
+        // GPUI can rebuild a cached scene on a window refresh. Presentation
+        // acknowledgements belong only to the first draw of this candidate.
+        self.0.presentation_operation = None;
+        self.0.graphics_attempt = None;
+        self.0.paint_fault = None;
+        self.0.fallback = None;
+        self.0.fallback_generation = None;
+        element
     }
 }
 

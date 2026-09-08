@@ -2482,6 +2482,25 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_some()
+    }));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.pane_state.clone()),
+        PaneTerminalState::Running
+    );
+}
+
+#[gpui::test]
 fn cursor_layer_rebuilds_for_output_selection_and_font_changes(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     let mut screen = text_screen(10, &["first row", "cursor row", "last row"]);
