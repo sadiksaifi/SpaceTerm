@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+mod presentation;
+pub(crate) use presentation::TerminalGridPresentation;
+
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, Font, FontFallbacks, FontFeatures, GlobalElementId, InspectorElementId,
@@ -131,6 +134,7 @@ impl TerminalGridCache {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct TerminalGridElement {
     background: Color,
     foreground: Color,
@@ -146,7 +150,7 @@ pub(crate) struct TerminalGridElement {
     font_family: SharedString,
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
-    input: Entity<TerminalPane>,
+    input: gpui::WeakEntity<TerminalPane>,
     blink_phase_visible: bool,
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
@@ -159,6 +163,7 @@ pub(crate) struct TerminalGridElement {
     fallback: Option<Box<TerminalGridElement>>,
     fallback_generation: Option<crate::terminal::PresentationGeneration>,
     paint_fault: Option<PaintPreflightFault>,
+    cursor_layer: Option<presentation::CursorLayer>,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -283,7 +288,7 @@ impl TerminalGridElement {
             font_family: configuration.font_family,
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
-            input: configuration.input,
+            input: configuration.input.downgrade(),
             blink_phase_visible: configuration.blink_phase_visible,
             find_spans: configuration.find_spans,
             graphics: configuration.graphics,
@@ -296,6 +301,7 @@ impl TerminalGridElement {
             fallback,
             fallback_generation,
             paint_fault: configuration.paint_fault,
+            cursor_layer: None,
         }
     }
 }
@@ -332,6 +338,7 @@ struct PreparedRow {
     cursor_symbols: PreparedDecorations,
 }
 
+#[derive(Clone)]
 struct PreparedFrameRow {
     stable: Arc<PreparedRow>,
     find_backgrounds: Vec<PaintQuad>,
@@ -437,6 +444,7 @@ impl PreparedFrameRow {
 pub(crate) struct PrepaintState {
     candidate: TerminalPaintBatch,
     fallback: Option<TerminalPaintBatch>,
+    cursor: Option<std::rc::Rc<TerminalPaintBatch>>,
 }
 
 struct TerminalPaintBatch {
@@ -678,7 +686,7 @@ fn preflight_text(
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PreparedDecorations {
     // GPUI consumes Path and rebuilds its scaled vertex Vec during paint. Flat scene primitives
     // keep stable decorations reusable through the row Arc without cloning heap geometry.
@@ -686,11 +694,13 @@ struct PreparedDecorations {
     underlines: Vec<PreparedUnderline>,
 }
 
+#[derive(Clone)]
 struct PreparedQuad {
     quad: PaintQuad,
     blinking: bool,
 }
 
+#[derive(Clone)]
 struct PreparedUnderline {
     origin: gpui::Point<Pixels>,
     width: Pixels,
@@ -1239,7 +1249,7 @@ impl Element for TerminalGridElement {
                 (self.line_height * visible_rows as f32).min(grid_bounds.size.height),
             ),
         );
-        let candidate = TerminalPaintBatch {
+        let mut candidate = TerminalPaintBatch {
             surface: Some(fill(bounds, gpui_color(self.background))),
             grid_bounds,
             rows: prepared_rows,
@@ -1251,6 +1261,28 @@ impl Element for TerminalGridElement {
             ),
             blink_phase_visible: self.blink_phase_visible,
         };
+        let cursor = self.cursor_layer.as_ref().and_then(|_| {
+            let position = self.cursor.as_ref()?.0;
+            let row = candidate.rows.get_mut(usize::from(position.row))?;
+            let cursor_row = row.clone();
+            row.cursor_background = None;
+            row.cursor_overlay_visible = false;
+            let row_bounds = Bounds::new(
+                point(
+                    grid_bounds.left(),
+                    bounds.top() + self.line_height * f32::from(position.row),
+                ),
+                size(grid_bounds.size.width, self.line_height),
+            )
+            .intersect(&grid_bounds);
+            Some(std::rc::Rc::new(TerminalPaintBatch {
+                surface: Some(fill(row_bounds, gpui_color(self.background))),
+                grid_bounds: row_bounds,
+                rows: vec![cursor_row],
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            }))
+        });
         let fallback = self.fallback.as_mut().map(|fallback| {
             let mut request_layout = ();
             fallback
@@ -1260,6 +1292,7 @@ impl Element for TerminalGridElement {
         PrepaintState {
             candidate,
             fallback,
+            cursor,
         }
     }
 
@@ -1273,10 +1306,20 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let Some(layer) = &self.cursor_layer {
+            layer.clear();
+            #[cfg(test)]
+            layer.record_grid_paint();
+        }
         let mut failure = prepaint
             .candidate
             .preflight(self.line_height, self.paint_fault.take(), window, cx)
             .err();
+        if failure.is_none()
+            && let Some(cursor) = &prepaint.cursor
+        {
+            failure = cursor.preflight(self.line_height, None, window, cx).err();
+        }
         let mut submitted_generation = None;
         if failure.is_none() {
             match prepaint.candidate.submit(
@@ -1285,7 +1328,12 @@ impl Element for TerminalGridElement {
                 window,
                 cx,
             ) {
-                Ok(()) => submitted_generation = Some(self.presentation.generation),
+                Ok(()) => {
+                    submitted_generation = Some(self.presentation.generation);
+                    if let Some(layer) = &self.cursor_layer {
+                        layer.set(prepaint.cursor.clone());
+                    }
+                }
                 Err(submission_failure) => failure = Some(submission_failure),
             }
         }
@@ -1307,12 +1355,14 @@ impl Element for TerminalGridElement {
         {
             submitted_generation = self.fallback_generation;
         }
+        let Some(pane) = self.input.upgrade() else {
+            return;
+        };
         window.handle_input(
             &self.focus_handle,
-            ElementInputHandler::new(bounds, self.input.clone()),
+            ElementInputHandler::new(bounds, pane.clone()),
             cx,
         );
-        let pane = self.input.clone();
         let presentation = Arc::clone(&self.presentation);
         if let (Some(operation), Some(graphics_attempt)) =
             (self.presentation_operation, self.graphics_attempt)

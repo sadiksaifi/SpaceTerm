@@ -17,7 +17,8 @@ use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_
 #[cfg(test)]
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
-    TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
+    TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation,
+    terminal_grid_content_bounds,
 };
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
@@ -430,6 +431,7 @@ pub(crate) struct TerminalPane {
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: Entity<TerminalGridCache>,
     fallback_render_cache: Entity<TerminalGridCache>,
+    grid_presentation: TerminalGridPresentation,
     #[cfg(test)]
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
@@ -665,6 +667,7 @@ impl TerminalPane {
             scrollbar,
             render_cache,
             fallback_render_cache,
+            grid_presentation: TerminalGridPresentation::new(),
             #[cfg(test)]
             paint_fault: None,
             graphics_cache,
@@ -3369,7 +3372,7 @@ impl Render for TerminalPane {
             diagnostics_available,
             last_valid_frame_preserved,
         );
-        let terminal_grid = TerminalGridElement::new(
+        let terminal_grid = self.grid_presentation.render(
             &display_screen,
             display_render_cache,
             TerminalGridConfiguration {

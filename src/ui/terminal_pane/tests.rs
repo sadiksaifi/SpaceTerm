@@ -2448,9 +2448,140 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
     assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
     assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
 
+    let before = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts());
+    assert!(before.0 > 0, "the initial grid must be painted");
+    let storage = pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage());
+    assert_eq!(storage.map(|(_, rows)| rows), Some(1));
+
     cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
     cx.run_until_parked();
     assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts()),
+        before
+    );
+
+    for _ in 0..20 {
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+    }
+    let after = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts());
+    assert_eq!(
+        after.0, before.0,
+        "blink frames must skip full-grid preflight and submit"
+    );
+    assert_eq!(
+        after.1,
+        before.1 + 10,
+        "only visible cursor phases paint the cursor layer"
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage()),
+        storage
+    );
+}
+
+#[gpui::test]
+fn cursor_layer_rebuilds_for_output_selection_and_font_changes(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let mut screen = text_screen(10, &["first row", "cursor row", "last row"]);
+    Arc::make_mut(&mut screen).cursor = blinking_cursor_screen(true, true).cursor;
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(SessionEvent::Screen(screen.clone()), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let mut paints = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(paints > 0);
+
+    // A new Selection and output arrive in the same frame as a blink. Snapshot
+    // identity must win over the otherwise reusable cursor phase.
+    let changed = Arc::make_mut(&mut screen);
+    changed.generation = crate::terminal::PresentationGeneration::test(11);
+    let rows = Arc::make_mut(&mut changed.rows);
+    Arc::make_mut(&mut rows[0])[0].selected = true;
+    Arc::make_mut(&mut rows[2])[0].text = "changed".to_owned();
+    pane.update(cx, |pane, cx| {
+        pane.blink_phase_visible = !pane.blink_phase_visible;
+        pane.handle_event(SessionEvent::Screen(screen), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let after_output = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(
+        after_output > paints,
+        "{:?}",
+        pane.read_with(cx, |pane, _| (
+            pane.screen.generation,
+            pane.last_valid_screen.generation,
+            pane.pane_state.clone(),
+            pane.grid_presentation.cursor_storage(),
+            pane.terminal_input_focus
+        ))
+    );
+    paints = after_output;
+
+    cx.simulate_keystrokes("cmd-=");
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0) > paints);
+    let after_resize = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+        after_resize
+    );
+}
+
+#[gpui::test]
+fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let cursor = blinking_cursor_screen(true, true).cursor;
+    for (index, mut screen) in [graphics_screen(20, 1), blinking_screen()]
+        .into_iter()
+        .enumerate()
+    {
+        pane.update(cx, |pane, cx| {
+            let mut idle = blinking_cursor_screen(true, true);
+            Arc::make_mut(&mut idle).generation =
+                crate::terminal::PresentationGeneration::test(20 + index as u64 * 2);
+            pane.handle_event(SessionEvent::Screen(idle), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.grid_presentation.cursor_storage().is_some()
+        }));
+        let changed = Arc::make_mut(&mut screen);
+        changed.cursor = cursor;
+        changed.generation = crate::terminal::PresentationGeneration::test(21 + index as u64 * 2);
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Screen(screen), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.grid_presentation.cursor_storage().is_none()
+        }));
+    }
+    pane.update(cx, |pane, cx| {
+        let mut idle = blinking_cursor_screen(true, true);
+        Arc::make_mut(&mut idle).generation = crate::terminal::PresentationGeneration::test(30);
+        pane.handle_event(SessionEvent::Screen(idle), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_some()
+    }));
+    pane.update(cx, |pane, cx| {
+        pane.mark_for_preedit_cache_test("かな", 2..2);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_none()
+    }));
 }
 
 #[gpui::test]
