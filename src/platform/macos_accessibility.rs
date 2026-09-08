@@ -10,9 +10,9 @@ use super::terminal_accessibility::{
 use crate::terminal::AccessibilityNotifications;
 use gpui::{Pixels, Window};
 
-#[cfg(all(target_os = "macos", not(test)))]
-use crate::terminal::AccessibilitySelectionSender;
 use crate::terminal::TerminalAccessibilityModel;
+#[cfg(all(target_os = "macos", not(test)))]
+use crate::terminal::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(any(not(test), feature = "macos-native-tests"))]
 use crate::terminal::{AccessibilityGeometry, AccessibilityNotification};
 
@@ -69,6 +69,8 @@ struct AccessibilityElementState {
     order: usize,
     #[cfg(all(target_os = "macos", not(test)))]
     selection_sender: Option<AccessibilitySelectionSender>,
+    #[cfg(all(target_os = "macos", not(test)))]
+    demand_sender: Option<AccessibilityDemandSender>,
     #[cfg(all(target_os = "macos", not(test)))]
     parent: cocoa::base::id,
 }
@@ -244,6 +246,7 @@ mod native {
                 registered: false,
                 order: 0,
                 selection_sender: None,
+                demand_sender: None,
                 parent,
             });
             // SAFETY: The registered Objective-C class uses the same pointer-sized ivar. The Box
@@ -269,6 +272,7 @@ mod native {
             self.state.order = order;
             if !presented {
                 self.state.selection_sender = None;
+                self.state.demand_sender = None;
             }
             self.state.visible &= presented;
             self.state.focused &= presented;
@@ -295,6 +299,7 @@ mod native {
                 focused,
                 notifications,
                 selection_sender,
+                demand_sender,
             } = update;
             let was_focused = self.state.focused;
             let parent = native_view(window).unwrap_or(nil);
@@ -311,6 +316,7 @@ mod native {
                 self.state.model = model.clone();
             }
             self.state.selection_sender = selection_sender.filter(|_| self.state.presented);
+            self.state.demand_sender = demand_sender.filter(|_| self.state.presented);
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
             let point_size = f32::from(font_size);
@@ -684,6 +690,17 @@ mod native {
         }
     }
 
+    fn semantic_state(this: &Object) -> Option<&AccessibilityElementState> {
+        let state = state(this)?;
+        if state.visible
+            && state.registered
+            && let Some(sender) = &state.demand_sender
+        {
+            sender.request();
+        }
+        Some(state)
+    }
+
     fn ns_range(range: Range<usize>) -> NSRange {
         NSRange {
             location: range.start as NSUInteger,
@@ -850,7 +867,7 @@ mod native {
     }
 
     extern "C" fn accessibility_value(this: &Object, _: Sel) -> id {
-        state(this).map_or(nil, |state| ns_string(state.model.text()))
+        semantic_state(this).map_or(nil, |state| ns_string(state.model.text()))
     }
 
     extern "C" fn accessibility_frame(this: &Object, _: Sel) -> NSRect {
@@ -874,21 +891,22 @@ mod native {
     }
 
     extern "C" fn accessibility_number_of_characters(this: &Object, _: Sel) -> NSInteger {
-        state(this).map_or(0, |state| {
+        semantic_state(this).map_or(0, |state| {
             NSInteger::try_from(state.model.len_utf16()).unwrap_or(NSInteger::MAX)
         })
     }
 
     extern "C" fn accessibility_visible_character_range(this: &Object, _: Sel) -> NSRange {
-        state(this).map_or_else(invalid_range, |state| ns_range(state.model.visible_range()))
+        semantic_state(this)
+            .map_or_else(invalid_range, |state| ns_range(state.model.visible_range()))
     }
 
     extern "C" fn accessibility_selected_text_range(this: &Object, _: Sel) -> NSRange {
-        state(this).map_or_else(invalid_range, |state| ns_range(state.selected_range()))
+        semantic_state(this).map_or_else(invalid_range, |state| ns_range(state.selected_range()))
     }
 
     extern "C" fn set_accessibility_selected_text_range(this: &Object, _: Sel, range: NSRange) {
-        let Some((sender, request)) = state(this)
+        let Some((sender, request)) = semantic_state(this)
             .filter(|state| state.visible && state.registered)
             .and_then(|state| {
                 Some((
@@ -903,13 +921,13 @@ mod native {
     }
 
     extern "C" fn accessibility_selected_text(this: &Object, _: Sel) -> id {
-        state(this)
+        semantic_state(this)
             .and_then(AccessibilityElementState::selected_text)
             .map_or(nil, |text| ns_string(&text))
     }
 
     extern "C" fn accessibility_string_for_range(this: &Object, _: Sel, range: NSRange) -> id {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.string_for_range(rust_range(range)?))
             .map_or(nil, |text| ns_string(&text))
     }
@@ -919,13 +937,13 @@ mod native {
         _: Sel,
         range: NSRange,
     ) -> id {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.attributed_text_for_range(rust_range(range)?))
             .map_or(nil, |text| ns_attributed_string(&text))
     }
 
     extern "C" fn accessibility_range_for_line(this: &Object, _: Sel, line: NSInteger) -> NSRange {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.model.range_for_line(usize::try_from(line).ok()?))
             .map_or_else(invalid_range, ns_range)
     }
@@ -935,7 +953,7 @@ mod native {
         _: Sel,
         index: NSInteger,
     ) -> NSInteger {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.model.line_for_index(usize::try_from(index).ok()?))
             .and_then(|line| NSInteger::try_from(line).ok())
             .unwrap_or(-1)
@@ -946,7 +964,7 @@ mod native {
         _: Sel,
         index: NSInteger,
     ) -> NSRange {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.model.range_for_index(usize::try_from(index).ok()?))
             .map_or_else(invalid_range, ns_range)
     }
@@ -956,13 +974,13 @@ mod native {
         _: Sel,
         point: NSPoint,
     ) -> NSRange {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.range_for_screen_point(point.x, point.y))
             .map_or_else(invalid_range, ns_range)
     }
 
     extern "C" fn accessibility_frame_for_range(this: &Object, _: Sel, range: NSRange) -> NSRect {
-        state(this)
+        semantic_state(this)
             .and_then(|state| state.screen_bounds_for_range(rust_range(range)?))
             .map_or_else(empty_rect, ns_rect)
     }

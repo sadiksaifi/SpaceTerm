@@ -1,6 +1,7 @@
 use super::local_authority::LocalFileAccess;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::platform::local_filesystem::{
     LocalFileEmissionRegistry, LocalFilesystemAuthority, ValidatedLocalFile,
@@ -249,9 +250,14 @@ fn file_url(path: &str) -> String {
     crate::local_path::LocalPathSemantics::Posix.file_url(path)
 }
 
-pub(crate) fn detect_url_cells(cells: &[String]) -> Vec<Option<HyperlinkTarget>> {
+pub(crate) fn detect_url_cells<'a>(
+    cells: impl Clone + ExactSizeIterator<Item = &'a str>,
+) -> Vec<Option<Arc<HyperlinkTarget>>> {
     let mut result = vec![None; cells.len()];
-    let text = cells.concat();
+    let mut text = String::with_capacity(cells.clone().map(str::len).sum());
+    for cell in cells.clone() {
+        text.push_str(cell);
+    }
     let mut cell_offsets = Vec::with_capacity(cells.len() + 1);
     let mut offset = 0;
     for cell in cells {
@@ -262,16 +268,14 @@ pub(crate) fn detect_url_cells(cells: &[String]) -> Vec<Option<HyperlinkTarget>>
 
     for token in text.split_whitespace() {
         let token = token.trim_end_matches(|character: char| ",.;:!?)]}".contains(character));
-        let Some(target) = HyperlinkTarget::url(token) else {
+        let Some(target) = HyperlinkTarget::url(token).map(Arc::new) else {
             continue;
         };
-        let Some(start) = text.find(token) else {
-            continue;
-        };
+        let start = token.as_ptr() as usize - text.as_ptr() as usize;
         let end = start + token.len();
         for (index, range) in cell_offsets.windows(2).enumerate() {
             if range[0] < end && range[1] > start {
-                result[index] = Some(target.clone());
+                result[index] = Some(Arc::clone(&target));
             }
         }
     }
@@ -314,17 +318,42 @@ mod tests {
 
     #[test]
     fn unicode_byte_ranges_map_to_complete_cells() {
-        let cells = vec![
+        let cells = [
             "😀".to_owned(),
             " ".to_owned(),
             "https://例.test/a".to_owned(),
         ];
-        let links = detect_url_cells(&cells);
+        let links = detect_url_cells(cells.iter().map(String::as_str));
         assert!(links[0].is_none());
         assert_eq!(
             links[2].as_ref().map(|link| link.value.as_str()),
             Some("https://例.test/a")
         );
+    }
+
+    #[test]
+    fn repeated_urls_map_each_token_without_cloning_cell_text() {
+        let cells = [
+            "https://example.test".to_owned(),
+            " ".to_owned(),
+            "https://example.test".to_owned(),
+        ];
+        let links = detect_url_cells(cells.iter().map(String::as_str));
+
+        assert!(links[0].is_some());
+        assert!(links[1].is_none());
+        assert!(links[2].is_some());
+    }
+
+    #[test]
+    fn cells_in_one_url_share_one_target_allocation() {
+        let cells = ["https://".to_owned(), "example.test".to_owned()];
+        let links = detect_url_cells(cells.iter().map(String::as_str));
+
+        assert!(Arc::ptr_eq(
+            links[0].as_ref().unwrap(),
+            links[1].as_ref().unwrap()
+        ));
     }
 
     #[test]
@@ -408,7 +437,8 @@ mod tests {
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
 
-        let detected = detect_url_cells(&["preview.txt".to_owned()]);
+        let cells = ["preview.txt".to_owned()];
+        let detected = detect_url_cells(cells.iter().map(String::as_str));
 
         assert_eq!(detected, vec![None]);
         fs::remove_dir_all(directory).unwrap();

@@ -707,6 +707,10 @@ impl TerminalAccessibilityModel {
         }
     }
 
+    pub(crate) fn generation(&self) -> PresentationGeneration {
+        self.data.generation
+    }
+
     pub(crate) fn shares_snapshot(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.data, &other.data)
     }

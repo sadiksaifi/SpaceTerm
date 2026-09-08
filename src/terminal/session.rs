@@ -225,6 +225,34 @@ impl AccessibilitySelectionSender {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct AccessibilityDemandSender {
+    commands: CommandSender<Command>,
+    schedule_input: ScheduleInput,
+}
+
+impl fmt::Debug for AccessibilityDemandSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AccessibilityDemandSender")
+    }
+}
+
+impl AccessibilityDemandSender {
+    pub(crate) fn request(&self) {
+        self.request_at(Instant::now());
+    }
+
+    fn request_at(&self, requested_at: Instant) {
+        if self
+            .schedule_input
+            .enqueue_accessibility_demand(requested_at)
+            && self.commands.send(Command::AccessibilityDemand).is_err()
+        {
+            eprintln!("terminal accessibility demand was dropped because the worker has stopped");
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct RecordingAccessibilitySelectionReceiver(CommandReceiver<Command>);
 
@@ -272,6 +300,10 @@ pub(crate) trait TerminalSessionHandle {
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
     }
+    fn accessibility_demand_sender(&self) -> Option<AccessibilityDemandSender> {
+        None
+    }
+    fn set_presentable(&self, _presentable: bool) {}
 }
 
 /// Starts one Terminal Session by consuming typed Local or Remote launch authority.
@@ -515,6 +547,25 @@ impl TerminalSessionHandle for TerminalSession {
                 commands: commands.clone(),
             })
     }
+
+    fn accessibility_demand_sender(&self) -> Option<AccessibilityDemandSender> {
+        self.commands
+            .as_ref()
+            .map(|commands| AccessibilityDemandSender {
+                commands: commands.clone(),
+                schedule_input: self.schedule_input.clone(),
+            })
+    }
+
+    fn set_presentable(&self, presentable: bool) {
+        self.schedule_input
+            .set_accessibility_demand_enabled(presentable);
+        if let Some(commands) = &self.commands
+            && commands.send(Command::SetPresentable(presentable)).is_err()
+        {
+            eprintln!("terminal presentation state was dropped because the worker has stopped");
+        }
+    }
 }
 
 impl Drop for TerminalSession {
@@ -587,11 +638,32 @@ enum Command {
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
     ),
     AccessibilitySelection(AccessibilitySelectionRequest),
+    AccessibilityDemand,
     AccessibilityContinue,
+    PublishAccessibility,
     SelectionAutoscrollTick(PresentationGeneration),
+    PublishPendingScreen,
+    SetPresentable(bool),
     ReaderReady,
     Shutdown,
     PollHiddenInput,
+}
+
+impl Command {
+    fn requires_presentation_barrier(&self) -> bool {
+        matches!(
+            self,
+            Self::Pointer(..)
+                | Self::PointerAndCopySelection(..)
+                | Self::Wheel(..)
+                | Self::ScrollTo(..)
+                | Self::SelectionCopy(Some(_), _)
+                | Self::AccessibilitySelection(..)
+                | Self::AccessibilityContinue
+                | Self::PublishAccessibility
+                | Self::SelectionAutoscrollTick(..)
+        )
+    }
 }
 
 impl fmt::Debug for Command {
@@ -611,8 +683,12 @@ impl fmt::Debug for Command {
             Self::PasteConfirmationExpired => "PasteConfirmationExpired",
             Self::SelectionCopy(..) => "SelectionCopy",
             Self::AccessibilitySelection(..) => "AccessibilitySelection",
+            Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
+            Self::PublishAccessibility => "PublishAccessibility",
             Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
+            Self::PublishPendingScreen => "PublishPendingScreen",
+            Self::SetPresentable(..) => "SetPresentable",
             Self::ReaderReady => "ReaderReady",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
@@ -842,10 +918,15 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        // A command removed from the shared queue while batching PTY output owns this
+        // single slot. Run it before schedules can install barrier work into the slot.
+        if let Some(command) = self.pending_command.take() {
+            return Some(self.note_normal_command(command));
+        }
         if self.schedules.must_continue_accessibility() {
             return self.take_accessibility_continuation();
         }
-        if let Some(command) = self.pending_command.take() {
+        if let Some(command) = self.schedules.take_due(Instant::now()) {
             return Some(self.note_normal_command(command));
         }
         if self.schedules.accessibility_pending() {
@@ -886,13 +967,26 @@ impl TerminalWorker {
         if !matches!(&command, Command::AccessibilityContinue) {
             self.schedules.note_normal_command();
         }
-        command
+        self.order_presentation_barrier(command)
+    }
+
+    fn order_presentation_barrier(&mut self, command: Command) -> Command {
+        if command.requires_presentation_barrier() && self.schedules.take_presentation_barrier() {
+            self.pending_command = Some(if matches!(&command, Command::AccessibilityContinue) {
+                Command::PublishAccessibility
+            } else {
+                command
+            });
+            Command::PublishPendingScreen
+        } else {
+            command
+        }
     }
 
     fn take_accessibility_continuation(&mut self) -> Option<Command> {
         self.schedules
             .take_accessibility_continuation()
-            .then_some(Command::AccessibilityContinue)
+            .then(|| self.order_presentation_barrier(Command::AccessibilityContinue))
     }
 
     fn process_command(&mut self, command: Command) -> bool {
@@ -960,6 +1054,9 @@ impl TerminalWorker {
                 }
             },
             Command::ScrollTo(offset_rows, generation) => {
+                if self.emulator.synchronized_output_deadline().is_some() {
+                    return true;
+                }
                 let action = self.emulator.scroll_to_at(offset_rows, generation);
                 self.apply_emulator_action(action)
             }
@@ -1014,8 +1111,16 @@ impl TerminalWorker {
                     }
                 }
             }
+            Command::AccessibilityDemand => {
+                self.schedules.accessibility_demand_received(Instant::now());
+                true
+            }
             Command::AccessibilityContinue => self.publish_accessibility(false),
+            Command::PublishAccessibility => self.publish_accessibility(true),
             Command::SelectionAutoscrollTick(generation) => {
+                if self.emulator.synchronized_output_deadline().is_some() {
+                    return true;
+                }
                 match self.emulator.selection_autoscroll_tick(generation) {
                     Ok(action) => {
                         self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
@@ -1024,6 +1129,16 @@ impl TerminalWorker {
                         self.send_runtime_failure(message);
                         false
                     }
+                }
+            }
+            Command::PublishPendingScreen => self.publish_screen(),
+            Command::SetPresentable(presentable) => {
+                let now = Instant::now();
+                self.schedules.set_presentable(presentable, now);
+                if self.schedules.presentation_due(now) {
+                    self.publish_screen()
+                } else {
+                    true
                 }
             }
             Command::Shutdown => false,
@@ -1179,7 +1294,7 @@ impl TerminalWorker {
         }
 
         if let Some(read_error) = reader_stopped {
-            if !self.flush_synchronized_output() {
+            if !self.end_synchronized_output() {
                 return false;
             }
             let event = classify_reader_stop(
@@ -1188,6 +1303,9 @@ impl TerminalWorker {
             );
             self.emulator.mark_metadata_stale();
             if !self.publish_screen() {
+                return false;
+            }
+            if !self.publish_final_accessibility() {
                 return false;
             }
             self.send_terminal_event(event);
@@ -1259,12 +1377,17 @@ impl TerminalWorker {
             }
         }
 
-        if received_output
-            && (!self.flush_ordered_terminal_replies(&mut focus_reports)
+        if received_output {
+            if !self.flush_ordered_terminal_replies(&mut focus_reports)
                 || !self.hidden_input_transition()
-                || !self.publish_screen())
-        {
-            return false;
+            {
+                return false;
+            }
+            if self.emulator.synchronized_output_deadline().is_none()
+                && !self.request_presentation()
+            {
+                return false;
+            }
         }
         true
     }
@@ -1352,7 +1475,7 @@ impl TerminalWorker {
     fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
         self.write_pending_pty_responses()
             && (action.bytes.is_empty() || self.write_pty(&action.bytes))
-            && (!action.screen_changed || self.publish_screen())
+            && (!action.screen_changed || self.publish_visible_screen_change())
     }
 
     fn apply_terminal_input_action(&mut self, action: EmulatorAction) -> bool {
@@ -1365,7 +1488,16 @@ impl TerminalWorker {
         if !action.bytes.is_empty() && !self.hidden_input_transition() {
             return false;
         }
-        !action.screen_changed || self.publish_screen()
+        !action.screen_changed || self.publish_visible_screen_change()
+    }
+
+    fn publish_visible_screen_change(&mut self) -> bool {
+        self.schedules.request_presentation();
+        if self.schedules.take_visible_presentation() {
+            self.publish_screen()
+        } else {
+            true
+        }
     }
 
     fn write_pending_pty_responses(&mut self) -> bool {
@@ -1386,15 +1518,28 @@ impl TerminalWorker {
     }
 
     fn publish_screen(&mut self) -> bool {
-        if !self.publish_accessibility(true) {
+        if self.events.is_closed() {
             return false;
         }
 
         match self.emulator.snapshot() {
-            Ok(Some(snapshot)) => self
-                .events
-                .force_send(SessionEvent::Screen(snapshot))
-                .is_ok(),
+            Ok(Some(snapshot)) => {
+                let result = self
+                    .events
+                    .force_send(SessionEvent::Screen(snapshot))
+                    .is_ok();
+                if result {
+                    let now = Instant::now();
+                    self.schedules.mark_presented(now);
+                    self.schedules.update_accessibility(false);
+                    if !self.accessibility.is_closed() {
+                        self.schedules.note_screen_published();
+                    } else {
+                        self.schedules.disable_accessibility();
+                    }
+                }
+                result
+            }
             Ok(None) => true,
             Err(error) => {
                 self.send_runtime_failure(format!(
@@ -1405,18 +1550,45 @@ impl TerminalWorker {
         }
     }
 
-    fn publish_accessibility(&mut self, bind_next_presentation: bool) -> bool {
-        let (accessibility, more) =
-            match self.emulator.accessibility_snapshot(bind_next_presentation) {
-                Ok(update) => update,
-                Err(error) => {
-                    self.send_runtime_failure(format!(
-                        "failed to produce terminal accessibility snapshot: {error}"
-                    ));
-                    return false;
-                }
-            };
+    fn request_presentation(&mut self) -> bool {
+        self.request_presentation_at(Instant::now())
+    }
+
+    fn request_presentation_at(&mut self, now: Instant) -> bool {
+        self.schedules.request_presentation();
+        if self.schedules.presentation_due(now) {
+            self.publish_screen()
+        } else {
+            true
+        }
+    }
+
+    fn publish_accessibility(&mut self, bind_current_presentation: bool) -> bool {
+        if self.accessibility.is_closed() {
+            self.schedules.disable_accessibility();
+            return true;
+        }
+        if self.emulator.synchronized_output_deadline().is_some() {
+            return true;
+        }
+        let update = if bind_current_presentation {
+            self.emulator
+                .accessibility_snapshot_for_current_presentation()
+        } else {
+            self.emulator.accessibility_snapshot(false)
+        };
+        let (accessibility, more) = match update {
+            Ok(update) => update,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to produce terminal accessibility snapshot: {error}"
+                ));
+                return false;
+            }
+        };
         self.schedules.update_accessibility(more);
+        self.schedules
+            .mark_accessibility_presented(Instant::now(), !more);
         if let Some(accessibility) = accessibility {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
@@ -1425,9 +1597,22 @@ impl TerminalWorker {
         true
     }
 
+    fn publish_final_accessibility(&mut self) -> bool {
+        let mut bind_current_presentation = true;
+        loop {
+            if !self.publish_accessibility(bind_current_presentation) {
+                return false;
+            }
+            bind_current_presentation = false;
+            if !self.schedules.take_accessibility_continuation() {
+                return true;
+            }
+        }
+    }
+
     fn release_synchronized_output_if_due(&mut self, now: Instant) -> bool {
         match self.emulator.expire_synchronized_output(now) {
-            Ok(true) => self.publish_screen(),
+            Ok(true) => self.request_presentation_at(now),
             Ok(false) => true,
             Err(error) => {
                 self.send_runtime_failure(format!(
@@ -1438,13 +1623,12 @@ impl TerminalWorker {
         }
     }
 
-    fn flush_synchronized_output(&mut self) -> bool {
+    fn end_synchronized_output(&mut self) -> bool {
         match self.emulator.end_synchronized_output() {
-            Ok(true) => self.publish_screen(),
-            Ok(false) => true,
+            Ok(_) => true,
             Err(error) => {
                 self.send_runtime_failure(format!(
-                    "failed to flush synchronized terminal output: {error}"
+                    "failed to end synchronized terminal output: {error}"
                 ));
                 false
             }

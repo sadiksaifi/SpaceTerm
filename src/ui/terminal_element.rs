@@ -3044,14 +3044,14 @@ mod tests {
     fn hyperlink_hover_underlines_only_undecorated_cells_in_mixed_spans() {
         let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
         let mut plain_first = cell("a");
-        plain_first.hyperlink = Some(link.clone());
+        plain_first.hyperlink = Some(Arc::new(link.clone()));
         let mut decorated = cell("b");
-        decorated.hyperlink = Some(link.clone());
+        decorated.hyperlink = Some(Arc::new(link.clone()));
         decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Curly;
         let mut plain_second = cell("c");
-        plain_second.hyperlink = Some(link.clone());
+        plain_second.hyperlink = Some(Arc::new(link.clone()));
         let mut other = cell("d");
-        other.hyperlink = crate::terminal::HyperlinkTarget::url("https://other.test");
+        other.hyperlink = crate::terminal::HyperlinkTarget::url("https://other.test").map(Arc::new);
         let row = Arc::<[CellSnapshot]>::from([plain_first, decorated, plain_second, other]);
         let screen = ScreenSnapshot::from_test_parts(
             Arc::from([Arc::clone(&row)]),
@@ -3088,10 +3088,10 @@ mod tests {
     fn hyperlink_hover_underlines_only_the_hovered_occurrence_when_targets_repeat() {
         let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
         let mut first = cell("a");
-        first.hyperlink = Some(link.clone());
+        first.hyperlink = Some(Arc::new(link.clone()));
         let separator = cell(" ");
         let mut second = cell("b");
-        second.hyperlink = Some(link.clone());
+        second.hyperlink = Some(Arc::new(link.clone()));
         let row = Arc::<[CellSnapshot]>::from([first, separator, second]);
         let screen = ScreenSnapshot::from_test_parts(
             Arc::from([Arc::clone(&row)]),

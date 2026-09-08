@@ -6,12 +6,15 @@ use std::sync::{Mutex, MutexGuard};
 const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
 const HIDDEN_INPUT_IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
+const PRESENTATION_INTERVAL: Duration = Duration::from_micros(16_667);
+const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The Session handle can enqueue coalesced work without accessing worker schedules.
 #[derive(Clone, Default)]
 pub(super) struct ScheduleInput {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
+    accessibility_demand: AccessibilityDemandMailbox,
 }
 
 impl ScheduleInput {
@@ -31,14 +34,24 @@ impl ScheduleInput {
     pub(super) fn enqueue_find_end(&self, generation: FindQueryGeneration) -> bool {
         self.find_queries.replace(FindQueryUpdate::End(generation))
     }
+
+    pub(super) fn enqueue_accessibility_demand(&self, requested_at: Instant) -> bool {
+        self.accessibility_demand.request(requested_at)
+    }
+
+    pub(super) fn set_accessibility_demand_enabled(&self, enabled: bool) {
+        self.accessibility_demand.set_enabled(enabled);
+    }
 }
 
 pub(super) struct WorkerSchedules {
     input: ScheduleInput,
     accessibility_continuation: AccessibilityContinuationSchedule,
+    accessibility_presentation: AccessibilityPresentationSchedule,
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
     hidden_input: HiddenInputSchedule,
+    presentation: PresentationSchedule,
 }
 
 impl WorkerSchedules {
@@ -70,6 +83,32 @@ impl WorkerSchedules {
         self.accessibility_continuation.take()
     }
 
+    pub(super) fn note_screen_published(&mut self) {
+        self.accessibility_presentation.note_screen_published();
+    }
+
+    pub(super) fn accessibility_demand_received(&mut self, now: Instant) {
+        let Some(requested_at) = self.input.accessibility_demand.latest_request() else {
+            return;
+        };
+        if !self
+            .accessibility_presentation
+            .activate_demand(requested_at, now)
+        {
+            self.input.accessibility_demand.clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn accessibility_presentation_due(&mut self, now: Instant) -> bool {
+        self.accessibility_presentation.take_due(now)
+    }
+
+    pub(super) fn mark_accessibility_presented(&mut self, now: Instant, complete: bool) {
+        self.accessibility_presentation
+            .mark_presented(now, complete);
+    }
+
     pub(super) fn update_selection_autoscroll(
         &mut self,
         now: Instant,
@@ -89,6 +128,45 @@ impl WorkerSchedules {
 
     pub(super) fn hidden_input_transition(&mut self, now: Instant) {
         self.hidden_input.transition(now);
+    }
+
+    pub(super) fn request_presentation(&mut self) {
+        self.presentation.request();
+    }
+
+    pub(super) fn presentation_due(&mut self, now: Instant) -> bool {
+        self.presentation.take_due(now)
+    }
+
+    pub(super) fn take_presentation_barrier(&mut self) -> bool {
+        self.presentation.take_pending()
+    }
+
+    pub(super) fn take_visible_presentation(&mut self) -> bool {
+        self.presentation.take_visible_pending()
+    }
+
+    pub(super) fn mark_presented(&mut self, now: Instant) {
+        self.presentation.mark_presented(now);
+    }
+
+    pub(super) fn set_presentable(&mut self, presentable: bool, now: Instant) {
+        self.input.set_accessibility_demand_enabled(presentable);
+        self.presentation.set_presentable(presentable, now);
+        self.accessibility_presentation
+            .set_presentable(presentable, now);
+        if !presentable {
+            self.accessibility_continuation.update(false);
+            self.input.accessibility_demand.clear();
+            self.selection_autoscroll.cancel();
+        }
+    }
+
+    pub(super) fn disable_accessibility(&mut self) {
+        self.accessibility_continuation.update(false);
+        self.accessibility_presentation.disable();
+        self.input.accessibility_demand.clear();
+        self.input.set_accessibility_demand_enabled(false);
     }
 
     pub(super) fn request_paste_confirmation(
@@ -115,9 +193,11 @@ impl WorkerSchedules {
         Self {
             input,
             accessibility_continuation: AccessibilityContinuationSchedule::default(),
+            accessibility_presentation: AccessibilityPresentationSchedule::new(now),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
             hidden_input: HiddenInputSchedule::new(now),
+            presentation: PresentationSchedule::new(now),
         }
     }
 
@@ -126,6 +206,8 @@ impl WorkerSchedules {
             synchronized_output,
             self.selection_autoscroll.deadline(),
             self.paste_confirmations.deadline(),
+            self.presentation.deadline(),
+            self.accessibility_presentation.deadline(),
             Some(self.hidden_input.deadline),
         ]
         .into_iter()
@@ -139,6 +221,12 @@ impl WorkerSchedules {
         }
         if self.paste_confirmations.expire(now) {
             return Some(Command::PasteConfirmationExpired);
+        }
+        if self.presentation.take_due(now) {
+            return Some(Command::PublishPendingScreen);
+        }
+        if self.accessibility_presentation.take_due(now) {
+            return Some(Command::PublishAccessibility);
         }
         (now >= self.hidden_input.deadline).then_some(Command::PollHiddenInput)
     }
@@ -300,6 +388,320 @@ mod tests {
         schedules.update_hidden_input(due, Ok(false));
         assert!(schedules.take_due(due).is_none());
     }
+
+    #[test]
+    fn presentation_schedule_coalesces_repeated_requests_to_one_display_interval() {
+        let start = Instant::now();
+        let mut schedule = PresentationSchedule::new(start);
+
+        schedule.request();
+        assert!(schedule.take_due(start));
+        schedule.mark_presented(start);
+
+        schedule.request();
+        schedule.request();
+        assert_eq!(schedule.deadline(), Some(start + PRESENTATION_INTERVAL));
+        assert!(!schedule.take_due(start + PRESENTATION_INTERVAL - Duration::from_micros(1)));
+        assert!(schedule.take_due(start + PRESENTATION_INTERVAL));
+        assert!(!schedule.take_due(start + PRESENTATION_INTERVAL));
+    }
+
+    #[test]
+    fn hidden_presentation_retains_only_pending_work_and_restores_it_immediately() {
+        let start = Instant::now();
+        let mut schedule = PresentationSchedule::new(start);
+        schedule.mark_presented(start);
+        schedule.set_presentable(false, start);
+
+        schedule.request();
+        schedule.request();
+        assert_eq!(schedule.deadline(), None);
+        assert!(!schedule.take_due(start + Duration::from_secs(1)));
+
+        let restored = start + Duration::from_secs(1);
+        schedule.set_presentable(true, restored);
+        assert_eq!(schedule.deadline(), Some(restored));
+        assert!(schedule.take_due(restored));
+        assert!(!schedule.take_due(restored));
+    }
+
+    #[test]
+    fn presentation_barrier_flushes_visible_work_before_generation_sensitive_input() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.mark_presented(start);
+        schedules.request_presentation();
+
+        assert!(schedules.take_presentation_barrier());
+        assert!(!schedules.take_presentation_barrier());
+
+        schedules.set_presentable(false, start);
+        schedules.request_presentation();
+        assert!(schedules.take_presentation_barrier());
+    }
+
+    #[test]
+    fn hidden_presentation_cancels_background_accessibility_and_autoscroll_work() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_accessibility(true);
+        schedules.update_selection_autoscroll(
+            start,
+            Some(Duration::from_millis(20)),
+            PresentationGeneration::default(),
+        );
+
+        schedules.set_presentable(false, start);
+
+        assert!(!schedules.accessibility_pending());
+        assert!(!matches!(
+            schedules.take_due(start + Duration::from_millis(20)),
+            Some(Command::SelectionAutoscrollTick(_))
+        ));
+    }
+
+    #[test]
+    fn accessibility_presentation_is_seeded_then_paced_only_during_native_demand() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+
+        schedules
+            .input
+            .enqueue_accessibility_demand(start + Duration::from_secs(1));
+        schedules.accessibility_demand_received(start + Duration::from_secs(1));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        schedules.mark_accessibility_presented(start + Duration::from_secs(1), true);
+
+        schedules.note_screen_published();
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(
+            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
+                - Duration::from_micros(1)
+        ));
+        assert!(schedules.accessibility_presentation_due(
+            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn accessibility_demand_mailbox_coalesces_one_visible_lifetime_activation() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        assert!(input.enqueue_accessibility_demand(start));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_millis(400)));
+        schedules.accessibility_demand_received(start + Duration::from_millis(400));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_millis(400)));
+        schedules.mark_accessibility_presented(start + Duration::from_millis(400), true);
+
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn restoring_visibility_reuses_a_complete_accessibility_cache_until_demanded() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        schedules.set_presentable(false, start + ACCESSIBILITY_PRESENTATION_INTERVAL);
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        schedules.set_presentable(true, start + Duration::from_secs(1));
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        assert!(input.enqueue_accessibility_demand(start + Duration::from_secs(1)));
+        schedules.accessibility_demand_received(start + Duration::from_secs(1));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn incomplete_accessibility_seed_survives_a_new_screen_generation() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, false);
+
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(
+            start + ACCESSIBILITY_PRESENTATION_INTERVAL - Duration::from_micros(1)
+        ));
+        assert!(
+            schedules.accessibility_presentation_due(start + ACCESSIBILITY_PRESENTATION_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn hiding_clears_accessibility_demand_and_pending_refreshes() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        assert!(input.enqueue_accessibility_demand(start));
+        schedules.accessibility_demand_received(start);
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+        schedules.note_screen_published();
+
+        schedules.set_presentable(false, start + Duration::from_millis(50));
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
+    }
+}
+
+struct AccessibilityPresentationSchedule {
+    presentable: bool,
+    pending: bool,
+    seed_required: bool,
+    not_before: Instant,
+    demand_request: Option<Instant>,
+}
+
+impl AccessibilityPresentationSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            presentable: true,
+            pending: false,
+            seed_required: true,
+            not_before: now,
+            demand_request: None,
+        }
+    }
+
+    fn note_screen_published(&mut self) {
+        if self.seed_required || self.demand_request.is_some() {
+            self.pending = true;
+        }
+    }
+
+    fn activate_demand(&mut self, requested_at: Instant, now: Instant) -> bool {
+        if !self.presentable {
+            return false;
+        }
+        let was_inactive = self.demand_request.is_none();
+        self.demand_request = Some(requested_at);
+        if was_inactive {
+            self.pending = true;
+            self.not_before = now;
+        }
+        true
+    }
+
+    fn set_presentable(&mut self, presentable: bool, now: Instant) {
+        if presentable && !self.presentable {
+            self.not_before = now;
+            self.pending = self.seed_required;
+        } else if !presentable {
+            self.pending = false;
+            self.demand_request = None;
+        }
+        self.presentable = presentable;
+    }
+
+    fn mark_presented(&mut self, now: Instant, complete: bool) {
+        self.pending = false;
+        if complete {
+            self.seed_required = false;
+        }
+        self.not_before = now + ACCESSIBILITY_PRESENTATION_INTERVAL;
+    }
+
+    fn disable(&mut self) {
+        self.pending = false;
+        self.seed_required = false;
+        self.demand_request = None;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        if !self.presentable {
+            return None;
+        }
+        self.pending.then_some(self.not_before)
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.presentable && self.pending && now >= self.not_before {
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct PresentationSchedule {
+    presentable: bool,
+    pending: bool,
+    not_before: Instant,
+}
+
+impl PresentationSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            presentable: true,
+            pending: false,
+            not_before: now,
+        }
+    }
+
+    fn request(&mut self) {
+        self.pending = true;
+    }
+
+    fn set_presentable(&mut self, presentable: bool, now: Instant) {
+        if presentable && !self.presentable {
+            self.not_before = now;
+        }
+        self.presentable = presentable;
+    }
+
+    fn mark_presented(&mut self, now: Instant) {
+        self.pending = false;
+        self.not_before = now + PRESENTATION_INTERVAL;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        (self.presentable && self.pending).then_some(self.not_before)
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.take_pending()
+        } else {
+            false
+        }
+    }
+
+    fn take_pending(&mut self) -> bool {
+        if self.pending {
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn take_visible_pending(&mut self) -> bool {
+        self.presentable && self.take_pending()
+    }
 }
 
 #[derive(Default)]
@@ -406,6 +808,10 @@ impl SelectionAutoscrollSchedule {
         self.deadline
     }
 
+    fn cancel(&mut self) {
+        self.deadline = None;
+    }
+
     fn take_due(&mut self, now: Instant) -> Option<PresentationGeneration> {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.deadline = None;
@@ -467,6 +873,69 @@ impl FindQueryMailbox {
     fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
         self.pending.lock().unwrap_or_else(|poisoned| {
             eprintln!("terminal Find mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct AccessibilityDemandMailbox {
+    state: Arc<Mutex<AccessibilityDemandMailboxState>>,
+}
+
+struct AccessibilityDemandMailboxState {
+    latest_request: Option<Instant>,
+    notified: bool,
+    enabled: bool,
+}
+
+impl Default for AccessibilityDemandMailboxState {
+    fn default() -> Self {
+        Self {
+            latest_request: None,
+            notified: false,
+            enabled: true,
+        }
+    }
+}
+
+impl AccessibilityDemandMailbox {
+    fn request(&self, requested_at: Instant) -> bool {
+        let mut state = self.lock();
+        if !state.enabled {
+            return false;
+        }
+        state.latest_request = Some(requested_at);
+        if state.notified {
+            false
+        } else {
+            state.notified = true;
+            true
+        }
+    }
+
+    fn latest_request(&self) -> Option<Instant> {
+        self.lock().latest_request
+    }
+
+    fn clear(&self) {
+        let mut state = self.lock();
+        state.latest_request = None;
+        state.notified = false;
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        let mut state = self.lock();
+        state.enabled = enabled;
+        if !enabled {
+            state.latest_request = None;
+            state.notified = false;
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, AccessibilityDemandMailboxState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal accessibility demand mailbox recovered after a worker panic");
             poisoned.into_inner()
         })
     }

@@ -75,9 +75,9 @@ pub(crate) use paste::{
 #[cfg(test)]
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
-pub(crate) use session::AccessibilitySelectionSender;
 #[cfg(test)]
 pub(crate) use session::SessionFailure;
+pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(test)]
 pub(crate) use session::{
     LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, SessionExit,

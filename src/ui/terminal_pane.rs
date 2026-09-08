@@ -384,6 +384,7 @@ pub(crate) struct TerminalPane {
     last_valid_screen: Arc<ScreenSnapshot>,
     last_valid_screen_session_epoch: u64,
     accessibility: Arc<TerminalAccessibilityModel>,
+    pending_accessibility: Option<(u64, Arc<TerminalAccessibilityModel>)>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
     pending_accessibility_notifications: AccessibilityNotifications,
     accessibility_needs_presentation: bool,
@@ -620,6 +621,7 @@ impl TerminalPane {
             last_valid_screen_session_epoch: 0,
             screen,
             accessibility,
+            pending_accessibility: None,
             accessibility_element,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
             accessibility_needs_presentation: false,
@@ -744,11 +746,13 @@ impl TerminalPane {
         {
             let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
         }
+        let was_presentable = self.render_lifecycle.can_present();
         self.product_focus = product_focus;
         let pane_visible = product_focus.active_tab && product_focus.pane_visible;
         let _ = self
             .render_lifecycle
             .update_product_visibility(product_focus.active_workspace, pane_visible);
+        self.sync_session_presentability(was_presentable);
         if !self.render_lifecycle.effects().animations_active {
             self.stop_surface_animations();
         }
@@ -1669,6 +1673,9 @@ impl TerminalPane {
                     cx.notify();
                 }
                 started.handle.focus(self.terminal_input_focus);
+                started
+                    .handle
+                    .set_presentable(self.render_lifecycle.can_present());
                 if let Some(input) = &self.find_input {
                     started
                         .handle
@@ -1700,6 +1707,7 @@ impl TerminalPane {
             pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let effects = self.render_lifecycle.update_visibility(surface);
+        self.sync_session_presentability(was_presentable);
         if was_presentable && !self.render_lifecycle.can_present() {
             self.evict_presentation_resources(cx);
         }
@@ -1713,6 +1721,15 @@ impl TerminalPane {
                 || !self.pending_accessibility_notifications.is_empty());
         if effects.request_redraw || accessibility_restored {
             cx.notify();
+        }
+    }
+
+    fn sync_session_presentability(&self, was_presentable: bool) {
+        let presentable = self.render_lifecycle.can_present();
+        if was_presentable != presentable
+            && let Some(session) = &self.terminal_session.session
+        {
+            session.set_presentable(presentable);
         }
     }
 
@@ -1732,6 +1749,11 @@ impl TerminalPane {
             .session
             .as_ref()
             .and_then(|session| session.accessibility_selection_sender());
+        let demand_sender = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.accessibility_demand_sender());
         self.pending_accessibility_notifications =
             self.accessibility_element
                 .update(TerminalAccessibilityUpdate {
@@ -1745,6 +1767,7 @@ impl TerminalPane {
                     focused,
                     notifications,
                     selection_sender,
+                    demand_sender,
                 });
         self.accessibility_needs_presentation = false;
     }
@@ -1780,6 +1803,7 @@ impl TerminalPane {
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
+                self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
             SessionEvent::Attention(event) => {
@@ -1858,7 +1882,49 @@ impl TerminalPane {
         accessibility: Arc<TerminalAccessibilityModel>,
     ) {
         if self.terminal_session.session_epoch == session_epoch {
-            self.handle_accessibility(accessibility);
+            self.handle_ordered_accessibility(session_epoch, accessibility);
+        }
+    }
+
+    fn handle_ordered_accessibility(
+        &mut self,
+        session_epoch: u64,
+        accessibility: Arc<TerminalAccessibilityModel>,
+    ) {
+        match self.terminal_session.accepted_screen_generation {
+            Some(screen_generation) if accessibility.generation() < screen_generation => {}
+            Some(screen_generation) if accessibility.generation() == screen_generation => {
+                self.pending_accessibility = None;
+                self.handle_accessibility(accessibility);
+            }
+            _ => {
+                let replace =
+                    self.pending_accessibility
+                        .as_ref()
+                        .is_none_or(|(pending_epoch, pending)| {
+                            *pending_epoch != session_epoch
+                                || accessibility.generation() >= pending.generation()
+                        });
+                if replace {
+                    self.pending_accessibility = Some((session_epoch, accessibility));
+                }
+            }
+        }
+    }
+
+    fn reconcile_pending_accessibility(&mut self) {
+        let Some((session_epoch, accessibility)) = self.pending_accessibility.take() else {
+            return;
+        };
+        if session_epoch != self.terminal_session.session_epoch {
+            return;
+        }
+        match self.terminal_session.accepted_screen_generation {
+            Some(screen_generation) if accessibility.generation() < screen_generation => {}
+            Some(screen_generation) if accessibility.generation() == screen_generation => {
+                self.handle_accessibility(accessibility);
+            }
+            _ => self.pending_accessibility = Some((session_epoch, accessibility)),
         }
     }
 
@@ -2887,7 +2953,7 @@ impl TerminalPane {
             .hyperlink
             .clone()
             .filter(|link| link.is_available(self.terminal_session.local_file_capabilities))?;
-        Some((cell, link))
+        Some((cell, link.as_ref().clone()))
     }
 
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3248,7 +3314,9 @@ impl Render for TerminalPane {
             workspace_visible: self.product_focus.active_workspace,
             pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
+        let was_presentable = self.render_lifecycle.can_present();
         let lifecycle_effects = self.render_lifecycle.update_visibility(surface_visibility);
+        self.sync_session_presentability(was_presentable);
         if !lifecycle_effects.animations_active {
             self.stop_surface_animations();
         }

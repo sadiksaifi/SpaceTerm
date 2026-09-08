@@ -164,7 +164,7 @@ fn context_action_screen(
             selected: selection_present,
             spacer_tail: false,
             semantic_content: crate::terminal::CellSemanticSnapshot::Output,
-            hyperlink: link,
+            hyperlink: link.map(Arc::new),
         }])]),
         ScrollbarSnapshot::default(),
         "context action",
@@ -293,6 +293,17 @@ fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualT
     (pane, cx)
 }
 
+fn latest_recorded_presentability(records: &TestTerminalSessionRecords) -> Option<bool> {
+    records
+        .commands()
+        .into_iter()
+        .rev()
+        .find_map(|call| match call.command {
+            RecordedSessionCommand::SetPresentable(presentable) => Some(presentable),
+            _ => None,
+        })
+}
+
 #[gpui::test]
 fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_polling(
     cx: &mut TestAppContext,
@@ -344,6 +355,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
             && pane._blink_task.is_none()
             && pane._attention_task.is_none())
     );
+    assert_eq!(latest_recorded_presentability(&records), Some(false));
     let notifications = Rc::new(Cell::new(0));
     cx.update(|_, cx| {
         let notifications = notifications.clone();
@@ -371,6 +383,18 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     factory.set_visibility(window_id, WindowVisibility::default());
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| pane.render_lifecycle.can_present()));
+    assert_eq!(latest_recorded_presentability(&records), Some(true));
+    pane.update(cx, |pane, _| {
+        pane.set_product_focus(TerminalProductFocus {
+            active_tab: false,
+            ..TerminalProductFocus::default()
+        });
+    });
+    assert_eq!(latest_recorded_presentability(&records), Some(false));
+    pane.update(cx, |pane, _| {
+        pane.set_product_focus(TerminalProductFocus::default());
+    });
+    assert_eq!(latest_recorded_presentability(&records), Some(true));
     assert!(notifications.get() > 0);
     let (initial_accessibility, scrolled_accessibility) =
         crate::terminal::testing::test_accessibility_viewport_models(
@@ -1231,6 +1255,30 @@ fn accessibility_uses_its_bounded_latest_lane_instead_of_screen_rows(cx: &mut Te
     cx.run_until_parked();
 
     assert!(pane.read_with(cx, |pane, _| pane.accessibility.text() == "latest"));
+}
+
+#[gpui::test]
+fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let old_screen = graphics_screen(40, 1);
+    let current_screen = graphics_screen(41, 2);
+    let ahead_screen = graphics_screen(42, 3);
+    let stale = Arc::new(TerminalAccessibilityModel::from_screen(&old_screen));
+    let ahead = Arc::new(TerminalAccessibilityModel::from_screen(&ahead_screen));
+
+    pane.update(cx, |pane, cx| {
+        assert!(pane.handle_event(SessionEvent::Screen(current_screen), cx));
+        let epoch = pane.terminal_session.session_epoch;
+        pane.handle_session_accessibility(epoch, Arc::clone(&stale));
+        assert!(!pane.accessibility.shares_snapshot(&stale));
+
+        pane.handle_session_accessibility(epoch, Arc::clone(&ahead));
+        assert!(!pane.accessibility.shares_snapshot(&ahead));
+        assert!(pane.handle_event(SessionEvent::Screen(ahead_screen), cx));
+        assert!(pane.accessibility.shares_snapshot(&ahead));
+    });
 }
 
 fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {

@@ -1323,9 +1323,9 @@ fn check_hyperlinks() -> Result<(), String> {
         Some("https://example.test/path".to_owned()),
     )?;
     let cells = ["go ".to_owned(), "https://example.test/path".to_owned()];
-    let detected = detect_url_cells(&cells);
+    let detected = detect_url_cells(cells.iter().map(String::as_str));
     require(
-        detected[0].is_none() && detected[1].as_ref() == Some(&target),
+        detected[0].is_none() && detected[1].as_deref() == Some(&target),
         "link-cell-mapping",
         format!("observed {detected:?}"),
     )?;
