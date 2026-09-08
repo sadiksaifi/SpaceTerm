@@ -32,5 +32,5 @@ important durable decisions.
 
 ## Work
 
-- Use the `Justfile` as the command authority.
+- Use the tasks in `.mise.toml` through `mise run` as the command authority.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.

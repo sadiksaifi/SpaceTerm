@@ -68,7 +68,7 @@ cleanup() {
 require_packager() {
     local version
     version="$(cargo packager --version 2>/dev/null)" \
-        || die "cargo-packager is unavailable; run: just install-packager"
+        || die "cargo-packager is unavailable; run: mise install"
     [[ "$version" == "cargo-packager $PACKAGER_VERSION" ]] \
         || die "cargo-packager $PACKAGER_VERSION is required, got: $version"
 }

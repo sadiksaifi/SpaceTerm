@@ -33,7 +33,7 @@ same-generation delivery without another submission, occlusion eviction and imag
 restoration without new output, zero GPU reservation for images without placements,
 and quit waiting for cleanup of both live and already closing Remote Workspaces.
 Existing native tests exercise process termination, reaping, and runtime artifacts.
-`just validate` passed, including portable checks, native Adapter tests, linting,
+The full validation suite passed, including portable checks, native Adapter tests, linting,
 script checks, and terminal-library patch tests.
 
 A generated Python `getpass` prompt hid fixture input and normal shell input

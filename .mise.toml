@@ -1,0 +1,244 @@
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+zig = { version = "0.15.2", os = ["linux", "windows"] }
+shellcheck = "0.11.0"
+python = "3.13.15"
+"cargo:cargo-packager" = "0.11.8"
+
+# Homebrew carries the Zig patches required by Xcode 26.4 and newer.
+[bootstrap.packages]
+"brew:zig@0.15" = "latest"
+
+[env]
+_.path = ["/opt/homebrew/opt/zig@0.15/bin", "/usr/local/opt/zig@0.15/bin"]
+
+[tasks.setup]
+description = "Prepare a checkout for development"
+run = [
+  "mise bootstrap packages apply --yes",
+  "git submodule update --init --recursive",
+  { task = "deps:fetch" },
+  { task = "doctor" },
+]
+
+[tasks.doctor]
+description = "Verify development and macOS packaging tools"
+run = '''
+set -eu
+cargo --version
+cargo clippy --version
+rustfmt --version
+cargo packager --version
+test "$(zig version)" = "0.15.2" || {
+  echo "Zig 0.15.2 is required, got: $(zig version)" >&2
+  exit 1
+}
+zig version
+python3 --version
+shellcheck --version | head -n 1
+version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
+major="${version%%.*}"
+test "$major" -ge 26 || {
+  echo "Xcode 26 or newer is required, got: $version" >&2
+  exit 1
+}
+xcrun --find codesign
+xcrun --find actool
+xcrun --find assetutil
+xcrun --find hdiutil
+xcrun --find iconutil
+xcrun --find tic
+'''
+
+[tasks."deps:fetch"]
+description = "Download locked Rust dependencies"
+run = "cargo fetch --locked"
+
+[tasks.dev]
+description = "Run SpaceTerm from source"
+run = "cargo run --locked"
+
+[tasks.check]
+description = "Check every target and feature"
+run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --all-features --locked"
+
+[tasks."check:portable"]
+description = "Check shared targets without native features"
+run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked"
+
+[tasks.fmt]
+description = "Format all Rust sources"
+run = [
+  "cargo fmt --package spaceterm --package spaceterm-ui",
+  "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs",
+]
+
+[tasks."fmt:check"]
+description = "Check all Rust formatting"
+run = [
+  { task = "fmt:check:portable" },
+  { task = "fmt:check:macos" },
+]
+
+[tasks."fmt:check:portable"]
+description = "Check workspace Rust formatting"
+run = "cargo fmt --package spaceterm --package spaceterm-ui -- --check"
+
+[tasks."fmt:check:macos"]
+description = "Check isolated macOS Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
+
+[tasks.test]
+description = "Run all tests with every feature"
+run = "cargo test --package spaceterm --package spaceterm-ui --all-targets --all-features --locked"
+
+[tasks."test:portable"]
+description = "Run shared tests without native features"
+run = "cargo test --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked"
+
+[tasks."test:one"]
+description = "Run tests matching a filter"
+usage = '''
+arg "<filter>" help="Test name filter"
+'''
+run = 'cargo test --package spaceterm --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
+
+[tasks."test:vendor"]
+description = "Test terminal-library patches with the application feature set"
+run = "cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
+
+[tasks."test:conformance"]
+description = "Run terminal protocol conformance tests"
+run = "cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
+
+[tasks."test:macos"]
+description = "Run native macOS Adapter tests"
+run = "cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+
+[tasks."lint:rust"]
+description = "Lint every target and feature"
+run = "cargo clippy --package spaceterm --package spaceterm-ui --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."lint:portable"]
+description = "Lint shared targets without native features"
+run = "cargo clippy --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked --no-deps -- -D warnings"
+
+[tasks."lint:scripts"]
+description = "Check macOS scripts and package metadata"
+run = '''
+set -eu
+bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/kitty-graphics-smoke.sh
+shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/kitty-graphics-smoke.sh
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-terminal-resources.py scripts/terminal-resource-workload.py
+plutil -lint packaging/macos/Info.plist
+'''
+
+[tasks."lint:diff"]
+description = "Check the diff for whitespace errors"
+run = "git diff --check"
+
+[tasks.lint]
+description = "Run all linters"
+run = [
+  { task = "lint:rust" },
+  { task = "lint:scripts" },
+  { task = "lint:diff" },
+]
+
+[tasks."validate:portable"]
+description = "Run checks without native tooling"
+run = [
+  { task = "fmt:check:portable" },
+  { task = "check:portable" },
+  { task = "test:portable" },
+  { task = "lint:portable" },
+  { task = "lint:diff" },
+]
+
+[tasks."validate:macos"]
+description = "Run macOS-specific checks"
+run = [
+  { task = "fmt:check:macos" },
+  { task = "test:macos" },
+  { task = "lint:rust" },
+  { task = "lint:scripts" },
+]
+
+[tasks.validate]
+description = "Run the full pre-push or handoff gate"
+run = [
+  { task = "validate:portable" },
+  { task = "validate:macos" },
+  { task = "test:vendor" },
+]
+
+[tasks."smoke:kitty-graphics"]
+description = "Display Kitty graphics checks inside a running SpaceTerm Pane"
+run = "./scripts/kitty-graphics-smoke.sh"
+
+[tasks."build:release"]
+description = "Build the optimized executable"
+run = "cargo build --release --locked"
+
+[tasks."bench:workload"]
+description = "Run a paced workload in a dedicated terminal Pane"
+usage = '''
+arg "[mode]" help="Workload mode" default="scroll"
+arg "[duration]" help="Duration in seconds" default="60"
+arg "[rate]" help="Updates per second" default="60"
+'''
+run = 'python3 scripts/terminal-resource-workload.py --mode "${usage_mode}" --duration "${usage_duration}" --rate "${usage_rate}"'
+
+[tasks."bench:resources"]
+description = "Sample one macOS application process without administrator privileges"
+usage = '''
+arg "<pid>" help="SpaceTerm process ID"
+arg "[duration]" help="Duration in seconds" default="20"
+arg "[interval]" help="Sampling interval in seconds" default="1"
+'''
+run = 'python3 scripts/measure-terminal-resources.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
+
+[tasks.package]
+description = "Build and verify the macOS app and disk image"
+usage = '''
+arg "[build_number]" help="Application build number" default="1"
+'''
+run = './scripts/package-macos.sh --build-number "${usage_build_number}"'
+
+[tasks."package:install"]
+description = "Build, verify, and install the macOS app"
+run = [
+  { task = "package" },
+  "rm -rf -- /Applications/SpaceTerm.app",
+  "/usr/bin/ditto dist/SpaceTerm.app /Applications/SpaceTerm.app",
+]
+
+[tasks."package:universal"]
+description = "Build universal Apple Silicon and Intel artifacts"
+usage = '''
+arg "[build_number]" help="Application build number" default="1"
+'''
+run = './scripts/package-macos.sh --universal --build-number "${usage_build_number}"'
+
+[tasks."package:verify"]
+description = "Verify existing macOS artifacts"
+run = "./scripts/verify-macos-package.sh"
+
+[tasks."package:open"]
+description = "Open the packaged application"
+run = "open -n dist/SpaceTerm.app"
+
+[tasks."package:open-dmg"]
+description = "Open the installer disk image"
+run = "open dist/SpaceTerm.dmg"
+
+[tasks."package:info"]
+description = "Show package metadata, architectures, signature, and sizes"
+run = [
+  "plutil -p dist/SpaceTerm.app/Contents/Info.plist",
+  "lipo -archs dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
+  "codesign --display --verbose=2 dist/SpaceTerm.app",
+  "ls -lh dist/SpaceTerm.dmg dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
+]
