@@ -942,7 +942,6 @@ impl WorkspaceManager {
             .iter()
             .enumerate()
             .map(|(index, workspace)| {
-                let (tabs, panes) = workspace.payload().read(cx).aggregate_counts(cx);
                 let active = workspace.id() == self.workspaces.active_workspace_id();
                 let icon = if active {
                     IconName::Check
@@ -970,9 +969,6 @@ impl WorkspaceManager {
                         .child(Icon::new(icon, px(14.0), foreground))
                         .into_any_element()
                 })
-                .trailing(ComboBoxAccessory::Text(
-                    super::workspace_count_summary(tabs, panes).into(),
-                ))
                 .debug_selector(format!(
                     "workspace-switcher-result-{}",
                     workspace.id().get()
@@ -3480,7 +3476,7 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        .panel_width((self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)).max(px(300.0)))
+        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")

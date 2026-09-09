@@ -5212,7 +5212,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         .expect("the New Workspace ComboBox panel should render");
     assert_eq!(
         panel.size.width,
-        (sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)).max(px(300.0))
+        sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
     );
     let chooser = cx
         .debug_bounds("workspace-switcher")
