@@ -354,6 +354,7 @@ impl SshHostPicker {
             .update(cx, |palette, cx| palette.dismiss(window, cx))
     }
 
+    #[cfg(test)]
     pub(super) fn dismiss_for_replacement(
         &mut self,
         window: &mut Window,

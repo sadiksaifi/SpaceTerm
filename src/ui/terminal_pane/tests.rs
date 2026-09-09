@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use super::*;
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
-    test_workspace_directory,
+    test_local_directory,
 };
 use crate::terminal::{
     LocalTerminalLaunchPlan, RemoteTerminalChannelProvider, ScrollbarSnapshot, SessionExit,
@@ -280,7 +280,7 @@ fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualT
     );
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-test",
         )),
     );
@@ -317,7 +317,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     dependencies.visibility = factory.clone();
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         Rc::new(TestTerminalSessionFactory::new(records.clone())),
-        test_workspace_directory(std::env::temp_dir()),
+        test_local_directory(std::env::temp_dir()),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::new_with_services(
@@ -494,64 +494,50 @@ fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
         crate::terminal::metadata::TerminalMetadataContext::Remote(
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
                 crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
-                crate::domain::RemoteWorkspaceDirectory::new(path.to_owned()).unwrap(),
+                crate::domain::RemoteDirectory::new(path.to_owned()).unwrap(),
             ),
         );
     screen
 }
 
 #[gpui::test]
-fn only_live_absolute_directory_metadata_should_emit_workspace_reports(cx: &mut TestAppContext) {
+fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
     let (pane, cx) = terminal_pane(cx);
-    let reports = Rc::new(RefCell::new(Vec::new()));
-    let observed_reports = Rc::clone(&reports);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if let TerminalPaneEvent::ReportedWorkingDirectoryChanged(path) = event {
-                observed_reports.borrow_mut().push(path.clone());
-            }
-        })
-        .detach();
-    });
-
+    for (generation, path, freshness, expected) in [
+        (
+            1,
+            "/Users/test/live",
+            MetadataFreshness::Live,
+            Some(CurrentDirectory::Local(PathBuf::from("/Users/test/live"))),
+        ),
+        (2, "/Users/test/stale", MetadataFreshness::Stale, None),
+        (3, "relative", MetadataFreshness::Live, None),
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(
+                SessionEvent::Screen(directory_screen(generation, path, freshness)),
+                cx,
+            );
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.current_directory()),
+            expected
+        );
+    }
     pane.update(cx, |pane, cx| {
         pane.handle_event(
-            SessionEvent::Screen(directory_screen(
-                1,
-                "/Users/test/live",
-                crate::terminal::metadata::MetadataFreshness::Live,
-            )),
-            cx,
-        );
-        pane.handle_event(
-            SessionEvent::Screen(directory_screen(
-                2,
-                "/Users/test/stale",
-                crate::terminal::metadata::MetadataFreshness::Stale,
-            )),
-            cx,
-        );
-        pane.handle_event(
-            SessionEvent::Screen(directory_screen(
-                3,
-                "remote-or-relative",
-                crate::terminal::metadata::MetadataFreshness::Live,
-            )),
-            cx,
-        );
-        pane.handle_event(
-            SessionEvent::Screen(remote_directory_screen(4, "/srv/remote-project")),
+            SessionEvent::Screen(remote_directory_screen(4, "/srv/app")),
             cx,
         );
     });
-
     assert_eq!(
-        reports.borrow().as_slice(),
-        [PathBuf::from("/Users/test/live")]
-    );
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.reported_working_directory()),
-        None
+        pane.read_with(cx, |pane, _| pane.current_directory()),
+        Some(CurrentDirectory::Remote(
+            crate::domain::RemoteDirectory::new("/srv/app".into()).unwrap()
+        ))
     );
 }
 
@@ -678,7 +664,7 @@ fn connected_terminal_pane(
         Rc::new(TestTerminalSessionFactory::new(records.clone()));
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-keyboard-test",
         )),
     );
@@ -710,6 +696,8 @@ impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
 
     fn revalidate(
         &self,
+        _directory: crate::domain::RemoteDirectory,
+        _identity: Option<crate::domain::RemoteDirectoryIdentity>,
     ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
         if self.is_ready() {
             gpui::Task::ready(Ok(()))
@@ -722,6 +710,7 @@ impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
 
     fn prepare(
         &self,
+        _directory: &crate::domain::RemoteDirectory,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
         if !self.is_ready() {
             return Err(RemoteChannelUnavailable);
@@ -752,10 +741,10 @@ fn remote_workspace_session_factory_with_readiness(
     });
     WorkspaceTerminalSessionFactory::new_remote(
         Rc::new(TestTerminalSessionFactory::new(records)),
-        test_workspace_directory(PathBuf::from("/local/home")),
+        test_local_directory(PathBuf::from("/local/home")),
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
             destination,
-            crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
         "project on remote".to_owned(),
         channel_provider,
@@ -1308,7 +1297,7 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
         Rc::new(TestTerminalSessionFactory::new(
             TestTerminalSessionRecords::default(),
         )),
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-accessibility-test",
         )),
     );
@@ -1852,7 +1841,7 @@ fn connected_terminal_pane_with_key_propagation(
         Rc::new(TestTerminalSessionFactory::new(records.clone()));
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-keyboard-propagation-test",
         )),
     );
@@ -1891,7 +1880,7 @@ fn terminal_pane_with_selection_copy(
     );
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-copy-test",
         )),
     );
@@ -1924,7 +1913,7 @@ fn terminal_pane_with_paste_response(
     );
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-paste-test",
         )),
     );
@@ -4827,7 +4816,7 @@ fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) 
                 LogicalCellSize::new(8.0, 16.0),
                 BackingScale::ONE,
             ),
-            TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(test_workspace_directory(
+            TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(test_local_directory(
                 PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
             ))),
         )
@@ -4897,7 +4886,7 @@ fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
         Rc::new(TestTerminalSessionFactory::new(records.clone()));
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-scale-test",
         )),
     );
@@ -4946,7 +4935,7 @@ fn terminal_pane_close_should_drop_its_session_once_when_repeated(cx: &mut TestA
         Rc::new(TestTerminalSessionFactory::new(records.clone()));
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-test",
         )),
     );
@@ -5541,7 +5530,7 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
         Rc::new(TestTerminalSessionFactory::new(records.clone()));
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
         session_factory,
-        crate::terminal::testing::test_workspace_directory(PathBuf::from(
+        crate::terminal::testing::test_local_directory(PathBuf::from(
             "/tmp/spaceterm-terminal-pane-test",
         )),
     );

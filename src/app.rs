@@ -21,8 +21,8 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
 };
 use crate::ui::{
-    CreateScratchWorkspace, NativeRemoteWorkspaceFlowBackendFactory, NewWorkspace,
-    RemoteWorkspaceSshRuntime, WorkspaceManager,
+    NativeRemoteWorkspaceFlowBackendFactory, NewWorkspace, RemoteWorkspaceSshRuntime,
+    WorkspaceManager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -311,11 +311,7 @@ fn restore_default_window(cx: &mut App, host: &HostComposition) {
 }
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
-    let new_workspace_host = Rc::clone(&host);
     cx.on_action(move |_: &NewWorkspace, cx| {
-        restore_default_window(cx, &new_workspace_host);
-    });
-    cx.on_action(move |_: &CreateScratchWorkspace, cx| {
         restore_default_window(cx, &host);
     });
 }
@@ -385,7 +381,7 @@ mod tests {
         );
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+            crate::terminal::testing::test_local_directory(PathBuf::from(
                 "/tmp/spaceterm-native-copy-command-test",
             )),
         );
@@ -805,43 +801,6 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn create_scratch_workspace_action_should_restore_a_default_window_when_headless(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-
-        let records = TestTerminalSessionRecords::default();
-        let services = Rc::new(RecordingServices::default());
-        let mut wiring = parts(Rc::clone(&services), Rc::default());
-        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let host = Rc::new(HostComposition::new(wiring).unwrap());
-        let original = cx.update(|cx| {
-            let original = start_application(cx, &host).unwrap();
-            install_headless_window_actions(cx, Rc::clone(&host));
-            original
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            original
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-
-        cx.update(|cx| cx.dispatch_action(&CreateScratchWorkspace));
-        cx.run_until_parked();
-
-        assert_eq!(
-            (
-                cx.windows().len(),
-                records.session_count(),
-                services.calls.borrow().clone(),
-            ),
-            (1, 2, vec!["register", "install", "install"])
-        );
-    }
-
-    #[gpui::test]
     fn new_workspace_menu_actions_should_remain_available_when_headless(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -859,14 +818,7 @@ mod runtime_tests {
         });
         cx.run_until_parked();
 
-        let available = cx.update(|cx| {
-            (
-                cx.is_action_available(&NewWorkspace),
-                cx.is_action_available(&CreateScratchWorkspace),
-            )
-        });
-
-        assert_eq!(available, (true, true));
+        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
     }
 
     #[gpui::test]

@@ -89,7 +89,7 @@ pub(crate) use session::{
 };
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,
-    RemoteTerminalChannelProvider, WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+    RemoteTerminalChannelProvider, WorkspaceTerminalSessionFactory,
 };
 
 pub(crate) use pointer_input::{

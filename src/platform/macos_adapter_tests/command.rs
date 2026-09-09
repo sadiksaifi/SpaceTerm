@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_PROBE_SCRIPT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn pane_command_should_launch_the_remote_shell_with_only_remote_compatibility_markers() {
+fn pane_command_should_launch_with_remote_compatibility_and_integration_markers() {
     let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
     let test_root = PathBuf::from(format!(
         "/private/tmp/spaceterm-remote-shell-environment-{}-{sequence}",
@@ -43,7 +43,7 @@ printf '%s\n%s\n%s\n%s\n' \
     assert!(status.success());
     assert_eq!(
         fs::read_to_string(environment).unwrap(),
-        "1\ntruecolor\nunset\nunset\n"
+        "1\ntruecolor\nunset\n1\n"
     );
     fs::remove_dir_all(test_root).unwrap();
 }
@@ -146,4 +146,55 @@ fn child_proxy_denial_never_searches_path_and_closes_the_real_ssh_transport() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("Connection closed"));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn remote_bash_should_report_navigation_and_remove_temporary_resources() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let initial = fixture.path().join("it's $(touch injected); initial");
+    let next = fixture.path().join("next");
+    std::fs::create_dir(&initial).unwrap();
+    std::fs::create_dir(&next).unwrap();
+    let command = pane_command(initial.to_str().unwrap(), "/bin/bash").unwrap();
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", &command.argument])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", fixture.path())
+        .env("TMPDIR", fixture.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let commands = format!(
+        "cd {}\nexit\n",
+        quote_for_posix_shell(next.to_str().unwrap())
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(commands.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let output = String::from_utf8_lossy(&output.stdout);
+    for path in [&initial, &next] {
+        assert!(
+            output.contains(&format!("\x1b]7;file://localhost{}\x07", path.display())),
+            "missing directory report: {output:?}, stderr: {stderr:?}"
+        );
+    }
+    assert!(!fixture.path().join("injected").exists());
+    assert!(!std::fs::read_dir(fixture.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("spaceterm-shell.")
+    }));
 }

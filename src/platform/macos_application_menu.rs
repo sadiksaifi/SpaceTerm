@@ -10,11 +10,11 @@ use crate::app::{
     ZoomActiveWindow,
 };
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
-    DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown,
-    FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, NewWorkspace,
-    OpenLocalProject, OpenTerminalFind, ResetTerminalFontSize, SearchWorkspaces, SplitDown,
-    SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
+    ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, NewWorkspace, OpenTerminalFind,
+    ResetTerminalFontSize, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
 };
 
 pub(crate) struct MacosApplicationMenuAdapter;
@@ -63,25 +63,13 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "New Workspace…",
+        item: "New Workspace",
         symbol: "folder.badge.plus",
     },
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "New Scratch Workspace",
-        symbol: "plus.rectangle",
-    },
-    MenuItemIcon {
-        menu: "File",
-        submenu: None,
-        item: "Open Local Project…",
-        symbol: "folder",
-    },
-    MenuItemIcon {
-        menu: "File",
-        submenu: None,
-        item: "Search Workspaces…",
+        item: "Search Workspaces",
         symbol: "magnifyingglass",
     },
     MenuItemIcon {
@@ -327,10 +315,8 @@ fn file_menu() -> Menu {
     Menu {
         name: "File".into(),
         items: vec![
-            MenuItem::action("New Workspace…", NewWorkspace),
-            MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
-            MenuItem::action("Open Local Project…", OpenLocalProject),
-            MenuItem::action("Search Workspaces…", SearchWorkspaces),
+            MenuItem::action("New Workspace", NewWorkspace),
+            MenuItem::action("Search Workspaces", SearchWorkspaces),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
             MenuItem::separator(),
@@ -831,8 +817,6 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
-                CreateScratchWorkspace.name(),
-                OpenLocalProject.name(),
                 SearchWorkspaces.name(),
                 CreateTab.name(),
                 ClosePane.name(),

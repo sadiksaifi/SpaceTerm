@@ -278,7 +278,7 @@ fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::platform::shell_integration::ShellKind;
     use crate::ssh::command::{
         PreparedSshPaneChannelError, RemotePaneShellCommandBuilder, SshCommandContext,
@@ -499,7 +499,7 @@ mod tests {
             "/private/runtime/control.sock".into(),
         )
         .unwrap();
-        let directory = RemoteWorkspaceDirectory::new("~/private project".to_owned()).unwrap();
+        let directory = RemoteDirectory::new("~/private project".to_owned()).unwrap();
         let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         let command = RemotePaneShellCommandBuilder::new(&directory, &shell)
             .build()

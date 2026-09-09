@@ -24,7 +24,8 @@ const CANCEL_ACTION_SELECTOR: &str = "managed-ssh-host-cancel";
 const SAVE_FAILURE_MESSAGE: &str =
     "SpaceTerm couldn\u{2019}t save this SSH host. Check permissions and try again.";
 const COLLISION_MESSAGE: &str = "That SSH host alias is already configured.";
-const HOST_IN_USE_MESSAGE: &str = "This SSH host is in use by a Remote Project Workspace. Close that Workspace before editing it.";
+const HOST_IN_USE_MESSAGE: &str =
+    "This SSH host is in use by a Remote Workspace. Close that Workspace before editing it.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedHostFormBackendError {
@@ -344,7 +345,7 @@ impl SshHostForm {
             ],
             DialogInitialFocus::Body(initial_focus),
         )
-        .description("Save an SSH destination for Remote Projects.")
+        .description("Save an SSH destination for Remote Workspaces.")
         .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(

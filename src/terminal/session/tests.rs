@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
+use crate::domain::{LocalDirectoryIdentity, RemoteDirectory, SshDestination};
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
 use crate::ssh::command::{
     RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
@@ -23,7 +23,7 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     )
 }
 
-fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteShellCommand {
+fn remote_pane_command(directory: &RemoteDirectory) -> ValidatedRemoteShellCommand {
     let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
     RemotePaneShellCommandBuilder::new(directory, &shell)
         .build()
@@ -32,12 +32,12 @@ fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteS
 
 #[test]
 fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels() {
-    let local_home = crate::domain::ValidatedWorkspaceDirectory::new(
+    let local_home = crate::domain::ValidatedLocalDirectory::new(
         PathBuf::from("/Users/local"),
-        WorkspaceDirectoryIdentity::for_test(7011),
+        LocalDirectoryIdentity::for_test(7011),
     );
     let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
     let prepared = SshCommandContext::new(
         crate::ssh::command::OpenSshExecutable::for_test(),
         PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -83,9 +83,9 @@ fn native_factory_routes_local_launches_through_injected_factory() {
     let (factory, constructions) = recording_native_terminal_session_factory();
     let working_directory = std::env::temp_dir().join(".");
     let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
-        crate::domain::ValidatedWorkspaceDirectory::new(
+        crate::domain::ValidatedLocalDirectory::new(
             working_directory.clone(),
-            WorkspaceDirectoryIdentity::for_test(7011),
+            LocalDirectoryIdentity::for_test(7011),
         ),
     ));
 
@@ -122,7 +122,7 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
     let (factory, constructions) = recording_native_terminal_session_factory();
     let local_home = std::env::temp_dir();
     let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
     let context = SshCommandContext::new(
         crate::ssh::command::OpenSshExecutable::for_test(),
         PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -134,9 +134,9 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
     let expected_executable = expected_command.executable().to_owned();
     let expected_arguments = expected_command.arguments().to_vec();
     let plan = TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
-        crate::domain::ValidatedWorkspaceDirectory::new(
+        crate::domain::ValidatedLocalDirectory::new(
             local_home.clone(),
-            WorkspaceDirectoryIdentity::for_test(7011),
+            LocalDirectoryIdentity::for_test(7011),
         ),
         destination,
         remote_directory.clone(),
@@ -1020,9 +1020,9 @@ fn native_factory_should_report_pty_spawn_failures_through_session_events() {
         .start(
             test_geometry(),
             TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
-                crate::domain::ValidatedWorkspaceDirectory::new(
+                crate::domain::ValidatedLocalDirectory::new(
                     PathBuf::from("/private/tmp/spaceterm-missing-session-workspace"),
-                    crate::domain::WorkspaceDirectoryIdentity::for_test(0),
+                    crate::domain::LocalDirectoryIdentity::for_test(0),
                 ),
             )),
         )
@@ -1051,7 +1051,7 @@ fn native_factory_should_report_pty_spawn_failures_through_session_events() {
 #[test]
 fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
     let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
     let prepared = SshCommandContext::new(
         crate::ssh::command::OpenSshExecutable::for_test(),
         PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -1061,9 +1061,9 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
     .unwrap()
     .prepare_pane_channel(remote_pane_command(&remote_directory));
     let plan = RemoteTerminalLaunchPlan::new(
-        crate::domain::ValidatedWorkspaceDirectory::new(
+        crate::domain::ValidatedLocalDirectory::new(
             PathBuf::from("/private/tmp/spaceterm-missing-local-home"),
-            WorkspaceDirectoryIdentity::for_test(0),
+            LocalDirectoryIdentity::for_test(0),
         ),
         destination,
         remote_directory,

@@ -15,6 +15,7 @@ use spaceterm_ui::{
 };
 
 use super::*;
+use crate::domain::TabId;
 
 #[test]
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
@@ -61,13 +62,13 @@ use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{SessionEvent, SessionExit};
+use crate::ui::remote_directory_picker::{
+    RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
+    RemoteDirectoryProviderError, RemoteWorkspaceAccount,
+};
 use crate::ui::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
-};
-use crate::ui::remote_workspace_picker::{
-    RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
-    RemoteWorkspaceProvider, RemoteWorkspaceProviderError,
 };
 use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::ssh_host_form::ManagedHostFormBackendError;
@@ -197,14 +198,14 @@ fn test_remote_backend_factory() -> Arc<dyn RemoteWorkspaceFlowBackendFactory> {
 
 struct TestRemoteProvider {
     account_available: bool,
-    identity: Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+    identity: Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
 }
 
 impl TestRemoteProvider {
     fn failing() -> Self {
         Self {
             account_available: false,
-            identity: Err(RemoteWorkspaceProviderError::Other),
+            identity: Err(RemoteDirectoryProviderError::Other),
         }
     }
 
@@ -218,17 +219,17 @@ impl TestRemoteProvider {
     fn directory_unavailable() -> Self {
         Self {
             account_available: true,
-            identity: Err(RemoteWorkspaceProviderError::PermissionDenied),
+            identity: Err(RemoteDirectoryProviderError::PermissionDenied),
         }
     }
 }
 
-impl RemoteWorkspaceProvider for TestRemoteProvider {
+impl RemoteDirectoryProvider for TestRemoteProvider {
     fn discover_account(
         &self,
-    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
         if !self.account_available {
-            return gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other));
+            return gpui::Task::ready(Err(RemoteDirectoryProviderError::Other));
         }
         gpui::Task::ready(
             RemoteWorkspaceAccount::new(
@@ -236,35 +237,35 @@ impl RemoteWorkspaceProvider for TestRemoteProvider {
                 crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
                 "/bin/zsh".to_owned(),
             )
-            .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse),
+            .map_err(|_| RemoteDirectoryProviderError::InvalidResponse),
         )
     }
 
     fn list_directories(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Ok(RemoteDirectoryListing::new(Vec::new())))
     }
 
     fn probe_exact_path(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Ok(RemoteDirectoryExactPathState::ReadableDirectory))
     }
 
     fn create_directory_recursively(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<(), RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<(), RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
     fn validate_physical_identity(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>>
     {
         gpui::Task::ready(self.identity.clone())
     }
@@ -272,11 +273,11 @@ impl RemoteWorkspaceProvider for TestRemoteProvider {
 
 struct BlockingRemoteProvider {
     account:
-        Mutex<Option<gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>>>,
+        Mutex<Option<gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>>>,
     identity: Mutex<
         Option<
             gpui::Task<
-                Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+                Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
             >,
         >,
     >,
@@ -284,50 +285,50 @@ struct BlockingRemoteProvider {
     identity_calls: Arc<AtomicUsize>,
 }
 
-impl RemoteWorkspaceProvider for BlockingRemoteProvider {
+impl RemoteDirectoryProvider for BlockingRemoteProvider {
     fn discover_account(
         &self,
-    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
         self.account_calls.fetch_add(1, Ordering::AcqRel);
         self.account
             .lock()
             .unwrap()
             .take()
-            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteDirectoryProviderError::Other)))
     }
 
     fn list_directories(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
     fn probe_exact_path(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
     fn create_directory_recursively(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<(), RemoteWorkspaceProviderError>> {
-        gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<(), RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
     fn validate_physical_identity(
         &self,
-        _: RemoteWorkspaceDirectory,
-    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>
+        _: RemoteDirectory,
+    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>>
     {
         self.identity_calls.fetch_add(1, Ordering::AcqRel);
         self.identity
             .lock()
             .unwrap()
             .take()
-            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteDirectoryProviderError::Other)))
     }
 }
 
@@ -356,6 +357,8 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
 
     fn revalidate(
         &self,
+        _: RemoteDirectory,
+        _: Option<crate::domain::RemoteDirectoryIdentity>,
     ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
         self.revalidations.fetch_add(1, Ordering::AcqRel);
         self.revalidation_tasks
@@ -367,6 +370,7 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
 
     fn prepare(
         &self,
+        _: &RemoteDirectory,
     ) -> Result<
         crate::ssh::command::PreparedSshPaneChannelCommand,
         crate::terminal::RemoteChannelUnavailable,
@@ -416,10 +420,8 @@ impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
             .transpose()
     }
 
-    fn bind_terminal_channels_for_identity(
+    fn bind_terminal_channels(
         &self,
-        _: &RemoteWorkspaceDirectory,
-        _: &crate::domain::RemoteDirectoryIdentity,
         _: &crate::ssh::command::ValidatedRemoteLoginShell,
     ) -> Result<
         Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
@@ -469,8 +471,26 @@ fn remote_completion_with_revalidation(
     available: bool,
     revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
 ) -> RemoteCompletionFixture {
+    remote_completion_with_provider(
+        destination,
+        directory,
+        physical,
+        available,
+        revalidation,
+        Arc::new(TestRemoteProvider::failing()),
+    )
+}
+
+fn remote_completion_with_provider(
+    destination: &str,
+    directory: &str,
+    physical: &str,
+    available: bool,
+    revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    provider: Arc<dyn RemoteDirectoryProvider>,
+) -> RemoteCompletionFixture {
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
-    let directory = RemoteWorkspaceDirectory::new(directory.to_owned()).unwrap();
+    let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
     let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
     let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
@@ -498,7 +518,7 @@ fn remote_completion_with_revalidation(
             alias: None,
             alias_pin_error: false,
         }),
-        Arc::new(TestRemoteProvider::failing()),
+        provider,
     );
     let account =
         RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
@@ -543,7 +563,7 @@ fn remote_completion_with_active_alias_pin_failure(
     let alias = SshHostAlias::new("work".to_owned()).unwrap();
     let lease = registry.acquire(alias.clone()).unwrap();
     let destination = crate::domain::SshDestination::new("work".to_owned()).unwrap();
-    let directory = RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap();
+    let directory = RemoteDirectory::new("~/src".to_owned()).unwrap();
     let physical =
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
     let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
@@ -640,7 +660,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(created.get(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-shift-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n enter", 4)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(created.get(), expected, "{shortcut}");
@@ -690,7 +710,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(factory.records.borrow().len(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-shift-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n enter", 4)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
@@ -833,7 +853,7 @@ fn reconnect_session(
 
 fn reconnect_session_with_provider(
     destination: &str,
-    provider: Arc<dyn RemoteWorkspaceProvider>,
+    provider: Arc<dyn RemoteDirectoryProvider>,
 ) -> (
     RemoteWorkspaceConnectedSession,
     Arc<AtomicUsize>,
@@ -846,7 +866,7 @@ fn reconnect_session_with_provider(
 
 fn reconnect_session_with_provider_and_revalidation(
     destination: &str,
-    provider: Arc<dyn RemoteWorkspaceProvider>,
+    provider: Arc<dyn RemoteDirectoryProvider>,
     revalidation_tasks: VecDeque<
         gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
     >,
@@ -993,8 +1013,12 @@ fn present_test_alert(
     })
 }
 
-fn open_workspace_picker(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("cmd-o");
+fn open_directory_picker(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
+        })
+    });
     cx.run_until_parked();
 }
 
@@ -1012,12 +1036,12 @@ fn open_remote_workspace_flow(
     cx: &mut VisualTestContext,
 ) -> Entity<RemoteWorkspaceFlow> {
     open_new_workspace_panel(cx);
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
             .as_ref()
-            .expect("Remote Project must create its flow")
+            .expect("Remote Workspace must create its flow")
             .clone()
     })
 }
@@ -1061,15 +1085,15 @@ fn install_remote_completion_directly(
 ) {
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let key = RemoteWorkspaceKey::new(
+            let key = RemoteWorkspaceTarget::new(
                 completion.destination().clone(),
                 completion.physical_directory().clone(),
             );
             let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
                 Rc::clone(&manager.session_factory),
-                ValidatedWorkspaceDirectory::new(
-                    manager.default_workspace_root.clone(),
-                    manager.default_workspace_identity.clone(),
+                ValidatedLocalDirectory::new(
+                    manager.local_home_directory_path.clone(),
+                    manager.local_home_identity.clone(),
                 ),
                 RemoteTerminalMetadataContext::new(
                     completion.destination().clone(),
@@ -1080,16 +1104,19 @@ fn install_remote_completion_directly(
             );
             let prepared = terminal_factory.prepare_child_launch().unwrap();
             manager
-                .try_create_remote_project(completion, terminal_factory, prepared, window, cx)
+                .try_create_remote_workspace(completion, terminal_factory, prepared, window, cx)
                 .unwrap_or_else(|_| panic!("direct Remote Workspace installation failed"));
         });
     });
     cx.run_until_parked();
 }
 
-fn choose_with_directory_selection_fallback(cx: &mut VisualTestContext) {
-    open_workspace_picker(cx);
-    click("workspace-picker-directory-selection", cx);
+fn choose_with_directory_selection_fallback(
+    manager: &Entity<WorkspaceManager>,
+    cx: &mut VisualTestContext,
+) {
+    open_directory_picker(manager, cx);
+    click("directory-picker-directory-selection", cx);
     cx.run_until_parked();
 }
 
@@ -1284,23 +1311,23 @@ fn workspace_search_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut
 }
 
 #[gpui::test]
-fn workspace_picker_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut TestAppContext) {
+fn directory_picker_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.present_workspace_picker(window, cx)
+            manager.present_directory_picker(window, cx)
         });
     });
     cx.run_until_parked();
-    let presentation = present_test_alert(&manager, "workspace-picker-modal-priority", cx);
+    let presentation = present_test_alert(&manager, "directory-picker-modal-priority", cx);
     cx.run_until_parked();
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_local_project(window, cx);
-            manager.open_local_project(window, cx);
+            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
+            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
         });
     });
     cx.run_until_parked();
@@ -1322,7 +1349,7 @@ fn workspace_picker_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut
     cx.update(|window, cx| {
         presentation
             .dismiss(window, cx)
-            .expect("workspace-picker modal should dismiss")
+            .expect("directory-picker modal should dismiss")
     });
     cx.run_until_parked();
 
@@ -1655,7 +1682,7 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 ) {
     let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
 
-    choose_with_directory_selection_fallback(cx);
+    choose_with_directory_selection_fallback(&manager, cx);
 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -1722,51 +1749,15 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
 }
 
 #[gpui::test]
-fn top_combo_box_local_project_should_open_the_picker_and_restore_terminal_focus_on_escape(
-    cx: &mut TestAppContext,
-) {
+fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     open_top_new_workspace_combo_box(cx);
-
-    click("new-workspace-source-local-project", cx);
-
-    let opened = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            window_combo_box_is_open(window, cx),
-            manager.transient.picker.read(cx).is_open(),
-            manager.transient.new_workspace.read(cx).is_open(),
-            manager.terminal_focus_blocker(window, cx),
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx),
-            manager.workspaces.len(),
-            records.starts().len(),
-        )
-    });
-    assert_eq!(
-        opened,
-        (
-            false,
-            true,
-            false,
-            Some(TerminalFocusBlocker::Modal),
-            false,
-            1,
-            1,
-        )
-    );
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
+    click("new-workspace-source-local", cx);
     assert_eq!(
         cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
+                window_combo_box_is_open(window, cx),
                 manager.transient.picker.read(cx).is_open(),
                 manager.transient.new_workspace.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
@@ -1776,20 +1767,22 @@ fn top_combo_box_local_project_should_open_the_picker_and_restore_terminal_focus
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
             )
         }),
-        (false, false, None, true)
+        (false, false, false, None, true, 2, 2)
     );
 }
 
 #[gpui::test]
-fn top_combo_box_keyboard_acceptance_should_create_exactly_one_scratch_workspace(
+fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     open_top_new_workspace_combo_box(cx);
 
-    cx.simulate_keystrokes("s c r a t c h enter");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
     assert_eq!(
@@ -1820,7 +1813,7 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
     let (manager, records, cx) = workspace_manager(cx);
     open_top_new_workspace_combo_box(cx);
 
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -1828,7 +1821,7 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
             let flow = manager
                 .remote_workspace_flow
                 .as_ref()
-                .expect("the available Remote Project source should open its flow")
+                .expect("the available Remote Workspace source should open its flow")
                 .read(cx);
             (
                 window_combo_box_is_open(window, cx),
@@ -1908,7 +1901,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     cx.run_until_parked();
     open_top_new_workspace_combo_box(cx);
 
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -1961,10 +1954,10 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
 }
 
 #[gpui::test]
-fn shift_cmd_o_should_present_the_workspace_picker_without_the_panel(cx: &mut TestAppContext) {
+fn pin_directory_selection_should_present_the_picker_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
-    open_workspace_picker(cx);
+    open_directory_picker(&manager, cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -1980,14 +1973,10 @@ fn shift_cmd_o_should_present_the_workspace_picker_without_the_panel(cx: &mut Te
 }
 
 #[gpui::test]
-fn choosing_local_project_should_replace_the_panel_with_the_workspace_picker(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-
+fn choosing_local_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
     open_new_workspace_panel(cx);
-    click("new-workspace-source-local-project", cx);
-
+    click("new-workspace-source-local", cx);
     assert_eq!(
         cx.update(|window, cx| {
             let manager = manager.read(cx);
@@ -1995,25 +1984,27 @@ fn choosing_local_project_should_replace_the_panel_with_the_workspace_picker(
                 manager.transient.picker.read(cx).is_open(),
                 manager.transient.new_workspace.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
             )
         }),
-        (true, false, Some(TerminalFocusBlocker::Modal))
+        (false, false, None, 2, 2)
     );
 }
 
 #[gpui::test]
-fn choosing_remote_project_should_strictly_replace_the_panel_and_restore_focus_on_escape(
+fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus_on_escape(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
 
     open_new_workspace_panel(cx);
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     let flow = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
             .as_ref()
-            .expect("Remote Project must create its flow")
+            .expect("Remote Workspace must create its flow")
             .clone()
     });
 
@@ -2054,12 +2045,12 @@ fn choosing_remote_project_should_strictly_replace_the_panel_and_restore_focus_o
     assert_eq!(escaped, (true, None, true));
 
     open_new_workspace_panel(cx);
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     let reopened = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
             .as_ref()
-            .expect("Remote Project should create a fresh flow")
+            .expect("Remote Workspace should create a fresh flow")
             .clone()
     });
     assert_ne!(reopened, flow);
@@ -2070,10 +2061,17 @@ fn choosing_remote_project_should_strictly_replace_the_panel_and_restore_focus_o
 }
 
 #[gpui::test]
-fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
+fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     cx: &mut TestAppContext,
 ) {
-    let (session, closes, _, _, _) = reconnect_session("work", "/home/tester");
+    let pending_account = cx.executor().spawn(async { std::future::pending().await });
+    let provider = Arc::new(BlockingRemoteProvider {
+        account: Mutex::new(Some(pending_account)),
+        identity: Mutex::new(None),
+        account_calls: Arc::new(AtomicUsize::new(0)),
+        identity_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
     let backend =
         TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
@@ -2092,7 +2090,7 @@ fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
     cx.run_until_parked();
     assert_eq!(
         flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::DirectorySelection
+        RemoteWorkspaceFlowStage::PreparingHome
     );
 
     cx.deactivate_window();
@@ -2162,12 +2160,12 @@ fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
                 .read(cx)
                 .focused_terminal_is_focused(window, cx)
     }));
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     let reopened = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
             .as_ref()
-            .expect("Remote Project should create a fresh flow")
+            .expect("Remote Workspace should create a fresh flow")
             .clone()
     });
     assert_ne!(reopened.entity_id(), cancelled_flow_id);
@@ -2200,7 +2198,7 @@ fn unavailable_remote_source_should_stay_disabled_without_constructing_askpass_b
     cx.run_until_parked();
 
     open_new_workspace_panel(cx);
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     cx.run_until_parked();
 
     assert_eq!(create_calls.load(Ordering::Acquire), 0);
@@ -2241,7 +2239,7 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
     cx.run_until_parked();
 
     open_new_workspace_panel(cx);
-    click("new-workspace-source-remote-project", cx);
+    click("new-workspace-source-remote", cx);
     cx.run_until_parked();
 
     assert_eq!(create_calls.load(Ordering::Acquire), 1);
@@ -2284,7 +2282,7 @@ fn remote_completion_should_create_exact_metadata_launch_and_owned_runtime(
                     .as_str()
                     .to_owned(),
                 workspace
-                    .remote_workspace_directory()
+                    .remote_starting_directory()
                     .expect("Remote Workspace preserves typed spelling")
                     .as_str()
                     .to_owned(),
@@ -2815,7 +2813,7 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
         ),
         Some((
             "Remote Directory Changed",
-            "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it.".to_owned()
+            "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it.".to_owned()
         ))
     );
 }
@@ -2873,7 +2871,7 @@ fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_al
         ),
         Some((
             "Remote Directory Unavailable",
-            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project.".to_owned()
+            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace.".to_owned()
         ))
     );
 }
@@ -3049,7 +3047,7 @@ fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_
             .spawn(async move { account_receiver.recv().await.unwrap() })
     });
     let account_calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(BlockingRemoteProvider {
         account: Mutex::new(Some(account_task)),
         identity: Mutex::new(Some(gpui::Task::ready(Ok(
             crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
@@ -3097,7 +3095,7 @@ fn closing_workspace_while_identity_validation_is_blocked_should_close_session_i
             .spawn(async move { identity_receiver.recv().await.unwrap() })
     });
     let identity_calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(BlockingRemoteProvider {
         account: Mutex::new(Some(gpui::Task::ready(Ok(test_remote_account())))),
         identity: Mutex::new(Some(identity_task)),
         account_calls: Arc::new(AtomicUsize::new(0)),
@@ -3140,7 +3138,7 @@ fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_clo
         cx.background_executor()
             .spawn(async move { revalidation_receiver.recv().await.unwrap() })
     });
-    let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(TestRemoteProvider::connected(
+    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
     ));
     let (session, closes, _, revalidations, _) = reconnect_session_with_provider_and_revalidation(
@@ -3348,9 +3346,7 @@ fn remote_child_identity_failure_should_show_alert_without_changing_connection_o
 }
 
 #[gpui::test]
-fn failed_flow_activation_should_return_intact_connection_to_picker_retry_state(
-    cx: &mut TestAppContext,
-) {
+fn failed_flow_activation_should_close_connection_and_offer_retry(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, closes, preparations, _) =
@@ -3374,19 +3370,17 @@ fn failed_flow_activation_should_return_intact_connection_to_picker_retry_state(
             1,
             0,
             true,
-            RemoteWorkspaceFlowStage::DirectorySelection,
-            Some(TerminalFocusBlocker::CommandPalette),
+            RemoteWorkspaceFlowStage::ConnectionError,
+            Some(TerminalFocusBlocker::Modal),
         )
     );
     assert_eq!(records.starts().len(), 1);
     assert_eq!(preparations.load(Ordering::Acquire), 0);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
+    assert_eq!(closes.load(Ordering::Acquire), 1);
 }
 
 #[gpui::test]
-fn remote_revalidation_failures_should_return_intact_completion_without_mutation(
-    cx: &mut TestAppContext,
-) {
+fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
     for error in [
@@ -3416,10 +3410,10 @@ fn remote_revalidation_failures_should_return_intact_completion_without_mutation
         assert_eq!(records.starts().len(), 1);
         assert_eq!(revalidations.load(Ordering::Acquire), 1);
         assert_eq!(preparations.load(Ordering::Acquire), 0);
-        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert_eq!(closes.load(Ordering::Acquire), 1);
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
+            RemoteWorkspaceFlowStage::ConnectionError
         );
 
         cx.update(|window, cx| {
@@ -3486,9 +3480,7 @@ fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrec
 }
 
 #[gpui::test]
-fn equivalent_remote_completion_should_activate_existing_and_close_redundant_session(
-    cx: &mut TestAppContext,
-) {
+fn matching_remote_destinations_should_create_independent_workspaces(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let (first, first_closes, first_preparations, _) =
         remote_completion("work", "~/src", "/home/tester/src", true);
@@ -3506,23 +3498,23 @@ fn equivalent_remote_completion_should_activate_existing_and_close_redundant_ses
             manager
                 .workspaces
                 .active_workspace()
-                .remote_workspace_directory()
+                .remote_starting_directory()
                 .unwrap()
                 .as_str()
                 .to_owned(),
             manager.remote_workspace_runtimes.len(),
         )
     });
-    assert_eq!(state, (2, "~/src".to_owned(), 1));
-    assert_eq!(records.starts().len(), 2);
+    assert_eq!(state, (3, "/home/tester/src".to_owned(), 2));
+    assert_eq!(records.starts().len(), 3);
     assert_eq!(first_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(duplicate_preparations.load(Ordering::Acquire), 0);
+    assert_eq!(duplicate_preparations.load(Ordering::Acquire), 1);
     assert_eq!(first_closes.load(Ordering::Acquire), 0);
-    assert_eq!(duplicate_closes.load(Ordering::Acquire), 1);
+    assert_eq!(duplicate_closes.load(Ordering::Acquire), 0);
 }
 
 #[gpui::test]
-fn equivalent_workspace_created_during_revalidation_should_win_without_a_duplicate_launch(
+fn independent_workspace_creation_during_revalidation_should_preserve_both_launches(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -3557,14 +3549,14 @@ fn equivalent_workspace_created_during_revalidation_should_win_without_a_duplica
             manager
                 .workspaces
                 .active_workspace()
-                .remote_workspace_directory()
+                .remote_starting_directory()
                 .map(|directory| directory.as_str().to_owned()),
         )),
-        (2, 1, Some("/home/tester/src".to_owned()))
+        (3, 2, Some("~/src".to_owned()))
     );
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(pending_preparations.load(Ordering::Acquire), 0);
-    assert_eq!(pending_closes.load(Ordering::Acquire), 1);
+    assert_eq!(records.starts().len(), 3);
+    assert_eq!(pending_preparations.load(Ordering::Acquire), 1);
+    assert_eq!(pending_closes.load(Ordering::Acquire), 0);
     assert_eq!(winner_closes.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(
@@ -3677,11 +3669,11 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
         )),
         (1, 0, true)
     );
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert!(aliases.is_active(&alias));
+    assert_eq!(closes.load(Ordering::Acquire), 1);
+    assert!(!aliases.is_active(&alias));
     assert_eq!(
         flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::DirectorySelection
+        RemoteWorkspaceFlowStage::ConnectionError
     );
 
     cx.update(|window, cx| {
@@ -3708,7 +3700,7 @@ fn application_teardown_hook_should_close_remote_runtime_exactly_once(cx: &mut T
 }
 
 #[gpui::test]
-fn unavailable_initial_remote_channel_should_return_intact_completion_for_retry(
+fn unavailable_initial_remote_channel_should_close_completion_and_offer_retry(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -3723,21 +3715,21 @@ fn unavailable_initial_remote_channel_should_return_intact_completion_for_retry(
     );
     assert_eq!(records.starts().len(), 1);
     assert_eq!(preparations.load(Ordering::Acquire), 0);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
+    assert_eq!(closes.load(Ordering::Acquire), 1);
 
     availability.store(true, Ordering::Release);
     assert_eq!(
         flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::DirectorySelection
+        RemoteWorkspaceFlowStage::ConnectionError
     );
 }
 
 #[gpui::test]
-fn choosing_scratch_should_create_a_workspace_and_close_the_panel(cx: &mut TestAppContext) {
+fn choosing_local_should_create_a_workspace_and_close_the_panel(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
     open_new_workspace_panel(cx);
-    click("new-workspace-source-scratch", cx);
+    click("new-workspace-source-local", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -3753,14 +3745,13 @@ fn choosing_scratch_should_create_a_workspace_and_close_the_panel(cx: &mut TestA
 }
 
 #[gpui::test]
-fn escape_should_step_back_from_the_picker_to_the_panel_that_opened_it(cx: &mut TestAppContext) {
+fn dismissing_pin_picker_should_restore_terminal_without_opening_creation_panel(
+    cx: &mut TestAppContext,
+) {
     let (manager, _, cx) = workspace_manager(cx);
-
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-local-project", cx);
+    open_directory_picker(&manager, cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-
     assert_eq!(
         cx.update(|window, cx| {
             let manager = manager.read(cx);
@@ -3770,24 +3761,23 @@ fn escape_should_step_back_from_the_picker_to_the_panel_that_opened_it(cx: &mut 
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
-        (false, true, Some(TerminalFocusBlocker::CommandPalette))
+        (false, false, None)
     );
 }
 
 #[gpui::test]
-fn failed_picker_activation_keeps_escape_navigation_to_its_origin_panel(cx: &mut TestAppContext) {
+fn failed_pin_keeps_picker_focus_and_escape_restores_terminal(cx: &mut TestAppContext) {
     let project = temporary_directory("activation-panel-origin");
     fs::create_dir_all(&project).unwrap();
     let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-local-project", cx);
+    open_directory_picker(&manager, cx);
     // The picker retains its valid background authority; activation independently fails.
     manager.update(cx, |manager, _| {
         manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
             crate::platform::local_filesystem::LocalFilesystemError::Capacity,
         );
     });
-    click("workspace-picker-directory-selection", cx);
+    click("directory-picker-directory-selection", cx);
     cx.run_until_parked();
     assert_eq!(records.starts().len(), 1);
     assert_eq!(
@@ -3813,7 +3803,7 @@ fn failed_picker_activation_keeps_escape_navigation_to_its_origin_panel(cx: &mut
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
-        (false, true, Some(TerminalFocusBlocker::CommandPalette))
+        (false, false, None)
     );
     fs::remove_dir_all(project).unwrap();
 }
@@ -3822,7 +3812,7 @@ fn failed_picker_activation_keeps_escape_navigation_to_its_origin_panel(cx: &mut
 fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
-    open_workspace_picker(cx);
+    open_directory_picker(&manager, cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
@@ -3840,10 +3830,10 @@ fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
+fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n");
-    open_workspace_picker(cx);
+    cx.simulate_keystrokes("cmd-n enter");
+    open_directory_picker(&manager, cx);
     let baseline = manager.read_with(cx, |manager, cx| {
         (
             manager.workspaces.len(),
@@ -3857,7 +3847,7 @@ fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         )
     });
 
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         baseline.0
@@ -3901,7 +3891,7 @@ fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
 }
 
 #[gpui::test]
-fn unavailable_local_project_should_block_children_and_recover_when_restored(
+fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     cx: &mut TestAppContext,
 ) {
     let root = temporary_directory("availability");
@@ -3909,8 +3899,8 @@ fn unavailable_local_project_should_block_children_and_recover_when_restored(
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
     let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    choose_with_directory_selection_fallback(cx);
-    assert_eq!(records.starts().len(), 2);
+    choose_with_directory_selection_fallback(&manager, cx);
+    assert_eq!(records.starts().len(), 1);
     assert!(!manager.read_with(cx, |manager, cx| {
         manager.transient.picker.read(cx).is_open()
     }));
@@ -3918,19 +3908,19 @@ fn unavailable_local_project_should_block_children_and_recover_when_restored(
     fs::rename(&project, &parked).unwrap();
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
-    assert_eq!(records.starts().len(), 2);
-    assert!(!manager.read_with(cx, |manager, _| {
+    assert_eq!(records.starts().len(), 1);
+    assert!(manager.read_with(cx, |manager, _| {
         manager
             .workspaces
             .active_workspace()
-            .availability()
-            .is_available()
+            .pinned_directory()
+            .is_some()
     }));
 
     fs::rename(&parked, &project).unwrap();
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
-    assert_eq!(records.starts().len(), 3);
+    assert_eq!(records.starts().len(), 2);
     assert!(manager.read_with(cx, |manager, _| {
         manager
             .workspaces
@@ -3942,11 +3932,11 @@ fn unavailable_local_project_should_block_children_and_recover_when_restored(
 }
 
 #[gpui::test]
-fn unusable_local_project_selection_should_not_create_a_workspace(cx: &mut TestAppContext) {
+fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppContext) {
     let missing = temporary_directory("missing");
     let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
 
-    choose_with_directory_selection_fallback(cx);
+    choose_with_directory_selection_fallback(&manager, cx);
 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -4087,7 +4077,7 @@ fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -4122,7 +4112,7 @@ fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits
 #[gpui::test]
 fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -5236,7 +5226,7 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 #[gpui::test]
 fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     let first_row = cx
@@ -5381,11 +5371,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
             .height,
         px(28.0)
     );
-    for selector in [
-        "new-workspace-source-local-project",
-        "new-workspace-source-scratch",
-        "new-workspace-source-remote-project",
-    ] {
+    for selector in ["new-workspace-source-local", "new-workspace-source-remote"] {
         let row = cx
             .debug_bounds(selector)
             .expect("the compact Workspace source row should render");
@@ -5399,39 +5385,27 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
 }
 
 #[gpui::test]
-fn workspace_kind_icons_should_not_have_redundant_pins(cx: &mut TestAppContext) {
-    let project = temporary_directory("pinned-project");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(project))], cx);
-
-    choose_with_directory_selection_fallback(cx);
-
-    let (scratch_id, project_id) = manager.read_with(cx, |manager, _| {
-        let mut scratch = None;
-        let mut project = None;
-        for workspace in manager.workspaces.iter() {
-            match workspace.kind() {
-                WorkspaceKind::Scratch { .. } => scratch = Some(workspace.id().get()),
-                WorkspaceKind::LocalProject { .. } => project = Some(workspace.id().get()),
-                WorkspaceKind::RemoteProject { .. } => {}
-            }
-        }
-        (
-            scratch.expect("the initial Scratch Workspace must remain"),
-            project.expect("the Local Project Workspace was not created"),
-        )
+fn workspace_pin_indicator_should_track_explicit_pin_state(cx: &mut TestAppContext) {
+    let directory = temporary_directory("pinned-directory");
+    fs::create_dir_all(&directory).unwrap();
+    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(directory.clone()))], cx);
+    assert!(cx.debug_bounds("workspace-row-pin-1").is_none());
+    choose_with_directory_selection_fallback(&manager, cx);
+    assert!(cx.debug_bounds("workspace-row-pin-1").is_some());
+    assert_eq!(records.starts().len(), 1);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        1
+    );
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(1), None, window, cx);
+        })
     });
-
-    assert!(
-        cx.debug_bounds(format!("workspace-row-pin-{project_id}").leak())
-            .is_none(),
-        "the folder already identifies a Local Project"
-    );
-    assert!(
-        cx.debug_bounds(format!("workspace-row-pin-{scratch_id}").leak())
-            .is_none(),
-        "a Scratch Workspace must not claim a pinned directory"
-    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("workspace-row-pin-1").is_none());
+    assert_eq!(records.starts().len(), 1);
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[gpui::test]
@@ -5468,7 +5442,7 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     redraw(cx);
 
     let chip = cx
@@ -5622,7 +5596,7 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
     let (_, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
 
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     let chrome = cx
@@ -5635,46 +5609,46 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
 }
 
 #[gpui::test]
-fn collapsed_top_chrome_should_follow_reported_workspace_directory_changes(
-    cx: &mut TestAppContext,
-) {
-    let directory = temporary_directory("reported-directory-with-a-long-name");
+fn collapsed_top_chrome_should_fit_after_pinning_without_renaming(cx: &mut TestAppContext) {
+    let directory = temporary_directory("pinned-directory-with-a-long-name");
     fs::create_dir_all(&directory).unwrap();
     let (manager, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
-
+    let name = manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace().name().to_owned()
+    });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.handle_directory_report(
+            manager.pin_current_directory(
                 WorkspaceId::new(1),
-                DirectoryAuthority::initial(),
-                &directory,
+                crate::terminal::metadata::CurrentDirectory::Local(directory.clone()),
                 window,
                 cx,
             );
-        });
+        })
     });
     cx.run_until_parked();
-
-    let chrome = cx
-        .debug_bounds("workspace-top-chrome")
-        .expect("the collapsed top-left chrome was not rendered");
-    let spacer = cx
-        .debug_bounds("tab-manager-top-spacer")
-        .expect("the Tab manager spacer was not rendered");
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        name
+    );
+    let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    let spacer = cx.debug_bounds("tab-manager-top-spacer").unwrap();
     assert_eq!(spacer.size.width, chrome.size.width);
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[gpui::test]
-fn collapsed_top_chrome_should_follow_automatic_rename_after_inactive_shell_exit(
-    cx: &mut TestAppContext,
-) {
+fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
@@ -5699,10 +5673,10 @@ fn collapsed_top_chrome_should_follow_automatic_rename_after_inactive_shell_exit
 }
 
 #[gpui::test]
-fn cmd_n_should_create_a_scratch_workspace_without_the_panel(cx: &mut TestAppContext) {
+fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     assert_eq!(
@@ -5740,7 +5714,7 @@ fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppC
 fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-shift-n");
+        cx.simulate_keystrokes("cmd-n enter");
     }
 
     manager.read_with(cx, |manager, _| {
@@ -5773,7 +5747,7 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-shift-n");
+        cx.simulate_keystrokes("cmd-n enter");
     }
     manager.read_with(cx, |manager, _| {
         manager
@@ -5810,7 +5784,7 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-shift-n");
+        cx.simulate_keystrokes("cmd-n enter");
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -5851,7 +5825,7 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-shift-n");
+        cx.simulate_keystrokes("cmd-n enter");
     }
 
     let state = manager.read_with(cx, |manager, _| {
@@ -5871,7 +5845,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-shift-n");
+        cx.simulate_keystrokes("cmd-n enter");
     }
 
     let sidebar = cx
@@ -5972,10 +5946,10 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
 }
 
 #[gpui::test]
-fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAppContext) {
+fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -5985,7 +5959,7 @@ fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAp
             manager
                 .workspaces
                 .active_workspace()
-                .working_directory()
+                .local_home_directory()
                 .unwrap()
                 .to_path_buf(),
             records.dropped_session_ids(),
@@ -5995,7 +5969,7 @@ fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAp
                 .map(|start| {
                     start
                         .local_working_directory()
-                        .expect("Scratch Workspace starts must remain local")
+                        .expect("Local Workspace starts must remain local")
                         .path()
                         .to_path_buf()
                 })
@@ -6017,7 +5991,7 @@ fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAp
 #[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter cmd-n enter");
     cx.run_until_parked();
 
     cx.simulate_keystrokes("ctrl-1");
@@ -6064,7 +6038,7 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 #[gpui::test]
 fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-d cmd-shift-n");
+    cx.simulate_keystrokes("cmd-d cmd-n enter");
     cx.run_until_parked();
 
     click("workspace-row-1-inactive", cx);
@@ -6123,7 +6097,7 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -6411,7 +6385,7 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
     });
     assert_eq!(
         state_before_submit,
-        (true, true, "Default".to_owned()),
+        (true, true, "Workspace 1".to_owned()),
         "dismissing the owned menu must not commit or destroy the editor"
     );
 
@@ -6461,7 +6435,7 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
     });
     assert_eq!(
         state_before_submit,
-        (true, true, "Default".to_owned()),
+        (true, true, "Workspace 1".to_owned()),
         "activating the owned menu must not commit or destroy the editor"
     );
 
@@ -6501,7 +6475,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 #[gpui::test]
 fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
     click("workspace-row-1-inactive", cx);
     right_click("workspace-row-1-active", cx);
@@ -6544,7 +6518,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
         (
             WorkspaceId::new(2),
             true,
-            "Default".to_owned(),
+            "Workspace 1".to_owned(),
             "zsh",
             "zsh · 2 tabs",
             Vec::new(),
@@ -6582,14 +6556,14 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     inactive_sender
         .try_send(SessionEvent::Exited(SessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n enter");
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -6604,4 +6578,267 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/workspace_manager.rs");
+}
+
+#[gpui::test]
+fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestAppContext) {
+    use crate::terminal::metadata::CurrentDirectory;
+    let root = temporary_directory("pin-policy");
+    let first = root.join("first");
+    let second = root.join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let (manager, records, cx) = workspace_manager(cx);
+    for (directory, existing_count) in [(&first, 1), (&second, 2)] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.pin_current_directory(
+                    WorkspaceId::new(1),
+                    CurrentDirectory::Local(directory.clone()),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(records.starts().len(), existing_count);
+        assert!(records.dropped_session_ids().is_empty());
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+        assert_eq!(
+            records
+                .starts()
+                .last()
+                .unwrap()
+                .local_working_directory()
+                .unwrap()
+                .path(),
+            directory.as_path()
+        );
+    }
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(1), None, window, cx);
+        })
+    });
+    assert_eq!(records.starts().len(), 3);
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+    let starts = records
+        .starts()
+        .iter()
+        .map(|start| {
+            start
+                .local_working_directory()
+                .unwrap()
+                .path()
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [PathBuf::from("/Users/test"), first, second.clone(), second]
+    );
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "Workspace 1"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let provider = Arc::new(TestRemoteProvider::connected(
+        crate::domain::RemoteDirectoryIdentity::new("/srv/physical".into()).unwrap(),
+    ));
+    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
+        "work",
+        "~",
+        "/home/tester",
+        true,
+        gpui::Task::ready(Ok(())),
+        provider,
+    );
+    let flow = open_remote_workspace_flow(&manager, cx);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    for (directory, count) in [("/srv/frontend", 2), ("/srv/backend", 3)] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.pin_current_directory(
+                    WorkspaceId::new(2),
+                    CurrentDirectory::Remote(RemoteDirectory::new(directory.into()).unwrap()),
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(records.starts().len(), count);
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+        assert_eq!(
+            records
+                .starts()
+                .last()
+                .unwrap()
+                .remote_launch_plan()
+                .unwrap()
+                .remote_directory()
+                .as_str(),
+            directory
+        );
+    }
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx);
+        })
+    });
+    assert_eq!(records.starts().len(), 4);
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+    assert_eq!(
+        records
+            .starts()
+            .last()
+            .unwrap()
+            .remote_launch_plan()
+            .unwrap()
+            .remote_directory()
+            .as_str(),
+        "/srv/backend"
+    );
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(closes.load(Ordering::Acquire), 0);
+}
+
+#[gpui::test]
+fn delayed_remote_pin_must_not_override_a_later_unpin(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let (sender, receiver) = async_channel::bounded(1);
+    let pending = cx.update(|_, cx| {
+        cx.background_executor()
+            .spawn(async move { receiver.recv().await.unwrap() })
+    });
+    let provider = Arc::new(BlockingRemoteProvider {
+        account: Mutex::new(None),
+        identity: Mutex::new(Some(pending)),
+        account_calls: Arc::new(AtomicUsize::new(0)),
+        identity_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
+        "work",
+        "~",
+        "/home/tester",
+        true,
+        gpui::Task::ready(Ok(())),
+        provider.clone(),
+    );
+    let flow = open_remote_workspace_flow(&manager, cx);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.pin_current_directory(
+                WorkspaceId::new(2),
+                CurrentDirectory::Remote(RemoteDirectory::new("/srv/late".into()).unwrap()),
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(provider.identity_calls.load(Ordering::Acquire), 1);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx);
+        })
+    });
+    sender
+        .try_send(Ok(crate::domain::RemoteDirectoryIdentity::new(
+            "/srv/late".into(),
+        )
+        .unwrap()))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .workspace(WorkspaceId::new(2))
+            .unwrap()
+            .pinned_directory()
+            .is_none()
+    }));
+    assert_eq!(records.starts().len(), 2);
+    assert_eq!(closes.load(Ordering::Acquire), 0);
+}
+
+#[gpui::test]
+fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let provider = Arc::new(TestRemoteProvider::connected(
+        crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
+    ));
+    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
+        "work",
+        "~",
+        "/home/tester",
+        true,
+        gpui::Task::ready(Ok(())),
+        provider,
+    );
+    let flow = open_remote_workspace_flow(&manager, cx);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_pin_directory_picker(WorkspaceId::new(2), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    click("remote-directory-picker-confirm", cx);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .workspace(WorkspaceId::new(1))
+            .unwrap()
+            .pinned_directory()
+            .is_none()
+    }));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            match manager
+                .workspaces
+                .workspace(WorkspaceId::new(2))
+                .unwrap()
+                .pinned_directory()
+            {
+                Some(PinnedDirectory::Remote { directory, .. }) => {
+                    Some(directory.as_str().to_owned())
+                }
+                _ => None,
+            }
+        }),
+        Some("~/".to_owned())
+    );
+    assert_eq!(records.starts().len(), 2);
+    assert_eq!(closes.load(Ordering::Acquire), 0);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.remote_workspace_runtimes.len()),
+        1
+    );
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 }

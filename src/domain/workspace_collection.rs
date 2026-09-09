@@ -1,9 +1,7 @@
-use super::remote_project::{RemoteConnectionReduction, RemoteConnectionState};
+use super::remote_workspace::{RemoteConnectionReduction, RemoteConnectionState};
 use crate::close_confirmation::{
     CloseContinuation, CloseWorkspaceOutcome, FinalTabCloseOutcome, HierarchyClose,
 };
-mod directory_promotion;
-pub(crate) use directory_promotion::DirectoryChange;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -28,7 +26,7 @@ impl WorkspaceId {
     }
 }
 
-pub(crate) use crate::platform::local_filesystem::WorkspaceDirectoryIdentity;
+pub(crate) use crate::platform::local_filesystem::LocalDirectoryIdentity;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Validation failures for values that cross the local-to-remote domain boundary.
@@ -37,8 +35,8 @@ pub(crate) use crate::platform::local_filesystem::WorkspaceDirectoryIdentity;
 pub(crate) enum RemoteWorkspaceValueError {
     #[error("SSH destination must be one non-option, control-free token")]
     Destination,
-    #[error("Remote Workspace Directory must be an absolute or ~/ path without control characters")]
-    WorkspaceDirectory,
+    #[error("Remote Directory must be an absolute or ~/ path without control characters")]
+    StartingDirectory,
     #[error("Physical remote directory identity must be an absolute control-free path")]
     DirectoryIdentity,
 }
@@ -79,19 +77,19 @@ impl SshDestination {
 /// This remote value is preserved for display and shell startup. It is not local filesystem
 /// authority and must never be converted to `PathBuf` or passed to a local path API.
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct RemoteWorkspaceDirectory(String);
+pub(crate) struct RemoteDirectory(String);
 
-impl fmt::Debug for RemoteWorkspaceDirectory {
+impl fmt::Debug for RemoteDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteWorkspaceDirectory(<redacted>)")
+        formatter.write_str("RemoteDirectory(<redacted>)")
     }
 }
 
-impl RemoteWorkspaceDirectory {
+impl RemoteDirectory {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
         if !supported_form || value.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceValueError::WorkspaceDirectory);
+            return Err(RemoteWorkspaceValueError::StartingDirectory);
         }
         Ok(Self(value))
     }
@@ -103,7 +101,7 @@ impl RemoteWorkspaceDirectory {
 
 /// The physical absolute directory returned by the remote `pwd -P` validation protocol.
 ///
-/// Its normalized path-like spelling is an opaque remote identity used for deduplication and
+/// Its normalized path-like spelling is an opaque remote identity used for connection and pin
 /// revalidation. It must never become a local `PathBuf` or local filesystem identity.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RemoteDirectoryIdentity(String);
@@ -134,23 +132,23 @@ impl RemoteDirectoryIdentity {
     }
 }
 
-/// The deduplication identity of a Remote Project Workspace.
+/// The validated destination and home identity retained for a Remote Workspace connection.
 ///
 /// Both the exact destination token and validated physical directory participate in equality.
 /// The selected directory spelling is deliberately excluded and remains separate startup data.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct RemoteWorkspaceKey {
+pub(crate) struct RemoteWorkspaceTarget {
     destination: SshDestination,
     physical_directory: RemoteDirectoryIdentity,
 }
 
-impl fmt::Debug for RemoteWorkspaceKey {
+impl fmt::Debug for RemoteWorkspaceTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteWorkspaceKey(<redacted>)")
+        formatter.write_str("RemoteWorkspaceTarget(<redacted>)")
     }
 }
 
-impl RemoteWorkspaceKey {
+impl RemoteWorkspaceTarget {
     pub(crate) const fn new(
         destination: SshDestination,
         physical_directory: RemoteDirectoryIdentity,
@@ -170,88 +168,63 @@ impl RemoteWorkspaceKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DirectoryAuthority {
-    tab_id: super::TabId,
-    pane_id: super::PaneId,
-}
-
-impl DirectoryAuthority {
-    pub(crate) const fn initial() -> Self {
-        Self::new(super::TabId::from_raw(1), super::PaneId::from_raw(1))
-    }
-
-    pub(crate) const fn new(tab_id: super::TabId, pane_id: super::PaneId) -> Self {
-        Self { tab_id, pane_id }
-    }
-
-    pub(crate) const fn tab_id(self) -> super::TabId {
-        self.tab_id
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn pane_id(self) -> super::PaneId {
-        self.pane_id
-    }
-}
-
+/// Where a Workspace runs. Pinning is independent of its execution location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// The immutable behavioral kind and kind-specific ownership state of a Workspace.
-pub(crate) enum WorkspaceKind {
-    /// A local Workspace whose directory follows its current Directory Authority.
-    Scratch {
-        directory_authority: DirectoryAuthority,
-    },
-    /// A local Workspace pinned to one validated filesystem identity.
-    LocalProject {
-        project_root_identity: WorkspaceDirectoryIdentity,
-    },
-    /// A runtime-only remote Workspace pinned to one deduplication key and startup spelling.
-    ///
-    /// Its remote directory and physical identity remain remote values, never local path authority.
-    RemoteProject {
-        key: RemoteWorkspaceKey,
-        remote_directory: RemoteWorkspaceDirectory,
+pub(crate) enum WorkspaceLocation {
+    Local,
+    Remote {
+        key: RemoteWorkspaceTarget,
+        remote_directory: RemoteDirectory,
         remote_home_identity: RemoteDirectoryIdentity,
         connection_state: RemoteConnectionState,
     },
 }
 
+/// An explicit starting-directory override with authority retained on its own machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspaceDirectoryAvailability {
+pub(crate) enum PinnedDirectory {
+    Local(ValidatedLocalDirectory),
+    Remote {
+        directory: RemoteDirectory,
+        identity: RemoteDirectoryIdentity,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DirectoryAvailability {
     Available,
     Unavailable { reason: String },
 }
 
-impl WorkspaceDirectoryAvailability {
+impl DirectoryAvailability {
     pub(crate) const fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
 }
 
 #[derive(Clone, Eq)]
-/// A validated local Workspace Directory and its local filesystem identity.
+/// A validated local directory and its local filesystem identity.
 ///
-/// This is the only Workspace directory value that may enter local `Path` and `PathBuf` APIs.
-pub(crate) struct ValidatedWorkspaceDirectory {
+/// Local launch and pin operations retain this authority when passing directories to native APIs.
+pub(crate) struct ValidatedLocalDirectory {
     path: PathBuf,
-    identity: WorkspaceDirectoryIdentity,
+    identity: LocalDirectoryIdentity,
 }
 
-impl PartialEq for ValidatedWorkspaceDirectory {
+impl PartialEq for ValidatedLocalDirectory {
     fn eq(&self, other: &Self) -> bool {
         self.path.as_os_str() == other.path.as_os_str() && self.identity == other.identity
     }
 }
 
-impl fmt::Debug for ValidatedWorkspaceDirectory {
+impl fmt::Debug for ValidatedLocalDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ValidatedWorkspaceDirectory(<redacted>)")
+        formatter.write_str("ValidatedLocalDirectory(<redacted>)")
     }
 }
 
-impl ValidatedWorkspaceDirectory {
-    pub(crate) fn new(path: PathBuf, identity: WorkspaceDirectoryIdentity) -> Self {
+impl ValidatedLocalDirectory {
+    pub(crate) fn new(path: PathBuf, identity: LocalDirectoryIdentity) -> Self {
         Self { path, identity }
     }
 
@@ -259,14 +232,14 @@ impl ValidatedWorkspaceDirectory {
         &self.path
     }
 
-    pub(crate) fn identity(&self) -> WorkspaceDirectoryIdentity {
+    pub(crate) fn identity(&self) -> LocalDirectoryIdentity {
         self.identity.clone()
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum WorkspaceDirectoryLocation {
-    Local(ValidatedWorkspaceDirectory),
+enum HomeDirectoryLocation {
+    Local(ValidatedLocalDirectory),
     Remote,
 }
 
@@ -280,43 +253,24 @@ impl fmt::Display for WorkspaceId {
 pub(crate) enum WorkspaceError {
     #[error("Workspace {0} does not belong to this collection")]
     WorkspaceNotFound(WorkspaceId),
-    #[error("Workspace {0} has no local Workspace Directory")]
-    LocalDirectoryUnavailable(WorkspaceId),
-    #[error("Workspace {0} is not a Remote Project Workspace")]
+    #[error("Workspace {0} is not a Remote Workspace")]
     RemoteConnectionUnavailable(WorkspaceId),
     #[error("Workspace {0} connection generation is exhausted")]
     RemoteConnectionGenerationExhausted(WorkspaceId),
+    #[error("Workspace {0} directory belongs to a different machine")]
+    DirectoryLocationMismatch(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
     IdSpaceExhausted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Whether Remote Project creation allocated a new Workspace or activated its deduplicated owner.
-///
-/// `ActivatedExisting` guarantees that the supplied payload factory was not invoked.
-pub(crate) enum CreateRemoteProjectOutcome {
-    Created { workspace_id: WorkspaceId },
-    ActivatedExisting { workspace_id: WorkspaceId },
-}
-
-impl CreateRemoteProjectOutcome {
-    #[cfg(test)]
-    pub(crate) const fn workspace_id(self) -> WorkspaceId {
-        match self {
-            Self::Created { workspace_id } | Self::ActivatedExisting { workspace_id } => {
-                workspace_id
-            }
-        }
-    }
 }
 
 pub(crate) struct WorkspaceEntry<T> {
     id: WorkspaceId,
     name: String,
     custom_name: Option<String>,
-    kind: WorkspaceKind,
-    directory_location: WorkspaceDirectoryLocation,
-    availability: WorkspaceDirectoryAvailability,
+    location: WorkspaceLocation,
+    pinned_directory: Option<PinnedDirectory>,
+    directory_location: HomeDirectoryLocation,
+    availability: DirectoryAvailability,
     payload: T,
 }
 
@@ -329,56 +283,69 @@ impl<T> WorkspaceEntry<T> {
         &self.name
     }
 
-    pub(crate) fn working_directory(&self) -> Option<&Path> {
+    pub(crate) fn local_home_directory(&self) -> Option<&Path> {
         match &self.directory_location {
-            WorkspaceDirectoryLocation::Local(directory) => Some(directory.path()),
-            WorkspaceDirectoryLocation::Remote => None,
+            HomeDirectoryLocation::Local(directory) => Some(directory.path()),
+            HomeDirectoryLocation::Remote => None,
         }
     }
 
-    pub(crate) const fn kind(&self) -> &WorkspaceKind {
-        &self.kind
+    pub(crate) const fn location(&self) -> &WorkspaceLocation {
+        &self.location
     }
 
-    pub(crate) const fn remote_workspace_directory(&self) -> Option<&RemoteWorkspaceDirectory> {
-        match &self.kind {
-            WorkspaceKind::RemoteProject {
+    pub(crate) const fn remote_starting_directory(&self) -> Option<&RemoteDirectory> {
+        match &self.location {
+            WorkspaceLocation::Remote {
                 remote_directory, ..
             } => Some(remote_directory),
-            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+            WorkspaceLocation::Local => None,
         }
     }
 
-    pub(crate) const fn remote_workspace_key(&self) -> Option<&RemoteWorkspaceKey> {
-        match &self.kind {
-            WorkspaceKind::RemoteProject { key, .. } => Some(key),
-            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+    pub(crate) const fn remote_workspace_key(&self) -> Option<&RemoteWorkspaceTarget> {
+        match &self.location {
+            WorkspaceLocation::Remote { key, .. } => Some(key),
+            WorkspaceLocation::Local => None,
         }
     }
 
     pub(crate) const fn remote_connection_state(&self) -> Option<RemoteConnectionState> {
-        match &self.kind {
-            WorkspaceKind::RemoteProject {
+        match &self.location {
+            WorkspaceLocation::Remote {
                 connection_state, ..
             } => Some(*connection_state),
-            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+            WorkspaceLocation::Local => None,
         }
-    }
-
-    pub(crate) fn directory_identity(&self) -> Option<WorkspaceDirectoryIdentity> {
-        match &self.directory_location {
-            WorkspaceDirectoryLocation::Local(directory) => Some(directory.identity()),
-            WorkspaceDirectoryLocation::Remote => None,
-        }
-    }
-
-    pub(crate) const fn availability(&self) -> &WorkspaceDirectoryAvailability {
-        &self.availability
     }
 
     #[cfg(test)]
-    pub(crate) fn custom_name(&self) -> Option<&str> {
-        self.custom_name.as_deref()
+    pub(crate) fn directory_identity(&self) -> Option<LocalDirectoryIdentity> {
+        match &self.directory_location {
+            HomeDirectoryLocation::Local(directory) => Some(directory.identity()),
+            HomeDirectoryLocation::Remote => None,
+        }
+    }
+
+    pub(crate) fn local_display_directory(&self) -> Option<&Path> {
+        match &self.pinned_directory {
+            Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
+            _ => self.local_home_directory(),
+        }
+    }
+    pub(crate) fn remote_display_directory(&self) -> Option<&RemoteDirectory> {
+        match &self.pinned_directory {
+            Some(PinnedDirectory::Remote { directory, .. }) => Some(directory),
+            _ => self.remote_starting_directory(),
+        }
+    }
+
+    pub(crate) const fn pinned_directory(&self) -> Option<&PinnedDirectory> {
+        self.pinned_directory.as_ref()
+    }
+
+    pub(crate) const fn availability(&self) -> &DirectoryAvailability {
+        &self.availability
     }
 
     pub(crate) const fn payload(&self) -> &T {
@@ -390,8 +357,6 @@ pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
     active_workspace_id: WorkspaceId,
     next_workspace_id: u64,
-    home_identity: WorkspaceDirectoryIdentity,
-    directory_names: bool,
 }
 
 impl<T> WorkspaceCollection<T> {
@@ -400,47 +365,31 @@ impl<T> WorkspaceCollection<T> {
         working_directory: PathBuf,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Self {
-        let directory = ValidatedWorkspaceDirectory::new(
-            working_directory,
-            WorkspaceDirectoryIdentity::for_test(0),
-        );
-        let mut collection = Self::new_scratch(
-            directory,
-            DirectoryAuthority::initial(),
-            create_initial_payload,
-        );
-        collection.directory_names = false;
-        collection.workspaces[0].name = default_workspace_name(1);
-        collection
+        let directory =
+            ValidatedLocalDirectory::new(working_directory, LocalDirectoryIdentity::for_test(0));
+        Self::new_local(directory, create_initial_payload)
     }
 
-    pub(crate) fn new_scratch(
-        directory: ValidatedWorkspaceDirectory,
-        directory_authority: DirectoryAuthority,
+    pub(crate) fn new_local(
+        directory: ValidatedLocalDirectory,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Self {
-        let initial_workspace_id = WorkspaceId::from_raw(1);
-        let payload = create_initial_payload(initial_workspace_id, directory.path());
-        let home_identity = directory.identity();
-        let mut collection = Self {
+        let id = WorkspaceId::from_raw(1);
+        let payload = create_initial_payload(id, directory.path());
+        Self {
             workspaces: vec![WorkspaceEntry {
-                id: initial_workspace_id,
-                name: String::new(),
+                id,
+                name: default_workspace_name(1),
                 custom_name: None,
-                kind: WorkspaceKind::Scratch {
-                    directory_authority,
-                },
-                directory_location: WorkspaceDirectoryLocation::Local(directory),
-                availability: WorkspaceDirectoryAvailability::Available,
+                location: WorkspaceLocation::Local,
+                pinned_directory: None,
+                directory_location: HomeDirectoryLocation::Local(directory),
+                availability: DirectoryAvailability::Available,
                 payload,
             }],
-            active_workspace_id: initial_workspace_id,
+            active_workspace_id: id,
             next_workspace_id: 2,
-            home_identity,
-            directory_names: true,
-        };
-        collection.recalculate_automatic_names();
-        collection
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -468,39 +417,7 @@ impl<T> WorkspaceCollection<T> {
         self.workspaces.iter()
     }
 
-    pub(crate) fn local_project_workspace(
-        &self,
-        identity: WorkspaceDirectoryIdentity,
-    ) -> Option<WorkspaceId> {
-        self.workspaces.iter().find_map(|workspace| {
-            matches!(
-                &workspace.kind,
-                WorkspaceKind::LocalProject {
-                    project_root_identity
-                } if project_root_identity == &identity
-            )
-            .then_some(workspace.id)
-        })
-    }
-
-    /// Returns the Workspace that owns the exact Remote deduplication key, if one exists.
-    ///
-    /// Lookup compares the exact SSH destination token plus physical remote directory identity;
-    /// it does not compare the selected directory spelling or resolve aliases.
-    pub(crate) fn remote_project_workspace(&self, key: &RemoteWorkspaceKey) -> Option<WorkspaceId> {
-        self.workspaces.iter().find_map(|workspace| {
-            matches!(
-                &workspace.kind,
-                WorkspaceKind::RemoteProject {
-                    key: candidate_key,
-                    ..
-                } if candidate_key == key
-            )
-            .then_some(workspace.id)
-        })
-    }
-
-    /// Starts exactly one reconnect attempt from a disconnected or failed Remote Project.
+    /// Starts exactly one reconnect attempt from a disconnected or failed Remote Workspace.
     ///
     /// The collection owns checked generation allocation so callers cannot manufacture, reuse, or
     /// skip generations. Errors and illegal reductions leave the Workspace unchanged.
@@ -515,7 +432,7 @@ impl<T> WorkspaceCollection<T> {
             ))
     }
 
-    /// Applies one observed lifecycle transition to the owning Remote Project Workspace.
+    /// Applies one observed lifecycle transition to the owning Remote Workspace.
     ///
     /// The state's reducer rejects stale generations and illegal phase changes without mutation.
     /// Missing and non-Remote Workspace IDs return typed errors.
@@ -541,102 +458,104 @@ impl<T> WorkspaceCollection<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_scratch_workspace_unchecked(
+    pub(crate) fn create_local_workspace_unchecked(
         &mut self,
-        working_directory: PathBuf,
+        directory: PathBuf,
         create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<WorkspaceId, WorkspaceError> {
-        let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
-        let name = self.next_default_workspace_name(None);
-        let directory = ValidatedWorkspaceDirectory::new(
-            working_directory,
-            WorkspaceDirectoryIdentity::for_test(workspace_id.get()),
-        );
-        let payload = create_payload(workspace_id, directory.path());
-        self.workspaces.push(WorkspaceEntry {
-            id: workspace_id,
-            name: name.clone(),
-            custom_name: Some(name),
-            kind: WorkspaceKind::Scratch {
-                directory_authority: DirectoryAuthority::initial(),
-            },
-            directory_location: WorkspaceDirectoryLocation::Local(directory),
-            availability: WorkspaceDirectoryAvailability::Available,
-            payload,
-        });
-        self.active_workspace_id = workspace_id;
-        self.next_workspace_id = next_workspace_id;
-        Ok(workspace_id)
-    }
-
-    pub(crate) fn create_scratch_workspace(
-        &mut self,
-        directory: ValidatedWorkspaceDirectory,
-        directory_authority: DirectoryAuthority,
-        create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<WorkspaceId, WorkspaceError> {
-        self.create_workspace_entry(
-            WorkspaceKind::Scratch {
-                directory_authority,
-            },
-            directory,
+        self.create_local_workspace(
+            ValidatedLocalDirectory::new(directory, LocalDirectoryIdentity::for_test(0)),
             create_payload,
         )
     }
 
-    pub(crate) fn create_local_project_workspace(
+    pub(crate) fn create_local_workspace(
         &mut self,
-        directory: ValidatedWorkspaceDirectory,
+        directory: ValidatedLocalDirectory,
         create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<WorkspaceId, WorkspaceError> {
-        if let Some(existing_id) = self.local_project_workspace(directory.identity()) {
-            self.active_workspace_id = existing_id;
-            return Ok(existing_id);
-        }
-        let kind = WorkspaceKind::LocalProject {
-            project_root_identity: directory.identity(),
-        };
-        self.create_workspace_entry(kind, directory, create_payload)
+        let (id, next) = self.next_workspace_id()?;
+        let payload = create_payload(id, directory.path());
+        let name = self.next_default_workspace_name(None);
+        self.workspaces.push(WorkspaceEntry {
+            id,
+            name,
+            custom_name: None,
+            location: WorkspaceLocation::Local,
+            pinned_directory: None,
+            directory_location: HomeDirectoryLocation::Local(directory),
+            availability: DirectoryAvailability::Available,
+            payload,
+        });
+        self.active_workspace_id = id;
+        self.next_workspace_id = next;
+        Ok(id)
     }
 
-    /// Creates or activates the Remote Project identified by `key`.
-    ///
-    /// Deduplication occurs before ID allocation and before invoking `create_payload`; an existing
-    /// exact destination plus physical-directory identity is activated with its original selected
-    /// directory spelling and runtime owner intact. No remote value enters a local path API.
-    pub(crate) fn create_remote_project_workspace(
+    pub(crate) fn create_remote_workspace(
         &mut self,
-        key: RemoteWorkspaceKey,
-        remote_directory: RemoteWorkspaceDirectory,
+        key: RemoteWorkspaceTarget,
+        remote_directory: RemoteDirectory,
         remote_home_identity: RemoteDirectoryIdentity,
         connection_state: RemoteConnectionState,
         create_payload: impl FnOnce(WorkspaceId) -> T,
-    ) -> Result<CreateRemoteProjectOutcome, WorkspaceError> {
-        if let Some(workspace_id) = self.remote_project_workspace(&key) {
-            self.active_workspace_id = workspace_id;
-            return Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id });
+    ) -> Result<WorkspaceId, WorkspaceError> {
+        let (id, next) = self.next_workspace_id()?;
+        let payload = create_payload(id);
+        let base = key.destination().as_str();
+        let mut name = base.to_owned();
+        let mut ordinal = 2;
+        while self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.name == name)
+        {
+            name = format!("{base} {ordinal}");
+            ordinal += 1;
         }
-
-        let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
-        let payload = create_payload(workspace_id);
         self.workspaces.push(WorkspaceEntry {
-            id: workspace_id,
-            name: String::new(),
+            id,
+            name,
             custom_name: None,
-            kind: WorkspaceKind::RemoteProject {
+            location: WorkspaceLocation::Remote {
                 key,
                 remote_directory,
                 remote_home_identity,
                 connection_state,
             },
-            directory_location: WorkspaceDirectoryLocation::Remote,
-            availability: WorkspaceDirectoryAvailability::Available,
+            pinned_directory: None,
+            directory_location: HomeDirectoryLocation::Remote,
+            availability: DirectoryAvailability::Available,
             payload,
         });
-        self.active_workspace_id = workspace_id;
-        self.next_workspace_id = next_workspace_id;
-        self.recalculate_automatic_names();
-        Ok(CreateRemoteProjectOutcome::Created { workspace_id })
+        self.active_workspace_id = id;
+        self.next_workspace_id = next;
+        Ok(id)
+    }
+
+    pub(crate) fn set_pinned_directory(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pin: Option<PinnedDirectory>,
+    ) -> Result<(), WorkspaceError> {
+        let workspace = self
+            .workspace_mut(workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        if matches!(
+            (&workspace.location, &pin),
+            (
+                WorkspaceLocation::Local,
+                Some(PinnedDirectory::Remote { .. })
+            ) | (
+                WorkspaceLocation::Remote { .. },
+                Some(PinnedDirectory::Local(_))
+            )
+        ) {
+            return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
+        }
+        workspace.pinned_directory = pin;
+        workspace.availability = DirectoryAvailability::Available;
+        Ok(())
     }
 
     pub(crate) fn activate_workspace(
@@ -656,17 +575,12 @@ impl<T> WorkspaceCollection<T> {
         workspace_id: WorkspaceId,
         name: String,
     ) -> Result<(), WorkspaceError> {
-        let directory_names = self.directory_names;
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-
-        let custom_name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
-        workspace.custom_name = custom_name.clone();
-        if !directory_names && let Some(custom_name) = custom_name {
-            workspace.name = custom_name;
-        }
-        self.recalculate_automatic_names();
+        let default_name = self.next_default_workspace_name(Some(workspace_id));
+        let workspace = self
+            .workspace_mut(workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        workspace.custom_name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+        workspace.name = workspace.custom_name.clone().unwrap_or(default_name);
         Ok(())
     }
 
@@ -678,24 +592,7 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        workspace.availability = WorkspaceDirectoryAvailability::Unavailable { reason };
-        Ok(())
-    }
-
-    pub(crate) fn set_directory_available(
-        &mut self,
-        workspace_id: WorkspaceId,
-        identity: WorkspaceDirectoryIdentity,
-    ) -> Result<(), WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceDirectoryLocation::Local(directory) = &mut workspace.directory_location else {
-            return Err(WorkspaceError::LocalDirectoryUnavailable(workspace_id));
-        };
-        directory.identity = identity;
-        workspace.availability = WorkspaceDirectoryAvailability::Available;
-        self.recalculate_automatic_names();
+        workspace.availability = DirectoryAvailability::Unavailable { reason };
         Ok(())
     }
 
@@ -706,38 +603,26 @@ impl<T> WorkspaceCollection<T> {
         replacement_working_directory: PathBuf,
         create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        let replacement = ValidatedWorkspaceDirectory::new(
+        let replacement = ValidatedLocalDirectory::new(
             replacement_working_directory,
-            self.home_identity.clone(),
+            LocalDirectoryIdentity::for_test(0),
         );
-        self.close_workspace_with_replacement(
-            workspace_id,
-            replacement,
-            DirectoryAuthority::initial(),
-            create_replacement,
-        )
+        self.close_workspace_with_replacement(workspace_id, replacement, create_replacement)
     }
 
-    pub(crate) fn close_workspace_with_scratch_replacement(
+    pub(crate) fn close_workspace_with_local_replacement(
         &mut self,
         workspace_id: WorkspaceId,
-        replacement: ValidatedWorkspaceDirectory,
-        directory_authority: DirectoryAuthority,
+        replacement: ValidatedLocalDirectory,
         create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        self.close_workspace_with_replacement(
-            workspace_id,
-            replacement,
-            directory_authority,
-            create_replacement,
-        )
+        self.close_workspace_with_replacement(workspace_id, replacement, create_replacement)
     }
 
     fn close_workspace_with_replacement(
         &mut self,
         workspace_id: WorkspaceId,
-        replacement: ValidatedWorkspaceDirectory,
-        directory_authority: DirectoryAuthority,
+        replacement: ValidatedLocalDirectory,
         create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
         let Some(index) = self
@@ -750,15 +635,7 @@ impl<T> WorkspaceCollection<T> {
 
         if HierarchyClose::Workspace.resolve(self.workspaces.len()) == CloseContinuation::Replace {
             let (replacement_workspace_id, next_workspace_id) = self.next_workspace_id()?;
-            let replacement_name = if self.directory_names {
-                automatic_workspace_basename(
-                    replacement.path(),
-                    replacement.identity(),
-                    self.home_identity.clone(),
-                )
-            } else {
-                self.next_default_workspace_name(Some(workspace_id))
-            };
+            let replacement_name = self.next_default_workspace_name(Some(workspace_id));
             let replacement_payload =
                 create_replacement(replacement_workspace_id, replacement.path());
             let closed_workspace = std::mem::replace(
@@ -767,11 +644,10 @@ impl<T> WorkspaceCollection<T> {
                     id: replacement_workspace_id,
                     name: replacement_name,
                     custom_name: None,
-                    kind: WorkspaceKind::Scratch {
-                        directory_authority,
-                    },
-                    directory_location: WorkspaceDirectoryLocation::Local(replacement),
-                    availability: WorkspaceDirectoryAvailability::Available,
+                    location: WorkspaceLocation::Local,
+                    pinned_directory: None,
+                    directory_location: HomeDirectoryLocation::Local(replacement),
+                    availability: DirectoryAvailability::Available,
                     payload: replacement_payload,
                 },
             );
@@ -790,7 +666,6 @@ impl<T> WorkspaceCollection<T> {
             let fallback_index = index.min(self.workspaces.len() - 1);
             self.active_workspace_id = self.workspaces[fallback_index].id;
         }
-        self.recalculate_automatic_names();
 
         Ok(CloseWorkspaceOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
@@ -820,7 +695,6 @@ impl<T> WorkspaceCollection<T> {
             let fallback_index = index.min(self.workspaces.len() - 1);
             self.active_workspace_id = self.workspaces[fallback_index].id;
         }
-        self.recalculate_automatic_names();
 
         Ok(FinalTabCloseOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
@@ -842,9 +716,9 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        let WorkspaceKind::RemoteProject {
+        let WorkspaceLocation::Remote {
             connection_state, ..
-        } = &mut workspace.kind
+        } = &mut workspace.location
         else {
             return Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id));
         };
@@ -857,86 +731,6 @@ impl<T> WorkspaceCollection<T> {
             .checked_add(1)
             .ok_or(WorkspaceError::IdSpaceExhausted)?;
         Ok((WorkspaceId::from_raw(value), next))
-    }
-
-    fn create_workspace_entry(
-        &mut self,
-        kind: WorkspaceKind,
-        directory: ValidatedWorkspaceDirectory,
-        create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<WorkspaceId, WorkspaceError> {
-        let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
-        let payload = create_payload(workspace_id, directory.path());
-        self.workspaces.push(WorkspaceEntry {
-            id: workspace_id,
-            name: String::new(),
-            custom_name: None,
-            kind,
-            directory_location: WorkspaceDirectoryLocation::Local(directory),
-            availability: WorkspaceDirectoryAvailability::Available,
-            payload,
-        });
-        self.active_workspace_id = workspace_id;
-        self.next_workspace_id = next_workspace_id;
-        self.recalculate_automatic_names();
-        Ok(workspace_id)
-    }
-
-    fn recalculate_automatic_names(&mut self) {
-        if !self.directory_names {
-            return;
-        }
-        let names = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .map(|(index, workspace)| {
-                if let Some(custom_name) = &workspace.custom_name {
-                    return custom_name.clone();
-                }
-                let base = match &workspace.kind {
-                    WorkspaceKind::RemoteProject {
-                        key,
-                        remote_home_identity,
-                        ..
-                    } => automatic_remote_workspace_name(key, remote_home_identity),
-                    WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => {
-                        let WorkspaceDirectoryLocation::Local(directory) =
-                            &workspace.directory_location
-                        else {
-                            unreachable!(
-                                "Scratch and Local Project Workspaces must own local directories"
-                            )
-                        };
-                        automatic_workspace_basename(
-                            directory.path(),
-                            directory.identity(),
-                            self.home_identity.clone(),
-                        )
-                    }
-                };
-                if !matches!(workspace.kind, WorkspaceKind::Scratch { .. }) {
-                    return base;
-                }
-                let ordinal = self.workspaces[..index]
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.custom_name.is_none()
-                            && matches!(candidate.kind, WorkspaceKind::Scratch { .. })
-                            && candidate.directory_identity() == workspace.directory_identity()
-                    })
-                    .count()
-                    + 1;
-                if ordinal == 1 {
-                    base
-                } else {
-                    format!("{base} {ordinal}")
-                }
-            })
-            .collect::<Vec<_>>();
-        for (workspace, name) in self.workspaces.iter_mut().zip(names) {
-            workspace.name = name;
-        }
     }
 
     fn next_default_workspace_name(&self, excluded_workspace_id: Option<WorkspaceId>) -> String {
@@ -956,42 +750,6 @@ impl<T> WorkspaceCollection<T> {
 
 fn default_workspace_name(workspace_number: usize) -> String {
     format!("Workspace {workspace_number}")
-}
-
-fn automatic_workspace_basename(
-    path: &Path,
-    identity: WorkspaceDirectoryIdentity,
-    home_identity: WorkspaceDirectoryIdentity,
-) -> String {
-    if identity == home_identity {
-        return "Default".to_owned();
-    }
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "/".to_owned())
-}
-
-fn automatic_remote_workspace_name(
-    key: &RemoteWorkspaceKey,
-    home_identity: &RemoteDirectoryIdentity,
-) -> String {
-    let destination = key.destination().as_str();
-    if key.physical_directory() == home_identity {
-        return destination.to_owned();
-    }
-
-    let physical_directory = key.physical_directory().as_str();
-    let basename = if physical_directory == "/" {
-        "/"
-    } else {
-        physical_directory
-            .rsplit('/')
-            .next()
-            .filter(|name| !name.is_empty())
-            .unwrap_or(physical_directory)
-    };
-    format!("{basename} · {destination}")
 }
 
 #[cfg(test)]
@@ -1018,10 +776,10 @@ mod tests {
         })
     }
 
-    fn validated(path: &str, identity_label: u64) -> ValidatedWorkspaceDirectory {
-        ValidatedWorkspaceDirectory::new(
+    fn validated(path: &str, identity_label: u64) -> ValidatedLocalDirectory {
+        ValidatedLocalDirectory::new(
             PathBuf::from(path),
-            WorkspaceDirectoryIdentity::for_test(identity_label),
+            LocalDirectoryIdentity::for_test(identity_label),
         )
     }
 
@@ -1029,8 +787,8 @@ mod tests {
         SshDestination::new(value.to_owned()).unwrap()
     }
 
-    fn remote_directory(value: &str) -> RemoteWorkspaceDirectory {
-        RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    fn remote_directory(value: &str) -> RemoteDirectory {
+        RemoteDirectory::new(value.to_owned()).unwrap()
     }
 
     #[test]
@@ -1038,10 +796,10 @@ mod tests {
         let destination = ssh_destination("sensitive-host");
         let selected = remote_directory("/sensitive/selected");
         let physical = RemoteDirectoryIdentity::new("/sensitive/physical".to_owned()).unwrap();
-        let key = RemoteWorkspaceKey::new(destination.clone(), physical.clone());
-        let local = ValidatedWorkspaceDirectory::new(
+        let key = RemoteWorkspaceTarget::new(destination.clone(), physical.clone());
+        let local = ValidatedLocalDirectory::new(
             PathBuf::from("/sensitive/local"),
-            WorkspaceDirectoryIdentity::for_test(1001),
+            LocalDirectoryIdentity::for_test(1001),
         );
 
         for debug in [
@@ -1059,109 +817,11 @@ mod tests {
         RemoteDirectoryIdentity::new(value.to_owned()).unwrap()
     }
 
-    fn remote_key(destination: &str, physical_directory: &str) -> RemoteWorkspaceKey {
-        RemoteWorkspaceKey::new(
+    fn remote_key(destination: &str, physical_directory: &str) -> RemoteWorkspaceTarget {
+        RemoteWorkspaceTarget::new(
             ssh_destination(destination),
             remote_identity(physical_directory),
         )
-    }
-
-    #[test]
-    fn workspace_kinds_own_distinct_directory_policies() {
-        let authority =
-            DirectoryAuthority::new(super::super::TabId::new(4), super::super::PaneId::new(7));
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            authority,
-            |_, _| "scratch",
-        );
-        let project_id = workspaces
-            .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| "project")
-            .unwrap();
-
-        assert!(matches!(
-            workspaces.workspace(WorkspaceId::new(1)).unwrap().kind(),
-            WorkspaceKind::Scratch { directory_authority } if *directory_authority == authority
-        ));
-        assert!(matches!(
-            workspaces.workspace(project_id).unwrap().kind(),
-            WorkspaceKind::LocalProject { project_root_identity }
-                if *project_root_identity == WorkspaceDirectoryIdentity::for_test(20)
-        ));
-        assert_eq!(
-            (authority.tab_id(), authority.pane_id()),
-            (super::super::TabId::new(4), super::super::PaneId::new(7))
-        );
-    }
-
-    #[test]
-    fn automatic_names_number_only_matching_unrenamed_scratch_workspaces() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
-        let second = workspaces
-            .create_scratch_workspace(
-                validated("/private/alternate-home-spelling", 10),
-                DirectoryAuthority::initial(),
-                |_, _| (),
-            )
-            .unwrap();
-        workspaces
-            .create_local_project_workspace(validated("/Users/test", 10), |_, _| ())
-            .unwrap();
-
-        assert_eq!(
-            workspaces
-                .iter()
-                .map(WorkspaceEntry::name)
-                .collect::<Vec<_>>(),
-            vec!["Default", "Default 2", "Default"]
-        );
-        workspaces
-            .rename_workspace(second, "  Focus  ".to_owned())
-            .unwrap();
-        assert_eq!(
-            workspaces.workspace(second).unwrap().custom_name(),
-            Some("Focus")
-        );
-        workspaces
-            .rename_workspace(second, "   ".to_owned())
-            .unwrap();
-        assert_eq!(
-            (
-                workspaces.workspace(second).unwrap().custom_name(),
-                workspaces.workspace(second).unwrap().name(),
-            ),
-            (None, "Default 2")
-        );
-    }
-
-    #[test]
-    fn local_project_identity_deduplicates_without_merging_scratch() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/selected/project", 20),
-            DirectoryAuthority::initial(),
-            |_, _| "scratch",
-        );
-        let created = workspaces
-            .create_local_project_workspace(validated("/selected/project", 20), |_, _| "project")
-            .unwrap();
-        let duplicate = workspaces
-            .create_local_project_workspace(validated("/equivalent/project", 20), |_, _| {
-                panic!("an equivalent Local Project must not create another payload")
-            })
-            .unwrap();
-
-        assert_eq!(
-            (workspaces.len(), created, duplicate),
-            (2, created, created)
-        );
-        assert_eq!(
-            workspaces.workspace(created).unwrap().working_directory(),
-            Some(Path::new("/selected/project"))
-        );
     }
 
     #[test]
@@ -1179,7 +839,7 @@ mod tests {
             )
         );
         assert!(SshDestination::new("bad destination".to_owned()).is_err());
-        assert!(RemoteWorkspaceDirectory::new("relative/path".to_owned()).is_err());
+        assert!(RemoteDirectory::new("relative/path".to_owned()).is_err());
         assert!(RemoteDirectoryIdentity::new("~/not-physical".to_owned()).is_err());
     }
 
@@ -1208,139 +868,36 @@ mod tests {
     }
 
     #[test]
-    fn remote_project_key_deduplicates_without_invoking_the_duplicate_payload_factory() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| "scratch",
-        );
-        let key = remote_key("orb", "/home/test/project");
-        let created = workspaces
-            .create_remote_project_workspace(
-                key.clone(),
-                remote_directory("~/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(4),
-                |_| "remote",
-            )
-            .unwrap();
-        let duplicate = workspaces
-            .create_remote_project_workspace(
-                key,
-                remote_directory("/home/test/./project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(9),
-                |_| panic!("a duplicate Remote Project must retain its original payload"),
-            )
-            .unwrap();
-
-        let CreateRemoteProjectOutcome::Created { workspace_id } = created else {
-            panic!("the first Remote Project should be created")
-        };
-        assert_eq!(
-            duplicate,
-            CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }
-        );
-        assert_eq!(workspaces.len(), 2);
-        assert_eq!(workspaces.active_workspace_id(), workspace_id);
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .unwrap()
-                .remote_workspace_directory()
-                .map(RemoteWorkspaceDirectory::as_str),
-            Some("~/project")
-        );
-    }
-
-    #[test]
-    fn remote_project_directory_is_unavailable_through_local_directory_apis() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+    fn remote_directories_never_provide_local_filesystem_authority() {
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/home/test/project"),
                 remote_directory("~/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(1),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
         let workspace = workspaces.workspace(workspace_id).unwrap();
 
-        assert_eq!(workspace.working_directory(), None);
+        assert_eq!(workspace.local_home_directory(), None);
         assert_eq!(workspace.directory_identity(), None);
         assert_eq!(
             workspace
-                .remote_workspace_directory()
-                .map(RemoteWorkspaceDirectory::as_str),
+                .remote_starting_directory()
+                .map(RemoteDirectory::as_str),
             Some("~/project")
         );
-        assert_eq!(
-            workspaces
-                .set_directory_available(workspace_id, WorkspaceDirectoryIdentity::for_test(99),),
-            Err(WorkspaceError::LocalDirectoryUnavailable(workspace_id))
-        );
     }
 
     #[test]
-    fn scratch_and_local_project_keep_validated_local_directory_apis() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
-        let project_id = workspaces
-            .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| ())
-            .unwrap();
-
-        assert_eq!(
-            (
-                workspaces
-                    .workspace(WorkspaceId::new(1))
-                    .unwrap()
-                    .working_directory(),
-                workspaces
-                    .workspace(WorkspaceId::new(1))
-                    .unwrap()
-                    .directory_identity(),
-            ),
-            (
-                Some(Path::new("/Users/test")),
-                Some(WorkspaceDirectoryIdentity::for_test(10)),
-            )
-        );
-        assert_eq!(
-            (
-                workspaces
-                    .workspace(project_id)
-                    .unwrap()
-                    .working_directory(),
-                workspaces
-                    .workspace(project_id)
-                    .unwrap()
-                    .directory_identity(),
-            ),
-            (
-                Some(Path::new("/Users/test/project")),
-                Some(WorkspaceDirectoryIdentity::for_test(20)),
-            )
-        );
-    }
-
-    #[test]
-    fn remote_project_key_keeps_different_destination_aliases_distinct() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+    fn remote_workspace_key_keeps_different_destination_aliases_distinct() {
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let first = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
@@ -1349,7 +906,7 @@ mod tests {
             )
             .unwrap();
         let second = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb-alias", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
@@ -1358,81 +915,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(first, CreateRemoteProjectOutcome::Created { .. }));
-        assert!(matches!(second, CreateRemoteProjectOutcome::Created { .. }));
+        assert_ne!(first, second);
         assert_eq!(workspaces.len(), 3);
-    }
-
-    #[test]
-    fn remote_automatic_names_distinguish_home_directory_and_preserve_custom_names() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
-        let home = workspaces
-            .create_remote_project_workspace(
-                remote_key("orb", "/home/test"),
-                remote_directory("~/"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap()
-            .workspace_id();
-        let project = workspaces
-            .create_remote_project_workspace(
-                remote_key("dev@example", "/srv/team/project"),
-                remote_directory("/srv/team/project/"),
-                remote_identity("/home/dev"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap()
-            .workspace_id();
-
-        assert_eq!(workspaces.workspace(home).unwrap().name(), "orb");
-        assert_eq!(
-            workspaces.workspace(project).unwrap().name(),
-            "project · dev@example"
-        );
-        workspaces
-            .rename_workspace(project, "  Production  ".to_owned())
-            .unwrap();
-        assert_eq!(workspaces.workspace(project).unwrap().name(), "Production");
-        workspaces.rename_workspace(project, String::new()).unwrap();
-        assert_eq!(
-            workspaces.workspace(project).unwrap().name(),
-            "project · dev@example"
-        );
-    }
-
-    #[test]
-    fn remote_automatic_name_uses_physical_basename_without_changing_startup_spelling() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
-        let workspace_id = workspaces
-            .create_remote_project_workspace(
-                remote_key("orb", "/srv/team/project"),
-                remote_directory("/srv/team/project/."),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap()
-            .workspace_id();
-        let workspace = workspaces.workspace(workspace_id).unwrap();
-
-        assert_eq!(workspace.name(), "project · orb");
-        assert_eq!(
-            workspace
-                .remote_workspace_directory()
-                .map(RemoteWorkspaceDirectory::as_str),
-            Some("/srv/team/project/.")
-        );
     }
 
     #[test]
@@ -1510,17 +994,14 @@ mod tests {
 
     #[test]
     fn remote_connection_operations_reject_missing_and_local_workspaces_without_mutation() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let local_id = workspaces
-            .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| ())
+            .create_local_workspace(validated("/Users/test/project", 20), |_, _| ())
             .unwrap();
         let before = workspaces
             .iter()
-            .map(|workspace| (workspace.id(), workspace.kind().clone()))
+            .map(|workspace| (workspace.id(), workspace.location().clone()))
             .collect::<Vec<_>>();
 
         for workspace_id in [WorkspaceId::new(1), local_id] {
@@ -1557,7 +1038,7 @@ mod tests {
         assert_eq!(
             workspaces
                 .iter()
-                .map(|workspace| (workspace.id(), workspace.kind().clone()))
+                .map(|workspace| (workspace.id(), workspace.location().clone()))
                 .collect::<Vec<_>>(),
             before
         );
@@ -1565,21 +1046,17 @@ mod tests {
 
     #[test]
     fn reconnect_generation_exhaustion_does_not_mutate_remote_state() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(u64::MAX),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
 
         assert_eq!(
             workspaces.begin_remote_reconnect(workspace_id),
@@ -1597,21 +1074,17 @@ mod tests {
 
     #[test]
     fn begin_remote_reconnect_advances_once_and_rejects_a_second_begin() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(7),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
 
         assert_eq!(
             workspaces.begin_remote_reconnect(workspace_id),
@@ -1631,21 +1104,17 @@ mod tests {
 
     #[test]
     fn begin_remote_reconnect_rejects_connected_state_without_advancing() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(7),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
 
         assert_eq!(
             workspaces.begin_remote_reconnect(workspace_id),
@@ -1670,21 +1139,17 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let mut workspaces = WorkspaceCollection::new_scratch(
-                validated("/Users/test", 10),
-                DirectoryAuthority::initial(),
-                |_, _| (),
-            );
+            let mut workspaces =
+                WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
             let workspace_id = workspaces
-                .create_remote_project_workspace(
+                .create_remote_workspace(
                     remote_key(&format!("orb-{index}"), "/srv/project"),
                     remote_directory("/srv/project"),
                     remote_identity("/home/test"),
                     state,
                     |_| (),
                 )
-                .unwrap()
-                .workspace_id();
+                .unwrap();
 
             assert_eq!(
                 workspaces.begin_remote_close(workspace_id),
@@ -1701,21 +1166,17 @@ mod tests {
 
     #[test]
     fn collection_reducer_preserves_stale_and_illegal_results_without_mutation() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(7),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
         assert_eq!(
             workspaces.begin_remote_reconnect(workspace_id),
             Ok(RemoteConnectionReduction::Applied)
@@ -1743,21 +1204,17 @@ mod tests {
 
     #[test]
     fn collection_remote_lifecycle_reduces_legal_transitions_and_closing_is_terminal() {
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            validated("/Users/test", 10),
-            DirectoryAuthority::initial(),
-            |_, _| (),
-        );
+        let mut workspaces =
+            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
-            .create_remote_project_workspace(
+            .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(4),
                 |_| (),
             )
-            .unwrap()
-            .workspace_id();
+            .unwrap();
 
         assert_eq!(
             workspaces.reduce_remote_connection_state(
@@ -1808,6 +1265,93 @@ mod tests {
     }
 
     #[test]
+    fn pins_are_explicit_independent_and_do_not_change_names_or_home() {
+        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let first = workspaces.active_workspace_id();
+        let second = workspaces
+            .create_local_workspace(validated("/home/me", 1), |_, _| ())
+            .unwrap();
+        let pin = PinnedDirectory::Local(validated("/app/frontend", 2));
+        workspaces
+            .set_pinned_directory(first, Some(pin.clone()))
+            .unwrap();
+        workspaces
+            .set_pinned_directory(second, Some(pin.clone()))
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(workspaces.len(), 2);
+        let first_workspace = workspaces.workspace(first).unwrap();
+        assert_eq!(first_workspace.name(), "Workspace 1");
+        assert_eq!(
+            first_workspace.local_home_directory(),
+            Some(Path::new("/home/me"))
+        );
+        assert_eq!(first_workspace.pinned_directory(), Some(&pin));
+        workspaces.set_pinned_directory(first, None).unwrap();
+        assert!(
+            workspaces
+                .workspace(first)
+                .unwrap()
+                .pinned_directory()
+                .is_none()
+        );
+        assert_eq!(
+            workspaces.workspace(second).unwrap().pinned_directory(),
+            Some(&pin)
+        );
+    }
+
+    #[test]
+    fn remote_workspaces_at_the_same_home_are_independent_and_pins_keep_remote_authority() {
+        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let mut create = || {
+            workspaces
+                .create_remote_workspace(
+                    remote_key("server", "/home/me"),
+                    remote_directory("~/"),
+                    remote_identity("/home/me"),
+                    RemoteConnectionState::connected(1),
+                    |_| (),
+                )
+                .unwrap()
+        };
+        let first = create();
+        let second = create();
+        assert_ne!(first, second);
+        assert_eq!(workspaces.workspace(first).unwrap().name(), "server");
+        assert_eq!(workspaces.workspace(second).unwrap().name(), "server 2");
+        let remote_pin = PinnedDirectory::Remote {
+            directory: remote_directory("/app"),
+            identity: remote_identity("/app"),
+        };
+        workspaces
+            .set_pinned_directory(first, Some(remote_pin.clone()))
+            .unwrap();
+        assert_eq!(
+            workspaces.workspace(first).unwrap().pinned_directory(),
+            Some(&remote_pin)
+        );
+        assert_eq!(
+            workspaces
+                .workspace(first)
+                .unwrap()
+                .local_display_directory(),
+            None
+        );
+        assert_eq!(
+            workspaces
+                .set_pinned_directory(first, Some(PinnedDirectory::Local(validated("/app", 2)))),
+            Err(WorkspaceError::DirectoryLocationMismatch(first))
+        );
+        assert_eq!(
+            workspaces.set_pinned_directory(WorkspaceId::new(1), Some(remote_pin)),
+            Err(WorkspaceError::DirectoryLocationMismatch(WorkspaceId::new(
+                1
+            )))
+        );
+    }
+
+    #[test]
     fn new_should_create_one_valid_active_workspace() {
         let workspaces = new_workspaces("first payload");
 
@@ -1831,10 +1375,10 @@ mod tests {
     fn iter_should_preserve_workspace_creation_order() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         let ordered_ids = workspaces
@@ -1853,11 +1397,11 @@ mod tests {
     }
 
     #[test]
-    fn create_scratch_workspace_unchecked_should_create_and_activate_the_new_workspace() {
+    fn create_local_workspace_unchecked_should_create_and_activate_the_new_workspace() {
         let mut workspaces = new_workspaces("first payload");
 
         let created = workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         assert_eq!(
@@ -1877,17 +1421,17 @@ mod tests {
     }
 
     #[test]
-    fn create_scratch_workspace_unchecked_should_choose_the_first_available_default_name() {
+    fn create_local_workspace_unchecked_should_choose_the_first_available_default_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
             .rename_workspace(WorkspaceId::new(1), "Projects".to_owned())
             .unwrap();
 
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         let names = workspaces
@@ -1898,28 +1442,28 @@ mod tests {
     }
 
     #[test]
-    fn create_scratch_workspace_unchecked_should_assign_its_name_and_propagate_the_exact_working_directory()
+    fn create_local_workspace_unchecked_should_assign_its_name_and_propagate_the_exact_working_directory()
      {
         let mut workspaces = new_workspaces("first payload");
         let working_directory = PathBuf::from("/Users/test/projects");
         let observed_pointer = Cell::new(std::ptr::null());
 
         workspaces
-            .create_scratch_workspace_unchecked(
-                working_directory,
-                |_, payload_working_directory| {
-                    observed_pointer.set(
-                        payload_working_directory
-                            .as_os_str()
-                            .as_encoded_bytes()
-                            .as_ptr(),
-                    );
-                    "second payload"
-                },
-            )
+            .create_local_workspace_unchecked(working_directory, |_, payload_working_directory| {
+                observed_pointer.set(
+                    payload_working_directory
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .as_ptr(),
+                );
+                "second payload"
+            })
             .unwrap();
 
-        let stored_working_directory = workspaces.active_workspace().working_directory().unwrap();
+        let stored_working_directory = workspaces
+            .active_workspace()
+            .local_home_directory()
+            .unwrap();
         assert_eq!(
             (
                 workspaces.active_workspace().name(),
@@ -1938,14 +1482,13 @@ mod tests {
     }
 
     #[test]
-    fn create_scratch_workspace_unchecked_should_reject_exhausted_ids_before_creating_its_payload()
-    {
+    fn create_local_workspace_unchecked_should_reject_exhausted_ids_before_creating_its_payload() {
         let mut workspaces = new_workspaces("first payload");
         workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
         let result =
-            workspaces.create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| {
+            workspaces.create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| {
                 creations.update(|count| count + 1);
                 "second payload"
             });
@@ -1960,7 +1503,7 @@ mod tests {
     fn activate_workspace_should_select_an_owned_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         workspaces.activate_workspace(WorkspaceId::new(1)).unwrap();
@@ -1993,7 +1536,7 @@ mod tests {
     fn rename_workspace_should_update_only_the_requested_workspace_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         workspaces
@@ -2026,7 +1569,7 @@ mod tests {
     fn non_final_close_should_not_allocate_a_replacement_workspace_id() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
@@ -2052,7 +1595,7 @@ mod tests {
     fn closed_workspace_ids_should_not_be_reused() {
         let mut workspaces = new_workspaces("first payload");
         let second = workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
             .close_workspace(second, PathBuf::from("/replacement"), |_, _| {
@@ -2061,7 +1604,7 @@ mod tests {
             .unwrap();
 
         let third = workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         assert_eq!(third, WorkspaceId::new(3));
@@ -2071,10 +1614,10 @@ mod tests {
     fn close_workspace_should_focus_the_next_workspace_when_closing_the_active_middle_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
         workspaces.activate_workspace(WorkspaceId::new(2)).unwrap();
 
@@ -2101,7 +1644,7 @@ mod tests {
     {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         let outcome = workspaces
@@ -2168,8 +1711,10 @@ mod tests {
             )
             .unwrap();
 
-        let replacement_working_directory =
-            workspaces.active_workspace().working_directory().unwrap();
+        let replacement_working_directory = workspaces
+            .active_workspace()
+            .local_home_directory()
+            .unwrap();
 
         assert_eq!(
             (
@@ -2209,7 +1754,7 @@ mod tests {
     fn final_tab_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
@@ -2260,7 +1805,7 @@ mod tests {
             drops: Rc::clone(&drops),
         });
         workspaces
-            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| DropProbe {
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| DropProbe {
                 drops: Rc::clone(&drops),
             })
             .unwrap();

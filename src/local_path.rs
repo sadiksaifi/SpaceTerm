@@ -75,18 +75,18 @@ impl LocalPathSemantics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspacePathFormatError {
+pub(crate) enum DirectoryPathFormatError {
     Relative,
     BareTilde,
     UnsupportedTilde,
 }
 
-impl WorkspacePathFormatError {
+impl DirectoryPathFormatError {
     pub(crate) const fn message(self, semantics: LocalPathSemantics) -> &'static str {
         match semantics {
             LocalPathSemantics::Posix => match self {
                 Self::Relative => "Enter an absolute path beginning with / or ~/.",
-                Self::BareTilde => "Use ~/ to open your home folder.",
+                Self::BareTilde => "Use ~/ to open your home directory.",
                 Self::UnsupportedTilde => "Only ~/ is supported for home-relative paths.",
             },
         }
@@ -94,7 +94,7 @@ impl WorkspacePathFormatError {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct ParsedWorkspacePath {
+pub(crate) struct ParsedDirectoryPath {
     display: String,
     exact_path: PathBuf,
     enumeration_directory: PathBuf,
@@ -102,13 +102,13 @@ pub(crate) struct ParsedWorkspacePath {
     trailing_separator: bool,
 }
 
-impl std::fmt::Debug for ParsedWorkspacePath {
+impl std::fmt::Debug for ParsedDirectoryPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ParsedWorkspacePath(<redacted>)")
+        f.write_str("ParsedDirectoryPath(<redacted>)")
     }
 }
 
-impl ParsedWorkspacePath {
+impl ParsedDirectoryPath {
     pub(crate) fn display(&self) -> &str {
         &self.display
     }
@@ -136,19 +136,19 @@ impl ParsedWorkspacePath {
     }
 }
 
-pub(crate) fn parse_workspace_path(
+pub(crate) fn parse_directory_path(
     semantics: LocalPathSemantics,
     input: &str,
     home: &Path,
-) -> Result<ParsedWorkspacePath, WorkspacePathFormatError> {
+) -> Result<ParsedDirectoryPath, DirectoryPathFormatError> {
     if input == "~" {
-        return Err(WorkspacePathFormatError::BareTilde);
+        return Err(DirectoryPathFormatError::BareTilde);
     }
     if input.starts_with('~') && !input.starts_with(semantics.home_prefix()) {
-        return Err(WorkspacePathFormatError::UnsupportedTilde);
+        return Err(DirectoryPathFormatError::UnsupportedTilde);
     }
     if !semantics.is_absolute(Path::new(input)) && !input.starts_with(semantics.home_prefix()) {
-        return Err(WorkspacePathFormatError::Relative);
+        return Err(DirectoryPathFormatError::Relative);
     }
 
     let exact_path = semantics.expand_home(input, home);
@@ -158,7 +158,7 @@ pub(crate) fn parse_workspace_path(
     } else {
         let separator = input
             .rfind(semantics.separator())
-            .ok_or(WorkspacePathFormatError::Relative)?;
+            .ok_or(DirectoryPathFormatError::Relative)?;
         let display_directory = &input[..=separator];
         (
             semantics.expand_home(display_directory, home),
@@ -166,7 +166,7 @@ pub(crate) fn parse_workspace_path(
         )
     };
 
-    Ok(ParsedWorkspacePath {
+    Ok(ParsedDirectoryPath {
         display: input.to_owned(),
         exact_path,
         enumeration_directory,
@@ -175,7 +175,7 @@ pub(crate) fn parse_workspace_path(
     })
 }
 
-pub(crate) fn display_workspace_directory_with_style(
+pub(crate) fn display_directory_with_style(
     semantics: LocalPathSemantics,
     path: &Path,
     home: &Path,
@@ -226,7 +226,7 @@ mod tests {
             ("/project/", "/project/", "/project/", ""),
             ("/project x/界", "/project x/界", "/project x/", "界"),
         ] {
-            let parsed = parse_workspace_path(semantics, input, home).unwrap();
+            let parsed = parse_directory_path(semantics, input, home).unwrap();
             assert_eq!(
                 (
                     parsed.display(),
@@ -243,7 +243,7 @@ mod tests {
             );
         }
         for input in ["relative", "~", "~someone/project"] {
-            assert!(parse_workspace_path(semantics, input, home).is_err());
+            assert!(parse_directory_path(semantics, input, home).is_err());
         }
     }
 
@@ -259,8 +259,7 @@ mod tests {
             ("/", true, "/"),
         ] {
             assert_eq!(
-                display_workspace_directory_with_style(semantics, Path::new(path), home, tilde)
-                    .as_deref(),
+                display_directory_with_style(semantics, Path::new(path), home, tilde).as_deref(),
                 Some(expected)
             );
         }

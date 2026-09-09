@@ -7,16 +7,29 @@ A native desktop terminal multiplexer currently built for macOS.
 > to try it today.
 
 SpaceTerm brings terminal multiplexing into a native, keyboard-first desktop application.
-Workspaces organize local and remote projects, Tabs separate tasks, and split Pane Layouts keep the
-shells you need visible together.
+Workspaces organize terminal work, Tabs separate tasks, and split Pane Layouts keep the shells you
+need visible together.
 
 ## Highlights
 
-- **Workspaces** for scratch shells, local projects, and remote projects
+- **Workspaces** for local and remote terminal work
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
 - **Remote terminals** through your existing OpenSSH configuration
-- **Keyboard-first navigation** through the Command Palette and Workspace Picker
+- **Keyboard-first navigation** through the Command Palette and Directory Picker
 - **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
+
+## Workspace behavior
+
+Press Command-N and choose This Mac or Remote over SSH. A new Workspace starts in your home
+directory on that machine. New Tabs inherit the focused Pane's Current Directory, and new Panes
+inherit the directory of the Pane being split. Workspace names stay stable as you navigate.
+
+Choose Pin to Directory from the Workspace context menu to select a fixed Starting Directory,
+or Pin Workspace to This Directory from a Pane menu to use that Pane's Current Directory.
+The Tab context menu offers the same action when the Workspace has exactly one Tab and one Pane.
+Change Pinned Directory and Unpin Directory are available from the Workspace context menu.
+Pinning only affects future Terminal Sessions. If the source directory is unknown, a new terminal
+starts at the user home directory on its machine.
 
 ## Workspace hierarchy
 

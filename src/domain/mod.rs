@@ -1,4 +1,4 @@
-pub(crate) mod remote_project;
+pub(crate) mod remote_workspace;
 mod tab_collection;
 mod terminal_tab;
 mod workspace_collection;
@@ -12,12 +12,11 @@ pub(crate) use terminal_tab::{
     TabId, TerminalTab, ZoomState,
 };
 pub(crate) use workspace_collection::{
-    CreateRemoteProjectOutcome, DirectoryAuthority, DirectoryChange, RemoteDirectoryIdentity,
-    RemoteWorkspaceDirectory, RemoteWorkspaceKey, RemoteWorkspaceValueError, SshDestination,
-    ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
-    WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
+    DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory, RemoteDirectory,
+    RemoteDirectoryIdentity, RemoteWorkspaceTarget, RemoteWorkspaceValueError, SshDestination,
+    ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 
-pub(crate) use remote_project::{
+pub(crate) use remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
 };

@@ -62,8 +62,8 @@ fn desktop_profile(
 ) -> Result<DesktopProfile, DesktopProfileError> {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
-        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
@@ -77,14 +77,12 @@ fn desktop_profile(
             DesktopWording {
                 directory_selection: "Choose with Finder",
                 file_preview: "Quick Look",
-                local_project_description: "Pinned to a folder on this Mac",
+                local_machine_label: "This Mac",
             },
             "⌘↩",
             vec![
-                ActionShortcut::new(CreateScratchWorkspace, "⇧⌘N"),
                 ActionShortcut::new(SearchWorkspaces, "⌘P"),
                 ActionShortcut::new(NewWorkspace, "⌘N"),
-                ActionShortcut::new(OpenLocalProject, "⌘O"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
                 ActionShortcut::new(EditPaste, "⌘V"),
@@ -358,8 +356,8 @@ mod tests {
     #[gpui::test]
     fn desktop_profile_should_preserve_macos_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
         use crate::ui::{
-            ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
-            SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
+            ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+            TogglePaneZoom,
         };
 
         cx.update(|cx| {
@@ -370,10 +368,8 @@ mod tests {
             .unwrap()
             .install(cx);
             let presentation = DesktopPresentation::get(cx);
-            assert_eq!(presentation.shortcut(&CreateScratchWorkspace), "⇧⌘N");
             assert_eq!(presentation.shortcut(&SearchWorkspaces), "⌘P");
             assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
-            assert_eq!(presentation.shortcut(&OpenLocalProject), "⌘O");
             assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
             assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");
             assert_eq!(presentation.shortcut(&SplitRight), "⌘D");
@@ -387,10 +383,7 @@ mod tests {
                 "Choose with Finder"
             );
             assert_eq!(presentation.wording().file_preview, "Quick Look");
-            assert_eq!(
-                presentation.wording().local_project_description,
-                "Pinned to a folder on this Mac"
-            );
+            assert_eq!(presentation.wording().local_machine_label, "This Mac");
         });
     }
 }

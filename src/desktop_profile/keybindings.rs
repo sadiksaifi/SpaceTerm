@@ -5,10 +5,8 @@ use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
 pub(crate) fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
-        KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
         KeyBinding::new("cmd-p", SearchWorkspaces, None),
         KeyBinding::new("cmd-n", NewWorkspace, None),
-        KeyBinding::new("cmd-o", OpenLocalProject, None),
         KeyBinding::new("cmd-t", CreateTab, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseTab, None),

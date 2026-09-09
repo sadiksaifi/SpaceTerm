@@ -2,7 +2,7 @@ use crate::terminal::RemoteChannelUnavailable;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// A bounded phase in one Remote Project Workspace's Control Connection lifecycle.
+/// A bounded phase in one Remote Workspace's Control Connection lifecycle.
 ///
 /// A phase is meaningful only together with its owning connection generation.
 pub(crate) enum RemoteConnectionPhase {
@@ -15,7 +15,7 @@ pub(crate) enum RemoteConnectionPhase {
 
 /// One bounded connection phase coupled to the operation generation that produced it.
 ///
-/// Generations are monotonic within one Remote Project Workspace. Closing is terminal, and an
+/// Generations are monotonic within one Remote Workspace. Closing is terminal, and an
 /// observation from a predecessor generation cannot mutate a successor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteConnectionState {

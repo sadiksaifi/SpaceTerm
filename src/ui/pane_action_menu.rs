@@ -9,6 +9,7 @@ pub(crate) enum PaneActionMenuCommand {
     SplitDown,
     ToggleZoom,
     Close,
+    PinDirectory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +43,7 @@ fn pane_action_menu_presentation(
 
 pub(crate) fn pane_action_menu_entries(
     debug_prefix: &'static str,
+    pin_directory: Option<bool>,
     zoomed: bool,
     zoom_enabled: bool,
     close_target: CloseTarget,
@@ -51,7 +53,7 @@ pub(crate) fn pane_action_menu_entries(
     let (close_label, close_selector) = close_presentation(close_target);
     let shortcuts = pane_action_menu_presentation(close_target, presentation);
 
-    vec![
+    let mut entries = vec![
         MenuEntry::action("Split Right", PaneActionMenuCommand::SplitRight)
             .icon(menu_icon(pane_action_icon(
                 PaneActionMenuCommand::SplitRight,
@@ -80,7 +82,20 @@ pub(crate) fn pane_action_menu_entries(
             .shortcut(shortcuts.close)
             .destructive(true)
             .debug_selector(format!("{debug_prefix}-row-{close_selector}")),
-    ]
+    ];
+    if let Some(enabled) = pin_directory {
+        entries.insert(
+            3,
+            MenuEntry::action(
+                "Pin Workspace to This Directory",
+                PaneActionMenuCommand::PinDirectory,
+            )
+            .icon(menu_icon(IconName::MapPin))
+            .disabled(!enabled)
+            .debug_selector(format!("{debug_prefix}-row-pin-directory")),
+        );
+    }
+    entries
 }
 
 fn pane_action_icon(command: PaneActionMenuCommand, zoomed: bool) -> IconName {
@@ -90,6 +105,7 @@ fn pane_action_icon(command: PaneActionMenuCommand, zoomed: bool) -> IconName {
         PaneActionMenuCommand::ToggleZoom if zoomed => IconName::Minimize2,
         PaneActionMenuCommand::ToggleZoom => IconName::Maximize2,
         PaneActionMenuCommand::Close => IconName::X,
+        PaneActionMenuCommand::PinDirectory => IconName::MapPin,
     }
 }
 
@@ -133,6 +149,7 @@ mod tests {
                     "Pane Actions",
                     pane_action_menu_entries(
                         "test-menu",
+                        None,
                         self.zoomed,
                         self.zoom_enabled,
                         self.close_target,
