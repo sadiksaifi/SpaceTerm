@@ -3,8 +3,8 @@ pub(crate) mod keybindings;
 
 use gpui::{Action, App, KeyBinding};
 use spaceterm_ui::{
-    CommandPaletteKeybindingProfile, ModalDesktopPolicy, ModalKeybindingProfile,
-    TextInputKeybindingProfile,
+    ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, ModalDesktopPolicy,
+    ModalKeybindingProfile, TextInputKeybindingProfile,
 };
 
 #[derive(Clone, Copy)]
@@ -73,12 +73,35 @@ impl gpui::Global for DesktopPresentation {}
 pub(crate) struct DesktopProfile {
     presentation: DesktopPresentation,
     modal_policy: ModalDesktopPolicy,
-    modal_keys: ModalKeybindingProfile,
-    command_palette_keys: CommandPaletteKeybindingProfile,
-    text_keys: TextInputKeybindingProfile,
+    control_keys: ControlKeybindingProfiles,
     bindings: Vec<KeyBinding>,
     locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct ControlKeybindingProfiles {
+    modal: ModalKeybindingProfile,
+    command_palette: CommandPaletteKeybindingProfile,
+    combo_box: ComboBoxKeybindingProfile,
+    text_input: TextInputKeybindingProfile,
+}
+
+impl ControlKeybindingProfiles {
+    pub(crate) const fn new(
+        modal: ModalKeybindingProfile,
+        command_palette: CommandPaletteKeybindingProfile,
+        combo_box: ComboBoxKeybindingProfile,
+        text_input: TextInputKeybindingProfile,
+    ) -> Self {
+        Self {
+            modal,
+            command_palette,
+            combo_box,
+            text_input,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DesktopProfileError {
     #[error("a required desktop capability is unavailable")]
@@ -91,9 +114,7 @@ pub(crate) enum DesktopProfileError {
 impl DesktopProfile {
     pub(crate) fn new(
         modal_policy: ModalDesktopPolicy,
-        modal_keys: ModalKeybindingProfile,
-        command_palette_keys: CommandPaletteKeybindingProfile,
-        text_keys: TextInputKeybindingProfile,
+        control_keys: ControlKeybindingProfiles,
         bindings: Vec<KeyBinding>,
         presentation: DesktopPresentation,
         locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
@@ -133,9 +154,7 @@ impl DesktopProfile {
         Ok(Self {
             presentation,
             modal_policy,
-            modal_keys,
-            command_palette_keys,
-            text_keys,
+            control_keys,
             bindings,
             locale,
         })
@@ -147,10 +166,12 @@ impl DesktopProfile {
             self.modal_policy
                 .with_text_direction(self.locale.text_direction()),
         );
-        spaceterm_ui::install_command_palette_keybindings(cx, self.command_palette_keys);
+        spaceterm_ui::install_command_palette_keybindings(cx, self.control_keys.command_palette);
+        spaceterm_ui::install_portable_combo_box_keybindings(cx);
+        spaceterm_ui::install_combo_box_keybindings(cx, self.control_keys.combo_box);
         spaceterm_ui::install_portable_modal_keybindings(cx);
-        spaceterm_ui::install_modal_keybindings(cx, self.modal_keys);
-        spaceterm_ui::install_text_input_keybindings(cx, self.text_keys);
+        spaceterm_ui::install_modal_keybindings(cx, self.control_keys.modal);
+        spaceterm_ui::install_text_input_keybindings(cx, self.control_keys.text_input);
         cx.bind_keys(self.bindings.clone());
     }
 }
@@ -231,9 +252,12 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
 pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> DesktopProfile {
     DesktopProfile::new(
         ModalDesktopPolicy::mac_os(),
-        ModalKeybindingProfile::MacOs,
-        CommandPaletteKeybindingProfile::MacOs,
-        TextInputKeybindingProfile::MacOs,
+        ControlKeybindingProfiles::new(
+            ModalKeybindingProfile::MacOs,
+            CommandPaletteKeybindingProfile::MacOs,
+            ComboBoxKeybindingProfile::MacOs,
+            TextInputKeybindingProfile::MacOs,
+        ),
         keybindings::bindings(),
         testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
@@ -287,9 +311,12 @@ mod tests {
     fn duplicate_global_shortcuts_are_rejected_after_modifier_normalization() {
         let result = DesktopProfile::new(
             ModalDesktopPolicy::mac_os(),
-            ModalKeybindingProfile::MacOs,
-            CommandPaletteKeybindingProfile::MacOs,
-            TextInputKeybindingProfile::MacOs,
+            ControlKeybindingProfiles::new(
+                ModalKeybindingProfile::MacOs,
+                CommandPaletteKeybindingProfile::MacOs,
+                ComboBoxKeybindingProfile::MacOs,
+                TextInputKeybindingProfile::MacOs,
+            ),
             vec![
                 KeyBinding::new("cmd-shift-k", SwitchWorkspace, None),
                 KeyBinding::new("shift-cmd-k", NewWorkspace, None),
@@ -311,9 +338,12 @@ mod tests {
 
         let result = DesktopProfile::new(
             ModalDesktopPolicy::mac_os(),
-            ModalKeybindingProfile::MacOs,
-            CommandPaletteKeybindingProfile::MacOs,
-            TextInputKeybindingProfile::MacOs,
+            ControlKeybindingProfiles::new(
+                ModalKeybindingProfile::MacOs,
+                CommandPaletteKeybindingProfile::MacOs,
+                ComboBoxKeybindingProfile::MacOs,
+                TextInputKeybindingProfile::MacOs,
+            ),
             keybindings::bindings(),
             presentation,
             std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
