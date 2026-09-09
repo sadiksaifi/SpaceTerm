@@ -11,18 +11,17 @@ use std::{collections::HashMap, rc::Rc};
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
     FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Styled as _,
-    Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
-    deferred, div, list, prelude::FluentBuilder as _, px, size,
+    KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString,
+    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
+    canvas, deferred, div, list, prelude::FluentBuilder as _, px, size,
 };
 
 use crate::{
     Icon, IconName, TextInput, TextInputEvent, TextInputHomeEndBehavior, TextInputTabBehavior,
     TextInputVariant,
     anchored_placement::{
-        AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
-        constrain_anchored_size, place_anchored,
+        AnchoredPlacementConfig, AnchoredTextDirection, constrain_anchored_size, place_anchored,
     },
 };
 
@@ -101,6 +100,8 @@ pub enum ComboBoxCloseReason {
     Escape,
     /// A pointer press outside the trigger and popup dismissed it.
     Outside,
+    /// Activating the already-open trigger toggled the popup closed.
+    Trigger,
     /// Focus moved outside the control.
     FocusLost,
     /// Tab or Shift-Tab continued focus traversal.
@@ -495,11 +496,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             copy: ComboBoxCopy::default(),
             disabled: false,
             busy: false,
-            placement: AnchoredPlacementConfig::new(
-                AnchoredPlacement::Top,
-                AnchoredAlignment::Start,
-            )
-            .offset(px(0.0)),
+            placement: AnchoredPlacementConfig::default(),
             full_width: false,
             trigger_leading: None,
             debug_selector: None,
@@ -588,13 +585,31 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ComboBoxRegistration(u64);
 
-type ReplaceComboBox = Rc<dyn Fn(&mut App) -> Option<WeakFocusHandle>>;
+type ReplaceComboBox = Rc<dyn Fn(&mut App) -> Option<ComboBoxReplacement>>;
 type ComboBoxIsOpen = Rc<dyn Fn(&App) -> bool>;
+type ClaimComboBoxMenu = Rc<dyn Fn(&mut App) -> bool>;
 
 struct ErasedComboBoxRegistration {
     token: ComboBoxRegistration,
     replace: ReplaceComboBox,
     is_open: ComboBoxIsOpen,
+    claim_menu: ClaimComboBoxMenu,
+}
+
+pub(crate) struct ComboBoxReplacement {
+    lifecycle: Option<LifecycleHandler>,
+    pub(crate) restore_focus: Option<WeakFocusHandle>,
+}
+
+impl ComboBoxReplacement {
+    pub(crate) fn finish(self, cx: &mut App) {
+        if let Some(handler) = self.lifecycle {
+            handler(
+                &ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::Replaced),
+                cx,
+            );
+        }
+    }
 }
 
 #[derive(Default)]
@@ -622,19 +637,27 @@ fn register_combo_box<I: Clone + Eq + 'static>(
 ) -> (ComboBoxRegistration, Option<WeakFocusHandle>) {
     let window_id = window.window_handle().window_id();
     let open_owner = owner.clone();
+    let menu_owner = owner.clone();
     let replace = Rc::new(move |cx: &mut App| {
         owner
-            .update(cx, |state, cx| {
-                let predecessor = state.restore_focus.clone();
-                state.close(ComboBoxCloseReason::Replaced, false, None, cx);
-                predecessor
-            })
+            .update(cx, |state, cx| state.replace_without_lifecycle(cx))
             .ok()
             .flatten()
     });
     let is_open = Rc::new(move |cx: &App| {
         open_owner
             .read_with(cx, |state, _| state.open)
+            .unwrap_or(false)
+    });
+    let claim_menu = Rc::new(move |cx: &mut App| {
+        menu_owner
+            .update(cx, |state, cx| {
+                let claimed = state.open
+                    && (state.input_context_menu_open || state.input.read(cx).owns_context_menu())
+                    && !state.input_context_menu_claimed;
+                state.input_context_menu_claimed |= claimed;
+                claimed
+            })
             .unwrap_or(false)
     });
     let (registration, previous) = cx.update_global::<ComboBoxCoordinator, _>(|coordinator, _| {
@@ -646,18 +669,25 @@ fn register_combo_box<I: Clone + Eq + 'static>(
                 token: registration,
                 replace,
                 is_open,
+                claim_menu,
             },
         );
         (registration, previous.map(|owner| owner.replace))
     });
     let predecessor = previous.and_then(|previous| previous(cx));
-    (registration, predecessor)
+    let restore_focus = predecessor
+        .as_ref()
+        .and_then(|replacement| replacement.restore_focus.clone());
+    if let Some(replacement) = predecessor {
+        replacement.finish(cx);
+    }
+    (registration, restore_focus)
 }
 
 pub(crate) fn dismiss_active_combo_box_for_replacement(
     window: &Window,
     cx: &mut App,
-) -> Option<WeakFocusHandle> {
+) -> Option<ComboBoxReplacement> {
     if !cx.has_global::<ComboBoxCoordinator>() {
         return None;
     }
@@ -667,6 +697,18 @@ pub(crate) fn dismiss_active_combo_box_for_replacement(
         .get(&window.window_handle().window_id())
         .map(|owner| owner.replace.clone());
     replace.and_then(|replace| replace(cx))
+}
+
+pub(crate) fn claim_window_combo_box_menu(window: &Window, cx: &mut App) -> bool {
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        return false;
+    }
+    let claim = cx
+        .global::<ComboBoxCoordinator>()
+        .owners
+        .get(&window.window_handle().window_id())
+        .map(|owner| owner.claim_menu.clone());
+    claim.is_some_and(|claim| claim(cx))
 }
 
 fn unregister_combo_box(window_id: WindowId, registration: ComboBoxRegistration, cx: &mut App) {
@@ -714,6 +756,9 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     input: Entity<TextInput>,
     list: ListState,
     pointer_press: Option<PointerPress<I>>,
+    selection_reveal_pending: bool,
+    input_context_menu_open: bool,
+    input_context_menu_claimed: bool,
     registration: Option<ComboBoxRegistration>,
     window_id: WindowId,
     restore_focus: Option<WeakFocusHandle>,
@@ -734,7 +779,6 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
                 .variant(TextInputVariant::Bare)
                 .tab_behavior(TextInputTabBehavior::Propagate)
                 .home_end_behavior(TextInputHomeEndBehavior::Propagate)
-                .context_menu(false)
                 .debug_selector("combo-box-input")
         });
         let input_subscription = cx.subscribe_in(
@@ -751,24 +795,42 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
                     state.close(ComboBoxCloseReason::Escape, true, Some(window), cx);
                 }
                 TextInputEvent::TabForwardRequested => {
-                    if state.close(ComboBoxCloseReason::TabTraversal, true, Some(window), cx) {
+                    if state.close(ComboBoxCloseReason::TabTraversal, false, Some(window), cx) {
+                        state.trigger_focus.focus(window);
                         window.defer(cx, |window, _| window.focus_next());
                     }
                 }
                 TextInputEvent::TabBackwardRequested => {
-                    if state.close(ComboBoxCloseReason::TabTraversal, true, Some(window), cx) {
+                    if state.close(ComboBoxCloseReason::TabTraversal, false, Some(window), cx) {
+                        state.trigger_focus.focus(window);
                         window.defer(cx, |window, _| window.focus_prev());
                     }
+                }
+                TextInputEvent::ContextMenuOpened => {
+                    state.input_context_menu_open = true;
+                    state.input_context_menu_claimed = false;
+                }
+                TextInputEvent::ContextMenuClosed => {
+                    state.input_context_menu_open = false;
+                    state.input_context_menu_claimed = false;
                 }
                 _ => {}
             },
         );
         let trigger_focus = cx.focus_handle();
         let popup_focus = cx.focus_handle();
-        let focus_subscription = cx.on_focus_out(&popup_focus, window, |state, _, window, cx| {
-            if state.open && !crate::menu::window_menu_is_open(window, cx) {
-                state.close(ComboBoxCloseReason::FocusLost, false, Some(window), cx);
-            }
+        let focus_subscription = cx.on_focus_out(&popup_focus, window, |_, _, window, cx| {
+            let state = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                let _ = state.update(cx, |state, cx| {
+                    if state.open
+                        && !state.popup_focus.contains_focused(window, cx)
+                        && !crate::menu::window_menu_is_open(window, cx)
+                    {
+                        state.close(ComboBoxCloseReason::FocusLost, false, Some(window), cx);
+                    }
+                });
+            });
         });
         cx.observe_window_activation(window, |state, window, cx| {
             if state.open && !window.is_window_active() {
@@ -831,6 +893,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             input,
             list: ListState::new(0, ListAlignment::Top, px(0.0)).measure_all(),
             pointer_press: None,
+            selection_reveal_pending: false,
+            input_context_menu_open: false,
+            input_context_menu_claimed: false,
             registration: None,
             window_id,
             restore_focus: None,
@@ -957,6 +1022,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         }
         if changed {
             self.list.reset(self.matches.len());
+            self.selection_reveal_pending = true;
         }
         changed
     }
@@ -982,6 +1048,13 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
                 })
                 .cloned()
                 .or_else(|| self.first_enabled_match().map(|item| item.id.clone()));
+            self.selection_reveal_pending = self.provisional.is_some();
+            if let Some(position) = self.provisional_position() {
+                self.list.scroll_to(ListOffset {
+                    item_ix: position,
+                    offset_in_item: px(0.0),
+                });
+            }
         }
     }
 
@@ -1084,6 +1157,29 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         self.emit_lifecycle(ComboBoxLifecycleEvent::Closed(reason), cx);
         cx.notify();
         true
+    }
+
+    fn replace_without_lifecycle(
+        &mut self,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<ComboBoxReplacement> {
+        if !self.open {
+            return None;
+        }
+        self.open = false;
+        self.pointer_press = None;
+        self.provisional = None;
+        self.input_context_menu_open = false;
+        self.input_context_menu_claimed = false;
+        if let Some(registration) = self.registration.take() {
+            unregister_combo_box(self.window_id, registration, cx);
+        }
+        let replacement = ComboBoxReplacement {
+            lifecycle: self.on_lifecycle.clone(),
+            restore_focus: self.restore_focus.take(),
+        };
+        cx.notify();
+        Some(replacement)
     }
 
     fn accept(
@@ -1292,6 +1388,25 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 cx,
             );
         });
+        let reveal_selection = state.update(cx, |state, _| {
+            std::mem::take(&mut state.selection_reveal_pending)
+        });
+        if reveal_selection {
+            let reveal_state = state.downgrade();
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| {
+                    let _ = reveal_state.update(cx, |state, cx| {
+                        if let Some(position) = state.provisional_position() {
+                            state.list.scroll_to_reveal_item(position);
+                            cx.notify();
+                        }
+                    });
+                    window.refresh();
+                });
+                window.refresh();
+            });
+            window.refresh();
+        }
         let theme = *cx.global::<ComboBoxTheme>();
         let snapshot = state.read(cx);
         let open = snapshot.open;
@@ -1329,7 +1444,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     window.prevent_default();
                     let _ = pointer_state.update(cx, |state, cx| {
                         if state.open {
-                            state.close(ComboBoxCloseReason::Outside, true, Some(window), cx);
+                            state.close(ComboBoxCloseReason::Trigger, true, Some(window), cx);
                         } else {
                             state.open(None, false, window, cx);
                         }
@@ -1536,6 +1651,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     );
     let bounds = place_anchored(target, panel_size, viewport, snapshot.placement);
     let popup_focus = snapshot.popup_focus.clone();
+    let nested_menu_open = snapshot.input_context_menu_open;
     let outside_state = state.downgrade();
     let outside = canvas(
         |_, _, _| (),
@@ -1545,6 +1661,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 if !phase.capture()
                     || bounds.contains(&event.position)
                     || target.contains(&event.position)
+                    || crate::menu::window_menu_is_open(window, cx)
                 {
                     return;
                 }
@@ -1699,15 +1816,18 @@ fn render_overlay<I: Clone + Eq + 'static>(
             cx.stop_propagation();
         });
 
-    deferred(
-        anchored()
-            .anchor(Corner::TopLeft)
-            .position(gpui::point(px(0.0), px(0.0)))
-            .snap_to_window()
-            .child(overlay),
-    )
-    .with_priority(OVERLAY_PRIORITY)
-    .into_any_element()
+    let overlay = anchored()
+        .anchor(Corner::TopLeft)
+        .position(gpui::point(px(0.0), px(0.0)))
+        .snap_to_window()
+        .child(overlay);
+    if nested_menu_open {
+        overlay.into_any_element()
+    } else {
+        deferred(overlay)
+            .with_priority(OVERLAY_PRIORITY)
+            .into_any_element()
+    }
 }
 
 fn status_row(

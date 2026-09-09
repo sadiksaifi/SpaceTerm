@@ -934,6 +934,10 @@ pub struct TextInput {
 impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
+    pub(crate) const fn owns_context_menu(&self) -> bool {
+        self.context_menu_open
+    }
+
     /// Creates an editor. The initial value is normalized and grapheme-safely truncated to the
     /// safe default 64 KiB limit. It begins at revision zero with a collapsed selection at the end.
     pub fn new(

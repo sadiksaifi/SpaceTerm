@@ -1688,6 +1688,42 @@ fn pointer_release_should_not_activate_a_row_removed_by_a_query_change(cx: &mut 
 }
 
 #[gpui::test]
+fn query_rebuild_should_invalidate_an_in_progress_fallback_pointer_gesture(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_fallback(
+            Some(CommandPaletteFallback::new(|query| {
+                CommandPaletteItem::new(9, format!("Create {query}"))
+            })),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    events.borrow_mut().clear();
+
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| {
+            palette.pointer_down(9, cx);
+            palette.set_query("rebuilt", cx);
+            if palette.pointer_up(&9, true) {
+                palette.selected = Some(9);
+                palette.activate_selected(CommandPaletteActivationSource::Pointer, window, cx);
+            }
+        });
+    });
+
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
+    );
+}
+
+#[gpui::test]
 fn pointer_click_should_emit_typed_pointer_activation_for_any_visible_row(cx: &mut TestAppContext) {
     let (root, _, events, _, cx) = palette_window(cx);
     let palette = root.read_with(cx, |root, _| root.palette.clone());

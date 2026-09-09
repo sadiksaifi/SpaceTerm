@@ -65,16 +65,16 @@ use gpui::{
     SharedString, Task, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ButtonSize, ButtonVariant, ComboBox, ContextMenu, Icon,
-    IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
-    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
-    OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation,
-    ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate,
-    ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
-    ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
-    window_combo_box_is_open, window_modal_is_open,
+    Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
+    AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ContextMenu, Icon, IconButton,
+    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction,
+    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
+    OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
+    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis,
+    ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
+    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -4084,6 +4084,13 @@ impl WorkspaceManager {
                             None,
                             "New Workspace",
                             new_workspace_items,
+                        )
+                        .placement(
+                            AnchoredPlacementConfig::new(
+                                AnchoredPlacement::Top,
+                                AnchoredAlignment::Start,
+                            )
+                            .offset(px(0.0)),
                         )
                         .full_width(true)
                         .debug_selector("new-workspace-button")

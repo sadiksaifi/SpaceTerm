@@ -1003,6 +1003,10 @@ fn open_new_workspace_panel(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+fn open_sidebar_new_workspace_combo_box(cx: &mut VisualTestContext) {
+    click("new-workspace-button", cx);
+}
+
 fn open_remote_workspace_flow(
     manager: &Entity<WorkspaceManager>,
     cx: &mut VisualTestContext,
@@ -1712,6 +1716,245 @@ fn hiding_the_sidebar_should_release_the_combo_box_and_terminal_focus_blocker(
             )
         }),
         (false, false, None)
+    );
+}
+
+#[gpui::test]
+fn sidebar_combo_box_local_project_should_open_the_picker_and_restore_terminal_focus_on_escape(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_sidebar_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-local-project", cx);
+
+    let opened = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            window_combo_box_is_open(window, cx),
+            manager.transient.picker.read(cx).is_open(),
+            manager.transient.new_workspace.read(cx).is_open(),
+            manager.terminal_focus_blocker(window, cx),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+            manager.workspaces.len(),
+            records.starts().len(),
+        )
+    });
+    assert_eq!(
+        opened,
+        (
+            false,
+            true,
+            false,
+            Some(TerminalFocusBlocker::Modal),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.transient.picker.read(cx).is_open(),
+                manager.transient.new_workspace.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (false, false, None, true)
+    );
+}
+
+#[gpui::test]
+fn sidebar_combo_box_keyboard_acceptance_should_create_exactly_one_scratch_workspace(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_sidebar_new_workspace_combo_box(cx);
+
+    cx.simulate_keystrokes("s c r a t c h enter");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.len(),
+                records.starts().len(),
+                window_combo_box_is_open(window, cx),
+                manager.transient.new_workspace.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (2, 2, false, false, None, true)
+    );
+}
+
+#[gpui::test]
+fn sidebar_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_blocked(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_sidebar_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-remote-project", cx);
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            let flow = manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("the available Remote Project source should open its flow")
+                .read(cx);
+            (
+                window_combo_box_is_open(window, cx),
+                manager.transient.new_workspace.read(cx).is_open(),
+                flow.stage(),
+                flow.owns_first_responder(window, cx),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (
+            false,
+            false,
+            RemoteWorkspaceFlowStage::HostSelection,
+            true,
+            Some(TerminalFocusBlocker::CommandPalette),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.remote_workspace_flow.is_none(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (true, None, true, 1, 1)
+    );
+}
+
+#[gpui::test]
+fn sidebar_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked(
+    cx: &mut TestAppContext,
+) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+        Arc::new(UnavailableTestRemoteWorkspaceFlowBackendFactory {
+            create_calls: Arc::clone(&create_calls),
+        });
+    let (manager, cx) = cx.add_window_view(move |window, cx| {
+        WorkspaceManager::new_with_remote_workspace_backend_factory(
+            session_factory,
+            PathBuf::from("/Users/test"),
+            factory,
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.run_until_parked();
+    open_sidebar_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-remote-project", cx);
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                create_calls.load(Ordering::Acquire),
+                window_combo_box_is_open(window, cx),
+                manager.remote_workspace_flow.is_none(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (
+            0,
+            true,
+            true,
+            Some(TerminalFocusBlocker::CommandPalette),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                window_combo_box_is_open(window, cx),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (false, None, true)
     );
 }
 

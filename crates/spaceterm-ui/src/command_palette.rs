@@ -1904,13 +1904,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let menu_replacement = crate::menu::dismiss_active_menu_for_replacement(window, cx);
         let combo_replacement =
             crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx);
+        let combo_focus = combo_replacement
+            .as_ref()
+            .and_then(|replacement| replacement.restore_focus.clone());
+        if let Some(combo_replacement) = combo_replacement {
+            combo_replacement.finish(cx);
+        }
         self.restore_focus = match replacement {
             Some(replacement) => replacement.restore_focus,
             None => match menu_replacement {
                 Some(crate::menu::MenuReplacementFocus(focus)) => focus,
-                None => {
-                    combo_replacement.or_else(|| window.focused(cx).map(|focus| focus.downgrade()))
-                }
+                None => combo_focus.or_else(|| window.focused(cx).map(|focus| focus.downgrade())),
             },
         };
         self.open = true;
@@ -2132,6 +2136,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     }
 
     fn recompute_matches(&mut self) {
+        self.pointer_press = None;
         let selected_was_fallback = self
             .fallback_item_id
             .as_ref()

@@ -1835,6 +1835,7 @@ impl MenuState {
         context_anchor: Option<Point<Pixels>>,
         direction: OpenDirection,
         reservation: Option<MenuReservation>,
+        inherited_focus: Option<WeakFocusHandle>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
@@ -1842,11 +1843,13 @@ impl MenuState {
         {
             return false;
         }
-        self.restore_focus = if self.restore_to_trigger {
-            Some(self.focus_handle.downgrade())
-        } else {
-            window.focused(cx).map(|handle| handle.downgrade())
-        };
+        self.restore_focus = inherited_focus.or_else(|| {
+            if self.restore_to_trigger {
+                Some(self.focus_handle.downgrade())
+            } else {
+                window.focused(cx).map(|handle| handle.downgrade())
+            }
+        });
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
         self.open = true;
@@ -2291,7 +2294,6 @@ fn open_menu(
     window: &mut Window,
     cx: &mut App,
 ) {
-    crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx);
     let Some(entity) = state.upgrade() else {
         return;
     };
@@ -2310,8 +2312,28 @@ fn open_menu(
             .ok()
             .flatten()
     });
+    let combo_replacement = (!crate::combo_box::claim_window_combo_box_menu(window, cx))
+        .then(|| crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx))
+        .flatten();
+    let combo_focus = combo_replacement
+        .as_ref()
+        .and_then(|replacement| replacement.restore_focus.clone());
+    if let Some(combo_replacement) = combo_replacement {
+        combo_replacement.finish(cx);
+    }
+    let inherited_focus = replacement
+        .as_ref()
+        .and_then(|replacement| replacement.restore_focus.clone())
+        .or(combo_focus);
     let opened = entity.update(cx, |state, cx| {
-        let opened = state.open(anchor, direction, Some(reservation), window, cx);
+        let opened = state.open(
+            anchor,
+            direction,
+            Some(reservation),
+            inherited_focus,
+            window,
+            cx,
+        );
         if opened && let Some(replacement) = &replacement {
             state.restore_focus = replacement.restore_focus.clone();
         }
@@ -3896,7 +3918,7 @@ mod tests {
                     false,
                     lifecycle,
                 );
-                state.open(None, OpenDirection::First, None, window, cx);
+                state.open(None, OpenDirection::First, None, None, window, cx);
             });
         });
         cx.run_until_parked();
@@ -3993,6 +4015,7 @@ mod tests {
                 state.open(
                     Some(point(px(24.0), px(24.0))),
                     OpenDirection::First,
+                    None,
                     None,
                     window,
                     cx,
