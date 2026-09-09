@@ -539,6 +539,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     panel_width: Option<Pixels>,
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
+    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
     icon_trigger: bool,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
@@ -570,6 +571,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             panel_width: None,
             full_width: false,
             trigger_leading: None,
+            input_leading: None,
             icon_trigger: false,
             tooltip: None,
             debug_selector: None,
@@ -637,6 +639,12 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Adds decorative content before the popup filter editor. The caller supplies its tint.
+    pub fn input_leading(mut self, build: impl Fn() -> AnyElement + 'static) -> Self {
+        self.input_leading = Some(Rc::new(build));
         self
     }
 
@@ -1670,7 +1678,9 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 root.size(metrics.icon_trigger_size).flex_shrink_0()
             })
             .child(trigger)
-            .when(open, |root| root.child(render_overlay(state, window, cx)))
+            .when(open, |root| {
+                root.child(render_overlay(state, self.input_leading, window, cx))
+            })
             .into_any_element()
     }
 }
@@ -1747,6 +1757,7 @@ fn filter_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<usize> {
 
 fn render_overlay<I: Clone + Eq + 'static>(
     state: Entity<ComboBoxState<I>>,
+    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1914,7 +1925,19 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 .px(theme.metrics.horizontal_padding)
                 .flex()
                 .items_center()
-                .child(input),
+                .when_some(input_leading, |row, leading| {
+                    row.gap(theme.metrics.gap).child(
+                        div()
+                            .debug_selector(|| "combo-box-input-leading".to_owned())
+                            .w(theme.metrics.leading_width)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(leading()),
+                    )
+                })
+                .child(div().flex_1().min_w_0().child(input)),
         )
         .child(
             div()

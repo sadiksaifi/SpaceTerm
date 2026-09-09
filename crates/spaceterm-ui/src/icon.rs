@@ -46,12 +46,15 @@ pub enum CustomIconName {
     GlobePlus,
     /// Stacked surfaces with an add badge, using rectangle.stack.badge.plus artwork.
     RectangleStackBadgePlus,
+    /// Decreasing horizontal lines in a circle, using supplied filter artwork.
+    FilterCircle,
 }
 
 impl CustomIconName {
     fn path(self) -> &'static str {
         match self {
             Self::RectangleStack => "spaceterm-ui/icons/rectangle-stack.svg",
+            Self::FilterCircle => "spaceterm-ui/icons/filter-circle.svg",
             Self::GlobePlus => "spaceterm-ui/icons/globe-plus.svg",
             Self::RectangleStackBadgePlus => "spaceterm-ui/icons/rectangle-stack-badge-plus.svg",
         }
@@ -59,6 +62,10 @@ impl CustomIconName {
 }
 
 const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
+    (
+        "spaceterm-ui/icons/filter-circle.svg",
+        include_bytes!("../assets/icons/filter-circle.svg"),
+    ),
     (
         "spaceterm-ui/icons/rectangle-stack.svg",
         include_bytes!("../assets/icons/rectangle-stack.svg"),
@@ -307,6 +314,7 @@ mod tests {
                 .list("spaceterm-ui/icons")
                 .expect("owned directory"),
             vec![
+                CustomIconName::FilterCircle.path().into(),
                 SharedString::from(path),
                 CustomIconName::GlobePlus.path().into(),
                 CustomIconName::RectangleStackBadgePlus.path().into()
@@ -324,6 +332,7 @@ mod tests {
     fn custom_vector_should_rasterize_into_an_unclipped_square(cx: &mut TestAppContext) {
         for (icon, width) in [
             (CustomIconName::RectangleStack, 24),
+            (CustomIconName::FilterCircle, 22),
             (CustomIconName::GlobePlus, 33),
             (CustomIconName::RectangleStackBadgePlus, 28),
         ] {

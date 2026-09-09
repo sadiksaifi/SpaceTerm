@@ -3416,6 +3416,14 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
+        .input_leading(|| {
+            Icon::custom(
+                CustomIconName::FilterCircle,
+                px(WORKSPACE_CHROME_ICON_SIZE),
+                gpui_color(ACTIVE_THEME.text_placeholder),
+            )
+            .into_any_element()
+        })
         .copy(ComboBoxCopy::new(
             "Workspace name",
             "Filter or create...",

@@ -6945,3 +6945,26 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
         WorkspaceId::new(2)
     );
 }
+
+#[gpui::test]
+fn workspace_filter_icon_should_precede_editable_input_without_affecting_creation(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+    let icon = cx.debug_bounds("combo-box-input-leading").unwrap();
+    let input = cx.debug_bounds("combo-box-input").unwrap();
+    assert!(icon.right() <= input.left());
+    assert!(input.size.width > px(0.0));
+    cx.simulate_keystrokes("f i l t e r enter");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "filter"
+    );
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
