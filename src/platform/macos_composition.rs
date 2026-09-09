@@ -3,7 +3,8 @@ use crate::app::{
     HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
 };
 use crate::desktop_profile::{
-    ActionShortcut, DesktopPresentation, DesktopProfile, DesktopProfileError, DesktopWording,
+    ActionShortcut, ControlKeybindingProfiles, DesktopPresentation, DesktopProfile,
+    DesktopProfileError, DesktopWording,
 };
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::{TitlebarOptions, point, px};
@@ -69,9 +70,12 @@ fn desktop_profile(
 
     DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
-        spaceterm_ui::ModalKeybindingProfile::MacOs,
-        spaceterm_ui::CommandPaletteKeybindingProfile::MacOs,
-        spaceterm_ui::TextInputKeybindingProfile::MacOs,
+        ControlKeybindingProfiles::new(
+            spaceterm_ui::ModalKeybindingProfile::MacOs,
+            spaceterm_ui::CommandPaletteKeybindingProfile::MacOs,
+            spaceterm_ui::ComboBoxKeybindingProfile::MacOs,
+            spaceterm_ui::TextInputKeybindingProfile::MacOs,
+        ),
         crate::desktop_profile::keybindings::bindings(),
         DesktopPresentation::new(
             DesktopWording {

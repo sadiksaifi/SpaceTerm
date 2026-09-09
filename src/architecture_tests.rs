@@ -300,6 +300,10 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
             "CommandPaletteKeybindingProfile::MacOs",
             "ExplicitCommandPaletteProfile",
         )
+        .replace(
+            "ComboBoxKeybindingProfile::MacOs",
+            "ExplicitComboBoxProfile",
+        )
         .replace("TextInputKeybindingProfile::MacOs", "ExplicitTextProfile");
     let compact: String = source
         .chars()

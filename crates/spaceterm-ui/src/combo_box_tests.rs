@@ -13,13 +13,13 @@ use gpui::{
 use crate::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ComboBox, ComboBoxAcceptance,
     ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCopy, ComboBoxFallback, ComboBoxHandle,
-    ComboBoxItem, ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme,
-    CommandPalette, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme, Menu, MenuEntry,
-    MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuSizes, MenuTheme, ScrollbarTheme,
-    TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputTheme,
-    TextInputVariants, install_text_input_keybindings, window_combo_box_is_open,
-    window_menu_is_open,
+    ComboBoxItem, ComboBoxKeybindingProfile, ComboBoxLifecycleEvent, ComboBoxMetrics,
+    ComboBoxPaint, ComboBoxTheme, CommandPalette, CommandPaletteEvent, CommandPaletteItem,
+    CommandPaletteLifecycleEvent, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme,
+    Menu, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuSizes, MenuTheme,
+    ScrollbarTheme, TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputTheme,
+    TextInputVariants, install_combo_box_keybindings, install_portable_combo_box_keybindings,
+    install_text_input_keybindings, window_combo_box_is_open, window_menu_is_open,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -502,7 +502,14 @@ fn install_themes(cx: &mut TestAppContext) {
     cx.update(crate::menu::init);
     cx.update(crate::combo_box::init);
     cx.update(crate::command_palette::init);
+    cx.update(install_portable_combo_box_keybindings);
     cx.update(|cx| install_text_input_keybindings(cx, TextInputKeybindingProfile::MacOs));
+}
+
+fn install_macos_combo_box_profile(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        install_combo_box_keybindings(cx, ComboBoxKeybindingProfile::MacOs);
+    });
 }
 
 fn install_modal_test_support(cx: &mut TestAppContext) {
@@ -1021,6 +1028,19 @@ fn down_key_on_the_focused_trigger_should_open_the_popup(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn macos_control_navigation_should_not_open_a_closed_combo_box(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    install_macos_combo_box_profile(cx);
+    focus_trigger(cx);
+
+    cx.simulate_keystrokes("ctrl-n ctrl-p");
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("combo-box-panel").is_none());
+    assert!(events.borrow().is_empty());
+}
+
+#[gpui::test]
 fn printable_input_on_the_trigger_should_open_with_that_query(cx: &mut TestAppContext) {
     let (_, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
     focus_trigger(cx);
@@ -1145,6 +1165,116 @@ fn navigation_should_remain_provisional_until_acceptance(cx: &mut TestAppContext
     assert_eq!(root.read_with(cx, |root, _| root.selected), Some(1));
     assert!(events.borrow().is_empty());
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn portable_arrow_navigation_should_wrap_in_both_directions(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(4), items(), false);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 1,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+
+    root.update(cx, |root, cx| {
+        root.selected = Some(1);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 4,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn macos_control_navigation_should_wrap_in_both_directions_while_input_is_focused(
+    cx: &mut TestAppContext,
+) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(4), items(), false);
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+
+    cx.simulate_keystrokes("ctrl-n enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 1,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+
+    root.update(cx, |root, cx| {
+        root.selected = Some(1);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+    cx.simulate_keystrokes("ctrl-p enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 4,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn macos_control_navigation_should_skip_disabled_items(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+
+    cx.simulate_keystrokes("ctrl-n enter");
+    cx.run_until_parked();
+
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 3,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn macos_control_navigation_should_leave_an_empty_list_stable(cx: &mut TestAppContext) {
+    let (_, empty_events, _, cx) = combo_box_window(cx, None, Vec::new(), false);
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    empty_events.borrow_mut().clear();
+    cx.simulate_keystrokes("ctrl-n ctrl-p enter");
+    cx.run_until_parked();
+    assert!(empty_events.borrow().is_empty());
+}
+
+#[gpui::test]
+fn macos_control_navigation_should_leave_a_single_item_selected(cx: &mut TestAppContext) {
+    let (_, single_events, _, cx) = combo_box_window(
+        cx,
+        None,
+        vec![ComboBoxItem::new(7, "Only Workspace")],
+        false,
+    );
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("ctrl-n ctrl-p enter");
+    cx.run_until_parked();
+    assert!(single_events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 7,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
 }
 
 #[gpui::test]
@@ -1897,6 +2027,34 @@ fn rendered_combo_box_placement_should_keep_last_result_reachable_when_neither_s
 }
 
 #[gpui::test]
+fn wrapped_control_navigation_should_reveal_the_first_offscreen_result(cx: &mut TestAppContext) {
+    let (accepted, cx) = placement_window(
+        cx,
+        point(px(180.0), px(180.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        long_items(),
+    );
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-row-64").is_some());
+
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    let first_row = cx
+        .debug_bounds("combo-row-1")
+        .expect("wrapped first result");
+    assert!(first_row.top() >= panel.top() && first_row.bottom() <= panel.bottom());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(accepted.borrow().as_slice(), [1]);
+}
+
+#[gpui::test]
 fn rendered_combo_box_placement_should_keep_active_last_result_visible_after_viewport_shrinks(
     cx: &mut TestAppContext,
 ) {
@@ -2273,6 +2431,43 @@ fn pinned_rows_should_allow_keyboard_creation_with_a_matching_existing_name(
     cx.run_until_parked();
     assert!(events.borrow().contains(&RecordedEvent::Accepted {
         item_id: 8,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn macos_control_navigation_should_wrap_across_filtered_results_and_pinned_rows(
+    cx: &mut TestAppContext,
+) {
+    let queries = Rc::new(RefCell::new(Vec::new()));
+    let captured_queries = Rc::clone(&queries);
+    let fallback = ComboBoxFallback::pinned_rows(move |query| {
+        captured_queries.borrow_mut().push(query.to_owned());
+        vec![
+            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+        ]
+    });
+    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    install_macos_combo_box_profile(cx);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("L o c a l space W o r k s p a c e ctrl-p");
+    cx.run_until_parked();
+
+    assert_eq!(
+        queries.borrow().last().map(String::as_str),
+        Some("Local Workspace")
+    );
+    assert_eq!(root.read_with(cx, |root, _| root.selected), None);
+    assert!(cx.debug_bounds("combo-row-local").is_some());
+    assert!(cx.debug_bounds("create-local").is_some());
+    assert!(cx.debug_bounds("create-remote").is_some());
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 9,
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));

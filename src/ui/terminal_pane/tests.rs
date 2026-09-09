@@ -3689,6 +3689,32 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    cx.update(|_, cx| {
+        spaceterm_ui::install_combo_box_keybindings(
+            cx,
+            spaceterm_ui::ComboBoxKeybindingProfile::MacOs,
+        );
+    });
+    let key_count_before = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+
+    cx.simulate_keystrokes("ctrl-n ctrl-p");
+    cx.run_until_parked();
+
+    let key_count_after = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+    assert_eq!(key_count_after, key_count_before + 2);
+}
+
+#[gpui::test]
 fn unhandled_key_translation_preserves_pane_presentation_and_propagates(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {

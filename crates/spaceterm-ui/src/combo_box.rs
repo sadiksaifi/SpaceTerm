@@ -43,7 +43,29 @@ actions!(
     ]
 );
 
-pub(crate) fn init(cx: &mut App) {
+/// Platform-specific ComboBox key equivalents layered over the portable bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComboBoxKeybindingProfile {
+    /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
+    /// and performs no operating-system detection.
+    MacOs,
+}
+
+/// Installs the platform-specific key equivalents for `profile`.
+///
+/// Applications explicitly install the portable navigation, acceptance, and dismissal bindings
+/// before calling this function. Both sets remain scoped to an open ComboBox.
+pub fn install_combo_box_keybindings(cx: &mut App, profile: ComboBoxKeybindingProfile) {
+    match profile {
+        ComboBoxKeybindingProfile::MacOs => cx.bind_keys([
+            KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+        ]),
+    }
+}
+
+/// Installs platform-neutral ComboBox navigation, acceptance, and dismissal bindings.
+pub fn install_portable_combo_box_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
         KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
@@ -54,6 +76,9 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("enter", Accept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
     ]);
+}
+
+pub(crate) fn init(cx: &mut App) {
     if !cx.has_global::<ComboBoxCoordinator>() {
         cx.set_global(ComboBoxCoordinator::default());
     }
@@ -1364,8 +1389,10 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             .provisional_position()
             .and_then(|position| enabled.iter().position(|candidate| *candidate == position));
         let next = match (current, delta.is_negative()) {
-            (Some(current), false) => (current + delta.unsigned_abs()).min(enabled.len() - 1),
-            (Some(current), true) => current.saturating_sub(delta.unsigned_abs()),
+            (Some(current), false) => (current + delta.unsigned_abs()) % enabled.len(),
+            (Some(current), true) => {
+                (current + enabled.len() - delta.unsigned_abs() % enabled.len()) % enabled.len()
+            }
             (None, false) => 0,
             (None, true) => enabled.len() - 1,
         };
