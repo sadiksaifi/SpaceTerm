@@ -1,0 +1,8 @@
+use os
+
+if (os:is-regular $E:SPACETERM_ELVISH_RC) {
+  eval (slurp < $E:SPACETERM_ELVISH_RC)
+}
+unset-env SPACETERM_ELVISH_RC
+eval (slurp < $E:SPACETERM_ELVISH_INTEGRATION)
+unset-env SPACETERM_ELVISH_INTEGRATION

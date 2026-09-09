@@ -469,9 +469,12 @@ impl TabManager {
                     .map(|(_, terminal)| terminal.current_directory())
             })
             .collect();
+        // Reconnecting restores existing terminals. The workspace pin only controls future ones.
+        let mut restart_factory = session_factory.clone();
+        restart_factory.set_pinned_directory(None);
         let factories: Result<Vec<_>, _> = sources
             .into_iter()
-            .map(|source| session_factory.for_source_directory(source))
+            .map(|source| restart_factory.for_source_directory(source))
             .collect();
         let factories = match factories {
             Ok(factories) => factories,
@@ -1989,6 +1992,7 @@ mod tests {
                 destination,
                 crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
             ),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
         )
@@ -3737,7 +3741,9 @@ mod tests {
         );
     }
     #[gpui::test]
-    fn reconnect_should_preserve_each_panes_captured_current_directory(cx: &mut TestAppContext) {
+    fn terminal_context_pin_should_remain_available_in_multiple_single_pane_tabs(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, records, cx) = remote_tab_manager(cx);
         report_current_directory(&records, 1, 1, "/srv/first", true);
         cx.run_until_parked();
@@ -3745,6 +3751,75 @@ mod tests {
         cx.run_until_parked();
         report_current_directory(&records, 2, 1, "/srv/second", true);
         cx.run_until_parked();
+        let pins = Rc::new(RefCell::new(Vec::new()));
+        manager.update(cx, |_, cx| {
+            let pins = Rc::clone(&pins);
+            cx.subscribe(&manager, move |_, _, event: &TabManagerEvent, _| {
+                if let TabManagerEvent::PinDirectoryRequested { directory } = event {
+                    pins.borrow_mut().push(directory.clone());
+                }
+            })
+            .detach();
+        });
+        for tab_id in [TabId::new(1), TabId::new(2)] {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| manager.activate_tab(tab_id, window, cx));
+            });
+            cx.run_until_parked();
+            // A closed deferred menu remains in GPUI's visual-test hit map for one replacement
+            // frame. Paint the active Tab through that retirement before targeting its terminal.
+            for _ in 0..2 {
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+            }
+            assert_eq!(
+                manager.read_with(cx, |manager, cx| manager
+                    .tab_pin_directory_availability(tab_id, cx)),
+                None
+            );
+            right_click(
+                "terminal-native-context-copy-false-open-false-file-preview-false-failure-false-last-frame-false",
+                cx,
+            );
+            click("terminal-context-menu-row-pin-directory-enabled", cx);
+            assert_eq!(
+                pins.borrow().len(),
+                tab_id.get() as usize,
+                "each targeted Tab must emit a pin"
+            );
+        }
+        assert_eq!(
+            *pins.borrow(),
+            ["/srv/first", "/srv/second"].map(|directory| CurrentDirectory::Remote(
+                crate::domain::RemoteDirectory::new(directory.into()).unwrap()
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn reconnect_should_restore_pane_directories_and_keep_changed_pin_for_new_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        report_current_directory(&records, 1, 1, "/srv/first", true);
+        cx.run_until_parked();
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
+        cx.run_until_parked();
+        report_current_directory(&records, 2, 1, "/srv/second", true);
+        cx.run_until_parked();
+        for directory in ["/srv/pinned", "/srv/changed"] {
+            manager.update(cx, |manager, cx| {
+                manager.set_pinned_directory(
+                    Some(PinnedDirectory::Remote {
+                        directory: crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
+                        identity: crate::domain::RemoteDirectoryIdentity::new(directory.into())
+                            .unwrap(),
+                    }),
+                    cx,
+                );
+            });
+        }
+        assert_eq!(records.starts().len(), 2);
         manager
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
             .unwrap();
@@ -3756,6 +3831,8 @@ mod tests {
             })
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
         cx.run_until_parked();
         let directories: Vec<_> = records
             .starts()
@@ -3770,6 +3847,6 @@ mod tests {
                     .to_owned()
             })
             .collect();
-        assert_eq!(directories, ["/srv/first", "/srv/second"]);
+        assert_eq!(directories, ["/srv/first", "/srv/second", "/srv/changed"]);
     }
 }

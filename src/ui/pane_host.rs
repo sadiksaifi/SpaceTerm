@@ -195,6 +195,7 @@ impl PaneHost {
             window,
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
+                TerminalPaneEvent::PinDirectoryRequested => host.request_pin_directory(pane_id, cx),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
@@ -1777,6 +1778,7 @@ mod tests {
                 destination,
                 crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
             ),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
         )

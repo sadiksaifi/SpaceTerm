@@ -187,13 +187,14 @@ impl WorkspaceTerminalSessionFactory {
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home: ValidatedLocalDirectory,
         metadata_context: RemoteTerminalMetadataContext,
+        initial_directory_identity: RemoteDirectoryIdentity,
         fallback_title: String,
         channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
     ) -> Self {
         Self {
             session_factory,
             pinned_directory: None,
-            expected_remote_identity: None,
+            expected_remote_identity: Some(initial_directory_identity),
             local_filesystem: None,
             launch_context: WorkspaceTerminalLaunchContext::Remote(
                 RemoteWorkspaceTerminalLaunchContext {
@@ -368,7 +369,10 @@ impl WorkspaceTerminalSessionFactory {
                     | (None, Some(CurrentDirectory::Local(_))) => {
                         return Err(LocalDirectoryError::Other);
                     }
-                    (None, Some(CurrentDirectory::Remote(directory))) => directory,
+                    (None, Some(CurrentDirectory::Remote(directory))) => {
+                        selected.expected_remote_identity = None;
+                        directory
+                    }
                     (None, None) => context.metadata_context.initial_directory().clone(),
                 };
                 context.metadata_context = RemoteTerminalMetadataContext::new(
@@ -399,6 +403,7 @@ mod tests {
     struct TestRemoteChannelProvider {
         ready: AtomicBool,
         preparations: AtomicUsize,
+        revalidations: Mutex<Vec<(RemoteDirectory, Option<RemoteDirectoryIdentity>)>>,
         results: Mutex<VecDeque<Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>>>,
     }
 
@@ -412,6 +417,7 @@ mod tests {
             Self {
                 ready: AtomicBool::new(ready),
                 preparations: AtomicUsize::new(0),
+                revalidations: Mutex::new(Vec::new()),
                 results: Mutex::new(results.into_iter().collect()),
             }
         }
@@ -424,9 +430,13 @@ mod tests {
 
         fn revalidate(
             &self,
-            _directory: RemoteDirectory,
-            _expected_identity: Option<RemoteDirectoryIdentity>,
+            directory: RemoteDirectory,
+            expected_identity: Option<RemoteDirectoryIdentity>,
         ) -> Task<Result<(), RemoteChannelRevalidationError>> {
+            self.revalidations
+                .lock()
+                .unwrap()
+                .push((directory, expected_identity));
             if self.is_ready() {
                 Task::ready(Ok(()))
             } else {
@@ -473,6 +483,7 @@ mod tests {
                 "/local/home/used-only-as-process-cwd",
             )),
             RemoteTerminalMetadataContext::new(destination, remote_directory),
+            RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
         )
@@ -691,13 +702,17 @@ mod tests {
     #[test]
     fn remote_launch_policy_should_capture_directory_and_identity_without_local_authority() {
         let provider = Arc::new(TestRemoteChannelProvider::new(true, []));
-        let mut factory = remote_factory(TestTerminalSessionRecords::default(), provider);
+        let mut factory = remote_factory(TestTerminalSessionRecords::default(), provider.clone());
         let source = RemoteDirectory::new("/srv/frontend".into()).unwrap();
         let pin = RemoteDirectory::new("/srv/pinned".into()).unwrap();
         let identity = RemoteDirectoryIdentity::new("/remote-identity".into()).unwrap();
+        let home_identity =
+            RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap();
+        let _initial_revalidation = factory.revalidate_remote_child_launch().unwrap();
         let captured = factory
             .for_source_directory(Some(CurrentDirectory::Remote(source.clone())))
             .unwrap();
+        let _source_revalidation = captured.revalidate_remote_child_launch().unwrap();
         factory.set_pinned_directory(Some(PinnedDirectory::Remote {
             directory: pin.clone(),
             identity: identity.clone(),
@@ -705,6 +720,7 @@ mod tests {
         let selected = factory
             .for_source_directory(Some(CurrentDirectory::Remote(source.clone())))
             .unwrap();
+        let _pin_revalidation = selected.revalidate_remote_child_launch().unwrap();
         let WorkspaceTerminalLaunchContext::Remote(context) = &captured.launch_context else {
             panic!("remote context")
         };
@@ -713,16 +729,32 @@ mod tests {
             panic!("remote context")
         };
         assert_eq!(context.metadata_context.initial_directory(), &pin);
-        assert_eq!(selected.expected_remote_identity, Some(identity));
+        assert_eq!(selected.expected_remote_identity, Some(identity.clone()));
         assert_eq!(selected.local_working_directory(), None);
         factory.set_pinned_directory(None);
         let home = factory.for_source_directory(None).unwrap();
+        let _home_revalidation = home.revalidate_remote_child_launch().unwrap();
         let WorkspaceTerminalLaunchContext::Remote(context) = home.launch_context else {
             panic!("remote context")
         };
         assert_eq!(
             context.metadata_context.initial_directory().as_str(),
             "~/project"
+        );
+        assert_eq!(
+            provider.revalidations.lock().unwrap().as_slice(),
+            [
+                (
+                    RemoteDirectory::new("~/project".to_owned()).unwrap(),
+                    Some(home_identity.clone()),
+                ),
+                (source.clone(), None),
+                (pin, Some(identity)),
+                (
+                    RemoteDirectory::new("~/project".to_owned()).unwrap(),
+                    Some(home_identity),
+                ),
+            ]
         );
         assert!(
             factory

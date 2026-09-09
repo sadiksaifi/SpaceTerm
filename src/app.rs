@@ -312,7 +312,17 @@ fn restore_default_window(cx: &mut App, host: &HostComposition) {
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     cx.on_action(move |_: &NewWorkspace, cx| {
-        restore_default_window(cx, &host);
+        if !cx.windows().is_empty() {
+            return;
+        }
+        match open(cx, &host) {
+            Ok(window) => {
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(NewWorkspace), cx);
+                });
+            }
+            Err(error) => eprintln!("failed to restore the default SpaceTerm window: {error}"),
+        }
     });
 }
 
@@ -764,7 +774,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn new_workspace_action_should_restore_a_default_window_when_headless(
+    fn new_workspace_action_should_restore_window_and_present_chooser_when_headless(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
@@ -789,6 +799,11 @@ mod runtime_tests {
 
         cx.update(|cx| cx.dispatch_action(&NewWorkspace));
         cx.run_until_parked();
+
+        cx.update(|cx| {
+            let restored = cx.windows()[0].downcast::<WorkspaceManager>().unwrap();
+            assert!(restored.read(cx).unwrap().new_workspace_panel_is_open(cx));
+        });
 
         assert_eq!(
             (

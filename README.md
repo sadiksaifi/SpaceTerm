@@ -25,11 +25,12 @@ directory on that machine. New Tabs inherit the focused Pane's Current Directory
 inherit the directory of the Pane being split. Workspace names stay stable as you navigate.
 
 Choose Pin to Directory from the Workspace context menu to select a fixed Starting Directory,
-or Pin Workspace to This Directory from a Pane menu to use that Pane's Current Directory.
+or Pin Workspace to This Directory from a Pane's actions or terminal context menu to use its
+Current Directory.
 The Tab context menu offers the same action when the Workspace has exactly one Tab and one Pane.
 Change Pinned Directory and Unpin Directory are available from the Workspace context menu.
-Pinning only affects future Terminal Sessions. If the source directory is unknown, a new terminal
-starts at the user home directory on its machine.
+Pinning only affects future Terminal Sessions. In an unpinned Workspace, if the source directory
+is unknown, a new terminal starts at the user home directory on its machine.
 
 ## Workspace hierarchy
 

@@ -1715,10 +1715,9 @@ mod tests {
             .unwrap();
         let command = prepared.take().unwrap();
 
-        assert_eq!(
-            command.arguments().last().unwrap(),
-            "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/sh' -l"
-        );
+        let launch = command.arguments().last().unwrap().to_str().unwrap();
+        assert!(launch.contains("SPACETERM_SH_INTEGRATION"));
+        assert!(launch.contains(" -l"));
     }
 
     #[gpui::test]

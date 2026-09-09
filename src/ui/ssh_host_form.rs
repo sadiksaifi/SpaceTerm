@@ -709,7 +709,7 @@ impl Render for SshHostForm {
                 "managed-ssh-host-identity-file-error",
             ))
             .child(
-                spaceterm_ui::Button::new("choose-ssh-identity-file", "Choose Identity File…")
+                spaceterm_ui::Button::new("choose-ssh-identity-file", "Choose Identity File")
                     .variant(spaceterm_ui::ButtonVariant::Outline)
                     .size(spaceterm_ui::ButtonSize::Small)
                     .tab_stop(true)

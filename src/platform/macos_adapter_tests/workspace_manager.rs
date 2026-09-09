@@ -20,7 +20,7 @@ fn workspace_manager_with_picker(
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_adapters(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_filesystem: crate::platform::macos_adapter_tests::local_filesystem(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),

@@ -746,6 +746,7 @@ fn remote_workspace_session_factory_with_readiness(
             destination,
             crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
+        crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
         "project on remote".to_owned(),
         channel_provider,
     )

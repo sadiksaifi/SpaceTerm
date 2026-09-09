@@ -42,7 +42,7 @@ use crate::domain::{
     RemoteDirectory, RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection,
     WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
-use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
@@ -1272,7 +1272,13 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.visible;
         let sidebar_width = self.sidebar.width;
-        let (directory, unavailable_reason) = self.local_home_directory();
+        let directory = match self.local_home_directory() {
+            Ok(directory) => directory,
+            Err(_) => {
+                Self::show_home_directory_unavailable(window, cx);
+                return;
+            }
+        };
         let directory_identity = directory.identity();
         let result =
             self.workspaces
@@ -1304,11 +1310,6 @@ impl WorkspaceManager {
                 return;
             }
         };
-        if let Some(reason) = unavailable_reason {
-            let _ = self
-                .workspaces
-                .set_directory_unavailable(workspace_id, reason);
-        }
         let Some(next_manager) = self
             .workspaces
             .workspace(workspace_id)
@@ -1775,6 +1776,7 @@ impl WorkspaceManager {
                 completion.destination().clone(),
                 completion.directory().clone(),
             ),
+            completion.physical_directory().clone(),
             remote_workspace_fallback_title(&key, completion.remote_home_identity()),
             completion.terminal_channels(),
         );
@@ -2198,6 +2200,7 @@ impl WorkspaceManager {
                     session_factory,
                     local_root,
                     RemoteTerminalMetadataContext::new(destination, directory),
+                    expected_identity.clone(),
                     remote_workspace_fallback_title(&key, account.home_identity()),
                     channels,
                 );
@@ -2613,20 +2616,19 @@ impl WorkspaceManager {
         }
     }
 
-    fn local_home_directory(&self) -> (ValidatedLocalDirectory, Option<String>) {
-        match self
-            .local_filesystem
+    fn local_home_directory(&self) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
+        self.local_filesystem
             .validate_directory(&self.local_home_directory_path)
-        {
-            Ok(directory) => (directory, None),
-            Err(error) => (
-                ValidatedLocalDirectory::new(
-                    self.local_home_directory_path.clone(),
-                    self.local_home_identity.clone(),
-                ),
-                Some(error.to_string()),
-            ),
-        }
+    }
+
+    fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
+        drop(window.prompt(
+            gpui::PromptLevel::Warning,
+            "Home Directory Unavailable",
+            Some("A workspace could not be created. Check that your home directory exists and is accessible, then try again."),
+            &[gpui::PromptButton::ok("OK")],
+            cx,
+        ));
     }
 
     fn activate_workspace(
@@ -2865,6 +2867,20 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let replacement = if self.workspaces.len() == 1 {
+            match self.local_home_directory() {
+                Ok(directory) => directory,
+                Err(_) => {
+                    Self::show_home_directory_unavailable(window, cx);
+                    return;
+                }
+            }
+        } else {
+            ValidatedLocalDirectory::new(
+                self.local_home_directory_path.clone(),
+                self.local_home_identity.clone(),
+            )
+        };
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let local_filesystem = self.local_filesystem.clone();
@@ -2873,7 +2889,6 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.visible;
         let sidebar_width = self.sidebar.width;
-        let (replacement, unavailable_reason) = self.local_home_directory();
         let replacement_identity = replacement.identity();
         let outcome = self.workspaces.close_workspace_with_local_replacement(
             workspace_id,
@@ -2907,17 +2922,6 @@ impl WorkspaceManager {
                 return;
             }
         };
-        if matches!(
-            outcome,
-            CloseWorkspaceOutcome::FinalWorkspaceReplaced { .. }
-        ) && let Some(reason) = unavailable_reason
-        {
-            let replacement_id = self.workspaces.active_workspace_id();
-            let _ = self
-                .workspaces
-                .set_directory_unavailable(replacement_id, reason);
-        }
-
         let closed_manager = match outcome {
             CloseWorkspaceOutcome::WorkspaceClosed { payload, .. }
             | CloseWorkspaceOutcome::FinalWorkspaceReplaced { payload, .. } => payload,
@@ -4524,6 +4528,10 @@ fn initial_home_directory(
 
 #[cfg(test)]
 impl WorkspaceManager {
+    pub(crate) fn new_workspace_panel_is_open(&self, cx: &App) -> bool {
+        self.transient.new_workspace.read(cx).is_open()
+    }
+
     pub(crate) fn assert_application_capabilities(
         &self,
         expected: &crate::app::ApplicationCapabilities,

@@ -109,6 +109,7 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
+    PinDirectoryRequested,
     TitleChanged(SharedString),
     AttentionChanged { unread_count: u32 },
     Exited,
@@ -118,6 +119,7 @@ impl std::fmt::Debug for TerminalPaneEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
+            Self::PinDirectoryRequested => "TerminalPaneEvent::PinDirectoryRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
@@ -2647,6 +2649,9 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
 
         match command {
+            TerminalContextMenuCommand::PinDirectory if self.current_directory().is_some() => {
+                cx.emit(TerminalPaneEvent::PinDirectoryRequested);
+            }
             TerminalContextMenuCommand::Paste => self.paste_clipboard(&PasteClipboard, window, cx),
             TerminalContextMenuCommand::Find => self.open_find(&OpenTerminalFind, window, cx),
             TerminalContextMenuCommand::Copy if actions.copy => {
@@ -3513,6 +3518,7 @@ impl Render for TerminalPane {
         let context_menu_available = self.context_menu_available();
         let context_menu_entries = terminal_context_menu_entries(
             context_menu_actions,
+            self.current_directory().is_some(),
             crate::desktop_profile::DesktopPresentation::get(cx),
         );
         let context_open_pane = pane.clone();
@@ -3530,7 +3536,7 @@ impl Render for TerminalPane {
                 .h(context_target_size.height),
             context_menu_entries,
         )
-        .size(MenuSize::Regular)
+        .size(MenuSize::Wide)
         .preserve_trigger_cursor()
         .disabled(!context_menu_available)
         .debug_selector("terminal-context-menu")

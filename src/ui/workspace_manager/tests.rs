@@ -747,7 +747,7 @@ fn workspace_manager(
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             test_remote_backend_factory(),
             window,
             cx,
@@ -789,7 +789,7 @@ fn workspace_manager_with_application_actions(
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             test_remote_backend_factory(),
             window,
             cx,
@@ -821,7 +821,7 @@ fn workspace_manager_with_remote_backend(
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             factory,
             window,
             cx,
@@ -927,7 +927,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceManager::new_with_operating_system_window_drag_platform(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             injected_platform,
             test_remote_backend_factory(),
             window,
@@ -961,7 +961,7 @@ fn workspace_manager_with_picker(
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_directory_selection_fallback(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             directory_selection_fallback,
             test_remote_backend_factory(),
             window,
@@ -1099,6 +1099,7 @@ fn install_remote_completion_directly(
                     completion.destination().clone(),
                     completion.directory().clone(),
                 ),
+                completion.physical_directory().clone(),
                 remote_workspace_fallback_title(&key, completion.remote_home_identity()),
                 completion.terminal_channels(),
             );
@@ -1132,7 +1133,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             test_remote_backend_factory(),
             window,
             cx,
@@ -1891,7 +1892,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             factory,
             window,
             cx,
@@ -2188,7 +2189,7 @@ fn unavailable_remote_source_should_stay_disabled_without_constructing_askpass_b
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             factory,
             window,
             cx,
@@ -2229,7 +2230,7 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceManager::new_with_remote_workspace_backend_factory(
             session_factory,
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             factory,
             window,
             cx,
@@ -2318,7 +2319,7 @@ fn remote_completion_should_create_exact_metadata_launch_and_owned_runtime(
     assert_eq!(closes.load(Ordering::Acquire), 0);
     assert_eq!(remote.destination().as_str(), "deploy@work");
     assert_eq!(remote.remote_directory().as_str(), "~/src");
-    assert_eq!(remote.local_home().path(), PathBuf::from("/Users/test"));
+    assert_eq!(remote.local_home().path(), std::env::temp_dir());
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -5981,9 +5982,9 @@ fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &m
         (
             2,
             WorkspaceId::new(2),
-            PathBuf::from("/Users/test"),
+            std::env::temp_dir(),
             Vec::new(),
-            vec![PathBuf::from("/Users/test"), PathBuf::from("/Users/test")],
+            vec![std::env::temp_dir(), std::env::temp_dir()],
         )
     );
 }
@@ -6637,7 +6638,7 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
         .collect::<Vec<_>>();
     assert_eq!(
         starts,
-        [PathBuf::from("/Users/test"), first, second.clone(), second]
+        [std::env::temp_dir(), first, second.clone(), second]
     );
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(
@@ -6841,4 +6842,79 @@ fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mu
             .read(cx)
             .focused_terminal_is_focused(window, cx)
     }));
+}
+
+#[gpui::test]
+fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let missing_home = temporary_directory("missing-home");
+    manager.update(cx, |manager, _| {
+        manager.local_home_directory_path = missing_home
+    });
+
+    cx.simulate_keystrokes("cmd-n enter");
+    cx.run_until_parked();
+
+    assert!(cx.has_pending_prompt());
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 1);
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(1)
+        );
+    });
+    assert_eq!(records.session_count(), 1);
+    assert!(records.dropped_session_ids().is_empty());
+}
+
+#[gpui::test]
+fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let missing_home = temporary_directory("missing-home");
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.local_home_directory_path = missing_home;
+            manager.close_workspace(WorkspaceId::new(1), window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(cx.has_pending_prompt());
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 1);
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(1)
+        );
+    });
+    assert_eq!(records.session_count(), 1);
+    assert!(records.dropped_session_ids().is_empty());
+}
+
+#[gpui::test]
+fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n enter");
+    cx.run_until_parked();
+    let missing_home = temporary_directory("missing-home");
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.local_home_directory_path = missing_home;
+            manager.close_workspace(WorkspaceId::new(2), window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(!cx.has_pending_prompt());
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 1);
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(1)
+        );
+    });
+    assert_eq!(records.session_count(), 2);
+    assert_eq!(records.dropped_session_ids(), vec![2]);
 }
