@@ -301,6 +301,12 @@ impl TabManager {
                     cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
+                PaneHostEvent::PrimaryPaneSelected { tab_id } => {
+                    if manager.tabs.select_primary_tab(*tab_id).is_ok() {
+                        cx.emit(TabManagerEvent::PresentationChanged);
+                        cx.notify();
+                    }
+                }
                 PaneHostEvent::PinDirectoryRequested { directory } => {
                     cx.emit(TabManagerEvent::PinDirectoryRequested {
                         directory: directory.clone(),
@@ -323,6 +329,10 @@ impl TabManager {
         if self.active {
             self.tabs.active_tab().read(cx).focus(window, cx);
         }
+    }
+
+    pub(crate) fn identity_directory(&self, cx: &App) -> Option<CurrentDirectory> {
+        self.tabs.primary_tab().read(cx).identity_directory(cx)
     }
 
     pub(crate) fn native_service_status(
@@ -959,6 +969,7 @@ impl TabManager {
         }
 
         let was_active = self.tabs.active_tab_id() == tab_id;
+        let was_primary = self.tabs.primary_tab_id() == tab_id;
         match self.tabs.close_tab(tab_id) {
             Ok(CloseTabOutcome::TabClosed {
                 closed_tab_id,
@@ -967,6 +978,11 @@ impl TabManager {
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
                 payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
+                if was_primary {
+                    self.tabs
+                        .primary_tab()
+                        .update(cx, |host, _| host.reset_primary_pane());
+                }
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
                     if self.active {
@@ -1083,6 +1099,11 @@ impl TabManager {
                 }
             }
             PaneActionMenuCommand::Close => self.request_close_tab(tab_id, cx),
+            PaneActionMenuCommand::UseForWorkspaceIdentity => {
+                pane_host.update(cx, |host, cx| {
+                    host.select_primary_pane(host.focused_pane_id(), cx);
+                });
+            }
         }
         if self.tab_menu.take().is_some() {
             self.sync_terminal_focus_blocker(cx);
@@ -3792,6 +3813,45 @@ mod tests {
             *pins.borrow(),
             ["/srv/first", "/srv/second"].map(|directory| CurrentDirectory::Remote(
                 crate::domain::RemoteDirectory::new(directory.into()).unwrap()
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn closing_primary_tab_should_promote_first_pane_instead_of_historical_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        report_current_directory(&records, 2, 1, "/srv/first", true);
+        report_current_directory(&records, 3, 1, "/srv/historical", true);
+        cx.run_until_parked();
+        for (tab_id, pane_id) in [
+            (TabId::new(2), PaneId::new(2)),
+            (TabId::new(1), PaneId::new(1)),
+        ] {
+            manager.update(cx, |manager, cx| {
+                manager
+                    .tabs
+                    .tab(tab_id)
+                    .unwrap()
+                    .update(cx, |host, cx| host.select_primary_pane(pane_id, cx));
+            });
+            cx.run_until_parked();
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_tab(TabId::new(1), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| manager.identity_directory(cx)),
+            Some(CurrentDirectory::Remote(
+                crate::domain::RemoteDirectory::new("/srv/first".into()).unwrap()
             ))
         );
     }

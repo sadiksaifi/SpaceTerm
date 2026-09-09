@@ -10,6 +10,7 @@ pub(crate) enum PaneActionMenuCommand {
     ToggleZoom,
     Close,
     PinDirectory,
+    UseForWorkspaceIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +96,17 @@ pub(crate) fn pane_action_menu_entries(
             .debug_selector(format!("{debug_prefix}-row-pin-directory")),
         );
     }
+    if close_target == CloseTarget::Pane {
+        entries.insert(
+            3,
+            MenuEntry::action(
+                "Use for Workspace identity",
+                PaneActionMenuCommand::UseForWorkspaceIdentity,
+            )
+            .icon(menu_icon(IconName::Terminal))
+            .debug_selector(format!("{debug_prefix}-row-workspace-identity")),
+        );
+    }
     entries
 }
 
@@ -106,6 +118,7 @@ fn pane_action_icon(command: PaneActionMenuCommand, zoomed: bool) -> IconName {
         PaneActionMenuCommand::ToggleZoom => IconName::Maximize2,
         PaneActionMenuCommand::Close => IconName::X,
         PaneActionMenuCommand::PinDirectory => IconName::Pin,
+        PaneActionMenuCommand::UseForWorkspaceIdentity => IconName::Terminal,
     }
 }
 

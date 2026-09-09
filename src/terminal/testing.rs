@@ -161,6 +161,7 @@ pub(crate) struct TestTerminalSessionRecords {
     selection_receivers:
         Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
+    directory_snapshots: Rc<RefCell<BTreeMap<usize, super::SessionDirectorySnapshot>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
@@ -168,6 +169,15 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn retain_directory_snapshot(
+        &self,
+        session_id: usize,
+        snapshot: super::SessionDirectorySnapshot,
+    ) {
+        self.directory_snapshots
+            .borrow_mut()
+            .insert(session_id, snapshot);
+    }
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
         self.selection_copies.borrow_mut().push_back(copy);
     }
@@ -400,6 +410,13 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn directory_snapshot(&self) -> Option<super::SessionDirectorySnapshot> {
+        self.records
+            .directory_snapshots
+            .borrow()
+            .get(&self.session_id)
+            .cloned()
+    }
     fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
         Some(self.selection_sender.clone())
     }

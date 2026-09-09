@@ -1,3 +1,5 @@
+mod identity;
+
 use super::remote_workspace::{RemoteConnectionReduction, RemoteConnectionState};
 use crate::close_confirmation::{
     CloseContinuation, CloseWorkspaceOutcome, FinalTabCloseOutcome, HierarchyClose,
@@ -27,6 +29,22 @@ impl WorkspaceId {
 }
 
 pub(crate) use crate::platform::local_filesystem::LocalDirectoryIdentity;
+
+/// A Terminal Session's directory, retaining its machine boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum CurrentDirectory {
+    Local(std::path::PathBuf),
+    Remote(RemoteDirectory),
+}
+
+impl std::fmt::Debug for CurrentDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Local(_) => "CurrentDirectory::Local",
+            Self::Remote(_) => "CurrentDirectory::Remote",
+        })
+    }
+}
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Validation failures for values that cross the local-to-remote domain boundary.
@@ -267,6 +285,8 @@ pub(crate) struct WorkspaceEntry<T> {
     id: WorkspaceId,
     name: String,
     custom_name: Option<String>,
+    fallback_name: String,
+    identity_directory: CurrentDirectory,
     location: WorkspaceLocation,
     pinned_directory: Option<PinnedDirectory>,
     directory_location: HomeDirectoryLocation,
@@ -330,13 +350,19 @@ impl<T> WorkspaceEntry<T> {
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
-            _ => self.local_home_directory(),
+            _ => match &self.identity_directory {
+                CurrentDirectory::Local(directory) => Some(directory),
+                CurrentDirectory::Remote(_) => None,
+            },
         }
     }
     pub(crate) fn remote_display_directory(&self) -> Option<&RemoteDirectory> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Remote { directory, .. }) => Some(directory),
-            _ => self.remote_starting_directory(),
+            _ => match &self.identity_directory {
+                CurrentDirectory::Remote(directory) => Some(directory),
+                CurrentDirectory::Local(_) => None,
+            },
         }
     }
 
@@ -381,6 +407,8 @@ impl<T> WorkspaceCollection<T> {
                 id,
                 name: default_workspace_name(1),
                 custom_name: None,
+                fallback_name: default_workspace_name(1),
+                identity_directory: CurrentDirectory::Local(directory.path().to_owned()),
                 location: WorkspaceLocation::Local,
                 pinned_directory: None,
                 directory_location: HomeDirectoryLocation::Local(directory),
@@ -479,8 +507,10 @@ impl<T> WorkspaceCollection<T> {
         let name = self.next_default_workspace_name(None);
         self.workspaces.push(WorkspaceEntry {
             id,
+            fallback_name: name.clone(),
             name,
             custom_name: None,
+            identity_directory: CurrentDirectory::Local(directory.path().to_owned()),
             location: WorkspaceLocation::Local,
             pinned_directory: None,
             directory_location: HomeDirectoryLocation::Local(directory),
@@ -489,6 +519,7 @@ impl<T> WorkspaceCollection<T> {
         });
         self.active_workspace_id = id;
         self.next_workspace_id = next;
+        self.recalculate_automatic_names();
         Ok(id)
     }
 
@@ -515,8 +546,10 @@ impl<T> WorkspaceCollection<T> {
         }
         self.workspaces.push(WorkspaceEntry {
             id,
+            fallback_name: name.clone(),
             name,
             custom_name: None,
+            identity_directory: CurrentDirectory::Remote(remote_directory.clone()),
             location: WorkspaceLocation::Remote {
                 key,
                 remote_directory,
@@ -530,6 +563,7 @@ impl<T> WorkspaceCollection<T> {
         });
         self.active_workspace_id = id;
         self.next_workspace_id = next;
+        self.recalculate_automatic_names();
         Ok(id)
     }
 
@@ -555,6 +589,7 @@ impl<T> WorkspaceCollection<T> {
         }
         workspace.pinned_directory = pin;
         workspace.availability = DirectoryAvailability::Available;
+        self.recalculate_automatic_names();
         Ok(())
     }
 
@@ -575,12 +610,11 @@ impl<T> WorkspaceCollection<T> {
         workspace_id: WorkspaceId,
         name: String,
     ) -> Result<(), WorkspaceError> {
-        let default_name = self.next_default_workspace_name(Some(workspace_id));
         let workspace = self
             .workspace_mut(workspace_id)
             .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
         workspace.custom_name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
-        workspace.name = workspace.custom_name.clone().unwrap_or(default_name);
+        self.recalculate_automatic_names();
         Ok(())
     }
 
@@ -642,6 +676,8 @@ impl<T> WorkspaceCollection<T> {
                 &mut self.workspaces[index],
                 WorkspaceEntry {
                     id: replacement_workspace_id,
+                    fallback_name: replacement_name.clone(),
+                    identity_directory: CurrentDirectory::Local(replacement.path().to_owned()),
                     name: replacement_name,
                     custom_name: None,
                     location: WorkspaceLocation::Local,
@@ -667,6 +703,7 @@ impl<T> WorkspaceCollection<T> {
             self.active_workspace_id = self.workspaces[fallback_index].id;
         }
 
+        self.recalculate_automatic_names();
         Ok(CloseWorkspaceOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
             active_workspace_id: self.active_workspace_id,
@@ -696,6 +733,7 @@ impl<T> WorkspaceCollection<T> {
             self.active_workspace_id = self.workspaces[fallback_index].id;
         }
 
+        self.recalculate_automatic_names();
         Ok(FinalTabCloseOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
             active_workspace_id: self.active_workspace_id,
@@ -1265,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn pins_are_explicit_independent_and_do_not_change_names_or_home() {
+    fn pins_are_explicit_independent_and_do_not_change_home() {
         let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
         let first = workspaces.active_workspace_id();
         let second = workspaces
@@ -1281,7 +1319,7 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(workspaces.len(), 2);
         let first_workspace = workspaces.workspace(first).unwrap();
-        assert_eq!(first_workspace.name(), "Workspace 1");
+        assert_eq!(first_workspace.name(), "frontend");
         assert_eq!(
             first_workspace.local_home_directory(),
             Some(Path::new("/home/me"))

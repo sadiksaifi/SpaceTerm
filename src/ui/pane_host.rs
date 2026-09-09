@@ -78,6 +78,7 @@ pub(crate) enum PaneHostEvent {
     CloseTabRequested { tab_id: TabId },
     PresentationChanged { tab_id: TabId },
     PinDirectoryRequested { directory: CurrentDirectory },
+    PrimaryPaneSelected { tab_id: TabId },
 }
 
 impl std::fmt::Debug for PaneHostEvent {
@@ -87,6 +88,7 @@ impl std::fmt::Debug for PaneHostEvent {
             Self::CloseTabRequested { .. } => "PaneHostEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "PaneHostEvent::PresentationChanged",
             Self::PinDirectoryRequested { .. } => "PaneHostEvent::PinDirectoryRequested",
+            Self::PrimaryPaneSelected { .. } => "PaneHostEvent::PrimaryPaneSelected",
         })
     }
 }
@@ -196,12 +198,20 @@ impl PaneHost {
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
                 TerminalPaneEvent::PinDirectoryRequested => host.request_pin_directory(pane_id, cx),
+                TerminalPaneEvent::WorkspaceIdentityRequested => {
+                    host.select_primary_pane(pane_id, cx)
+                }
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
                         tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
+                }
+                TerminalPaneEvent::DirectoryChanged => {
+                    cx.emit(PaneHostEvent::PresentationChanged {
+                        tab_id: host.terminal_tab.id(),
+                    });
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
@@ -277,6 +287,26 @@ impl PaneHost {
         self.terminal_tab
             .terminal(pane_id)
             .and_then(|terminal| terminal.read(cx).current_directory())
+    }
+
+    pub(crate) fn identity_directory(&self, cx: &App) -> Option<CurrentDirectory> {
+        self.terminal_tab
+            .terminal(self.terminal_tab.primary_pane_id())
+            .and_then(|terminal| terminal.read(cx).identity_directory())
+    }
+
+    pub(crate) fn reset_primary_pane(&mut self) {
+        self.terminal_tab.reset_primary_pane();
+    }
+
+    pub(crate) fn select_primary_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if self.close_tab_requested || self.terminal_tab.select_primary_pane(pane_id).is_err() {
+            return;
+        }
+        cx.emit(PaneHostEvent::PrimaryPaneSelected {
+            tab_id: self.tab_id(),
+        });
+        cx.notify();
     }
 
     pub(crate) fn terminal_panes<'a>(
@@ -1096,6 +1126,7 @@ impl PaneHost {
             }
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
             PaneActionMenuCommand::PinDirectory => self.request_pin_directory(pane_id, cx),
+            PaneActionMenuCommand::UseForWorkspaceIdentity => self.select_primary_pane(pane_id, cx),
             PaneActionMenuCommand::Close => self.request_close_pane(pane_id, cx),
         }
         if self.menu_pane_id.take().is_some() {
@@ -3059,7 +3090,7 @@ mod tests {
             (
                 Some(px(26.0)),
                 Some(px(26.0)),
-                Some(size(px(240.0), px(147.0)))
+                Some(size(px(240.0), px(173.0)))
             )
         );
     }

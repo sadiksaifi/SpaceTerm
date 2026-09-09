@@ -183,6 +183,7 @@ pub(crate) struct TerminalTab<T> {
     root: PaneNode,
     terminals: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
+    primary_pane_id: PaneId,
     zoom_state: ZoomState,
     minimum_pane_size: PaneSize,
     next_pane_id: u64,
@@ -204,6 +205,7 @@ impl<T> TerminalTab<T> {
                 create_initial_terminal(initial_pane_id),
             )]),
             focused_pane_id: initial_pane_id,
+            primary_pane_id: initial_pane_id,
             zoom_state: ZoomState::Restored,
             minimum_pane_size,
             next_pane_id: 2,
@@ -217,6 +219,22 @@ impl<T> TerminalTab<T> {
 
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.focused_pane_id
+    }
+
+    pub(crate) const fn primary_pane_id(&self) -> PaneId {
+        self.primary_pane_id
+    }
+
+    pub(crate) fn reset_primary_pane(&mut self) {
+        self.primary_pane_id = self.root.first_pane_id();
+    }
+
+    pub(crate) fn select_primary_pane(&mut self, pane_id: PaneId) -> Result<(), PaneError> {
+        if !self.terminals.contains_key(&pane_id) {
+            return Err(PaneError::PaneNotFound(pane_id));
+        }
+        self.primary_pane_id = pane_id;
+        Ok(())
     }
 
     pub(crate) const fn zoom_state(&self) -> ZoomState {
@@ -325,6 +343,9 @@ impl<T> TerminalTab<T> {
             .ok_or(PaneError::MissingTerminal(pane_id))?;
 
         self.root = new_root;
+        if self.primary_pane_id == pane_id {
+            self.primary_pane_id = self.root.first_pane_id();
+        }
         if self.focused_pane_id == pane_id {
             self.focused_pane_id = removal.focus_fallback;
         }
@@ -888,6 +909,21 @@ mod tests {
                 topology(second)
             ),
         }
+    }
+
+    #[test]
+    fn primary_pane_should_ignore_focus_and_promote_in_layout_order() {
+        let mut tab = four_pane_tab();
+        assert_eq!(tab.primary_pane_id(), PaneId::new(1));
+        tab.focus_pane(PaneId::new(4)).unwrap();
+        assert_eq!(tab.primary_pane_id(), PaneId::new(1));
+        tab.select_primary_pane(PaneId::new(2)).unwrap();
+        tab.close_pane(PaneId::new(2)).unwrap();
+        assert_eq!(tab.primary_pane_id(), PaneId::new(1));
+        tab.close_pane(PaneId::new(1)).unwrap();
+        assert_eq!(tab.primary_pane_id(), PaneId::new(3));
+        assert!(tab.select_primary_pane(PaneId::new(99)).is_err());
+        assert_eq!(tab.primary_pane_id(), PaneId::new(3));
     }
 
     #[test]

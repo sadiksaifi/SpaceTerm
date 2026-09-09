@@ -170,6 +170,7 @@ struct WorkspaceMenuState {
 
 struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
+    initial_value: String,
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
     context_menu_open: bool,
@@ -780,7 +781,7 @@ impl WorkspaceManager {
         cx.subscribe_in(
             &manager,
             window,
-            move |workspace_manager, _, event: &TabManagerEvent, window, cx| match event {
+            move |workspace_manager, tab_manager, event: &TabManagerEvent, window, cx| match event {
                 TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
                     workspace_manager.request_close(
                         CloseTarget::Pane {
@@ -817,6 +818,13 @@ impl WorkspaceManager {
                     }
                 }
                 TabManagerEvent::PresentationChanged => {
+                    if let Some(directory) = tab_manager.read(cx).identity_directory(cx)
+                        && workspace_manager
+                            .workspaces
+                            .update_identity_directory(workspace_id, directory)
+                    {
+                        workspace_manager.synchronize_tab_manager_layouts(window, cx);
+                    }
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
@@ -1371,6 +1379,7 @@ impl WorkspaceManager {
                 .payload()
                 .update(cx, |manager, cx| manager.set_pinned_directory(pin, cx));
         }
+        self.synchronize_tab_manager_layouts(window, cx);
         self.refresh_workspace_search(cx);
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -3242,6 +3251,7 @@ impl WorkspaceManager {
                 .detach();
                 self.sidebar.rename = Some(WorkspaceRenameState {
                     workspace_id,
+                    initial_value: input.read(cx).value().to_owned(),
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                     context_menu_open: false,
@@ -3284,11 +3294,12 @@ impl WorkspaceManager {
         }
         let workspace_id = rename.workspace_id;
         if let Some(value) = value
+            && value.trim() != rename.initial_value
             && let Err(error) = self.workspaces.rename_workspace(workspace_id, value)
         {
             Self::report_workspace_error("rename", error);
         }
-        self.synchronize_tab_manager_layout(workspace_id, window, cx);
+        self.synchronize_tab_manager_layouts(window, cx);
         self.sidebar.rename = None;
         if restore_sidebar_focus {
             self.sidebar.focus.focus(window);
@@ -3733,7 +3744,7 @@ impl WorkspaceManager {
         } else if pinned {
             "Pinned Directory"
         } else if available {
-            "Home Directory"
+            "Workspace Directory"
         } else {
             "Workspace unavailable"
         };

@@ -19,6 +19,7 @@ struct TabEntry<T> {
 pub(crate) struct TabCollection<T> {
     tabs: Vec<TabEntry<T>>,
     active_tab_id: TabId,
+    primary_tab_id: TabId,
     next_tab_id: u64,
 }
 
@@ -31,6 +32,7 @@ impl<T> TabCollection<T> {
                 payload: create_initial_payload(initial_tab_id),
             }],
             active_tab_id: initial_tab_id,
+            primary_tab_id: initial_tab_id,
             next_tab_id: 2,
         }
     }
@@ -48,6 +50,23 @@ impl<T> TabCollection<T> {
             unreachable!("the Active Tab ID must always reference an owned Tab")
         };
         tab
+    }
+
+    pub(crate) fn primary_tab(&self) -> &T {
+        self.tab(self.primary_tab_id)
+            .expect("the primary Tab remains owned by its collection")
+    }
+
+    pub(crate) const fn primary_tab_id(&self) -> TabId {
+        self.primary_tab_id
+    }
+
+    pub(crate) fn select_primary_tab(&mut self, tab_id: TabId) -> Result<(), TabError> {
+        if self.tab(tab_id).is_none() {
+            return Err(TabError::TabNotFound(tab_id));
+        }
+        self.primary_tab_id = tab_id;
+        Ok(())
     }
 
     pub(crate) fn tab(&self, tab_id: TabId) -> Option<&T> {
@@ -96,6 +115,9 @@ impl<T> TabCollection<T> {
         }
 
         let closed_tab = self.tabs.remove(index);
+        if self.primary_tab_id == tab_id {
+            self.primary_tab_id = self.tabs[index.min(self.tabs.len() - 1)].id;
+        }
         if self.active_tab_id == tab_id {
             let fallback_index = index.min(self.tabs.len() - 1);
             self.active_tab_id = self.tabs[fallback_index].id;
@@ -130,6 +152,23 @@ mod tests {
         fn drop(&mut self) {
             self.drops.update(|drops| drops + 1);
         }
+    }
+
+    #[test]
+    fn primary_tab_should_ignore_activation_and_promote_to_next_then_previous() {
+        let mut tabs = TabCollection::new(|_| "first");
+        tabs.create_tab(|_| "second").unwrap();
+        tabs.create_tab(|_| "third").unwrap();
+        assert_eq!(tabs.primary_tab(), &"first");
+        tabs.select_primary_tab(TabId::new(2)).unwrap();
+        tabs.activate_tab(TabId::new(1)).unwrap();
+        tabs.close_tab(TabId::new(2)).unwrap();
+        assert_eq!(tabs.primary_tab(), &"third");
+        assert_eq!(tabs.active_tab(), &"first");
+        tabs.close_tab(TabId::new(3)).unwrap();
+        assert_eq!(tabs.primary_tab(), &"first");
+        assert!(tabs.select_primary_tab(TabId::new(99)).is_err());
+        assert_eq!(tabs.primary_tab(), &"first");
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub(crate) enum TerminalContextMenuCommand {
     OpenLink,
     FilePreview,
     PinDirectory,
+    UseForWorkspaceIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +45,11 @@ pub(crate) fn terminal_context_menu_entries(
         menu_entry(TerminalContextMenuCommand::Find, "Find", true).shortcut(find_shortcut),
         MenuEntry::separator(),
         menu_entry(
+            TerminalContextMenuCommand::UseForWorkspaceIdentity,
+            "Use for Workspace identity",
+            true,
+        ),
+        menu_entry(
             TerminalContextMenuCommand::PinDirectory,
             "Pin workspace to this directory",
             pin_enabled,
@@ -70,6 +76,7 @@ fn command_icon(command: TerminalContextMenuCommand) -> IconName {
         TerminalContextMenuCommand::OpenLink => IconName::ExternalLink,
         TerminalContextMenuCommand::FilePreview => IconName::Eye,
         TerminalContextMenuCommand::PinDirectory => IconName::Pin,
+        TerminalContextMenuCommand::UseForWorkspaceIdentity => IconName::Terminal,
     }
 }
 
@@ -98,6 +105,7 @@ impl TerminalContextMenuCommand {
             Self::OpenLink => "open-link",
             Self::FilePreview => "file-preview",
             Self::PinDirectory => "pin-directory",
+            Self::UseForWorkspaceIdentity => "workspace-identity",
         }
     }
 }

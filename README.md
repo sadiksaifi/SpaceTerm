@@ -18,20 +18,6 @@ need visible together.
 - **Keyboard-first navigation** through the Command Palette and Directory Picker
 - **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
 
-## Workspace behavior
-
-Press Command-N and choose This Mac or Remote over SSH. A new Workspace starts in your home
-directory on that machine. New Tabs inherit the focused Pane's Current Directory, and new Panes
-inherit the directory of the Pane being split. Workspace names stay stable as you navigate.
-
-Choose Pin workspace to a directory from the Workspace context menu to select a fixed Starting Directory,
-or Pin workspace to this directory from a Pane's actions or terminal context menu to use its
-Current Directory.
-The Tab context menu offers the same action when the Workspace has exactly one Tab and one Pane.
-Change Pinned Directory and Unpin Directory are available from the Workspace context menu.
-Pinning only affects future Terminal Sessions. In an unpinned Workspace, if the source directory
-is unknown, a new terminal starts at the user home directory on its machine.
-
 ## Workspace hierarchy
 
 ```mermaid
