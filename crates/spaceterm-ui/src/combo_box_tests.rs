@@ -147,6 +147,41 @@ struct WheelContainmentRoot {
     accepted: Rc<RefCell<Vec<u8>>>,
 }
 
+struct PlacementRoot {
+    origin: gpui::Point<gpui::Pixels>,
+    placement: AnchoredPlacementConfig,
+    items: Vec<ComboBoxItem<u8>>,
+    accepted: Rc<RefCell<Vec<u8>>>,
+}
+
+impl Render for PlacementRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        let accepted = Rc::clone(&self.accepted);
+        div().relative().size_full().child(
+            div()
+                .absolute()
+                .left(self.origin.x)
+                .top(self.origin.y)
+                .w(px(100.0))
+                .child(
+                    ComboBox::new(
+                        "placement-combo",
+                        "Workspace",
+                        None,
+                        "Choose",
+                        self.items.clone(),
+                    )
+                    .full_width(true)
+                    .placement(self.placement)
+                    .debug_selector("combo-box-trigger")
+                    .on_accept(move |acceptance, _, _| {
+                        accepted.borrow_mut().push(*acceptance.item_id());
+                    }),
+                ),
+        )
+    }
+}
+
 impl Render for WheelContainmentRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let underlay_scrolls = Rc::clone(&self.underlay_scrolls);
@@ -530,6 +565,28 @@ fn trigger_center(cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
         .center()
 }
 
+fn placement_window(
+    cx: &mut TestAppContext,
+    origin: gpui::Point<gpui::Pixels>,
+    placement: AnchoredPlacementConfig,
+    viewport: gpui::Size<gpui::Pixels>,
+    items: Vec<ComboBoxItem<u8>>,
+) -> (Rc<RefCell<Vec<u8>>>, &mut VisualTestContext) {
+    install_themes(cx);
+    let accepted = Rc::new(RefCell::new(Vec::new()));
+    let root_accepted = Rc::clone(&accepted);
+    let (_, cx) = cx.add_window_view(move |_, _| PlacementRoot {
+        origin,
+        placement,
+        items,
+        accepted: root_accepted,
+    });
+    cx.simulate_resize(viewport);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    (accepted, cx)
+}
+
 fn open_by_pointer(cx: &mut VisualTestContext) {
     let trigger = trigger_center(cx);
     cx.simulate_click(trigger, Modifiers::none());
@@ -553,6 +610,78 @@ fn pointer_press_should_open_the_popup(cx: &mut TestAppContext) {
     assert_eq!(
         events.borrow().as_slice(),
         [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Opened)]
+    );
+}
+
+#[gpui::test]
+fn single_result_should_have_equal_insets_on_all_four_sides(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(
+        cx,
+        None,
+        vec![ComboBoxItem::new(1, "One option").debug_selector("single-option")],
+        false,
+    );
+    open_by_pointer(cx);
+
+    let panel = cx.debug_bounds("combo-box-panel").unwrap();
+    let input = cx.debug_bounds("combo-box-input-row").unwrap();
+    let row = cx.debug_bounds("single-option").unwrap();
+    let border = px(1.0);
+    assert_eq!(
+        [
+            row.left() - panel.left() - border,
+            panel.right() - row.right() - border,
+            row.top() - input.bottom() - border,
+            panel.bottom() - row.bottom() - border,
+        ],
+        [px(4.0); 4],
+        "the result viewport should own one uniform inset around its contents"
+    );
+}
+
+#[gpui::test]
+fn filter_editor_should_use_compact_text_and_caret_geometry(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, None, items(), false);
+    open_by_pointer(cx);
+
+    let row = cx.debug_bounds("combo-box-input-row").unwrap();
+    let editor = cx.debug_bounds("combo-box-input").unwrap();
+    assert_eq!(editor.size.height, px(16.0));
+    assert_eq!(editor.center().y, row.center().y);
+
+    cx.simulate_input("remote");
+    cx.run_until_parked();
+    assert_eq!(cx.debug_bounds("combo-box-input").unwrap(), editor);
+}
+
+#[gpui::test]
+fn secondary_click_and_modified_release_should_not_accept_an_option(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = combo_box_window(cx, None, items(), false);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+    let row = cx.debug_bounds("combo-row-local").unwrap().center();
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::none()
+    };
+
+    for (button, down, up) in [
+        (MouseButton::Right, Modifiers::none(), Modifiers::none()),
+        (MouseButton::Left, control, control),
+        (MouseButton::Left, Modifiers::none(), control),
+    ] {
+        cx.simulate_mouse_down(row, button, down);
+        cx.simulate_mouse_up(row, button, up);
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+        assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    }
+
+    cx.simulate_mouse_up(row, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        events.borrow().is_empty(),
+        "a cancelled press must not survive a later release"
     );
 }
 
@@ -1517,4 +1646,246 @@ fn committed_input_method_text_should_filter_without_closing_the_popup(cx: &mut 
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_left_to_right_at_the_left_edge(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(12.0), px(120.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Left, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.left(), trigger.right() + px(4.0));
+    assert_eq!(panel.top(), trigger.top());
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_right_to_left_at_the_right_edge(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(488.0), px(120.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Right, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.right(), trigger.left() - px(4.0));
+    assert_eq!(panel.top(), trigger.top());
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_top_to_bottom_at_the_top_edge(cx: &mut TestAppContext) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(180.0), px(12.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Top, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.top(), trigger.bottom() + px(4.0));
+    assert_eq!(panel.left(), trigger.left());
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_bottom_to_top_at_the_bottom_edge(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(180.0), px(368.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.bottom(), trigger.top() - px(4.0));
+    assert_eq!(panel.left(), trigger.left());
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_alignment_at_the_viewport_corner(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(488.0), px(12.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Top, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.top(), trigger.bottom() + px(4.0));
+    assert_eq!(panel.right(), trigger.right());
+    assert!(panel.left() >= px(12.0) && panel.bottom() <= px(408.0));
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_keep_logical_start_when_flipped_in_rtl(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(300.0), px(368.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start)
+            .direction(crate::AnchoredTextDirection::RightToLeft),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.bottom(), trigger.top() - px(4.0));
+    assert_eq!(panel.right(), trigger.right());
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_flip_after_live_viewport_resize(cx: &mut TestAppContext) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(180.0), px(250.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(700.0)),
+        items(),
+    );
+    open_by_pointer(cx);
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let initial_panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(initial_panel.top(), trigger.bottom() + px(4.0));
+
+    cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
+    cx.run_until_parked();
+
+    let panel = cx.debug_bounds("combo-box-panel").expect("resized popup");
+    assert_eq!(panel.bottom(), trigger.top() - px(4.0));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_keep_last_result_reachable_when_neither_side_fits(
+    cx: &mut TestAppContext,
+) {
+    let (accepted, cx) = placement_window(
+        cx,
+        point(px(180.0), px(180.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        long_items(),
+    );
+    open_by_pointer(cx);
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.top(), trigger.bottom() + px(4.0));
+    assert_eq!(panel.bottom(), px(408.0));
+    assert!(cx.debug_bounds("combo-row-64").is_none());
+
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let last_row = cx.debug_bounds("combo-row-64").expect("last result");
+    assert!(last_row.top() >= panel.top() && last_row.bottom() <= panel.bottom());
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(accepted.borrow().as_slice(), [64]);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn rendered_combo_box_placement_should_keep_active_last_result_visible_after_viewport_shrinks(
+    cx: &mut TestAppContext,
+) {
+    let (accepted, cx) = placement_window(
+        cx,
+        point(px(180.0), px(180.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(700.0)),
+        long_items(),
+    );
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let initial_panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    let initial_last_row = cx.debug_bounds("combo-row-64").expect("active last result");
+    assert!(initial_last_row.bottom() <= initial_panel.bottom());
+
+    cx.simulate_resize(gpui::size(px(600.0), px(420.0)));
+    cx.run_until_parked();
+
+    let panel = cx.debug_bounds("combo-box-panel").expect("resized popup");
+    assert!(panel.size.height < initial_panel.size.height);
+    let last_row = cx
+        .debug_bounds("combo-row-64")
+        .expect("the active last result should remain visible after resizing");
+    assert!(last_row.top() >= panel.top() && last_row.bottom() <= panel.bottom());
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(accepted.borrow().as_slice(), [64]);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn repeated_end_should_reveal_the_active_last_result_after_manual_scrolling(
+    cx: &mut TestAppContext,
+) {
+    let (accepted, cx) = placement_window(
+        cx,
+        point(px(180.0), px(180.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(700.0)),
+        long_items(),
+    );
+    open_by_pointer(cx);
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    cx.simulate_mouse_move(panel.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-row-64").is_some());
+    assert!(cx.debug_bounds("combo-row-40").is_none());
+
+    cx.simulate_event(ScrollWheelEvent {
+        position: panel.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(640.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-row-40").is_some());
+
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+
+    // Click the actual bottom row because GPUI retains stale debug bounds for virtualized rows.
+    cx.simulate_click(
+        point(panel.center().x, panel.bottom() - px(20.0)),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(accepted.borrow().as_slice(), [64]);
 }

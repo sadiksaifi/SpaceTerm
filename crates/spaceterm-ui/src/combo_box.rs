@@ -12,7 +12,7 @@ use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
     FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
     Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
     canvas, deferred, div, list, prelude::FluentBuilder as _, px, size,
 };
@@ -766,6 +766,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     popup_focus: FocusHandle,
     input: Entity<TextInput>,
     list: ListState,
+    result_viewport_size: Option<Size<Pixels>>,
     pointer_press: Option<PointerPress<I>>,
     selection_reveal_pending: bool,
     input_context_menu_open: bool,
@@ -904,6 +905,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             popup_focus,
             input,
             list: ListState::new(0, ListAlignment::Top, px(0.0)).measure_all(),
+            result_viewport_size: None,
             pointer_press: None,
             selection_reveal_pending: false,
             input_context_menu_open: false,
@@ -1107,6 +1109,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             .and_then(|replacement| replacement.0);
         self.open = true;
         self.pointer_press = None;
+        self.result_viewport_size = None;
         if let Some(query) = query {
             self.input
                 .update(cx, |input, cx| input.set_value(query, cx));
@@ -1330,9 +1333,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
                 .last()
                 .or_else(|| enabled.iter().copied().find(|p| *p > current))
         };
-        if let Some(next) = next {
-            self.select_position(next, cx);
-        }
+        self.select_position(next.unwrap_or(current), cx);
     }
 
     fn select_position(&mut self, position: usize, cx: &mut gpui::Context<Self>) {
@@ -1342,7 +1343,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             .and_then(|index| self.presented_items.get(*index))
             .filter(|item| !item.disabled)
             .map(|item| item.id.clone());
-        if next.is_some() && self.provisional != next {
+        if next.is_some() {
             self.provisional = next;
             self.list.scroll_to_reveal_item(position);
             cx.notify();
@@ -1350,6 +1351,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
     }
 
     fn hover(&mut self, id: &I, cx: &mut gpui::Context<Self>) {
+        if self.provisional.as_ref() == Some(id) {
+            return;
+        }
         if let Some(position) = self.matches.iter().position(|index| {
             self.presented_items
                 .get(*index)
@@ -1434,6 +1438,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let pointer_state = state.downgrade();
         let trigger_tracker = canvas(
             move |bounds, window, _| {
+                let bounds = bounds.dilate(theme.metrics.border_width);
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
                 (bounds, hitbox)
             },
@@ -1708,13 +1713,41 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let busy = state.read(cx).busy;
     let copy = state.read(cx).copy.clone();
     let list_state = state.read(cx).list.clone();
-    let rows_height = (panel_size.height
+    let rows_height = (bounds.size.height
         - theme.metrics.input_height
         - theme.metrics.border_width
         - theme.metrics.panel_padding * 2.0
         - theme.metrics.border_width * 2.0)
         .max(px(0.0));
     let row_owner = state.downgrade();
+    let layout_owner = state.downgrade();
+    let result_tracker = canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            let changed = layout_owner
+                .update(cx, |state, _| {
+                    state.result_viewport_size.replace(bounds.size) != Some(bounds.size)
+                })
+                .unwrap_or(false);
+            if changed {
+                // Reveal after the list has measured the new viewport. Geometry changes
+                // request this once, so ordinary pointer scrolling stays independent.
+                window.defer(cx, move |window, cx| {
+                    let _ = layout_owner.update(cx, |state, cx| {
+                        if state.open
+                            && let Some(position) = state.provisional_position()
+                        {
+                            state.list.scroll_to_reveal_item(position);
+                            cx.notify();
+                        }
+                    });
+                    window.refresh();
+                });
+            }
+        },
+    )
+    .absolute()
+    .inset_0();
     let content = if busy {
         status_row(copy.busy_status, "combo-box-loading", theme).into_any_element()
     } else if matches.is_empty() {
@@ -1754,6 +1787,8 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .border(theme.metrics.border_width)
         .border_color(theme.paint.border)
         .bg(theme.paint.background)
+        .text_size(theme.metrics.label_size)
+        .line_height(theme.metrics.label_size * (4.0 / 3.0))
         .block_mouse_except_scroll()
         .child(
             div()
@@ -1774,10 +1809,12 @@ fn render_overlay<I: Clone + Eq + 'static>(
         )
         .child(
             div()
+                .relative()
                 .flex_1()
                 .min_h_0()
-                .py(theme.metrics.panel_padding)
-                .child(content),
+                .p(theme.metrics.panel_padding)
+                .child(content)
+                .child(result_tracker),
         );
 
     let up = state.downgrade();
@@ -1891,8 +1928,8 @@ fn render_row<I: Clone + Eq + 'static>(
         .id(("combo-box-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
+        .w_full()
         .h(theme.metrics.row_height(item.description.is_some()))
-        .mx(theme.metrics.panel_padding)
         .px(theme.metrics.horizontal_padding)
         .flex()
         .items_center()
@@ -1967,6 +2004,7 @@ fn render_row<I: Clone + Eq + 'static>(
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
                             || event.button != MouseButton::Left
+                            || event.modifiers.control
                             || !down_hitbox.is_hovered(window)
                         {
                             return;
@@ -1987,7 +2025,10 @@ fn render_row<I: Clone + Eq + 'static>(
                         }
                         let accepted = up_state
                             .update(cx, |state, _| {
-                                state.pointer_up(&up_id, up_hitbox.is_hovered(window))
+                                state.pointer_up(
+                                    &up_id,
+                                    !event.modifiers.control && up_hitbox.is_hovered(window),
+                                )
                             })
                             .unwrap_or(false);
                         if accepted {
@@ -2010,11 +2051,7 @@ fn render_row<I: Clone + Eq + 'static>(
             .inset_0(),
         );
     }
-    div()
-        .w_full()
-        .px(theme.metrics.panel_padding)
-        .child(row)
-        .into_any_element()
+    row.into_any_element()
 }
 
 #[cfg(test)]

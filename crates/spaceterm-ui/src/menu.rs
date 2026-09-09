@@ -9,8 +9,8 @@ use gpui::{
     AnyElement, App, BorrowAppContext as _, Bounds, Corner, ElementId, Entity, FocusHandle, Global,
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, RenderOnce,
-    Rgba, SharedString, StatefulInteractiveElement as _, Styled as _, Task, WeakEntity,
-    WeakFocusHandle, Window, WindowId, actions, anchored, canvas, deferred, div, point,
+    Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _, Styled as _, Task,
+    WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px, size,
 };
 
@@ -1657,6 +1657,12 @@ enum OpenDirection {
     First,
 }
 
+#[derive(Default)]
+struct MenuPanelScroll {
+    handle: ScrollHandle,
+    layout: Option<(Size<Pixels>, Pixels, Option<usize>)>,
+}
+
 struct MenuState {
     focus_handle: FocusHandle,
     entries: Vec<InternalEntry>,
@@ -1674,6 +1680,7 @@ struct MenuState {
     restore_focus: Option<WeakFocusHandle>,
     active_path: Vec<usize>,
     highlighted: Vec<Option<usize>>,
+    panel_scroll: Vec<MenuPanelScroll>,
     typeahead: String,
     last_typeahead: Option<Instant>,
     lifecycle: Option<MenuLifecycleHandler>,
@@ -1752,6 +1759,7 @@ impl MenuState {
             restore_focus: None,
             active_path: Vec::new(),
             highlighted: vec![None],
+            panel_scroll: Vec::new(),
             typeahead: String::new(),
             last_typeahead: None,
             lifecycle: None,
@@ -1857,6 +1865,7 @@ impl MenuState {
         self.reservation = reservation;
         self.awaiting_context_snapshot = self.freeze_entries_while_open;
         self.active_path.clear();
+        self.panel_scroll.clear();
         self.highlighted.clear();
         self.highlighted.push(match direction {
             OpenDirection::First => initial_selectable(&self.entries),
@@ -1900,6 +1909,7 @@ impl MenuState {
         self.window_id = None;
         self.context_anchor = None;
         self.active_path.clear();
+        self.panel_scroll.clear();
         self.highlighted.clear();
         self.highlighted.push(None);
         self.typeahead.clear();
@@ -1938,6 +1948,7 @@ impl MenuState {
         self.window_id = None;
         self.context_anchor = None;
         self.active_path.clear();
+        self.panel_scroll.clear();
         self.highlighted.clear();
         self.highlighted.push(None);
         self.typeahead.clear();
@@ -1964,6 +1975,49 @@ impl MenuState {
         self.submenu_task.take();
     }
 
+    fn prepare_panel_scroll(
+        &mut self,
+        depth: usize,
+        panel: Size<Pixels>,
+        entries: &[InternalEntry],
+        highlighted: Option<usize>,
+    ) -> ScrollHandle {
+        if self.panel_scroll.len() <= depth {
+            self.panel_scroll
+                .resize_with(depth + 1, MenuPanelScroll::default);
+        }
+        let metrics = self.style.metrics;
+        let inset = (metrics.panel_padding + metrics.border_width) * 2.0;
+        let content_height = panel_size(entries, metrics).height - inset;
+        let visible_height = (panel.height - inset).max(px(0.0));
+        let maximum_offset = (content_height - visible_height).max(px(0.0));
+        let scroll = &mut self.panel_scroll[depth];
+        let mut offset = (-scroll.handle.offset().y).clamp(px(0.0), maximum_offset);
+        let layout = (panel, content_height, highlighted);
+        if scroll.layout != Some(layout) {
+            if let Some(index) = highlighted {
+                let top = entry_offset(entries, index, metrics);
+                let bottom = top + metrics.row_height;
+                if top < offset {
+                    offset = top;
+                } else if bottom > offset + visible_height {
+                    offset = (bottom - visible_height).max(px(0.0));
+                }
+            }
+            scroll.layout = Some(layout);
+        }
+        scroll
+            .handle
+            .set_offset(point(px(0.0), -offset.clamp(px(0.0), maximum_offset)));
+        scroll.handle.clone()
+    }
+
+    fn reveal_selection(&mut self, depth: usize) {
+        if let Some(scroll) = self.panel_scroll.get_mut(depth) {
+            scroll.layout = None;
+        }
+    }
+
     fn move_selection(&mut self, delta: isize, cx: &mut gpui::Context<Self>) {
         self.invalidate_submenu_task();
         let depth = self.highlighted.len().saturating_sub(1);
@@ -1972,8 +2026,9 @@ impl MenuState {
         if self.highlighted[depth] != next {
             self.highlighted[depth] = next;
             self.active_path.truncate(depth);
-            cx.notify();
         }
+        self.reveal_selection(depth);
+        cx.notify();
     }
 
     fn move_edge(&mut self, first: bool, cx: &mut gpui::Context<Self>) {
@@ -1987,8 +2042,9 @@ impl MenuState {
         if self.highlighted[depth] != next {
             self.highlighted[depth] = next;
             self.active_path.truncate(depth);
-            cx.notify();
         }
+        self.reveal_selection(depth);
+        cx.notify();
     }
 
     fn open_submenu(&mut self, cx: &mut gpui::Context<Self>) {
@@ -2011,6 +2067,8 @@ impl MenuState {
         }
         self.active_path.truncate(depth);
         self.active_path.push(index);
+        self.reveal_selection(depth);
+        self.panel_scroll.truncate(depth + 1);
         self.highlighted.truncate(depth + 1);
         self.highlighted.push(first);
         cx.notify();
@@ -2020,6 +2078,7 @@ impl MenuState {
         self.invalidate_submenu_task();
         if self.active_path.pop().is_some() {
             self.highlighted.pop();
+            self.reveal_selection(self.highlighted.len().saturating_sub(1));
             cx.notify();
         }
     }
@@ -2166,6 +2225,7 @@ impl MenuState {
         {
             self.highlighted[depth] = Some(index);
             self.active_path.truncate(depth);
+            self.reveal_selection(depth);
             cx.notify();
         }
     }
@@ -2397,30 +2457,43 @@ fn activate_menu(
 }
 
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
-    let menu = state.read(cx);
     let viewport = window.viewport_size();
-    let anchor = menu.context_anchor.map_or_else(
-        || {
-            menu.trigger_bounds
-                .unwrap_or_else(|| Bounds::new(Point::default(), size(px(0.0), px(0.0))))
-        },
-        |point| Bounds::new(point, size(px(0.0), px(0.0))),
-    );
+    let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
+        let menu = state.read(cx);
+        (
+            menu.context_anchor.map_or_else(
+                || menu.trigger_bounds.unwrap_or_default(),
+                |point| Bounds::new(point, size(px(0.0), px(0.0))),
+            ),
+            menu.entries.clone(),
+            menu.active_path.clone(),
+            menu.highlighted.clone(),
+            menu.style,
+            menu.placement,
+            menu.trigger_bounds,
+        )
+    };
     let root_size = constrain_panel_size(
-        panel_size(&menu.entries, menu.style.metrics),
+        panel_size(&entries, style.metrics),
         viewport,
-        menu.placement.viewport_margin,
+        placement.viewport_margin,
     );
-    let root_bounds = place_root(anchor, root_size, viewport, menu.placement);
+    let root_bounds = place_root(anchor, root_size, viewport, placement);
+    let root_highlighted = highlighted.first().copied().flatten();
+    let root_scroll = state.update(cx, |state, _| {
+        state.prepare_panel_scroll(0, root_bounds.size, &entries, root_highlighted)
+    });
+    let mut parent_scroll_offset = root_scroll.offset().y;
     let mut panels = vec![(
         0usize,
         root_bounds,
-        menu.entries.clone(),
-        menu.highlighted.first().copied().flatten(),
+        entries.clone(),
+        root_highlighted,
+        root_scroll,
     )];
     let mut parent_bounds = root_bounds;
-    let mut parent_entries = menu.entries.as_slice();
-    for (depth, index) in menu.active_path.iter().copied().enumerate() {
+    let mut parent_entries = entries.as_slice();
+    for (depth, index) in active_path.iter().copied().enumerate() {
         let Some(entry) = parent_entries.get(index) else {
             break;
         };
@@ -2428,33 +2501,40 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             break;
         };
         let row_top = parent_bounds.top()
-            + menu.style.metrics.panel_padding
-            + entry_offset(parent_entries, index, menu.style.metrics);
+            + style.metrics.border_width
+            + style.metrics.panel_padding
+            + parent_scroll_offset
+            + entry_offset(parent_entries, index, style.metrics);
         let child_size = constrain_panel_size(
-            panel_size(children, menu.style.metrics),
+            panel_size(children, style.metrics),
             viewport,
-            menu.placement.viewport_margin,
+            placement.viewport_margin,
         );
         let child_bounds = place_submenu(
             parent_bounds,
             row_top,
             child_size,
             viewport,
-            menu.placement.viewport_margin,
-            menu.style.metrics.submenu_gap,
+            placement.viewport_margin,
+            style.metrics.submenu_gap,
         );
+        let child_highlighted = highlighted.get(depth + 1).copied().flatten();
+        let child_scroll = state.update(cx, |state, _| {
+            state.prepare_panel_scroll(depth + 1, child_bounds.size, children, child_highlighted)
+        });
+        parent_scroll_offset = child_scroll.offset().y;
         panels.push((
             depth + 1,
             child_bounds,
             children.to_vec(),
-            menu.highlighted.get(depth + 1).copied().flatten(),
+            child_highlighted,
+            child_scroll,
         ));
         parent_bounds = child_bounds;
         parent_entries = children;
     }
-    let chain_bounds: Vec<_> = panels.iter().map(|(_, bounds, _, _)| *bounds).collect();
-    let trigger_bounds = menu.trigger_bounds;
-    let style = menu.style;
+    state.update(cx, |state, _| state.panel_scroll.truncate(panels.len()));
+    let chain_bounds: Vec<_> = panels.iter().map(|(_, bounds, _, _, _)| *bounds).collect();
 
     let outside_state = state.downgrade();
     let outside_tracker = canvas(
@@ -2487,7 +2567,7 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
         .key_context(KEY_CONTEXT)
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
-    for (depth, bounds, entries, highlighted) in panels {
+    for (depth, bounds, entries, highlighted, scroll) in panels {
         overlay = overlay.child(render_panel(
             state.downgrade(),
             depth,
@@ -2495,6 +2575,7 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             entries,
             highlighted,
             style,
+            scroll,
         ));
     }
 
@@ -2588,6 +2669,7 @@ fn render_panel(
     entries: Vec<InternalEntry>,
     highlighted: Option<usize>,
     style: MenuStyle,
+    scroll: ScrollHandle,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -2615,7 +2697,8 @@ fn render_panel(
         .bottom(style.metrics.panel_padding)
         .left_0()
         .right_0()
-        .overflow_y_scroll();
+        .overflow_y_scroll()
+        .track_scroll(&scroll);
 
     for (index, entry) in entries.into_iter().enumerate() {
         match entry.kind {
@@ -3371,6 +3454,201 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    struct ScrollTestRoot {
+        events: Rc<RefCell<Vec<MenuActivation<usize>>>>,
+    }
+
+    impl Render for ScrollTestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let events = Rc::clone(&self.events);
+            div().size_full().child(
+                div().absolute().left(px(180.0)).top(px(180.0)).child(
+                    Menu::new(
+                        "scroll-menu",
+                        "Actions",
+                        (0..40)
+                            .map(|index| {
+                                MenuEntry::action(format!("Command {index}"), index)
+                                    .debug_selector(format!("scroll-menu-row-{index}"))
+                            })
+                            .collect(),
+                    )
+                    .debug_selector("scroll-menu-trigger")
+                    .on_activate(move |event, _, _| events.borrow_mut().push(event.clone())),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn constrained_menu_should_scroll_the_last_command_into_view_before_end_activation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| ScrollTestRoot {
+            events: root_events,
+        });
+        cx.simulate_resize(size(px(600.0), px(420.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("scroll-menu-trigger").expect("trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+
+        let panel = cx.debug_bounds("menu-panel-0").expect("constrained menu");
+        let row = cx.debug_bounds("scroll-menu-row-39").expect("last command");
+        assert!(row.top() >= panel.top() && row.bottom() <= panel.bottom());
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            [MenuActivation::Action {
+                action: 39,
+                source: MenuActivationSource::Keyboard,
+            }]
+        );
+    }
+
+    #[gpui::test]
+    fn constrained_menu_should_reveal_down_navigation_and_keep_highlight_visible_after_resize(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(move |_, _| ScrollTestRoot { events });
+        cx.simulate_resize(size(px(600.0), px(700.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("scroll-menu-trigger").expect("trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for _ in 0..39 {
+            cx.simulate_keystrokes("down");
+            cx.run_until_parked();
+        }
+        let original_panel = cx.debug_bounds("menu-panel-0").expect("menu");
+        let last_row = cx.debug_bounds("scroll-menu-row-39").expect("last command");
+        assert!(
+            last_row.top() >= original_panel.top() && last_row.bottom() <= original_panel.bottom()
+        );
+
+        cx.simulate_resize(size(px(600.0), px(420.0)));
+        cx.run_until_parked();
+
+        let panel = cx.debug_bounds("menu-panel-0").expect("resized menu");
+        let last_row = cx
+            .debug_bounds("scroll-menu-row-39")
+            .expect("last command after resize");
+        assert!(panel.size.height < original_panel.size.height);
+        assert!(last_row.top() >= panel.top() && last_row.bottom() <= panel.bottom());
+
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+        let first_row = cx.debug_bounds("scroll-menu-row-0").expect("first command");
+        assert!(first_row.top() >= panel.top() && first_row.bottom() <= panel.bottom());
+    }
+
+    #[gpui::test]
+    fn constrained_menu_should_preserve_wheel_scroll_and_reveal_repeated_end_selection(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(move |_, _| ScrollTestRoot { events });
+        cx.simulate_resize(size(px(600.0), px(420.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("scroll-menu-trigger").expect("trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        let panel = cx.debug_bounds("menu-panel-0").expect("constrained menu");
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: panel.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(140.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let offscreen_last = cx.debug_bounds("scroll-menu-row-39").expect("last command");
+        assert!(offscreen_last.bottom() > panel.bottom());
+
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+
+        let last = cx
+            .debug_bounds("scroll-menu-row-39")
+            .expect("revealed last command");
+        assert!(last.top() >= panel.top() && last.bottom() <= panel.bottom());
+    }
+
+    struct ScrolledSubmenuRoot;
+
+    impl Render for ScrolledSubmenuRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let entries = (0..40)
+                .map(|index| {
+                    if index == 20 {
+                        MenuEntry::submenu(
+                            "More commands",
+                            vec![MenuEntry::action("Child command", 40)],
+                        )
+                        .debug_selector("scrolled-submenu-row")
+                    } else {
+                        MenuEntry::action(format!("Command {index}"), index)
+                    }
+                })
+                .collect();
+            div().size_full().child(
+                div().absolute().left(px(180.0)).top(px(180.0)).child(
+                    Menu::new("scrolled-submenu", "Actions", entries)
+                        .debug_selector("scrolled-submenu-trigger")
+                        .on_activate(|_, _, _| {}),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn constrained_menu_should_anchor_submenus_to_the_scrolled_parent_row(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(move |_, _| ScrolledSubmenuRoot);
+        cx.simulate_resize(size(px(600.0), px(420.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("scrolled-submenu-trigger")
+            .expect("trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("end");
+        for _ in 0..19 {
+            cx.simulate_keystrokes("up");
+        }
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("scrolled-submenu-row")
+            .expect("scrolled parent row");
+        let child = cx.debug_bounds("menu-panel-1").expect("child menu");
+        assert!(child.top() <= row.bottom() && child.bottom() >= row.top());
     }
 
     #[gpui::test]
