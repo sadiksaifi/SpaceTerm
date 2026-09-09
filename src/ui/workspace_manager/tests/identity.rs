@@ -180,6 +180,13 @@ fn remote_workspace_identity_should_track_primary_and_retain_last_live_path(
     let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
     let flow = open_remote_workspace_flow(&manager, cx);
     emit_remote_workspace_completion(&flow, completion, cx);
+    manager.update(cx, |manager, _| {
+        let id = manager.workspaces.active_workspace_id();
+        manager
+            .workspaces
+            .rename_workspace(id, String::new())
+            .unwrap();
+    });
     report_directory(&records, 2, 1, "/srv/alpha", true, MetadataFreshness::Live);
     cx.run_until_parked();
     assert_eq!(
@@ -306,6 +313,13 @@ fn assert_pin_and_custom_name_policy(cx: &mut TestAppContext, remote: bool) {
         let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
         let flow = open_remote_workspace_flow(&manager, cx);
         emit_remote_workspace_completion(&flow, completion, cx);
+        manager.update(cx, |manager, _| {
+            let id = manager.workspaces.active_workspace_id();
+            manager
+                .workspaces
+                .rename_workspace(id, String::new())
+                .unwrap();
+        });
         2
     } else {
         1
@@ -407,4 +421,88 @@ fn automatic_identity_changes_should_keep_collapsed_chrome_aligned(cx: &mut Test
         let spacer = cx.debug_bounds("tab-manager-top-spacer").unwrap();
         assert_eq!(chrome.size.width, spacer.size.width);
     }
+}
+
+#[gpui::test]
+fn switcher_local_creation_should_freeze_the_typed_name_as_directory_changes(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-local", cx);
+    report_directory(
+        &records,
+        2,
+        1,
+        "/projects/alpha",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        identity(&manager, cx),
+        ("fresh workspace".into(), "/projects/alpha".into())
+    );
+    report_directory(
+        &records,
+        2,
+        2,
+        "/projects/beta",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        identity(&manager, cx),
+        ("fresh workspace".into(), "/projects/beta".into())
+    );
+}
+
+#[gpui::test]
+fn switcher_remote_creation_should_freeze_the_typed_name_as_directory_changes(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let flow = open_remote_workspace_flow(&manager, cx);
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    report_directory(&records, 2, 1, "/srv/alpha", true, MetadataFreshness::Live);
+    cx.run_until_parked();
+    assert_eq!(
+        identity(&manager, cx),
+        ("fresh workspace 1".into(), "/srv/alpha".into())
+    );
+    report_directory(&records, 2, 2, "/srv/beta", true, MetadataFreshness::Live);
+    cx.run_until_parked();
+    assert_eq!(
+        identity(&manager, cx),
+        ("fresh workspace 1".into(), "/srv/beta".into())
+    );
+}
+
+#[gpui::test]
+fn command_n_should_keep_automatic_workspace_naming(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    report_directory(
+        &records,
+        2,
+        1,
+        "/projects/alpha",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "alpha");
+    report_directory(
+        &records,
+        2,
+        2,
+        "/projects/beta",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "beta");
 }

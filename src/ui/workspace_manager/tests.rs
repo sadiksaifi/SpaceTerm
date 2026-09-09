@@ -36,7 +36,6 @@ fn workspace_surfaces_should_use_host_neutral_profile_shortcuts() {
     assert_eq!(
         workspace_surface_presentation(&crate::desktop_profile::testing_presentation()),
         WorkspaceSurfacePresentation {
-            search_tooltip: "Primary+P",
             new_workspace_button: "Primary+N",
             new_tab_menu: "Primary+T",
         }
@@ -660,7 +659,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(created.get(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n enter", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(created.get(), expected, "{shortcut}");
@@ -710,7 +709,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(factory.records.borrow().len(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n enter", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
@@ -1022,21 +1021,29 @@ fn open_directory_picker(manager: &Entity<WorkspaceManager>, cx: &mut VisualTest
     cx.run_until_parked();
 }
 
-fn open_new_workspace_panel(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("cmd-n");
+fn open_workspace_switcher(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("cmd-k");
     cx.run_until_parked();
 }
 
-fn open_top_new_workspace_combo_box(cx: &mut VisualTestContext) {
-    click("new-workspace-chooser", cx);
+fn open_workspace_switcher_for_creation(cx: &mut VisualTestContext) {
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
+    cx.run_until_parked();
 }
 
 fn open_remote_workspace_flow(
     manager: &Entity<WorkspaceManager>,
     cx: &mut VisualTestContext,
 ) -> Entity<RemoteWorkspaceFlow> {
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-remote", cx);
+    open_workspace_switcher_for_creation(cx);
+    let count = manager.read_with(cx, |manager, _| manager.workspaces.len());
+    cx.simulate_keystrokes("space");
+    for digit in count.to_string().chars() {
+        cx.simulate_keystrokes(&digit.to_string());
+    }
+    cx.run_until_parked();
+    click("workspace-switcher-create-remote", cx);
     manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
@@ -1258,57 +1265,25 @@ fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn workspace_search_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut TestAppContext) {
+fn workspace_switcher_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.open_workspace_search(window, cx));
-    });
+    open_workspace_switcher(cx);
+    let presentation = present_test_alert(&manager, "workspace-switcher-modal-priority", cx);
     cx.run_until_parked();
-    let presentation = present_test_alert(&manager, "workspace-search-modal-priority", cx);
-    cx.run_until_parked();
-
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_workspace_search(window, cx);
-            manager.open_workspace_search(window, cx);
+            manager.open_workspace_switcher(window, cx);
+            manager.open_workspace_switcher(window, cx);
         });
     });
     cx.run_until_parked();
-    let focus_contained = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        window_modal_is_open(window, cx)
-            && !manager
-                .transient
-                .search
-                .read(cx)
-                .palette()
-                .read(cx)
-                .editor_is_focused(window, cx)
-    });
-
-    assert!(focus_contained);
-    assert!(cx.debug_bounds("command-palette-panel").is_none());
-
-    cx.update(|window, cx| {
-        presentation
-            .dismiss(window, cx)
-            .expect("workspace-search modal should dismiss")
-    });
+    assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    cx.update(|window, cx| presentation.dismiss(window, cx).unwrap());
     cx.run_until_parked();
-
-    let resumed = cx.update(|window, cx| {
-        let palette = manager.read(cx).transient.search.read(cx).palette();
-        (
-            palette.read(cx).is_open(),
-            palette.read(cx).editor_is_focused(window, cx),
-            window_modal_is_open(window, cx),
-            window.is_window_active(),
-        )
-    });
-    assert_eq!(resumed, (true, true, false, true));
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert!(!cx.update(|window, cx| window_modal_is_open(window, cx)));
 }
 
 #[gpui::test]
@@ -1693,40 +1668,26 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 }
 
 #[gpui::test]
-fn top_combo_box_and_command_shortcut_should_each_block_terminal_input(cx: &mut TestAppContext) {
+fn titlebar_button_and_command_k_should_each_block_terminal_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-
-    click("new-workspace-chooser", cx);
-    let sidebar_state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            window_combo_box_is_open(window, cx),
-            manager.terminal_focus_blocker(window, cx),
-        )
-    });
-    open_new_workspace_panel(cx);
-    let repeated_state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            manager.transient.new_workspace.read(cx).is_open(),
-            window_combo_box_is_open(window, cx),
-            manager.terminal_focus_blocker(window, cx),
-        )
-    });
-
+    click("workspace-switcher", cx);
     assert_eq!(
-        (sidebar_state, repeated_state),
-        (
-            (true, Some(TerminalFocusBlocker::CommandPalette)),
-            (true, false, Some(TerminalFocusBlocker::CommandPalette)),
-        )
+        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+        Some(TerminalFocusBlocker::CommandPalette)
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    open_workspace_switcher(cx);
+    assert_eq!(
+        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+        Some(TerminalFocusBlocker::CommandPalette)
     );
 }
 
 #[gpui::test]
 fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    click("new-workspace-chooser", cx);
+    click("workspace-switcher", cx);
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
@@ -1752,15 +1713,14 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
 #[gpui::test]
 fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    open_top_new_workspace_combo_box(cx);
-    click("new-workspace-source-local", cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-local", cx);
     assert_eq!(
         cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
                 window_combo_box_is_open(window, cx),
                 manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
@@ -1772,7 +1732,7 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
                 records.starts().len(),
             )
         }),
-        (false, false, false, None, true, 2, 2)
+        (false, false, None, true, 2, 2)
     );
 }
 
@@ -1781,7 +1741,7 @@ fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
-    open_top_new_workspace_combo_box(cx);
+    open_workspace_switcher_for_creation(cx);
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -1793,7 +1753,6 @@ fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
                 manager.workspaces.len(),
                 records.starts().len(),
                 window_combo_box_is_open(window, cx),
-                manager.transient.new_workspace.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
@@ -1803,7 +1762,7 @@ fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
                     .focused_terminal_is_focused(window, cx),
             )
         }),
-        (2, 2, false, false, None, true)
+        (2, 2, false, None, true)
     );
 }
 
@@ -1812,9 +1771,9 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
-    open_top_new_workspace_combo_box(cx);
+    open_workspace_switcher_for_creation(cx);
 
-    click("new-workspace-source-remote", cx);
+    click("workspace-switcher-create-remote", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -1826,7 +1785,6 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
                 .read(cx);
             (
                 window_combo_box_is_open(window, cx),
-                manager.transient.new_workspace.read(cx).is_open(),
                 flow.stage(),
                 flow.owns_first_responder(window, cx),
                 manager.terminal_focus_blocker(window, cx),
@@ -1841,7 +1799,6 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
             )
         }),
         (
-            false,
             false,
             RemoteWorkspaceFlowStage::HostSelection,
             true,
@@ -1900,9 +1857,9 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     });
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
-    open_top_new_workspace_combo_box(cx);
+    open_workspace_switcher_for_creation(cx);
 
-    click("new-workspace-source-remote", cx);
+    click("workspace-switcher-create-remote", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -1965,31 +1922,11 @@ fn pin_directory_selection_should_present_the_picker_without_the_panel(cx: &mut 
             let manager = manager.read(cx);
             (
                 manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                window_combo_box_is_open(window, cx),
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
         (true, false, Some(TerminalFocusBlocker::Modal))
-    );
-}
-
-#[gpui::test]
-fn choosing_local_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-local", cx);
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
-                manager.terminal_focus_blocker(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (false, false, None, 2, 2)
     );
 }
 
@@ -1999,8 +1936,8 @@ fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus
 ) {
     let (manager, _, cx) = workspace_manager(cx);
 
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-remote", cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-remote", cx);
     let flow = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
@@ -2012,7 +1949,7 @@ fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus
     let opened = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.new_workspace.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
             flow.read(cx).stage(),
             flow.read(cx).owns_first_responder(window, cx),
             manager.terminal_focus_blocker(window, cx),
@@ -2045,8 +1982,8 @@ fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus
     });
     assert_eq!(escaped, (true, None, true));
 
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-remote", cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-remote", cx);
     let reopened = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
@@ -2130,16 +2067,8 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     }));
     assert!(cx.update(|window, cx| { window.is_action_available(&NewWorkspace, cx) }));
 
-    open_new_workspace_panel(cx);
-    assert!(cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        manager.transient.new_workspace.read(cx).is_open()
-            && manager
-                .transient
-                .new_workspace
-                .read(cx)
-                .input_is_focused(window, cx)
-    }));
+    open_workspace_switcher_for_creation(cx);
+    assert!(cx.update(|window, cx| { window_combo_box_is_open(window, cx) }));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.remote_workspace_focus_restore_pending = true;
@@ -2149,11 +2078,7 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     assert!(cx.update(|window, cx| {
         let manager = manager.read(cx);
         !manager.remote_workspace_focus_restore_pending
-            && manager
-                .transient
-                .new_workspace
-                .read(cx)
-                .input_is_focused(window, cx)
+            && window_combo_box_is_open(window, cx)
             && !manager
                 .workspaces
                 .active_workspace()
@@ -2161,7 +2086,7 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
                 .read(cx)
                 .focused_terminal_is_focused(window, cx)
     }));
-    click("new-workspace-source-remote", cx);
+    click("workspace-switcher-create-remote", cx);
     let reopened = manager.read_with(cx, |manager, _| {
         manager
             .remote_workspace_flow
@@ -2170,47 +2095,6 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
             .clone()
     });
     assert_ne!(reopened.entity_id(), cancelled_flow_id);
-}
-
-#[gpui::test]
-fn unavailable_remote_source_should_stay_disabled_without_constructing_askpass_backend(
-    cx: &mut TestAppContext,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
-    let create_calls = Arc::new(AtomicUsize::new(0));
-    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
-        Arc::new(UnavailableTestRemoteWorkspaceFlowBackendFactory {
-            create_calls: Arc::clone(&create_calls),
-        });
-    let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
-            session_factory,
-            std::env::temp_dir(),
-            factory,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
-    cx.run_until_parked();
-
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-remote", cx);
-    cx.run_until_parked();
-
-    assert_eq!(create_calls.load(Ordering::Acquire), 0);
-    assert!(manager.read_with(cx, |manager, cx| {
-        manager.transient.new_workspace.read(cx).is_open()
-    }));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(
-        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
-        Some(TerminalFocusBlocker::CommandPalette)
-    );
 }
 
 #[gpui::test]
@@ -2239,14 +2123,12 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
 
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-remote", cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-remote", cx);
     cx.run_until_parked();
 
     assert_eq!(create_calls.load(Ordering::Acquire), 1);
-    assert!(manager.read_with(cx, |manager, cx| {
-        manager.transient.new_workspace.read(cx).is_open()
-    }));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(
         cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
@@ -3726,26 +3608,6 @@ fn unavailable_initial_remote_channel_should_close_completion_and_offer_retry(
 }
 
 #[gpui::test]
-fn choosing_local_should_create_a_workspace_and_close_the_panel(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-
-    open_new_workspace_panel(cx);
-    click("new-workspace-source-local", cx);
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.workspaces.len(),
-                manager.transient.new_workspace.read(cx).is_open(),
-                manager.terminal_focus_blocker(window, cx),
-            )
-        }),
-        (2, false, None)
-    );
-}
-
-#[gpui::test]
 fn dismissing_pin_picker_should_restore_terminal_without_opening_creation_panel(
     cx: &mut TestAppContext,
 ) {
@@ -3758,7 +3620,7 @@ fn dismissing_pin_picker_should_restore_terminal_without_opening_creation_panel(
             let manager = manager.read(cx);
             (
                 manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                window_combo_box_is_open(window, cx),
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
@@ -3800,7 +3662,7 @@ fn failed_pin_keeps_picker_focus_and_escape_restores_terminal(cx: &mut TestAppCo
             let manager = manager.read(cx);
             (
                 manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                window_combo_box_is_open(window, cx),
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
@@ -3822,7 +3684,7 @@ fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
             let manager = manager.read(cx);
             (
                 manager.transient.picker.read(cx).is_open(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                window_combo_box_is_open(window, cx),
                 manager.terminal_focus_blocker(window, cx),
             )
         }),
@@ -3833,7 +3695,7 @@ fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
 #[gpui::test]
 fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     open_directory_picker(&manager, cx);
     let baseline = manager.read_with(cx, |manager, cx| {
         (
@@ -3848,17 +3710,17 @@ fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         )
     });
 
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         baseline.0
     );
 
-    cx.simulate_keystrokes("cmd-p");
+    cx.simulate_keystrokes("cmd-k");
     let focus_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.search.read(cx).blocks_terminal_input(),
+            window_combo_box_is_open(window, cx),
             manager
                 .transient
                 .picker
@@ -3947,15 +3809,15 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn workspace_search_should_open_and_block_terminal_input_focus(cx: &mut TestAppContext) {
+fn workspace_switcher_should_open_and_block_terminal_input_focus(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
-    click("search-workspaces-button", cx);
+    click("workspace-switcher", cx);
 
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.search.read(cx).blocks_terminal_input(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -3969,24 +3831,25 @@ fn workspace_search_should_open_and_block_terminal_input_focus(cx: &mut TestAppC
         state,
         (true, Some(TerminalFocusBlocker::CommandPalette), false)
     );
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
 }
 
 #[gpui::test]
-fn workspace_search_should_replace_an_open_workspace_context_menu(cx: &mut TestAppContext) {
+fn workspace_switcher_should_replace_an_open_workspace_context_menu(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     right_click("workspace-row-1-active", cx);
     assert!(cx.debug_bounds("menu-panel-0").is_some());
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_workspace_search(window, cx);
+            manager.open_workspace_switcher(window, cx);
         });
     });
     cx.run_until_parked();
 
+    redraw(cx);
     assert!(cx.debug_bounds("menu-panel-0").is_none());
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
     assert!(manager.read_with(cx, |manager, _| manager.sidebar.menu.is_none()));
 
     cx.simulate_keystrokes("escape");
@@ -4007,7 +3870,7 @@ fn workspace_search_should_replace_an_open_workspace_context_menu(cx: &mut TestA
 }
 
 #[gpui::test]
-fn workspace_search_from_inline_rename_should_restore_sidebar_focus(cx: &mut TestAppContext) {
+fn workspace_switcher_from_inline_rename_should_restore_sidebar_focus(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
@@ -4015,7 +3878,7 @@ fn workspace_search_from_inline_rename_should_restore_sidebar_focus(cx: &mut Tes
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_workspace_search(window, cx);
+            manager.open_workspace_switcher(window, cx);
         });
     });
     cx.run_until_parked();
@@ -4034,7 +3897,7 @@ fn workspace_search_from_inline_rename_should_restore_sidebar_focus(cx: &mut Tes
 }
 
 #[gpui::test]
-fn workspace_search_escape_should_restore_terminal_focus(cx: &mut TestAppContext) {
+fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     let terminal_was_focused = cx.update(|window, cx| {
         manager
@@ -4046,14 +3909,14 @@ fn workspace_search_escape_should_restore_terminal_focus(cx: &mut TestAppContext
             .focused_terminal_is_focused(window, cx)
     });
 
-    click("search-workspaces-button", cx);
+    click("workspace-switcher", cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
     let restored = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.search.read(cx).blocks_terminal_input(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -4067,18 +3930,18 @@ fn workspace_search_escape_should_restore_terminal_focus(cx: &mut TestAppContext
         (terminal_was_focused, restored),
         (true, (false, None, true))
     );
-    assert!(cx.debug_bounds("command-palette-panel").is_none());
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
 
 #[gpui::test]
-fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits(
+fn open_workspace_switcher_should_remove_a_workspace_after_its_final_session_exits(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -4088,10 +3951,10 @@ fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits
         cx.notify();
     });
 
-    click("search-workspaces-button", cx);
+    click("workspace-switcher", cx);
     cx.simulate_keystrokes("a l p h a");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("workspace-search-result-1").is_some());
+    assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
 
     inactive_sender
         .try_send(SessionEvent::Exited(SessionExit::Success))
@@ -4106,14 +3969,21 @@ fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits
             manager.workspaces.active_workspace_id(),
         )
     });
-    assert_eq!(state, (true, WorkspaceId::new(2)));
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert_eq!(state, (true, WorkspaceId::new(3)));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "alpha"
+    );
 }
 
 #[gpui::test]
-fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
+fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -4127,7 +3997,7 @@ fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut Te
         cx.notify();
     });
 
-    click("search-workspaces-button", cx);
+    click("workspace-switcher", cx);
     cx.simulate_keystrokes("a l p h a enter");
     cx.run_until_parked();
 
@@ -4135,7 +4005,7 @@ fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut Te
         let manager = manager.read(cx);
         (
             manager.workspaces.active_workspace_id(),
-            manager.transient.search.read(cx).blocks_terminal_input(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -4149,52 +4019,20 @@ fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut Te
 }
 
 #[gpui::test]
-fn sidebar_header_should_align_its_title_and_actions_with_the_surrounding_chrome(
+fn sidebar_should_place_new_workspace_directly_after_rows_without_a_header(
     cx: &mut TestAppContext,
 ) {
-    let (_manager, _, cx) = workspace_manager(cx);
-
-    let header = cx
-        .debug_bounds("workspace-sidebar-header")
-        .expect("the Workspace sidebar header was not rendered");
-    let title = cx
-        .debug_bounds("workspace-sidebar-header-title")
-        .expect("the Workspace sidebar header title was not rendered");
-    let search = cx
-        .debug_bounds("search-workspaces-button")
-        .expect("the Search Workspaces button was not rendered");
-    let active_row = cx
-        .debug_bounds("workspace-row-1-active")
-        .expect("the Active Workspace row was not rendered");
-    let toggle = cx
-        .debug_bounds("toggle-sidebar-button")
-        .expect("the sidebar toggle was not rendered");
-
-    assert_eq!(header.size.height, px(SIDEBAR_HEADER_HEIGHT));
-    // Read the action height back from the painted button so a change to the shared button
-    // theme cannot silently eat the header's vertical breathing room.
-    assert_eq!(
-        header.size.height,
-        search.size.height + px(SIDEBAR_HEADER_ACTION_PADDING * 2.0),
-        "the header no longer leaves even breathing room above and below its actions"
-    );
-    assert_eq!(
-        title.origin.x,
-        active_row.origin.x + px(SIDEBAR_ROW_HORIZONTAL_PADDING)
-    );
-    assert!(
-        title.origin.x + title.size.width <= search.origin.x,
-        "the header title overlapped the Search Workspaces button: {title:?} {search:?}"
-    );
-    assert_eq!(
-        search.origin.x + search.size.width,
-        toggle.origin.x + toggle.size.width,
-        "the header actions were not flush with the sidebar toggle above them"
-    );
-    assert!(
-        header.origin.y + header.size.height <= active_row.origin.y,
-        "the header overlapped the first Workspace row: {header:?} {active_row:?}"
-    );
+    let (_, _, cx) = workspace_manager(cx);
+    assert!(cx.debug_bounds("workspace-sidebar-header").is_none());
+    assert!(cx.debug_bounds("search-workspaces-button").is_none());
+    let sidebar = cx.debug_bounds("workspace-sidebar").unwrap();
+    let row = cx.debug_bounds("workspace-row-1-active").unwrap();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    let button = cx.debug_bounds("new-workspace-button").unwrap();
+    assert_eq!(row.top(), sidebar.top());
+    assert_eq!(row.bottom(), list.bottom());
+    assert_eq!(button.top(), list.bottom());
+    assert!(button.bottom() < sidebar.bottom());
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -5227,7 +5065,7 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 #[gpui::test]
 fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     let first_row = cx
@@ -5270,7 +5108,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
 ) {
     let (manager, platform, cx) = workspace_manager_with_operating_system_window_drag_platform(cx);
     let chooser = cx
-        .debug_bounds("new-workspace-chooser")
+        .debug_bounds("workspace-switcher")
         .expect("the Workspace chooser should be in the top chrome");
     let toggle = cx
         .debug_bounds("toggle-sidebar-button")
@@ -5278,7 +5116,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
     assert_eq!(chooser.size, toggle.size);
     assert_eq!(chooser.right(), toggle.left());
 
-    click("new-workspace-chooser", cx);
+    click("workspace-switcher", cx);
 
     let panel = cx
         .debug_bounds("combo-box-panel")
@@ -5298,15 +5136,13 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 ) {
     let (manager, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
-    let chooser = cx
-        .debug_bounds("new-workspace-chooser")
-        .expect("top chooser");
+    let chooser = cx.debug_bounds("workspace-switcher").expect("top chooser");
     let chip = cx
         .debug_bounds("workspace-chip")
         .expect("collapsed Workspace chip");
     assert!(chip.right() <= chooser.left());
 
-    click("new-workspace-chooser", cx);
+    click("workspace-switcher", cx);
 
     assert!(!manager.read_with(cx, |manager, _| manager.sidebar.visible));
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
@@ -5317,15 +5153,24 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 }
 
 #[gpui::test]
-fn bottom_new_workspace_button_should_open_the_original_panel(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-
+fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
     click("new-workspace-button", cx);
-
-    assert!(manager.read_with(cx, |manager, cx| {
-        manager.transient.new_workspace.read(cx).is_open()
-    }));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        2
+    );
+    assert_eq!(records.starts().len(), 2);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 }
 
 #[gpui::test]
@@ -5339,7 +5184,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    click("new-workspace-chooser", cx);
+    click("workspace-switcher", cx);
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -5362,7 +5207,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
     );
     let chooser = cx
-        .debug_bounds("new-workspace-chooser")
+        .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
     assert_eq!(panel.top(), chooser.bottom() + px(4.0));
     assert_eq!(
@@ -5372,7 +5217,12 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
             .height,
         px(28.0)
     );
-    for selector in ["new-workspace-source-local", "new-workspace-source-remote"] {
+    cx.simulate_keystrokes("f r e s h");
+    cx.run_until_parked();
+    for selector in [
+        "workspace-switcher-create-local",
+        "workspace-switcher-create-remote",
+    ] {
         let row = cx
             .debug_bounds(selector)
             .expect("the compact Workspace source row should render");
@@ -5443,14 +5293,14 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     redraw(cx);
 
     let chip = cx
         .debug_bounds("workspace-chip")
         .expect("the chip was not rendered for the new Active Workspace");
     let chooser = cx
-        .debug_bounds("new-workspace-chooser")
+        .debug_bounds("workspace-switcher")
         .expect("the Workspace chooser was not rendered");
 
     assert_eq!(
@@ -5573,7 +5423,7 @@ fn collapsed_top_chrome_should_preserve_the_default_label_beside_both_actions(
         .debug_bounds("workspace-chip-label")
         .expect("collapsed Workspace label");
     let chooser = cx
-        .debug_bounds("new-workspace-chooser")
+        .debug_bounds("workspace-switcher")
         .expect("Workspace chooser");
     let toggle = cx
         .debug_bounds("toggle-sidebar-button")
@@ -5597,7 +5447,7 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
     let (_, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
 
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     let chrome = cx
@@ -5651,7 +5501,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
@@ -5679,15 +5529,16 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
 fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     assert_eq!(
-        manager.read_with(cx, |manager, cx| {
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                window_combo_box_is_open(window, cx),
             )
         }),
         (2, WorkspaceId::new(2), false)
@@ -5717,7 +5568,7 @@ fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppC
 fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n enter");
+        cx.simulate_keystrokes("cmd-n");
     }
 
     manager.read_with(cx, |manager, _| {
@@ -5750,7 +5601,7 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n enter");
+        cx.simulate_keystrokes("cmd-n");
     }
     manager.read_with(cx, |manager, _| {
         manager
@@ -5787,7 +5638,7 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n enter");
+        cx.simulate_keystrokes("cmd-n");
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -5828,7 +5679,7 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n enter");
+        cx.simulate_keystrokes("cmd-n");
     }
 
     let state = manager.read_with(cx, |manager, _| {
@@ -5848,7 +5699,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n enter");
+        cx.simulate_keystrokes("cmd-n");
     }
 
     let sidebar = cx
@@ -5952,7 +5803,7 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
 fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -5994,7 +5845,7 @@ fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &m
 #[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter cmd-n enter");
+    cx.simulate_keystrokes("cmd-n cmd-n");
     cx.run_until_parked();
 
     cx.simulate_keystrokes("ctrl-1");
@@ -6041,7 +5892,7 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 #[gpui::test]
 fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-d cmd-n enter");
+    cx.simulate_keystrokes("cmd-d cmd-n");
     cx.run_until_parked();
 
     click("workspace-row-1-inactive", cx);
@@ -6100,7 +5951,7 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -6478,7 +6329,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 #[gpui::test]
 fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     click("workspace-row-1-inactive", cx);
     right_click("workspace-row-1-active", cx);
@@ -6559,14 +6410,14 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     inactive_sender
         .try_send(SessionEvent::Exited(SessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -6854,7 +6705,7 @@ fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &m
         manager.local_home_directory_path = missing_home
     });
 
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     assert!(cx.has_pending_prompt());
@@ -6898,7 +6749,7 @@ fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
 #[gpui::test]
 fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n enter");
+    cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     let missing_home = temporary_directory("missing-home");
     cx.update(|window, cx| {
@@ -6923,3 +6774,57 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
 
 #[path = "tests/identity.rs"]
 mod identity;
+
+#[gpui::test]
+fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remote(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    let flow = open_remote_workspace_flow(&manager, cx);
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    cx.simulate_keystrokes("ctrl-1");
+    cx.run_until_parked();
+    open_workspace_switcher(cx);
+    assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
+    assert!(cx.debug_bounds("workspace-switcher-result-2").is_some());
+    cx.simulate_keystrokes("f r e s h enter");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn workspace_switcher_should_not_offer_creation_for_an_empty_or_matching_query(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "Alpha".into())
+            .unwrap()
+    });
+    open_workspace_switcher(cx);
+    for query in ["", "space", "a l p h a"] {
+        cx.simulate_keystrokes(query);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-switcher-create-local").is_none());
+        assert!(
+            cx.debug_bounds("workspace-switcher-create-remote")
+                .is_none()
+        );
+    }
+}
+
+#[gpui::test]
+fn command_p_should_no_longer_open_workspace_search(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-p");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.debug_bounds("command-palette-panel").is_none());
+}

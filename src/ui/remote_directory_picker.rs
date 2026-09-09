@@ -17,7 +17,7 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace, OpenTerminalFind,
-    SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceValueError};
@@ -1175,7 +1175,7 @@ impl Render for RemoteDirectoryPicker {
             .when(self.blocks_terminal_input(), |picker| {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
-                    .capture_action(block_parent_action::<SearchWorkspaces>)
+                    .capture_action(block_parent_action::<SwitchWorkspace>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)

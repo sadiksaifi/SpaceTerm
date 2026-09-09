@@ -6,7 +6,6 @@ mod directory_picker;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
@@ -30,7 +29,6 @@ mod terminal_symbols;
 mod text_input_theme;
 mod tooltip_theme;
 mod workspace_manager;
-mod workspace_search;
 
 use gpui::{App, actions};
 
@@ -95,7 +93,7 @@ actions!(
         ClosePane,
         CloseTab,
         CloseWorkspace,
-        SearchWorkspaces,
+        SwitchWorkspace,
         NewWorkspace,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -263,7 +261,7 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-p", SearchWorkspaces.name()),
+            ("cmd-k", SwitchWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),

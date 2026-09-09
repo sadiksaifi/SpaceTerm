@@ -31,8 +31,8 @@ pub use button::{
 };
 pub use combo_box::{
     ComboBox, ComboBoxAcceptance, ComboBoxAccessory, ComboBoxActivationSource, ComboBoxCloseReason,
-    ComboBoxCopy, ComboBoxFallback, ComboBoxItem, ComboBoxLifecycleEvent, ComboBoxMetrics,
-    ComboBoxPaint, ComboBoxTheme, window_combo_box_is_open,
+    ComboBoxCopy, ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ComboBoxLifecycleEvent,
+    ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme, window_combo_box_is_open,
 };
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,

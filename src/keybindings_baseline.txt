@@ -86,7 +86,7 @@ escape	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::Cancel
 tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusNext
 shift-tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusPrevious
 ctrl-cmd-space	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::ShowCharacterPalette
-cmd-p	None	terminal::SearchWorkspaces
+cmd-k	None	terminal::SwitchWorkspace
 cmd-n	None	terminal::NewWorkspace
 cmd-t	None	terminal::CreateTab
 cmd-w	None	terminal::ClosePane

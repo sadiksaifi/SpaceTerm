@@ -1,3 +1,5 @@
+#[cfg(test)]
+use spaceterm_ui::CommandPaletteReplacementFocus;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -7,8 +9,7 @@ use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, px};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus, Icon,
-    IconName, MenuEntry,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName, MenuEntry,
 };
 
 use crate::domain::SshDestination;
@@ -366,6 +367,7 @@ impl SshHostPicker {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn open_replacing(
         &mut self,
         replacement: CommandPaletteReplacementFocus,

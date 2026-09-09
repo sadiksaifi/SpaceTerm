@@ -12,13 +12,14 @@ use gpui::{
 
 use crate::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ComboBox, ComboBoxAcceptance,
-    ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCopy, ComboBoxFallback, ComboBoxItem,
-    ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme, CommandPalette,
-    CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMetrics,
-    CommandPalettePaint, CommandPaletteTheme, Menu, MenuEntry, MenuLifecycleEvent, MenuMetrics,
-    MenuPaint, MenuSizes, MenuTheme, ScrollbarTheme, TextInputKeybindingProfile, TextInputMetrics,
-    TextInputPaint, TextInputTheme, TextInputVariants, install_text_input_keybindings,
-    window_combo_box_is_open, window_menu_is_open,
+    ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCopy, ComboBoxFallback, ComboBoxHandle,
+    ComboBoxItem, ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme,
+    CommandPalette, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme, Menu, MenuEntry,
+    MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuSizes, MenuTheme, ScrollbarTheme,
+    TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputTheme,
+    TextInputVariants, install_text_input_keybindings, window_combo_box_is_open,
+    window_menu_is_open,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +38,7 @@ struct TestRoot {
     selected: Option<u8>,
     items: Vec<ComboBoxItem<u8>>,
     fallback: Option<ComboBoxFallback<u8>>,
+    handle: ComboBoxHandle<u8>,
     copy: ComboBoxCopy,
     disabled: bool,
     before_focus: FocusHandle,
@@ -58,7 +60,8 @@ impl Render for TestRoot {
             self.selected,
             "Choose a workspace type",
             self.items.clone(),
-        );
+        )
+        .handle(self.handle.clone());
         let combo_box = if let Some(fallback) = self.fallback.clone() {
             combo_box.fallback(fallback)
         } else {
@@ -564,6 +567,7 @@ fn combo_box_window(
         selected,
         items,
         fallback: None,
+        handle: ComboBoxHandle::default(),
         copy: ComboBoxCopy::default(),
         disabled,
         before_focus: cx.focus_handle().tab_stop(true),
@@ -591,6 +595,7 @@ fn fallback_combo_box_window(
         selected: None,
         items: items(),
         fallback: Some(fallback),
+        handle: ComboBoxHandle::default(),
         copy: ComboBoxCopy::default(),
         disabled: false,
         before_focus: cx.focus_handle().tab_stop(true),
@@ -2066,4 +2071,150 @@ fn disabled_icon_trigger_should_not_present_tooltip_help(cx: &mut TestAppContext
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("icon-combo-help").is_none());
+}
+
+#[gpui::test]
+fn no_match_fallbacks_should_hide_until_an_unmatched_nonblank_query(cx: &mut TestAppContext) {
+    let fallback = ComboBoxFallback::when_no_matches(|_| {
+        vec![
+            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+        ]
+    });
+    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    assert!(cx.debug_bounds("create-local").is_none());
+    cx.simulate_keystrokes("l o c a l");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("create-local").is_none());
+    cx.simulate_keystrokes("cmd-a x");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("create-local").is_some());
+    assert!(cx.debug_bounds("create-remote").is_some());
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 9,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn no_match_fallbacks_should_hide_for_whitespace_when_there_are_no_items(cx: &mut TestAppContext) {
+    let (root, _, _, cx) = combo_box_window(cx, None, Vec::new(), false);
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.fallback = Some(ComboBoxFallback::when_no_matches(|_| {
+                vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("space space");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("create-workspace").is_none());
+    assert!(cx.debug_bounds("combo-box-empty").is_some());
+}
+
+#[gpui::test]
+fn no_match_fallbacks_should_reject_a_pointer_release_after_query_changes(cx: &mut TestAppContext) {
+    let fallback = ComboBoxFallback::when_no_matches(|_| {
+        vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
+    });
+    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    let row = cx.debug_bounds("create-workspace").unwrap();
+    cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("y");
+    cx.run_until_parked();
+    cx.simulate_mouse_up(row.center(), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+}
+
+#[gpui::test]
+fn handle_should_open_the_rendered_popup_and_restore_prior_focus(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, None, items(), false);
+    let handle = cx.update(|_, cx| root.read(cx).handle.clone());
+    cx.update(|window, cx| root.read(cx).before_focus.focus(window));
+    assert!(cx.update(|window, cx| handle.open(window, cx)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
+    assert!(!cx.update(|window, cx| handle.open(window, cx)));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| root.read(cx).before_focus.is_focused(window)));
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Opened),
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::Escape)),
+        ]
+    );
+}
+
+#[gpui::test]
+fn handle_should_not_open_a_removed_trigger(cx: &mut TestAppContext) {
+    let (root, _, _, cx) = combo_box_window(cx, None, items(), false);
+    let handle = cx.update(|_, cx| root.read(cx).handle.clone());
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.show_combo_box = false;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| handle.open(window, cx)));
+}
+
+#[gpui::test]
+fn handle_should_not_open_a_disabled_trigger(cx: &mut TestAppContext) {
+    let (root, _, _, cx) = combo_box_window(cx, None, items(), true);
+    let handle = cx.update(|_, cx| root.read(cx).handle.clone());
+    assert!(!cx.update(|window, cx| handle.open(window, cx)));
+}
+
+#[gpui::test]
+fn no_match_fallbacks_should_yield_to_a_new_ordinary_match(cx: &mut TestAppContext) {
+    let fallback = ComboBoxFallback::when_no_matches(|_| {
+        vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
+    });
+    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("create-workspace").is_some());
+    root.update(cx, |root, cx| {
+        root.items.push(ComboBoxItem::new(7, "Existing x"));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("Existing x").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 7,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn handle_should_not_open_its_control_in_another_window(cx: &mut TestAppContext) {
+    let (root, _, _, first) = combo_box_window(cx, None, items(), false);
+    let handle = first.update(|_, cx| root.read(cx).handle.clone());
+    let mut shared_app = first.cx.clone();
+    let (_, _, _, second) = combo_box_window(&mut shared_app, None, items(), false);
+    assert!(!second.update(|window, cx| handle.open(window, cx)));
+    assert!(!first.update(|window, cx| window_combo_box_is_open(window, cx)));
 }

@@ -6,7 +6,7 @@
 //! relationships for ordinary elements, so this Module retains those facts without claiming native
 //! assistive-technology publication.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
@@ -267,24 +267,76 @@ impl<I> ComboBoxItem<I> {
     }
 }
 
-/// A query-aware provider for the pinned row at the end of a ComboBox.
+/// Query-aware rows accepted through the ordinary typed ComboBox callback.
 ///
-/// The provider receives the editor's exact text, including case and whitespace. Its typed item is
-/// never filtered. Ordinary matches retain initial-selection precedence; when none exist, an
-/// enabled fallback becomes provisional and can be accepted through the ordinary typed callback.
+/// Providers receive the editor's exact text, including case and whitespace. Fallback rows are
+/// never filtered and ordinary matches retain initial-selection precedence.
 #[derive(Clone)]
 pub struct ComboBoxFallback<I>(ComboBoxFallbackProvider<I>);
 
-type ComboBoxFallbackProvider<I> = Rc<dyn Fn(&str) -> ComboBoxItem<I>>;
+type PinnedFallbackProvider<I> = Rc<dyn Fn(&str) -> ComboBoxItem<I>>;
+type NoMatchesFallbackProvider<I> = Rc<dyn Fn(&str) -> Vec<ComboBoxItem<I>>>;
+
+#[derive(Clone)]
+enum ComboBoxFallbackProvider<I> {
+    Pinned(PinnedFallbackProvider<I>),
+    NoMatches(NoMatchesFallbackProvider<I>),
+}
 
 impl<I> ComboBoxFallback<I> {
-    /// Creates a provider whose row is rebuilt whenever the accepted query changes.
+    /// Pins one row after ordinary matches, including when the query is empty.
     pub fn new(provider: impl Fn(&str) -> ComboBoxItem<I> + 'static) -> Self {
-        Self(Rc::new(provider))
+        Self(ComboBoxFallbackProvider::Pinned(Rc::new(provider)))
     }
 
-    fn item(&self, query: &str) -> ComboBoxItem<I> {
-        (self.0)(query)
+    /// Shows rows only when a non-whitespace query has no ordinary matches.
+    pub fn when_no_matches(provider: impl Fn(&str) -> Vec<ComboBoxItem<I>> + 'static) -> Self {
+        Self(ComboBoxFallbackProvider::NoMatches(Rc::new(provider)))
+    }
+
+    fn items(&self, query: &str, ordinary_match_count: usize) -> Vec<ComboBoxItem<I>> {
+        match &self.0 {
+            ComboBoxFallbackProvider::Pinned(provider) => vec![provider(query)],
+            ComboBoxFallbackProvider::NoMatches(provider)
+                if ordinary_match_count == 0 && !query.trim().is_empty() =>
+            {
+                provider(query)
+            }
+            ComboBoxFallbackProvider::NoMatches(_) => Vec::new(),
+        }
+    }
+}
+
+/// A weak handle for opening one rendered ComboBox from an application action.
+///
+/// Attach the same handle on every render. It neither retains a removed control nor opens a
+/// control in another Operating-System Window.
+#[derive(Clone)]
+pub struct ComboBoxHandle<I: Clone + Eq + 'static> {
+    state: Rc<RefCell<Option<WeakEntity<ComboBoxState<I>>>>>,
+}
+
+impl<I: Clone + Eq + 'static> Default for ComboBoxHandle<I> {
+    fn default() -> Self {
+        Self {
+            state: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
+    /// Opens the attached, enabled, rendered control using its ordinary popup lifecycle.
+    /// Returns false if it is unavailable, already open, or blocked by a modal.
+    pub fn open(&self, window: &mut Window, cx: &mut App) -> bool {
+        let state = self.state.borrow().clone();
+        state.is_some_and(|state| {
+            state
+                .update(cx, |state, cx| {
+                    state.window_id == window.window_handle().window_id()
+                        && state.open(None, false, window, cx)
+                })
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -475,6 +527,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     prompt: SharedString,
     items: Vec<ComboBoxItem<I>>,
     fallback: Option<ComboBoxFallback<I>>,
+    handle: Option<ComboBoxHandle<I>>,
     copy: ComboBoxCopy,
     disabled: bool,
     busy: bool,
@@ -505,6 +558,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             prompt: prompt.into(),
             items,
             fallback: None,
+            handle: None,
             copy: ComboBoxCopy::default(),
             disabled: false,
             busy: false,
@@ -520,9 +574,15 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         }
     }
 
-    /// Pins one query-aware item after all ordinary matches.
+    /// Installs query-aware fallback rows.
     pub fn fallback(mut self, fallback: ComboBoxFallback<I>) -> Self {
         self.fallback = Some(fallback);
+        self
+    }
+
+    /// Attaches a weak handle for opening this control from an application action.
+    pub fn handle(mut self, handle: ComboBoxHandle<I>) -> Self {
+        self.handle = Some(handle);
         self
     }
 
@@ -781,7 +841,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     items: Rc<[ComboBoxItem<I>]>,
     presented_items: Rc<[ComboBoxItem<I>]>,
     fallback: Option<ComboBoxFallback<I>>,
-    fallback_item_id: Option<I>,
+    fallback_item_ids: Vec<I>,
     ordinary_match_count: usize,
     matches: Rc<[usize]>,
     provisional: Option<I>,
@@ -920,7 +980,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             items: Vec::new().into(),
             presented_items: Vec::new().into(),
             fallback: None,
-            fallback_item_id: None,
+            fallback_item_ids: Vec::new(),
             ordinary_match_count: 0,
             matches: Vec::new().into(),
             provisional: None,
@@ -983,9 +1043,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         let items = unique_items(items);
         let model_changed = !same_model(&self.items, &items);
         let provisional_was_fallback = self
-            .fallback_item_id
+            .provisional
             .as_ref()
-            .is_some_and(|id| self.provisional.as_ref() == Some(id));
+            .is_some_and(|id| self.fallback_item_ids.contains(id));
         self.items = items.into();
         self.fallback = fallback;
         let results_changed = self.recompute_matches(provisional_was_fallback && model_changed);
@@ -1044,21 +1104,17 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
 
     fn recompute_matches(&mut self, reset_fallback_selection: bool) -> bool {
         let mut presented = self.items.to_vec();
-        if let Some(item) = self
-            .fallback
-            .as_ref()
-            .map(|fallback| fallback.item(&self.query))
-            && !presented.iter().any(|existing| existing.id == item.id)
-        {
-            self.fallback_item_id = Some(item.id.clone());
-            presented.push(item);
-        } else {
-            self.fallback_item_id = None;
-        }
         let mut matches = filter_items(&self.items, &self.query);
         self.ordinary_match_count = matches.len();
-        if presented.len() > self.items.len() {
-            matches.push(self.items.len());
+        self.fallback_item_ids.clear();
+        if let Some(fallback) = &self.fallback {
+            for item in fallback.items(&self.query, self.ordinary_match_count) {
+                if !presented.iter().any(|existing| existing.id == item.id) {
+                    self.fallback_item_ids.push(item.id.clone());
+                    matches.push(presented.len());
+                    presented.push(item);
+                }
+            }
         }
         let changed = !same_model(&self.presented_items, &presented)
             || self.matches.as_ref() != matches.as_slice();
@@ -1420,6 +1476,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
 impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, ComboBoxState::new);
+        if let Some(handle) = self.handle {
+            *handle.state.borrow_mut() = Some(state.downgrade());
+        }
         state.update(cx, |state, cx| {
             state.synchronize(
                 self.accessibility_name.clone(),
@@ -2155,6 +2214,28 @@ mod tests {
         let fallback =
             ComboBoxFallback::new(|query| ComboBoxItem::new(query.to_owned(), "Use exact query"));
 
-        assert_eq!(fallback.item(" Mixed Case ").id(), " Mixed Case ");
+        assert_eq!(fallback.items(" Mixed Case ", 0)[0].id(), " Mixed Case ");
+    }
+
+    #[test]
+    fn no_match_provider_should_preserve_exact_query_in_each_typed_identity() {
+        let fallback = ComboBoxFallback::when_no_matches(|query| {
+            vec![
+                ComboBoxItem::new((0, query.to_owned()), "Local Workspace"),
+                ComboBoxItem::new((1, query.to_owned()), "Remote Workspace"),
+            ]
+        });
+        let identities: Vec<_> = fallback
+            .items(" Mixed Case ", 0)
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                (0, " Mixed Case ".to_owned()),
+                (1, " Mixed Case ".to_owned())
+            ]
+        );
     }
 }
