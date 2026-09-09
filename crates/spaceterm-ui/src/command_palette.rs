@@ -1907,8 +1907,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let combo_focus = combo_replacement
             .as_ref()
             .and_then(|replacement| replacement.restore_focus.clone());
+        let replaced_combo_box = combo_replacement.is_some();
         if let Some(combo_replacement) = combo_replacement {
-            combo_replacement.finish(cx);
+            cx.defer(move |cx| combo_replacement.finish(cx));
         }
         self.restore_focus = match replacement {
             Some(replacement) => replacement.restore_focus,
@@ -1946,9 +1947,20 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx) {
             self.input.read(cx).focus_handle().focus(window);
         }
-        cx.emit(CommandPaletteEvent::Lifecycle(
-            CommandPaletteLifecycleEvent::Opened,
-        ));
+        if replaced_combo_box {
+            let palette = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = palette.update(cx, |_, cx| {
+                    cx.emit(CommandPaletteEvent::Lifecycle(
+                        CommandPaletteLifecycleEvent::Opened,
+                    ));
+                });
+            });
+        } else {
+            cx.emit(CommandPaletteEvent::Lifecycle(
+                CommandPaletteLifecycleEvent::Opened,
+            ));
+        }
         self.request_refresh(cx);
         cx.notify();
         true

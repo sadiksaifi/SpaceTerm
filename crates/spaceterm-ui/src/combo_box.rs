@@ -679,7 +679,7 @@ fn register_combo_box<I: Clone + Eq + 'static>(
         .as_ref()
         .and_then(|replacement| replacement.restore_focus.clone());
     if let Some(replacement) = predecessor {
-        replacement.finish(cx);
+        cx.defer(move |cx| replacement.finish(cx));
     }
     (registration, restore_focus)
 }

@@ -6,24 +6,25 @@ use std::{
 
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, Keystroke, Modifiers,
-    MouseButton, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
-    Window, div, point, px, rgba,
+    MouseButton, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
+    TestAppContext, TouchPhase, VisualTestContext, Window, div, point, px, rgba,
 };
 
 use crate::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ComboBox, ComboBoxAcceptance,
     ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCopy, ComboBoxFallback, ComboBoxItem,
     ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme, CommandPalette,
-    CommandPaletteItem, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme, Menu,
-    MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuSizes, MenuTheme, ScrollbarTheme,
-    TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputTheme,
-    TextInputVariants, install_text_input_keybindings, window_combo_box_is_open,
-    window_menu_is_open,
+    CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMetrics,
+    CommandPalettePaint, CommandPaletteTheme, Menu, MenuEntry, MenuLifecycleEvent, MenuMetrics,
+    MenuPaint, MenuSizes, MenuTheme, ScrollbarTheme, TextInputKeybindingProfile, TextInputMetrics,
+    TextInputPaint, TextInputTheme, TextInputVariants, install_text_input_keybindings,
+    window_combo_box_is_open, window_menu_is_open,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RecordedEvent {
     Lifecycle(ComboBoxLifecycleEvent),
+    PaletteOpened,
     Accepted {
         item_id: u8,
         source: ComboBoxActivationSource,
@@ -113,6 +114,7 @@ impl Render for TestRoot {
 struct PaletteReplacementRoot {
     palette: Entity<CommandPalette<u8>>,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
+    reentries: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +132,66 @@ struct ModalReplacementRoot {
     prior_focus: FocusHandle,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     modal: Option<crate::ModalPresentationHandle>,
+}
+
+struct ReentrantComboReplacementRoot {
+    prior_focus: FocusHandle,
+    events: Rc<RefCell<Vec<(u8, ComboBoxLifecycleEvent)>>>,
+    reentries: usize,
+}
+
+struct WheelContainmentRoot {
+    underlay_scrolls: Rc<Cell<usize>>,
+    accepted: Rc<RefCell<Vec<u8>>>,
+}
+
+impl Render for WheelContainmentRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        let underlay_scrolls = Rc::clone(&self.underlay_scrolls);
+        let accepted = Rc::clone(&self.accepted);
+        div()
+            .size_full()
+            .on_scroll_wheel(move |_, _, _| {
+                underlay_scrolls.set(underlay_scrolls.get() + 1);
+            })
+            .child(div().h(px(80.0)))
+            .child(
+                ComboBox::new("wheel-combo", "Workspace", Some(1), "Choose", long_items())
+                    .debug_selector("wheel-combo-trigger")
+                    .on_accept(move |acceptance, _, _| {
+                        accepted.borrow_mut().push(*acceptance.item_id());
+                    }),
+            )
+    }
+}
+
+impl Render for ReentrantComboReplacementRoot {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let first_events = Rc::clone(&self.events);
+        let first_owner = cx.entity().downgrade();
+        let second_events = Rc::clone(&self.events);
+        div()
+            .size_full()
+            .child(div().track_focus(&self.prior_focus))
+            .child(
+                ComboBox::new("reentrant-first", "First", None, "First", items())
+                    .debug_selector("reentrant-first-trigger")
+                    .on_lifecycle(move |event, cx| {
+                        first_events.borrow_mut().push((1, *event));
+                        let _ = first_owner.update(cx, |root, cx| {
+                            root.reentries += 1;
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                ComboBox::new("reentrant-second", "Second", None, "Second", items())
+                    .debug_selector("reentrant-second-trigger")
+                    .on_lifecycle(move |event, _| {
+                        second_events.borrow_mut().push((2, *event));
+                    }),
+            )
+    }
 }
 
 impl ModalReplacementRoot {
@@ -224,8 +286,9 @@ impl Render for MenuReplacementRoot {
 }
 
 impl Render for PaletteReplacementRoot {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let events = Rc::clone(&self.events);
+        let owner = cx.entity().downgrade();
         div()
             .size_full()
             .child(
@@ -237,8 +300,12 @@ impl Render for PaletteReplacementRoot {
                     items(),
                 )
                 .debug_selector("palette-replacement-trigger")
-                .on_lifecycle(move |event, _| {
+                .on_lifecycle(move |event, cx| {
                     events.borrow_mut().push(RecordedEvent::Lifecycle(*event));
+                    let _ = owner.update(cx, |root, cx| {
+                        root.reentries += 1;
+                        cx.notify();
+                    });
                 }),
             )
             .child(self.palette.clone())
@@ -521,6 +588,7 @@ fn command_palette_should_replace_an_open_combo_box_in_the_same_window(cx: &mut 
             )
         }),
         events: root_events,
+        reentries: 0,
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -531,7 +599,22 @@ fn command_palette_should_replace_an_open_combo_box_in_the_same_window(cx: &mut 
     cx.simulate_click(trigger, Modifiers::none());
     cx.run_until_parked();
     events.borrow_mut().clear();
+    root.update(cx, |root, _| root.reentries = 0);
     let palette = root.read_with(cx, |root, _| root.palette.clone());
+    let palette_events = Rc::clone(&events);
+    root.update(cx, |_, cx| {
+        cx.subscribe(&palette, move |_, _, event, _| {
+            if matches!(
+                event,
+                CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened)
+            ) {
+                palette_events
+                    .borrow_mut()
+                    .push(RecordedEvent::PaletteOpened);
+            }
+        })
+        .detach();
+    });
 
     cx.update(|window, cx| {
         palette.update(cx, |palette, cx| palette.open(window, cx));
@@ -541,10 +624,58 @@ fn command_palette_should_replace_an_open_combo_box_in_the_same_window(cx: &mut 
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert_eq!(
         events.borrow().as_slice(),
-        [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
-            ComboBoxCloseReason::Replaced,
-        ))]
+        [
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                ComboBoxCloseReason::Replaced,
+            )),
+            RecordedEvent::PaletteOpened,
+        ]
     );
+    assert_eq!(root.read_with(cx, |root, _| root.reentries), 1);
+}
+
+#[gpui::test]
+fn combo_box_replacement_should_release_borrows_before_reentrant_lifecycle_delivery(
+    cx: &mut TestAppContext,
+) {
+    install_themes(cx);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let root_events = Rc::clone(&events);
+    let (root, cx) = cx.add_window_view(move |_, cx| ReentrantComboReplacementRoot {
+        prior_focus: cx.focus_handle().tab_stop(true),
+        events: root_events,
+        reentries: 0,
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds("reentrant-first-trigger")
+        .expect("the first ComboBox trigger should render")
+        .center();
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.run_until_parked();
+    events.borrow_mut().clear();
+    root.update(cx, |root, _| root.reentries = 0);
+
+    cx.update(|window, cx| {
+        window.focus_next();
+        window.focus_next();
+        window.focus_next();
+        window.dispatch_keystroke(Keystroke::parse("enter").expect("valid keystroke"), cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        events.borrow().as_slice(),
+        [
+            (
+                1,
+                ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::Replaced),
+            ),
+            (2, ComboBoxLifecycleEvent::Opened),
+        ]
+    );
+    assert_eq!(root.read_with(cx, |root, _| root.reentries), 1);
 }
 
 #[gpui::test]
@@ -1227,6 +1358,48 @@ fn long_items() -> Vec<ComboBoxItem<u8>> {
 }
 
 #[gpui::test]
+fn wheel_should_scroll_long_results_without_reaching_the_underlay(cx: &mut TestAppContext) {
+    install_themes(cx);
+    let underlay_scrolls = Rc::new(Cell::new(0));
+    let root_scrolls = Rc::clone(&underlay_scrolls);
+    let accepted = Rc::new(RefCell::new(Vec::new()));
+    let root_accepted = Rc::clone(&accepted);
+    let (_, cx) = cx.add_window_view(move |_, _| WheelContainmentRoot {
+        underlay_scrolls: root_scrolls,
+        accepted: root_accepted,
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds("wheel-combo-trigger")
+        .expect("the ComboBox trigger should render")
+        .center();
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.run_until_parked();
+    let panel = cx
+        .debug_bounds("combo-box-panel")
+        .expect("the ComboBox panel should render");
+    assert!(cx.debug_bounds("combo-row-1").is_some());
+    assert!(cx.debug_bounds("combo-row-20").is_none());
+
+    cx.simulate_event(ScrollWheelEvent {
+        position: panel.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-640.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let first_visible_row = point(panel.center().x, panel.top() + px(64.0));
+    cx.simulate_click(first_visible_row, Modifiers::none());
+    cx.run_until_parked();
+    assert!(accepted.borrow().first().is_some_and(|id| *id > 1));
+    assert_eq!(underlay_scrolls.get(), 0);
+}
+
+#[gpui::test]
 fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestAppContext) {
     let (_, events, _, cx) = combo_box_window(cx, Some(30), long_items(), false);
     open_by_pointer(cx);
@@ -1239,7 +1412,7 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
         .iter()
         .find_map(|event| match event {
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_) => None,
+            RecordedEvent::Lifecycle(_) | RecordedEvent::PaletteOpened => None,
         })
         .expect("Page Up should leave an acceptible provisional item");
     assert!(page_up_id < 30);
@@ -1253,7 +1426,7 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
         .iter()
         .find_map(|event| match event {
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_) => None,
+            RecordedEvent::Lifecycle(_) | RecordedEvent::PaletteOpened => None,
         })
         .expect("Page Down should leave an acceptible provisional item");
     assert!(page_down_id > 30);
