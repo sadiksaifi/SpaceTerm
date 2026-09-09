@@ -115,13 +115,15 @@ impl NewWorkspaceSource {
         let unavailable = (self == Self::RemoteProject)
             .then_some(remote_unavailable_reason)
             .flatten();
+        let mut keywords = vec!["workspace".to_owned(), self.label().to_owned()];
+        keywords.push(
+            unavailable
+                .as_deref()
+                .unwrap_or_else(|| self.description(presentation))
+                .to_owned(),
+        );
         let item = ComboBoxItem::new(self, self.label())
-            .description(
-                unavailable
-                    .clone()
-                    .unwrap_or_else(|| self.description(presentation).to_owned()),
-            )
-            .keywords(["workspace", self.label()])
+            .keywords(keywords)
             .disabled(unavailable.is_some())
             .leading_icon(move |foreground| {
                 Icon::new(icon_name, px(SOURCE_ICON_SIZE), foreground).into_any_element()
@@ -493,6 +495,17 @@ mod tests {
 
         assert!(remote.is_disabled());
         assert_eq!(remote.description_text(), Some(reason));
+    }
+
+    #[test]
+    fn combo_box_sources_should_use_compact_single_line_rows() {
+        let presentation = crate::desktop_profile::testing_presentation();
+
+        for reason in [None, Some("OpenSSH 9.0 or later is required".to_owned())] {
+            for item in NewWorkspaceSource::combo_box_items(reason, &presentation) {
+                assert_eq!(item.description_text(), None);
+            }
+        }
     }
 
     #[gpui::test]

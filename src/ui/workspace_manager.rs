@@ -4088,10 +4088,11 @@ impl WorkspaceManager {
                         .placement(
                             AnchoredPlacementConfig::new(
                                 AnchoredPlacement::Top,
-                                AnchoredAlignment::Start,
+                                AnchoredAlignment::Center,
                             )
                             .offset(px(0.0)),
                         )
+                        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
                         .full_width(true)
                         .debug_selector("new-workspace-button")
                         .leading(|foreground| {

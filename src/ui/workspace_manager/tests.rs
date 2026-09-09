@@ -5280,6 +5280,42 @@ fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_box
         }),
         (1, true)
     );
+
+    let sidebar = cx
+        .debug_bounds("workspace-sidebar")
+        .expect("the Workspace sidebar should render");
+    let panel = cx
+        .debug_bounds("combo-box-panel")
+        .expect("the New Workspace ComboBox panel should render");
+    assert_eq!(
+        (panel.left(), panel.right()),
+        (
+            sidebar.left() + px(SIDEBAR_ROW_HORIZONTAL_PADDING),
+            sidebar.right() - px(SIDEBAR_ROW_HORIZONTAL_PADDING),
+        )
+    );
+    assert_eq!(
+        cx.debug_bounds("combo-box-input-row")
+            .expect("the compact ComboBox input row should render")
+            .size
+            .height,
+        px(28.0)
+    );
+    for selector in [
+        "new-workspace-source-local-project",
+        "new-workspace-source-scratch",
+        "new-workspace-source-remote-project",
+    ] {
+        let row = cx
+            .debug_bounds(selector)
+            .expect("the compact Workspace source row should render");
+        assert_eq!(row.size.height, px(30.0));
+        assert_eq!(
+            row.left() - panel.left(),
+            panel.right() - row.right(),
+            "{selector} should have equal left and right insets"
+        );
+    }
 }
 
 #[gpui::test]

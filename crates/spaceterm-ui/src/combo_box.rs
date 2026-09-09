@@ -470,6 +470,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     disabled: bool,
     busy: bool,
     placement: AnchoredPlacementConfig,
+    panel_width: Option<Pixels>,
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
     debug_selector: Option<String>,
@@ -497,6 +498,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             disabled: false,
             busy: false,
             placement: AnchoredPlacementConfig::default(),
+            panel_width: None,
             full_width: false,
             trigger_leading: None,
             debug_selector: None,
@@ -532,6 +534,14 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Selects the shared anchored placement policy.
     pub fn placement(mut self, placement: AnchoredPlacementConfig) -> Self {
         self.placement = placement;
+        self
+    }
+
+    /// Sets the preferred popup width independently of the trigger width.
+    ///
+    /// The shared placement policy still constrains this width to the available viewport.
+    pub fn panel_width(mut self, width: Pixels) -> Self {
+        self.panel_width = Some(width.max(px(0.0)));
         self
     }
 
@@ -751,6 +761,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     model_generation: u64,
     trigger_bounds: Option<BoundsPixels>,
     placement: AnchoredPlacementConfig,
+    panel_width: Option<Pixels>,
     trigger_focus: FocusHandle,
     popup_focus: FocusHandle,
     input: Entity<TextInput>,
@@ -888,6 +899,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             model_generation: 0,
             trigger_bounds: None,
             placement: AnchoredPlacementConfig::default(),
+            panel_width: None,
             trigger_focus,
             popup_focus,
             input,
@@ -929,6 +941,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         disabled: bool,
         busy: bool,
         placement: AnchoredPlacementConfig,
+        panel_width: Option<Pixels>,
         on_accept: Option<AcceptanceHandler<I>>,
         on_lifecycle: Option<LifecycleHandler>,
         window: &mut Window,
@@ -960,6 +973,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         self.disabled = disabled;
         self.busy = busy;
         self.placement = placement;
+        self.panel_width = panel_width;
         self.on_accept = on_accept;
         self.on_lifecycle = on_lifecycle;
         self.trigger_focus = self.trigger_focus.clone().tab_stop(!disabled);
@@ -1382,6 +1396,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 self.disabled,
                 self.busy,
                 self.placement,
+                self.panel_width,
                 self.on_accept,
                 self.on_lifecycle,
                 window,
@@ -1634,7 +1649,9 @@ fn render_overlay<I: Clone + Eq + 'static>(
         })
     };
     let desired = size(
-        theme.metrics.panel_width.max(target.size.width),
+        snapshot
+            .panel_width
+            .unwrap_or_else(|| theme.metrics.panel_width.max(target.size.width)),
         theme.metrics.input_height
             + theme.metrics.border_width
             + content_height
@@ -1740,6 +1757,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .block_mouse_except_scroll()
         .child(
             div()
+                .debug_selector(|| "combo-box-input-row".to_owned())
                 .h(theme.metrics.input_height)
                 .flex_shrink_0()
                 .px(theme.metrics.horizontal_padding)
@@ -1873,7 +1891,6 @@ fn render_row<I: Clone + Eq + 'static>(
         .id(("combo-box-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
-        .w_full()
         .h(theme.metrics.row_height(item.description.is_some()))
         .mx(theme.metrics.panel_padding)
         .px(theme.metrics.horizontal_padding)
