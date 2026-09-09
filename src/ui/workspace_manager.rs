@@ -77,6 +77,7 @@ use spaceterm_ui::{
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
+const WORKSPACE_CHROME_ICON_SIZE: f32 = 14.0;
 const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
 // Reserve enough label width beside both actions for Workspace names across desktop fonts.
 const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
@@ -3452,7 +3453,12 @@ impl WorkspaceManager {
             vec![local, remote]
         }))
         .icon_trigger(|foreground| {
-            Icon::custom(CustomIconName::RectangleStack, px(14.0), foreground).into_any_element()
+            Icon::custom(
+                CustomIconName::RectangleStack,
+                px(WORKSPACE_CHROME_ICON_SIZE),
+                foreground,
+            )
+            .into_any_element()
         })
         .placement(AnchoredPlacementConfig::new(
             AnchoredPlacement::Bottom,
@@ -3529,7 +3535,8 @@ impl WorkspaceManager {
                     .child(chooser)
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
-                            Icon::new(toggle_icon, px(14.0), foreground).into_any_element()
+                            Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
+                                .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
@@ -3977,8 +3984,12 @@ impl WorkspaceManager {
                             "new-remote-workspace-button",
                             "New Remote Workspace",
                             |foreground| {
-                                Icon::custom(CustomIconName::GlobePlus, px(20.0), foreground)
-                                    .into_any_element()
+                                Icon::custom(
+                                    CustomIconName::GlobePlus,
+                                    px(WORKSPACE_CHROME_ICON_SIZE),
+                                    foreground,
+                                )
+                                .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
@@ -4000,7 +4011,7 @@ impl WorkspaceManager {
                             |foreground| {
                                 Icon::custom(
                                     CustomIconName::RectangleStackBadgePlus,
-                                    px(20.0),
+                                    px(WORKSPACE_CHROME_ICON_SIZE),
                                     foreground,
                                 )
                                 .into_any_element()
@@ -4018,17 +4029,6 @@ impl WorkspaceManager {
                                 manager.create_local_workspace(window, cx)
                             });
                         }),
-                    )
-                    .child(
-                        div()
-                            .id("workspace-sidebar-footer-divider")
-                            .debug_selector(|| "workspace-sidebar-footer-divider".to_owned())
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .w_full()
-                            .h(px(CHROME_DIVIDER_SIZE))
-                            .bg(gpui_color(ACTIVE_THEME.border)),
                     ),
             )
             .child(scrollbar)

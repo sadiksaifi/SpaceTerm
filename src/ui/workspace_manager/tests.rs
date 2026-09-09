@@ -5554,21 +5554,12 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn sidebar_footer_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
-    let (_manager, _records, cx) = workspace_manager(cx);
-    let button = cx
-        .debug_bounds("workspace-sidebar-footer")
-        .expect("the New Workspace button was not rendered");
-    let divider = cx
-        .debug_bounds("workspace-sidebar-footer-divider")
-        .expect("the New Workspace button divider was not rendered");
-
-    assert_eq!(
-        divider,
-        gpui::bounds(
-            button.origin,
-            gpui::size(button.size.width, px(CHROME_DIVIDER_SIZE)),
-        )
+fn sidebar_footer_should_have_no_top_divider(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    assert!(cx.debug_bounds("workspace-sidebar-footer").is_some());
+    assert!(
+        cx.debug_bounds("workspace-sidebar-footer-divider")
+            .is_none()
     );
 }
 
