@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::{LocalFilesystemAuthority, LocalFilesystemError, validate_absolute_path};
-use crate::domain::ValidatedWorkspaceDirectory;
+use crate::domain::ValidatedLocalDirectory;
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct WorkspacePickerDirectoryEntry {
+pub(crate) struct DirectoryPickerDirectoryEntry {
     name: String,
     path: PathBuf,
 }
 
-impl WorkspacePickerDirectoryEntry {
+impl DirectoryPickerDirectoryEntry {
     pub(crate) fn new(name: String, path: PathBuf) -> Self {
         Self { name, path }
     }
@@ -29,7 +29,7 @@ impl WorkspacePickerDirectoryEntry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum WorkspacePickerFilesystemError {
+pub(crate) enum DirectoryPickerFilesystemError {
     #[error("permission denied")]
     PermissionDenied,
     #[error("path is missing")]
@@ -41,30 +41,30 @@ pub(crate) enum WorkspacePickerFilesystemError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspacePickerExactPathProbe {
+pub(crate) enum DirectoryPickerExactPathProbe {
     ReadableDirectory,
-    Unavailable(WorkspacePickerFilesystemError),
+    Unavailable(DirectoryPickerFilesystemError),
 }
 
-pub(crate) trait WorkspacePickerFilesystem: Send + Sync {
+pub(crate) trait DirectoryPickerFilesystem: Send + Sync {
     fn path_semantics(&self) -> crate::local_path::LocalPathSemantics;
     fn list_directories(
         &self,
         directory: &Path,
         hide_dot_prefixed: bool,
-    ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError>;
+    ) -> Result<Vec<DirectoryPickerDirectoryEntry>, DirectoryPickerFilesystemError>;
 
-    fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe;
+    fn probe_exact_path(&self, path: &Path) -> DirectoryPickerExactPathProbe;
 
-    fn create_dir_all(&self, path: &Path) -> Result<(), WorkspacePickerFilesystemError>;
+    fn create_dir_all(&self, path: &Path) -> Result<(), DirectoryPickerFilesystemError>;
 
-    fn validate_workspace_directory(
+    fn validate_directory(
         &self,
         path: &Path,
-    ) -> Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>;
+    ) -> Result<ValidatedLocalDirectory, DirectoryPickerFilesystemError>;
 }
 
-impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
+impl DirectoryPickerFilesystem for LocalFilesystemAuthority {
     fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
         self.path_semantics()
     }
@@ -72,9 +72,9 @@ impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
         &self,
         directory: &Path,
         hide_dot_prefixed: bool,
-    ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
+    ) -> Result<Vec<DirectoryPickerDirectoryEntry>, DirectoryPickerFilesystemError> {
         validate_absolute_path(self.path_semantics(), directory)
-            .map_err(classify_workspace_directory_error)?;
+            .map_err(classify_directory_error)?;
         let entries = fs::read_dir(directory).map_err(classify_io_error)?;
         let mut directories = Vec::new();
 
@@ -93,40 +93,38 @@ impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
                 Err(error) => return Err(classify_io_error(error)),
             };
             if metadata.is_dir() {
-                directories.push(WorkspacePickerDirectoryEntry::new(name, path));
+                directories.push(DirectoryPickerDirectoryEntry::new(name, path));
             }
         }
 
         Ok(directories)
     }
 
-    fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe {
-        match self.validate_workspace_directory(path) {
-            Ok(_) => WorkspacePickerExactPathProbe::ReadableDirectory,
-            Err(error) => WorkspacePickerExactPathProbe::Unavailable(
-                classify_workspace_directory_error(error),
-            ),
+    fn probe_exact_path(&self, path: &Path) -> DirectoryPickerExactPathProbe {
+        match self.validate_directory(path) {
+            Ok(_) => DirectoryPickerExactPathProbe::ReadableDirectory,
+            Err(error) => {
+                DirectoryPickerExactPathProbe::Unavailable(classify_directory_error(error))
+            }
         }
     }
 
-    fn create_dir_all(&self, path: &Path) -> Result<(), WorkspacePickerFilesystemError> {
-        validate_absolute_path(self.path_semantics(), path)
-            .map_err(classify_workspace_directory_error)?;
+    fn create_dir_all(&self, path: &Path) -> Result<(), DirectoryPickerFilesystemError> {
+        validate_absolute_path(self.path_semantics(), path).map_err(classify_directory_error)?;
         fs::create_dir_all(path).map_err(|error| {
             if fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
-                WorkspacePickerFilesystemError::NotDirectory
+                DirectoryPickerFilesystemError::NotDirectory
             } else {
                 classify_io_error(error)
             }
         })
     }
 
-    fn validate_workspace_directory(
+    fn validate_directory(
         &self,
         path: &Path,
-    ) -> Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError> {
-        LocalFilesystemAuthority::validate_workspace_directory(self, path)
-            .map_err(classify_workspace_directory_error)
+    ) -> Result<ValidatedLocalDirectory, DirectoryPickerFilesystemError> {
+        LocalFilesystemAuthority::validate_directory(self, path).map_err(classify_directory_error)
     }
 }
 
@@ -139,24 +137,22 @@ fn visible_entry_name(name: OsString, hide_dot_prefixed: bool) -> Option<String>
     }
 }
 
-impl std::fmt::Debug for WorkspacePickerDirectoryEntry {
+impl std::fmt::Debug for DirectoryPickerDirectoryEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WorkspacePickerDirectoryEntry(<redacted>)")
+        f.write_str("DirectoryPickerDirectoryEntry(<redacted>)")
     }
 }
 
-fn classify_io_error(error: io::Error) -> WorkspacePickerFilesystemError {
-    classify_workspace_directory_error(super::classify_io_error(error))
+fn classify_io_error(error: io::Error) -> DirectoryPickerFilesystemError {
+    classify_directory_error(super::classify_io_error(error))
 }
 
-fn classify_workspace_directory_error(
-    error: LocalFilesystemError,
-) -> WorkspacePickerFilesystemError {
+fn classify_directory_error(error: LocalFilesystemError) -> DirectoryPickerFilesystemError {
     match error {
-        LocalFilesystemError::PermissionDenied => WorkspacePickerFilesystemError::PermissionDenied,
-        LocalFilesystemError::Missing => WorkspacePickerFilesystemError::Missing,
-        LocalFilesystemError::NotDirectory => WorkspacePickerFilesystemError::NotDirectory,
-        _ => WorkspacePickerFilesystemError::Other,
+        LocalFilesystemError::PermissionDenied => DirectoryPickerFilesystemError::PermissionDenied,
+        LocalFilesystemError::Missing => DirectoryPickerFilesystemError::Missing,
+        LocalFilesystemError::NotDirectory => DirectoryPickerFilesystemError::NotDirectory,
+        _ => DirectoryPickerFilesystemError::Other,
     }
 }
 
@@ -177,7 +173,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let sequence = NEXT_TEMPORARY_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "spaceterm-workspace-picker-{name}-{}-{sequence}",
+                "spaceterm-directory-picker-{name}-{}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();
@@ -197,7 +193,7 @@ mod tests {
 
         let result = classify_io_error(error);
 
-        assert_eq!(result, WorkspacePickerFilesystemError::PermissionDenied);
+        assert_eq!(result, DirectoryPickerFilesystemError::PermissionDenied);
     }
 
     #[test]
@@ -206,7 +202,7 @@ mod tests {
 
         let result = classify_io_error(error);
 
-        assert_eq!(result, WorkspacePickerFilesystemError::Missing);
+        assert_eq!(result, DirectoryPickerFilesystemError::Missing);
     }
 
     #[test]
@@ -215,7 +211,7 @@ mod tests {
 
         let result = classify_io_error(error);
 
-        assert_eq!(result, WorkspacePickerFilesystemError::Other);
+        assert_eq!(result, DirectoryPickerFilesystemError::Other);
     }
 
     #[test]
@@ -227,7 +223,7 @@ mod tests {
 
         assert_eq!(
             result,
-            WorkspacePickerExactPathProbe::Unavailable(WorkspacePickerFilesystemError::Missing)
+            DirectoryPickerExactPathProbe::Unavailable(DirectoryPickerFilesystemError::Missing)
         );
     }
 
@@ -240,7 +236,7 @@ mod tests {
 
         let result = filesystem.list_directories(&file, true);
 
-        assert_eq!(result, Err(WorkspacePickerFilesystemError::NotDirectory));
+        assert_eq!(result, Err(DirectoryPickerFilesystemError::NotDirectory));
     }
 
     #[test]
@@ -254,8 +250,8 @@ mod tests {
 
         assert_eq!(
             result,
-            WorkspacePickerExactPathProbe::Unavailable(
-                WorkspacePickerFilesystemError::NotDirectory
+            DirectoryPickerExactPathProbe::Unavailable(
+                DirectoryPickerFilesystemError::NotDirectory
             )
         );
     }
@@ -271,7 +267,7 @@ mod tests {
 
         assert_eq!(
             result,
-            vec![WorkspacePickerDirectoryEntry {
+            vec![DirectoryPickerDirectoryEntry {
                 name: String::from(".hidden"),
                 path: hidden,
             }]
@@ -289,7 +285,7 @@ mod tests {
 
         assert_eq!(
             result,
-            vec![WorkspacePickerDirectoryEntry {
+            vec![DirectoryPickerDirectoryEntry {
                 name: String::from("Example.app"),
                 path: package,
             }]
@@ -316,7 +312,7 @@ mod tests {
 
         let result = filesystem.create_dir_all(&file);
 
-        assert_eq!(result, Err(WorkspacePickerFilesystemError::NotDirectory));
+        assert_eq!(result, Err(DirectoryPickerFilesystemError::NotDirectory));
     }
 
     #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]

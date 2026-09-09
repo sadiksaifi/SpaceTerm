@@ -12,13 +12,13 @@ use super::{
     TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
     TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
-use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
+use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 
 pub(crate) use super::emulator::TerminalEmulator;
 pub(crate) use super::graphics::test_lock as graphics_test_lock;
 
-pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
-    ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::for_test(0))
+pub(crate) fn test_local_directory(path: PathBuf) -> ValidatedLocalDirectory {
+    ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::for_test(0))
 }
 
 pub(crate) fn test_accessibility_viewport_models(
@@ -123,7 +123,7 @@ impl RecordedSessionStart {
         }
     }
 
-    pub(crate) fn local_working_directory(&self) -> Option<&ValidatedWorkspaceDirectory> {
+    pub(crate) fn local_working_directory(&self) -> Option<&ValidatedLocalDirectory> {
         self.local_launch_plan()
             .map(super::LocalTerminalLaunchPlan::working_directory)
     }
@@ -528,7 +528,7 @@ impl Drop for ShellResourcesFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::{RemoteTerminalLaunchPlan, TerminalLaunchPlan};
@@ -538,7 +538,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let factory = TestTerminalSessionFactory::new(records.clone());
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
         let prepared = SshCommandContext::new(
             crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -559,7 +559,7 @@ mod tests {
             .start(
                 geometry,
                 TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
-                    test_workspace_directory(PathBuf::from("/Users/local")),
+                    test_local_directory(PathBuf::from("/Users/local")),
                     destination.clone(),
                     directory.clone(),
                     "project on remote".to_owned(),

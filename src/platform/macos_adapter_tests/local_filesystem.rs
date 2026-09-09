@@ -36,12 +36,12 @@ fn directory_identity_preserves_selected_spelling_and_equivalent_paths() {
         crate::local_path::LocalPathSemantics::Posix,
         Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
     );
-    let directory = authority.validate_workspace_directory(&selected).unwrap();
-    let equivalent = authority.validate_workspace_directory(&target).unwrap();
+    let directory = authority.validate_directory(&selected).unwrap();
+    let equivalent = authority.validate_directory(&target).unwrap();
     assert_eq!(directory.path(), selected);
     assert_eq!(directory.identity(), equivalent.identity());
     let dotted = selected.join(".");
-    let exact = authority.validate_workspace_directory(&dotted).unwrap();
+    let exact = authority.validate_directory(&dotted).unwrap();
     assert_eq!(exact.path().as_os_str(), dotted.as_os_str());
     assert_eq!(exact.identity(), directory.identity());
 }
@@ -59,30 +59,30 @@ fn directory_revalidation_rejects_retarget_replacement_removal_and_file() {
         crate::local_path::LocalPathSemantics::Posix,
         Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
     );
-    let directory = authority.validate_workspace_directory(&selected).unwrap();
+    let directory = authority.validate_directory(&selected).unwrap();
     fs::remove_file(&selected).unwrap();
     symlink(&other, &selected).unwrap();
     assert_eq!(
-        authority.revalidate_workspace_directory(&directory),
+        authority.revalidate_directory(&directory),
         Err(LocalFilesystemError::IdentityChanged)
     );
     fs::remove_file(&selected).unwrap();
     symlink(&target, &selected).unwrap();
-    assert!(authority.revalidate_workspace_directory(&directory).is_ok());
+    assert!(authority.revalidate_directory(&directory).is_ok());
     fs::remove_dir(&target).unwrap();
     assert_eq!(
-        authority.revalidate_workspace_directory(&directory),
+        authority.revalidate_directory(&directory),
         Err(LocalFilesystemError::Missing)
     );
     fs::create_dir(&target).unwrap();
     assert_eq!(
-        authority.revalidate_workspace_directory(&directory),
+        authority.revalidate_directory(&directory),
         Err(LocalFilesystemError::IdentityChanged)
     );
     fs::remove_dir(&target).unwrap();
     fs::write(&target, b"fixture").unwrap();
     assert_eq!(
-        authority.revalidate_workspace_directory(&directory),
+        authority.revalidate_directory(&directory),
         Err(LocalFilesystemError::NotDirectory)
     );
 }
@@ -95,17 +95,17 @@ fn directory_validation_rejects_relative_malformed_and_unreadable_paths() {
         Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
     );
     assert_eq!(
-        authority.validate_workspace_directory(Path::new("relative")),
+        authority.validate_directory(Path::new("relative")),
         Err(LocalFilesystemError::NotAbsolute)
     );
     assert_eq!(
-        authority.validate_workspace_directory(&root.0.join("invalid\0")),
+        authority.validate_directory(&root.0.join("invalid\0")),
         Err(LocalFilesystemError::Malformed)
     );
     let unreadable = root.0.join("unreadable");
     fs::create_dir(&unreadable).unwrap();
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-    let result = authority.validate_workspace_directory(&unreadable);
+    let result = authority.validate_directory(&unreadable);
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(result, Err(LocalFilesystemError::PermissionDenied));
 }
@@ -117,10 +117,10 @@ fn errors_and_retained_identities_do_not_disclose_content() {
         crate::local_path::LocalPathSemantics::Posix,
         Arc::new(crate::platform::macos_local_identity::MacosLocalIdentity),
     );
-    let directory = authority.validate_workspace_directory(&root.0).unwrap();
+    let directory = authority.validate_directory(&root.0).unwrap();
     assert_eq!(
         format!("{:?}", directory.identity()),
-        "WorkspaceDirectoryIdentity(LocalObjectIdentity(<redacted>))"
+        "LocalDirectoryIdentity(LocalObjectIdentity(<redacted>))"
     );
     let error = classify_io_error(io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -129,19 +129,16 @@ fn errors_and_retained_identities_do_not_disclose_content() {
     assert_eq!(format!("{error}"), "permission denied");
     assert_eq!(format!("{error:?}"), "PermissionDenied");
     let unavailable =
-        ValidatedWorkspaceDirectory::new(root.0.clone(), WorkspaceDirectoryIdentity::unavailable());
+        ValidatedLocalDirectory::new(root.0.clone(), LocalDirectoryIdentity::unavailable());
     assert_eq!(
-        authority.revalidate_workspace_directory(&unavailable),
+        authority.revalidate_directory(&unavailable),
         Err(LocalFilesystemError::IdentityChanged)
     );
     assert_eq!(
-        WorkspaceDirectoryIdentity::for_test(31),
-        WorkspaceDirectoryIdentity::for_test(31)
+        LocalDirectoryIdentity::for_test(31),
+        LocalDirectoryIdentity::for_test(31)
     );
-    assert_ne!(
-        directory.identity(),
-        WorkspaceDirectoryIdentity::for_test(31)
-    );
+    assert_ne!(directory.identity(), LocalDirectoryIdentity::for_test(31));
 }
 
 struct ScriptedIdentities(Mutex<VecDeque<Result<LocalIdentityObservation, LocalFilesystemError>>>);
@@ -176,7 +173,7 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
     let authority =
         LocalFilesystemAuthority::new(crate::local_path::LocalPathSemantics::Posix, source.clone());
     assert_eq!(
-        authority.validate_workspace_directory(&root.0),
+        authority.validate_directory(&root.0),
         Err(LocalFilesystemError::IdentityChanged)
     );
     assert!(source.0.lock().unwrap().is_empty());
@@ -192,7 +189,7 @@ fn identity_failures_remain_closed_and_do_not_fall_back_to_path_equality() {
         )])))),
     );
     assert_eq!(
-        authority.validate_workspace_directory(&root.0),
+        authority.validate_directory(&root.0),
         Err(LocalFilesystemError::PermissionDenied)
     );
 }
@@ -376,8 +373,8 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
     }
     // Output cannot consume the descriptors reserved for PTYs, sockets and directory work.
     let infrastructure: Vec<_> = (0..128).map(|_| fs::File::open(&root.0).unwrap()).collect();
-    let directory = authority.validate_workspace_directory(&root.0).unwrap();
-    assert!(authority.revalidate_workspace_directory(&directory).is_ok());
+    let directory = authority.validate_directory(&root.0).unwrap();
+    assert!(authority.revalidate_directory(&directory).is_ok());
     assert!(snapshots[0].revalidated_path().is_some());
     drop(infrastructure);
     drop(registries);

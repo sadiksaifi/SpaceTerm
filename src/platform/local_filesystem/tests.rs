@@ -66,10 +66,10 @@ impl Drop for Fixture {
 fn errors_and_retained_identities_do_not_disclose_content() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::testing();
-    let directory = authority.validate_workspace_directory(&root.0).unwrap();
+    let directory = authority.validate_directory(&root.0).unwrap();
     assert_eq!(
         format!("{:?}", directory.identity()),
-        "WorkspaceDirectoryIdentity(LocalObjectIdentity(<redacted>))"
+        "LocalDirectoryIdentity(LocalObjectIdentity(<redacted>))"
     );
     let error = classify_io_error(io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -78,19 +78,16 @@ fn errors_and_retained_identities_do_not_disclose_content() {
     assert_eq!(format!("{error}"), "permission denied");
     assert_eq!(format!("{error:?}"), "PermissionDenied");
     let unavailable =
-        ValidatedWorkspaceDirectory::new(root.0.clone(), WorkspaceDirectoryIdentity::unavailable());
+        ValidatedLocalDirectory::new(root.0.clone(), LocalDirectoryIdentity::unavailable());
     assert_eq!(
-        authority.revalidate_workspace_directory(&unavailable),
+        authority.revalidate_directory(&unavailable),
         Err(LocalFilesystemError::IdentityChanged)
     );
     assert_eq!(
-        WorkspaceDirectoryIdentity::for_test(31),
-        WorkspaceDirectoryIdentity::for_test(31)
+        LocalDirectoryIdentity::for_test(31),
+        LocalDirectoryIdentity::for_test(31)
     );
-    assert_ne!(
-        directory.identity(),
-        WorkspaceDirectoryIdentity::for_test(31)
-    );
+    assert_ne!(directory.identity(), LocalDirectoryIdentity::for_test(31));
 }
 
 struct ScriptedIdentities(Mutex<VecDeque<Result<LocalIdentityObservation, LocalFilesystemError>>>);
@@ -125,7 +122,7 @@ fn directory_validation_rejects_a_replacement_during_readability_check() {
     let authority =
         LocalFilesystemAuthority::new(crate::local_path::LocalPathSemantics::Posix, source.clone());
     assert_eq!(
-        authority.validate_workspace_directory(&root.0),
+        authority.validate_directory(&root.0),
         Err(LocalFilesystemError::IdentityChanged)
     );
     assert!(source.0.lock().unwrap().is_empty());
@@ -141,7 +138,7 @@ fn identity_failures_remain_closed_and_do_not_fall_back_to_path_equality() {
         )])))),
     );
     assert_eq!(
-        authority.validate_workspace_directory(&root.0),
+        authority.validate_directory(&root.0),
         Err(LocalFilesystemError::PermissionDenied)
     );
 }

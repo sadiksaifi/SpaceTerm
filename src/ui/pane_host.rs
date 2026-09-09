@@ -1,7 +1,8 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
-use crate::domain::remote_project::RemoteRestartBatch;
+use crate::domain::PinnedDirectory;
+use crate::domain::remote_workspace::RemoteRestartBatch;
+use crate::terminal::metadata::CurrentDirectory;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -39,11 +40,11 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
 }
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TabId, TerminalTab, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
+    SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -73,33 +74,10 @@ const _: () = assert!(
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
-    UserClosePaneRequested {
-        tab_id: TabId,
-        pane_id: PaneId,
-    },
-    CloseTabRequested {
-        tab_id: TabId,
-    },
-    PresentationChanged {
-        tab_id: TabId,
-    },
-    ReportedWorkingDirectoryChanged {
-        tab_id: TabId,
-        pane_id: PaneId,
-        path: PathBuf,
-    },
-    PaneClosed {
-        tab_id: TabId,
-        pane_id: PaneId,
-        promoted_pane_id: PaneId,
-        promoted_directory: Option<PathBuf>,
-    },
-    DirectoryAvailable {
-        identity: crate::domain::WorkspaceDirectoryIdentity,
-    },
-    DirectoryUnavailable {
-        reason: String,
-    },
+    UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
+    CloseTabRequested { tab_id: TabId },
+    PresentationChanged { tab_id: TabId },
+    PinDirectoryRequested { directory: CurrentDirectory },
 }
 
 impl std::fmt::Debug for PaneHostEvent {
@@ -108,12 +86,7 @@ impl std::fmt::Debug for PaneHostEvent {
             Self::UserClosePaneRequested { .. } => "PaneHostEvent::UserClosePaneRequested",
             Self::CloseTabRequested { .. } => "PaneHostEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "PaneHostEvent::PresentationChanged",
-            Self::ReportedWorkingDirectoryChanged { .. } => {
-                "PaneHostEvent::ReportedWorkingDirectoryChanged"
-            }
-            Self::PaneClosed { .. } => "PaneHostEvent::PaneClosed",
-            Self::DirectoryAvailable { .. } => "PaneHostEvent::DirectoryAvailable",
-            Self::DirectoryUnavailable { .. } => "PaneHostEvent::DirectoryUnavailable",
+            Self::PinDirectoryRequested { .. } => "PaneHostEvent::PinDirectoryRequested",
         })
     }
 }
@@ -222,19 +195,13 @@ impl PaneHost {
             window,
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
+                TerminalPaneEvent::PinDirectoryRequested => host.request_pin_directory(pane_id, cx),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
                         tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
-                }
-                TerminalPaneEvent::ReportedWorkingDirectoryChanged(path) => {
-                    cx.emit(PaneHostEvent::ReportedWorkingDirectoryChanged {
-                        tab_id: host.terminal_tab.id(),
-                        pane_id,
-                        path: path.clone(),
-                    });
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
@@ -306,14 +273,10 @@ impl PaneHost {
         self.terminal_tab.pane_count()
     }
 
-    pub(crate) fn root_pane_id(&self) -> PaneId {
-        self.terminal_tab.root_pane_id()
-    }
-
-    pub(crate) fn reported_working_directory(&self, pane_id: PaneId, cx: &App) -> Option<PathBuf> {
+    pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {
         self.terminal_tab
             .terminal(pane_id)
-            .and_then(|terminal| terminal.read(cx).reported_working_directory())
+            .and_then(|terminal| terminal.read(cx).current_directory())
     }
 
     pub(crate) fn terminal_panes<'a>(
@@ -325,13 +288,14 @@ impl PaneHost {
             .map(|(id, terminal)| (id, terminal.read(cx)))
     }
 
-    pub(crate) fn set_workspace_directory(
-        &mut self,
-        path: &Path,
-        identity: WorkspaceDirectoryIdentity,
-    ) {
-        self.session_factory
-            .set_working_directory(path.to_path_buf(), identity);
+    pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
+        self.session_factory.set_pinned_directory(directory);
+    }
+
+    pub(crate) fn request_pin_directory(&self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if let Some(directory) = self.current_directory(pane_id, cx) {
+            cx.emit(PaneHostEvent::PinDirectoryRequested { directory });
+        }
     }
 
     pub(crate) fn tab_title(&self) -> gpui::SharedString {
@@ -554,7 +518,6 @@ impl PaneHost {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.terminal_tab.focused_pane_id()
     }
@@ -704,34 +667,27 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        match self.session_factory.validate_child_launch() {
-            Ok(WorkspaceChildLaunchValidation::Local(directory)) => {
-                cx.emit(PaneHostEvent::DirectoryAvailable {
-                    identity: directory.identity(),
-                });
-            }
-            Ok(WorkspaceChildLaunchValidation::Remote) => {}
+        let session_factory = match self
+            .session_factory
+            .for_source_directory(self.current_directory(target_pane_id, cx))
+        {
+            Ok(factory) => factory,
             Err(error) => {
-                let reason = error.to_string();
-                cx.emit(PaneHostEvent::DirectoryUnavailable {
-                    reason: reason.clone(),
-                });
                 let detail = format!(
-                    "Cannot create a Pane because {reason}. Restore the Workspace Directory or use another Workspace."
+                    "Cannot create a Pane because {error}. Restore the directory or change the pinned directory."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
-                    "Workspace Directory Unavailable",
+                    "Starting Directory Unavailable",
                     Some(&detail),
                     &[PromptButton::ok("OK")],
                     cx,
                 ));
                 return;
             }
-        }
-        if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
+        };
+        if let Some(revalidation) = session_factory.revalidate_remote_child_launch() {
             let child_launch_generation = self.remote_lifecycle.begin_child_launch();
-            let session_factory = self.session_factory.clone();
             cx.spawn_in(window, async move |host, cx| {
                 let revalidation = revalidation.await;
                 let _ = host.update_in(cx, |host, window, cx| {
@@ -780,7 +736,7 @@ impl PaneHost {
             .detach();
             return;
         }
-        let prepared_launch = match self.session_factory.prepare_child_launch() {
+        let prepared_launch = match session_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
             Err(_) => {
                 cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
@@ -904,21 +860,10 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
-                let promoted_pane_id = self.terminal_tab.root_pane_id();
-                let promoted_directory = self
-                    .terminal_tab
-                    .terminal(promoted_pane_id)
-                    .and_then(|terminal| terminal.read(cx).reported_working_directory());
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     tab_id: self.terminal_tab.id(),
-                });
-                cx.emit(PaneHostEvent::PaneClosed {
-                    tab_id: self.terminal_tab.id(),
-                    pane_id,
-                    promoted_pane_id,
-                    promoted_directory,
                 });
                 cx.notify();
                 if self.active
@@ -1150,6 +1095,7 @@ impl PaneHost {
                 self.split_pane(pane_id, SplitAxis::Vertical, window, cx)
             }
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
+            PaneActionMenuCommand::PinDirectory => self.request_pin_directory(pane_id, cx),
             PaneActionMenuCommand::Close => self.request_close_pane(pane_id, cx),
         }
         if self.menu_pane_id.take().is_some() {
@@ -1210,16 +1156,25 @@ impl PaneHost {
         tree: PaneTreeRef<'_>,
         host: gpui::WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
+        cx: &App,
     ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, presentation),
+            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, presentation, cx),
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host, presentation),
+            } => self.render_split(
+                split_id,
+                axis,
+                ratio,
+                (first, second),
+                host,
+                presentation,
+                cx,
+            ),
         }
     }
 
@@ -1228,6 +1183,7 @@ impl PaneHost {
         pane_id: PaneId,
         host: gpui::WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
+        cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
@@ -1303,6 +1259,7 @@ impl PaneHost {
             .when(has_multiple_panes, |pane| {
                 pane.child(render_pane_controls(
                     pane_id,
+                    self.current_directory(pane_id, cx).is_some(),
                     focused,
                     zoomed,
                     &pane_group,
@@ -1313,6 +1270,10 @@ impl PaneHost {
             .into_any_element()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Recursive split rendering keeps layout geometry and UI context explicit"
+    )]
     fn render_split(
         &self,
         split_id: SplitId,
@@ -1321,10 +1282,11 @@ impl PaneHost {
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
+        cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone(), presentation);
-        let second = self.render_tree(second, host.clone(), presentation);
+        let first = self.render_tree(first, host.clone(), presentation, cx);
+        let second = self.render_tree(second, host.clone(), presentation, cx);
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1418,9 +1380,9 @@ impl Render for PaneHost {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let content = match zoom_state {
             ZoomState::Restored => {
-                self.render_tree(self.terminal_tab.root(), host.clone(), presentation)
+                self.render_tree(self.terminal_tab.root(), host.clone(), presentation, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, presentation),
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, presentation, cx),
         };
 
         div()
@@ -1585,6 +1547,7 @@ fn render_divider(
 
 fn render_pane_controls(
     pane_id: PaneId,
+    pin_enabled: bool,
     focused: bool,
     zoomed: bool,
     pane_group: &str,
@@ -1610,6 +1573,7 @@ fn render_pane_controls(
                 "Pane Actions",
                 pane_action_menu_entries(
                     "pane-menu",
+                    Some(pin_enabled),
                     zoomed,
                     true,
                     CloseTarget::Pane,
@@ -1736,7 +1700,11 @@ mod tests {
             true
         }
 
-        fn revalidate(&self) -> gpui::Task<Result<(), RemoteChannelRevalidationError>> {
+        fn revalidate(
+            &self,
+            _directory: crate::domain::RemoteDirectory,
+            _expected_identity: Option<crate::domain::RemoteDirectoryIdentity>,
+        ) -> gpui::Task<Result<(), RemoteChannelRevalidationError>> {
             self.revalidations.fetch_add(1, Ordering::AcqRel);
             self.grant.store(false, Ordering::Release);
             let error = *self.revalidation_error.lock().unwrap();
@@ -1748,6 +1716,7 @@ mod tests {
 
         fn prepare(
             &self,
+            _directory: &crate::domain::RemoteDirectory,
         ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
         {
             if !self.grant.swap(false, Ordering::AcqRel) {
@@ -1766,7 +1735,7 @@ mod tests {
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                     .with_selection_copy_response(Ok(None)),
             ),
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         )
     }
 
@@ -1801,14 +1770,15 @@ mod tests {
     ) -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::new(TestTerminalSessionFactory::new(records)),
-            crate::domain::ValidatedWorkspaceDirectory::new(
+            crate::domain::ValidatedLocalDirectory::new(
                 PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                WorkspaceDirectoryIdentity::for_test(71073),
+                crate::domain::LocalDirectoryIdentity::for_test(71073),
             ),
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
                 destination,
-                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
             ),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
         )
@@ -2118,7 +2088,7 @@ mod tests {
         );
     }
 
-    fn test_workspace_root() -> PathBuf {
+    fn test_home_directory() -> PathBuf {
         PathBuf::from("/tmp/spaceterm-test-workspace")
     }
 
@@ -2211,7 +2181,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2271,16 +2241,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
+    fn initial_and_unknown_source_panes_should_start_in_home_directory(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
+        let home_directory = PathBuf::from("/tmp/spaceterm-home-directory");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(workspace_root.clone()),
+            crate::terminal::testing::test_local_directory(home_directory.clone()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2305,7 +2275,7 @@ mod tests {
                         .to_path_buf()
                 })
                 .collect::<Vec<_>>(),
-            vec![workspace_root.clone(), workspace_root]
+            vec![home_directory.clone(), home_directory]
         );
     }
 
@@ -2371,7 +2341,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2430,7 +2400,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2487,7 +2457,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2546,7 +2516,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2664,7 +2634,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2707,7 +2677,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2747,7 +2717,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2843,7 +2813,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2882,7 +2852,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2939,7 +2909,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -2981,7 +2951,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -3050,7 +3020,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -3089,7 +3059,7 @@ mod tests {
             (
                 Some(px(26.0)),
                 Some(px(26.0)),
-                Some(size(px(240.0), px(121.0)))
+                Some(size(px(240.0), px(147.0)))
             )
         );
     }
@@ -3105,7 +3075,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -3157,7 +3127,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -3210,7 +3180,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
@@ -3268,5 +3238,174 @@ mod tests {
             split_ratio_for_offset(SplitAxis::Vertical, split_bounds, 50.0),
             Some(0.25)
         );
+    }
+    fn report_current_directory(
+        records: &TestTerminalSessionRecords,
+        session: usize,
+        generation: u64,
+        directory: &str,
+        remote: bool,
+    ) {
+        let mut screen = crate::terminal::ScreenSnapshot::from_test_parts_at(
+            Arc::from([]),
+            crate::terminal::ScrollbarSnapshot::default(),
+            "terminal",
+            generation,
+        );
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.directory.path = Arc::from(directory);
+        if remote {
+            metadata.context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+                crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                    crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
+                    crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
+                ),
+            );
+        }
+        records
+            .event_sender(session)
+            .unwrap()
+            .try_send(SessionEvent::Screen(screen))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn split_should_inherit_target_directory_and_capture_it_before_remote_wait(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory = remote_test_session_factory(records.clone());
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
+        cx.run_until_parked();
+        report_current_directory(&records, 1, 1, "/srv/frontend", true);
+        cx.run_until_parked();
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        report_current_directory(&records, 2, 1, "/srv/backend", true);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(PaneId::new(1), SplitAxis::Vertical, window, cx)
+            })
+        });
+        report_current_directory(&records, 1, 2, "/srv/later", true);
+        cx.run_until_parked();
+        let starts = records.starts();
+        assert_eq!(
+            starts[1]
+                .remote_launch_plan()
+                .unwrap()
+                .remote_directory()
+                .as_str(),
+            "/srv/frontend"
+        );
+        assert_eq!(
+            starts[2]
+                .remote_launch_plan()
+                .unwrap()
+                .remote_directory()
+                .as_str(),
+            "/srv/frontend"
+        );
+        assert_eq!(
+            host.read_with(cx, |host, cx| host.current_directory(PaneId::new(2), cx)),
+            Some(CurrentDirectory::Remote(
+                crate::domain::RemoteDirectory::new("/srv/backend".into()).unwrap()
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn pane_pin_action_should_emit_clicked_panes_directory(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory = remote_test_session_factory(records.clone());
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
+        cx.run_until_parked();
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        report_current_directory(&records, 1, 1, "/srv/first", true);
+        report_current_directory(&records, 2, 1, "/srv/second", true);
+        cx.run_until_parked();
+        let pins = Rc::new(RefCell::new(Vec::new()));
+        host.update(cx, |_, cx| {
+            let pins = pins.clone();
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if let PaneHostEvent::PinDirectoryRequested { directory } = event {
+                    pins.borrow_mut().push(directory.clone());
+                }
+            })
+            .detach();
+        });
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.perform_menu_command(
+                    PaneActionMenuCommand::PinDirectory,
+                    PaneId::new(1),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert_eq!(
+            pins.borrow().as_slice(),
+            &[CurrentDirectory::Remote(
+                crate::domain::RemoteDirectory::new("/srv/first".into()).unwrap()
+            )]
+        );
+    }
+    #[gpui::test]
+    fn local_split_should_inherit_target_apply_pins_and_reject_unavailable_directories(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let authority = crate::platform::local_filesystem::LocalFilesystemAuthority::testing();
+        let home = fixture.path().to_owned();
+        let first = home.join("shell-integration/bash");
+        let second = home.join("shell-integration/zsh");
+        let records = TestTerminalSessionRecords::default();
+        let factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+            Rc::new(TestTerminalSessionFactory::new(records.clone())),
+            authority.validate_directory(&home).unwrap(),
+            authority.clone(),
+        );
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
+        cx.run_until_parked();
+        report_current_directory(&records, 1, 1, first.to_str().unwrap(), false);
+        cx.run_until_parked();
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        report_current_directory(&records, 2, 1, second.to_str().unwrap(), false);
+        cx.run_until_parked();
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
+        host.update(cx, |host, _| {
+            host.set_pinned_directory(Some(PinnedDirectory::Local(
+                authority.validate_directory(&second).unwrap(),
+            )))
+        });
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        host.update(cx, |host, _| host.set_pinned_directory(None));
+        report_current_directory(
+            &records,
+            1,
+            2,
+            home.join("missing").to_str().unwrap(),
+            false,
+        );
+        cx.run_until_parked();
+        let count = host.read_with(cx, |host, _| host.pane_count());
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), count);
+        assert_eq!(
+            records
+                .starts()
+                .iter()
+                .map(|start| start.local_working_directory().unwrap().path().to_owned())
+                .collect::<Vec<_>>(),
+            vec![home, first.clone(), first, second]
+        );
+        assert!(records.dropped_session_ids().is_empty());
     }
 }

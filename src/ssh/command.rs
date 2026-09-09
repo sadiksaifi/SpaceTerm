@@ -13,7 +13,7 @@ use super::process::{
     SshProcessEnvironmentError, SshProcessMechanismError, run_probe_process,
 };
 use super::startup_environment::StartupSshEnvironment;
-use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+use crate::domain::{RemoteDirectory, SshDestination};
 
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
 const MAX_PROBE_STREAM_BYTES: usize = 4 * 1024;
@@ -545,8 +545,8 @@ pub(crate) enum RemoteShellCommandError {
     PosixShLoginCapabilityRequired,
     #[error("the remote login-shell capability does not match the configured shell")]
     InvalidLoginShellCapability,
-    #[error("the Remote Workspace Directory is too long to launch")]
-    WorkspaceDirectoryTooLong,
+    #[error("the remote Starting Directory is too long to launch")]
+    StartingDirectoryTooLong,
     #[error("the remote Pane launch command is too long")]
     CommandTooLong,
 }
@@ -602,29 +602,12 @@ impl SupportedRemoteLoginShell {
         }
     }
 
-    fn quote_directory(self, directory: &RemoteWorkspaceDirectory) -> String {
-        match self {
-            Self::Nushell => quote_remote_workspace_directory_for_nushell(directory),
-            Self::Elvish => quote_remote_workspace_directory_for_elvish(directory),
-            Self::PosixSh | Self::Bash | Self::Zsh | Self::Fish => {
-                quote_remote_workspace_directory_for_posix(directory)
-            }
-        }
-    }
-
     fn quote_login_shell(self, login_shell: &str) -> String {
         match self {
             Self::Nushell => quote_for_nushell(login_shell),
             Self::PosixSh | Self::Bash | Self::Zsh | Self::Fish | Self::Elvish => {
                 quote_for_posix_shell(login_shell)
             }
-        }
-    }
-
-    const fn success_separator(self) -> &'static str {
-        match self {
-            Self::Nushell | Self::Elvish => ";",
-            Self::PosixSh | Self::Bash | Self::Zsh | Self::Fish => "&&",
         }
     }
 
@@ -736,13 +719,13 @@ impl fmt::Debug for ValidatedRemoteLoginShell {
 /// creating a child. This builder preserves remote-string authority and performs no local path
 /// conversion or filesystem access.
 pub(crate) struct RemotePaneShellCommandBuilder<'a> {
-    directory: &'a RemoteWorkspaceDirectory,
+    directory: &'a RemoteDirectory,
     login_shell: &'a ValidatedRemoteLoginShell,
 }
 
 impl<'a> RemotePaneShellCommandBuilder<'a> {
     pub(crate) const fn new(
-        directory: &'a RemoteWorkspaceDirectory,
+        directory: &'a RemoteDirectory,
         login_shell: &'a ValidatedRemoteLoginShell,
     ) -> Self {
         Self {
@@ -753,19 +736,12 @@ impl<'a> RemotePaneShellCommandBuilder<'a> {
 
     pub(crate) fn build(self) -> Result<ValidatedRemoteShellCommand, RemoteShellCommandError> {
         if self.directory.as_str().len() > MAXIMUM_REMOTE_SHELL_VALUE_BYTES {
-            return Err(RemoteShellCommandError::WorkspaceDirectoryTooLong);
+            return Err(RemoteShellCommandError::StartingDirectoryTooLong);
         }
         let kind = self.login_shell.kind;
-        let directory = kind.quote_directory(self.directory);
-        let login_shell = kind.quote_login_shell(&self.login_shell.path);
-        let arguments = kind.login_arguments();
-        let separator = kind.success_separator();
-        let launch_prefix = kind.launch_prefix();
-        let mut command = format!("cd {directory} {separator} {launch_prefix} {login_shell}");
-        for argument in arguments {
-            command.push(' ');
-            command.push_str(argument);
-        }
+        let bootstrap = remote_shell_bootstrap(self.directory, self.login_shell);
+        let quoted = kind.quote_login_shell(&bootstrap);
+        let command = format!("{} '/bin/sh' -c {quoted}", kind.launch_prefix());
         if command.len() > MAXIMUM_REMOTE_PANE_COMMAND_BYTES {
             return Err(RemoteShellCommandError::CommandTooLong);
         }
@@ -773,34 +749,126 @@ impl<'a> RemotePaneShellCommandBuilder<'a> {
     }
 }
 
-fn quote_remote_workspace_directory_for_posix(directory: &RemoteWorkspaceDirectory) -> String {
+/// Builds a per-channel bootstrap without changing remote user configuration.
+/// The supervising shell retains the temporary resources until its child exits and removes them
+/// on normal exit or hangup. Paths and shell contents are always quoted as data.
+fn remote_shell_bootstrap(
+    directory: &RemoteDirectory,
+    shell: &ValidatedRemoteLoginShell,
+) -> String {
+    let mut script = format!(
+        "cd {} 2>/dev/null || exit 125\nspaceterm_shell_umask=$(umask)\numask 077\nspaceterm_integration_dir=$(mktemp -d \"${{TMPDIR:-/tmp}}/spaceterm-shell.XXXXXXXX\" 2>/dev/null) || exit 125\ntrap 'rm -rf -- \"$spaceterm_integration_dir\"' 0\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nexport SPACETERM=1 COLORTERM=truecolor SPACETERM_SHELL_INTEGRATION_VERSION=1\n",
+        quote_remote_starting_directory_for_posix(directory)
+    );
+    let files: &[(&str, &str)] = match shell.kind {
+        SupportedRemoteLoginShell::Zsh => &[
+            (
+                "zsh/.zshenv",
+                include_str!("../../assets/shell-integration/zsh/.zshenv"),
+            ),
+            (
+                "zsh/spaceterm-integration",
+                include_str!("../../assets/shell-integration/zsh/spaceterm-integration"),
+            ),
+        ],
+        SupportedRemoteLoginShell::Bash => &[
+            (
+                "bash/spaceterm.bash",
+                include_str!("../../assets/shell-integration/bash/spaceterm.bash"),
+            ),
+            (
+                "bash/.bash_profile",
+                include_str!("../../assets/shell-integration/bash/remote-profile.bash"),
+            ),
+        ],
+        SupportedRemoteLoginShell::Fish => &[(
+            "fish/vendor_conf.d/spaceterm-shell-integration.fish",
+            include_str!(
+                "../../assets/shell-integration/fish/vendor_conf.d/spaceterm-shell-integration.fish"
+            ),
+        )],
+        SupportedRemoteLoginShell::Nushell => &[(
+            "nushell/vendor/autoload/spaceterm.nu",
+            include_str!("../../assets/shell-integration/nushell/vendor/autoload/spaceterm.nu"),
+        )],
+        SupportedRemoteLoginShell::Elvish => &[
+            (
+                "elvish/lib/spaceterm-integration.elv",
+                include_str!("../../assets/shell-integration/elvish/lib/spaceterm-integration.elv"),
+            ),
+            (
+                "elvish/rc.elv",
+                include_str!("../../assets/shell-integration/elvish/remote-rc.elv"),
+            ),
+        ],
+        SupportedRemoteLoginShell::PosixSh => &[
+            (
+                "sh/.profile",
+                include_str!("../../assets/shell-integration/sh/remote-profile.sh"),
+            ),
+            (
+                "sh/spaceterm.sh",
+                include_str!("../../assets/shell-integration/sh/spaceterm.sh"),
+            ),
+        ],
+    };
+    for (relative, contents) in files {
+        let parent = relative.rsplit_once('/').map_or("", |(parent, _)| parent);
+        script.push_str(&format!(
+            "mkdir -p \"$spaceterm_integration_dir/{parent}\" 2>/dev/null || exit 125\nprintf '%s' {} > \"$spaceterm_integration_dir/{relative}\" || exit 125\n",
+            quote_for_posix_shell(contents)
+        ));
+    }
+    match shell.kind {
+        SupportedRemoteLoginShell::Zsh => script.push_str(
+            "if [ \"${ZDOTDIR+set}\" = set ]; then export SPACETERM_ZSH_ZDOTDIR=\"$ZDOTDIR\"; fi\nexport ZDOTDIR=\"$spaceterm_integration_dir/zsh\"\n",
+        ),
+        // Bash has no post-profile injection option for login shells. Its system profile runs
+        // once with this temporary HOME; the wrapper restores account HOME before the user profile.
+        SupportedRemoteLoginShell::Bash => script.push_str(
+            "export SPACETERM_BASH_HOME=\"$HOME\" SPACETERM_BASH_INTEGRATION=\"$spaceterm_integration_dir/bash/spaceterm.bash\"\nexport HOME=\"$spaceterm_integration_dir/bash\"\n",
+        ),
+        SupportedRemoteLoginShell::Elvish => script.push_str(
+            "export SPACETERM_ELVISH_RC=\"${XDG_CONFIG_HOME:-$HOME/.config}/elvish/rc.elv\"\nexport SPACETERM_ELVISH_INTEGRATION=\"$spaceterm_integration_dir/elvish/lib/spaceterm-integration.elv\"\n",
+        ),
+        SupportedRemoteLoginShell::Fish | SupportedRemoteLoginShell::Nushell => script.push_str(
+            "export SPACETERM_SHELL_INTEGRATION_XDG_DIR=\"$spaceterm_integration_dir\"\nexport XDG_DATA_DIRS=\"$spaceterm_integration_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}\"\n",
+        ),
+        // The login profile can replace ENV, so install the ENV wrapper after that profile runs.
+        SupportedRemoteLoginShell::PosixSh => script.push_str(
+            "export SPACETERM_SH_HOME=\"$HOME\" SPACETERM_SH_INTEGRATION=\"$spaceterm_integration_dir/sh/spaceterm.sh\"\nexport HOME=\"$spaceterm_integration_dir/sh\"\n",
+        ),
+    }
+    script.push_str("umask \"$spaceterm_shell_umask\"\n");
+    script.push_str(&quote_for_posix_shell(&shell.path));
+    match shell.kind {
+        // Bash has no post-profile injection option for login shells. Its system profile runs
+        // once with this temporary HOME; the wrapper restores account HOME before the user profile.
+        SupportedRemoteLoginShell::Bash => script.push_str(" -il"),
+        SupportedRemoteLoginShell::Nushell => {
+            script.push_str(" -l --execute 'use spaceterm *; install'")
+        }
+        SupportedRemoteLoginShell::Elvish => {
+            script.push_str(" -rc \"$spaceterm_integration_dir/elvish/rc.elv\"")
+        }
+        _ => {
+            for argument in shell.kind.login_arguments() {
+                script.push(' ');
+                script.push_str(argument);
+            }
+        }
+    }
+    script.push_str("\nspaceterm_shell_status=$?\nexit \"$spaceterm_shell_status\"\n");
+    script
+}
+
+fn quote_remote_starting_directory_for_posix(directory: &RemoteDirectory) -> String {
     match directory.as_str() {
         "~" => "\"${HOME}\"".to_owned(),
         value if value.starts_with("~/") => {
             format!("\"${{HOME}}\"{}", quote_for_posix_shell(&value[1..]))
         }
         value => quote_for_posix_shell(value),
-    }
-}
-
-fn quote_remote_workspace_directory_for_elvish(directory: &RemoteWorkspaceDirectory) -> String {
-    match directory.as_str() {
-        "~" => "$E:HOME".to_owned(),
-        value if value.starts_with("~/") => {
-            format!("$E:HOME{}", quote_for_posix_shell(&value[1..]))
-        }
-        value => quote_for_posix_shell(value),
-    }
-}
-
-fn quote_remote_workspace_directory_for_nushell(directory: &RemoteWorkspaceDirectory) -> String {
-    match directory.as_str() {
-        "~" | "~/" => "$nu.home-dir".to_owned(),
-        value if value.starts_with("~/") => format!(
-            "($nu.home-dir | path join {})",
-            quote_for_nushell(&value[2..])
-        ),
-        value => quote_for_nushell(value),
     }
 }
 
@@ -818,7 +886,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
 
     use super::*;
 
@@ -893,7 +961,7 @@ mod tests {
         directory: &str,
         login_shell: &str,
     ) -> Result<ValidatedRemoteShellCommand, RemoteShellCommandError> {
-        let directory = RemoteWorkspaceDirectory::new(directory.to_owned()).unwrap();
+        let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
         let login_shell = if login_shell.rsplit('/').next() == Some("sh") {
             ValidatedRemoteLoginShell::from_discovery(
                 login_shell.to_owned(),
@@ -1166,6 +1234,7 @@ mod tests {
     fn pane_spec_should_force_a_tty_and_append_one_validated_remote_argument() {
         let command = pane_command("/srv/project", "/bin/zsh").unwrap();
 
+        let expected = command.argument.clone();
         let spec = context().pane_channel(command);
 
         assert_eq!(
@@ -1192,85 +1261,48 @@ mod tests {
                 "SessionType=default",
                 "--",
                 "root@fedora@orb",
-                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l",
+                &expected,
             ]
         );
     }
 
     #[test]
-    fn pane_command_should_quote_hostile_remote_values_as_one_posix_command() {
-        let command = pane_command(
-            "/srv/-project dir/it's $(touch nope); ü",
-            "/opt/shell dir/it's/zsh",
-        )
-        .unwrap();
-
-        assert_eq!(
-            command.argument,
-            "cd '/srv/-project dir/it'\"'\"'s $(touch nope); ü' && SPACETERM='1' COLORTERM='truecolor' exec '/opt/shell dir/it'\"'\"'s/zsh' -l"
+    fn bootstrap_should_quote_hostile_directory_and_shell_values() {
+        let directory = RemoteDirectory::new("/srv/it's $(touch nope); ü".to_owned()).unwrap();
+        let shell = ValidatedRemoteLoginShell::new("/opt/it's/zsh".to_owned()).unwrap();
+        let script = remote_shell_bootstrap(&directory, &shell);
+        assert!(
+            script.starts_with("cd '/srv/it'\"'\"'s $(touch nope); ü' 2>/dev/null || exit 125\n")
         );
+        assert!(script.contains("'/opt/it'\"'\"'s/zsh' -l"));
+        assert!(script.contains("trap 'rm -rf -- \"$spaceterm_integration_dir\"' 0"));
     }
 
     #[test]
-    fn pane_command_should_expand_only_the_remote_home_prefix() {
-        let command = pane_command("~/project dir/it's", "/bin/bash").unwrap();
-
-        assert_eq!(
-            command.argument,
-            "cd \"${HOME}\"'/project dir/it'\"'\"'s' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/bash' -l"
-        );
+    fn bootstrap_should_expand_only_remote_home_prefix() {
+        let directory = RemoteDirectory::new("~/it's".to_owned()).unwrap();
+        let shell = ValidatedRemoteLoginShell::new("/bin/bash".to_owned()).unwrap();
+        let script = remote_shell_bootstrap(&directory, &shell);
+        assert!(script.starts_with("cd \"${HOME}\"'/it'\"'\"'s' 2>/dev/null || exit 125\n"));
     }
 
     #[test]
-    fn nushell_pane_command_should_quote_values_and_expand_remote_home() {
-        let command = pane_command(
-            "~/project \"quoted\" it's $(touch nope); ü",
-            "/opt/shell \"quoted\"/nu",
-        )
-        .unwrap();
-
-        assert_eq!(
-            command.argument,
-            "cd ($nu.home-dir | path join \"project \\\"quoted\\\" it's $(touch nope); ü\") ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/shell \\\"quoted\\\"/nu\" -l"
-        );
-    }
-
-    #[test]
-    fn pane_command_should_use_explicit_arguments_for_every_supported_shell() {
-        let cases = [
-            (
-                "/bin/sh",
-                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/sh' -l",
-            ),
-            (
-                "/usr/local/bin/bash",
-                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/usr/local/bin/bash' -l",
-            ),
-            (
-                "/opt/bin/zsh",
-                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/opt/bin/zsh' -l",
-            ),
-            (
-                "/opt/bin/fish",
-                "cd '/srv/project' && set -lx SPACETERM '1' && set -lx COLORTERM 'truecolor' && exec '/opt/bin/fish' -l",
-            ),
-            (
-                "/opt/bin/nu",
-                "cd \"/srv/project\" ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/bin/nu\" -l",
-            ),
-            (
-                "/opt/bin/nushell",
-                "cd \"/srv/project\" ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/bin/nushell\" -l",
-            ),
-            (
-                "/opt/bin/elvish",
-                "cd '/srv/project' ; set E:SPACETERM = '1'; set E:COLORTERM = 'truecolor'; exec '/opt/bin/elvish'",
-            ),
-        ];
-
-        for (shell, expected) in cases {
-            let command = pane_command("/srv/project", shell).unwrap();
-            assert_eq!(command.argument, expected);
+    fn pane_command_should_install_directory_reports_for_supported_shells() {
+        for shell in [
+            "/bin/bash",
+            "/bin/zsh",
+            "/bin/fish",
+            "/bin/nu",
+            "/bin/elvish",
+        ] {
+            let command = pane_command("~/", shell).unwrap();
+            assert!(
+                command
+                    .argument
+                    .contains("SPACETERM_SHELL_INTEGRATION_VERSION=1")
+            );
+            assert!(command.argument.contains("file://localhost"));
+            assert!(command.argument.contains("spaceterm_shell_status"));
         }
     }
 
@@ -1342,17 +1374,15 @@ mod tests {
 
     #[test]
     fn pane_command_should_reject_oversized_directory_and_shell_values() {
-        let oversized_directory = RemoteWorkspaceDirectory::new(format!(
-            "/{}",
-            "d".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES)
-        ))
-        .unwrap();
+        let oversized_directory =
+            RemoteDirectory::new(format!("/{}", "d".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES)))
+                .unwrap();
         let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         assert_eq!(
             RemotePaneShellCommandBuilder::new(&oversized_directory, &shell)
                 .build()
                 .err(),
-            Some(RemoteShellCommandError::WorkspaceDirectoryTooLong)
+            Some(RemoteShellCommandError::StartingDirectoryTooLong)
         );
 
         let oversized_shell = format!("/{}/zsh", "s".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES));
@@ -1364,7 +1394,7 @@ mod tests {
 
     #[test]
     fn pane_command_should_reject_oversized_quoted_output() {
-        let directory = RemoteWorkspaceDirectory::new(format!(
+        let directory = RemoteDirectory::new(format!(
             "/{}",
             "'".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES - 1)
         ))
@@ -1394,7 +1424,12 @@ mod tests {
         assert_eq!(spec.executable(), OsStr::new("/selected/openssh"));
         assert_eq!(
             arguments(&spec).last().map(String::as_str),
-            Some("cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l")
+            Some(
+                pane_command("/srv/project", "/bin/zsh")
+                    .unwrap()
+                    .argument
+                    .as_str()
+            )
         );
         assert_eq!(
             duplicate_owner.take().err(),

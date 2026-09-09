@@ -6,15 +6,15 @@ use std::time::Duration;
 
 use gpui::{App, BackgroundExecutor, Task, Window};
 
+use super::remote_directory_picker::RemoteDirectoryProvider;
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
     RemoteWorkspaceConnectedSession, RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlowBackend,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
     RemoteWorkspaceSessionOwner,
 };
-use super::remote_workspace_picker::RemoteWorkspaceProvider;
 use super::ssh_host_form::ManagedHostFormBackendError;
-use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
+use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, SshDestination};
 use crate::platform::app_paths::AppPaths;
 use crate::platform::askpass::{
     AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease, AskPassWindowFactory,
@@ -39,8 +39,8 @@ use crate::ssh::process::{
     SshProcessAdapter, SshProcessCleanup, SshProcessCleanupScope, SshProcessEnvironment,
     SshProcessSupervisor,
 };
+use crate::ssh::remote_directory_provider::SshRemoteDirectoryProvider;
 use crate::ssh::remote_utility::SshRemoteUtilityProcessRunner;
-use crate::ssh::remote_workspace_provider::SshRemoteWorkspaceProvider;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
     RemoteChannelRevalidationError, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
@@ -378,8 +378,8 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 process_adapter,
                 environment,
             ));
-            let provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync> =
-                Arc::new(SshRemoteWorkspaceProvider::new(
+            let provider: Arc<dyn RemoteDirectoryProvider + Send + Sync> =
+                Arc::new(SshRemoteDirectoryProvider::new(
                     utility_command,
                     utility_runner,
                     cancellation.clone(),
@@ -480,7 +480,7 @@ fn map_control_connection_error(
 struct NativeRemoteWorkspaceSessionOwner {
     resources: Arc<NativeSessionResources>,
     lifecycle: Option<ControlConnectionObserver>,
-    utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+    utility: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
 }
 
 #[derive(Clone, Default)]
@@ -629,19 +629,12 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
             .transpose()
     }
 
-    fn bind_terminal_channels_for_identity(
+    fn bind_terminal_channels(
         &self,
-        directory: &RemoteWorkspaceDirectory,
-        expected_identity: &RemoteDirectoryIdentity,
         login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
-        RemotePaneShellCommandBuilder::new(directory, login_shell)
-            .build()
-            .map_err(|_| RemoteWorkspaceFlowBackendError::IncompatibleServer)?;
         Ok(Arc::new(NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&self.resources.control),
-            directory: directory.clone(),
-            expected_identity: expected_identity.clone(),
             utility: Arc::clone(&self.utility),
             login_shell: login_shell.clone(),
             executor: self.resources.executor.clone(),
@@ -664,15 +657,13 @@ impl Drop for NativeRemoteWorkspaceSessionOwner {
     }
 }
 
-/// Fallible terminal-channel source bound to one directory identity and live control authority.
+/// Fallible terminal-channel source bound to live control authority.
 ///
-/// Revalidation must observe the expected physical identity through the session utility provider
-/// and grants exactly one prepare for the same opaque connection instance and generation.
+/// Each selected directory is validated independently. Explicit pins also require a matching
+/// physical identity. Grants authorize one preparation for that directory and connection generation.
 struct NativeRemoteTerminalChannelProvider {
     control: Weak<Mutex<Option<Box<dyn NativeSessionControl>>>>,
-    directory: RemoteWorkspaceDirectory,
-    expected_identity: RemoteDirectoryIdentity,
-    utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+    utility: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
     login_shell: ValidatedRemoteLoginShell,
     executor: BackgroundExecutor,
     grant: Arc<Mutex<ChannelGrantState>>,
@@ -681,7 +672,7 @@ struct NativeRemoteTerminalChannelProvider {
 #[derive(Default)]
 struct ChannelGrantState {
     validation_epoch: u64,
-    granted_binding: Option<LiveConnectionBinding>,
+    granted_binding: Option<(LiveConnectionBinding, RemoteDirectory)>,
 }
 
 impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
@@ -695,7 +686,11 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
         })
     }
 
-    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+    fn revalidate(
+        &self,
+        directory: RemoteDirectory,
+        expected_identity: Option<RemoteDirectoryIdentity>,
+    ) -> Task<Result<(), RemoteChannelRevalidationError>> {
         let validation_epoch = {
             let mut grant = self
                 .grant
@@ -719,20 +714,17 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
         let Some(binding) = binding else {
             return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
         };
-        let validation = self
-            .utility
-            .validate_physical_identity(self.directory.clone());
-        let expected_identity = self.expected_identity.clone();
+        let validation = self.utility.validate_physical_identity(directory.clone());
         let control = Arc::downgrade(&control);
         let grant = Arc::clone(&self.grant);
         self.executor.spawn(async move {
             let observed_identity = validation.await.map_err(|error| match error {
-                super::remote_workspace_picker::RemoteWorkspaceProviderError::ConnectionLost => {
+                super::remote_directory_picker::RemoteDirectoryProviderError::ConnectionLost => {
                     RemoteChannelRevalidationError::ConnectionUnavailable
                 }
                 _ => RemoteChannelRevalidationError::DirectoryUnavailable,
             })?;
-            if observed_identity != expected_identity {
+            if expected_identity.is_some_and(|expected| observed_identity != expected) {
                 return Err(RemoteChannelRevalidationError::IdentityChanged);
             }
             let current_binding = control
@@ -754,23 +746,27 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
             if grant.validation_epoch != validation_epoch {
                 return Err(RemoteChannelRevalidationError::ConnectionUnavailable);
             }
-            grant.granted_binding = Some(binding);
+            grant.granted_binding = Some((binding, directory));
             Ok(())
         })
     }
 
     fn prepare(
         &self,
+        directory: &RemoteDirectory,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
-        let granted_binding = self
+        let (granted_binding, granted_directory) = self
             .grant
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .granted_binding
             .take()
             .ok_or(RemoteChannelUnavailable)?;
+        if granted_directory != *directory {
+            return Err(RemoteChannelUnavailable);
+        }
         let control = self.control.upgrade().ok_or(RemoteChannelUnavailable)?;
-        let command = RemotePaneShellCommandBuilder::new(&self.directory, &self.login_shell)
+        let command = RemotePaneShellCommandBuilder::new(directory, &self.login_shell)
             .build()
             .map_err(|_| RemoteChannelUnavailable)?;
         let control = control
@@ -854,7 +850,7 @@ mod tests {
             VecDeque<
                 Result<
                     RemoteDirectoryIdentity,
-                    super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                    super::super::remote_directory_picker::RemoteDirectoryProviderError,
                 >,
             >,
         >,
@@ -865,7 +861,7 @@ mod tests {
             results: impl IntoIterator<
                 Item = Result<
                     RemoteDirectoryIdentity,
-                    super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                    super::super::remote_directory_picker::RemoteDirectoryProviderError,
                 >,
             >,
         ) -> Self {
@@ -875,69 +871,69 @@ mod tests {
         }
     }
 
-    impl RemoteWorkspaceProvider for FakeIdentityProvider {
+    impl RemoteDirectoryProvider for FakeIdentityProvider {
         fn discover_account(
             &self,
         ) -> Task<
             Result<
-                super::super::remote_workspace_picker::RemoteWorkspaceAccount,
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                super::super::remote_directory_picker::RemoteWorkspaceAccount,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
         fn list_directories(
             &self,
-            _: RemoteWorkspaceDirectory,
+            _: RemoteDirectory,
         ) -> Task<
             Result<
-                super::super::remote_workspace_picker::RemoteWorkspaceDirectoryListing,
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                super::super::remote_directory_picker::RemoteDirectoryListing,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
         fn probe_exact_path(
             &self,
-            _: RemoteWorkspaceDirectory,
+            _: RemoteDirectory,
         ) -> Task<
             Result<
-                super::super::remote_workspace_picker::RemoteWorkspaceExactPathState,
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                super::super::remote_directory_picker::RemoteDirectoryExactPathState,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
         fn create_directory_recursively(
             &self,
-            _: RemoteWorkspaceDirectory,
-        ) -> Task<Result<(), super::super::remote_workspace_picker::RemoteWorkspaceProviderError>>
+            _: RemoteDirectory,
+        ) -> Task<Result<(), super::super::remote_directory_picker::RemoteDirectoryProviderError>>
         {
             Task::ready(Err(
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
         fn validate_physical_identity(
             &self,
-            _: RemoteWorkspaceDirectory,
+            _: RemoteDirectory,
         ) -> Task<
             Result<
                 RemoteDirectoryIdentity,
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(self.validations.lock().unwrap().pop_front().unwrap_or(Err(
-                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
             )))
         }
     }
@@ -1541,15 +1537,15 @@ mod tests {
             )])),
         };
         let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
-        let provider = owner
-            .bind_terminal_channels_for_identity(
-                &RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
-                &RemoteDirectoryIdentity::new("/home/test/src".to_owned()).unwrap(),
-                &login_shell,
-            )
-            .unwrap();
+        let provider = owner.bind_terminal_channels(&login_shell).unwrap();
         assert!(provider.is_ready());
-        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        assert_eq!(
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                None
+            )),
+            Ok(())
+        );
         let workspace_alias = owner.acquire_workspace_alias_pin().unwrap().unwrap();
 
         owner.close();
@@ -1560,7 +1556,11 @@ mod tests {
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
         assert!(aliases.is_active(&alias));
         assert!(!provider.is_ready());
-        assert!(provider.prepare().is_err());
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
         drop(workspace_alias);
         assert!(!aliases.is_active(&alias));
     }
@@ -1582,8 +1582,6 @@ mod tests {
         let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
         let provider = NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&control),
-            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
-            expected_identity: expected.clone(),
             utility: Arc::new(FakeIdentityProvider::returning([
                 Ok(expected.clone()),
                 Ok(expected),
@@ -1593,13 +1591,37 @@ mod tests {
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
 
-        assert!(provider.prepare().is_err());
-        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
-        assert!(provider.prepare().is_ok());
-        assert!(provider.prepare().is_err());
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
+        assert_eq!(
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
+            )),
+            Ok(())
+        );
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_ok()
+        );
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
 
-        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        assert_eq!(
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
+            )),
+            Ok(())
+        );
         let next_generation = binding
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1607,7 +1629,52 @@ mod tests {
         *binding
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next_generation;
-        assert!(provider.prepare().is_err());
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
+        assert_eq!(preparations.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn native_channel_grant_should_bind_selected_directory_and_allow_unpinned_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::clone(&preparations),
+                binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }))));
+        let first = RemoteDirectory::new("/srv/frontend".to_owned()).unwrap();
+        let second = RemoteDirectory::new("/srv/backend".to_owned()).unwrap();
+        let provider = NativeRemoteTerminalChannelProvider {
+            control: Arc::downgrade(&control),
+            utility: Arc::new(FakeIdentityProvider::returning([
+                Ok(RemoteDirectoryIdentity::new("/physical/frontend".to_owned()).unwrap()),
+                Ok(RemoteDirectoryIdentity::new("/physical/backend".to_owned()).unwrap()),
+            ])),
+            login_shell: ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
+            executor: cx.executor(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
+        };
+        assert_eq!(
+            cx.executor()
+                .block(provider.revalidate(first.clone(), None)),
+            Ok(())
+        );
+        assert!(provider.prepare(&second).is_err());
+        assert!(provider.prepare(&first).is_err());
+        assert_eq!(
+            cx.executor()
+                .block(provider.revalidate(second.clone(), None)),
+            Ok(())
+        );
+        assert!(provider.prepare(&second).is_ok());
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
     }
 
@@ -1626,8 +1693,6 @@ mod tests {
         let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
         let provider = NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&control),
-            directory: RemoteWorkspaceDirectory::new("/srv/project".to_owned()).unwrap(),
-            expected_identity: expected.clone(),
             utility: Arc::new(FakeIdentityProvider::returning([Ok(expected)])),
             login_shell: ValidatedRemoteLoginShell::from_discovery(
                 "/bin/sh".to_owned(),
@@ -1638,14 +1703,21 @@ mod tests {
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
 
-        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
-        let prepared = provider.prepare().unwrap();
+        assert_eq!(
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
+            )),
+            Ok(())
+        );
+        let prepared = provider
+            .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+            .unwrap();
         let command = prepared.take().unwrap();
 
-        assert_eq!(
-            command.arguments().last().unwrap(),
-            "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/sh' -l"
-        );
+        let launch = command.arguments().last().unwrap().to_str().unwrap();
+        assert!(launch.contains("SPACETERM_SH_INTEGRATION"));
+        assert!(launch.contains(" -l"));
     }
 
     #[gpui::test]
@@ -1663,15 +1735,19 @@ mod tests {
         let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
         let provider = NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&control),
-            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
-            expected_identity: expected.clone(),
             utility: Arc::new(FakeIdentityProvider::returning([Ok(expected)])),
             login_shell: ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
             executor: cx.executor(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
 
-        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        assert_eq!(
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
+            )),
+            Ok(())
+        );
 
         let replacement_preparations = Arc::new(AtomicUsize::new(0));
         *control
@@ -1685,7 +1761,11 @@ mod tests {
                 aliases: ActiveSshAliasRegistry::default(),
             }));
 
-        assert!(provider.prepare().is_err());
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
         assert_eq!(old_preparations.load(Ordering::SeqCst), 0);
         assert_eq!(replacement_preparations.load(Ordering::SeqCst), 0);
     }
@@ -1705,8 +1785,6 @@ mod tests {
             }))));
         let provider = NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&control),
-            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
-            expected_identity: RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap(),
             utility: Arc::new(FakeIdentityProvider::returning([Ok(
                 RemoteDirectoryIdentity::new("/attacker/project".to_owned()).unwrap(),
             )])),
@@ -1716,10 +1794,17 @@ mod tests {
         };
 
         assert_eq!(
-            cx.executor().block(provider.revalidate()),
+            cx.executor().block(provider.revalidate(
+                RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
+                Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
+            )),
             Err(RemoteChannelRevalidationError::IdentityChanged)
         );
-        assert!(provider.prepare().is_err());
+        assert!(
+            provider
+                .prepare(&RemoteDirectory::new("/srv/project".to_owned()).unwrap())
+                .is_err()
+        );
         assert_eq!(preparations.load(Ordering::SeqCst), 0);
     }
 

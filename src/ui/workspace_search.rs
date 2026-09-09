@@ -5,7 +5,7 @@ use spaceterm_ui::{
     CommandPaletteItem, CommandPaletteLifecycleEvent, Icon, IconName,
 };
 
-use crate::domain::{WorkspaceId, WorkspaceKind};
+use crate::domain::{WorkspaceId, WorkspaceLocation};
 
 const WORKSPACE_ICON_SIZE: f32 = 14.0;
 
@@ -16,28 +16,25 @@ pub(super) enum WorkspaceSearchEvent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkspaceSearchKind {
-    Scratch,
-    LocalProject,
-    RemoteProject,
+enum WorkspaceSearchLocation {
+    Local,
+    Remote,
 }
 
-impl WorkspaceSearchKind {
+impl WorkspaceSearchLocation {
     const fn icon(self) -> IconName {
         match self {
-            Self::Scratch => IconName::Terminal,
-            Self::LocalProject => IconName::Folder,
-            Self::RemoteProject => IconName::Globe,
+            Self::Local => IconName::Terminal,
+            Self::Remote => IconName::Globe,
         }
     }
 }
 
-impl From<&WorkspaceKind> for WorkspaceSearchKind {
-    fn from(kind: &WorkspaceKind) -> Self {
-        match kind {
-            WorkspaceKind::Scratch { .. } => Self::Scratch,
-            WorkspaceKind::LocalProject { .. } => Self::LocalProject,
-            WorkspaceKind::RemoteProject { .. } => Self::RemoteProject,
+impl From<&WorkspaceLocation> for WorkspaceSearchLocation {
+    fn from(location: &WorkspaceLocation) -> Self {
+        match location {
+            WorkspaceLocation::Local => Self::Local,
+            WorkspaceLocation::Remote { .. } => Self::Remote,
         }
     }
 }
@@ -46,7 +43,7 @@ pub(super) struct WorkspaceSearchItem {
     workspace_id: WorkspaceId,
     name: String,
     path: String,
-    kind: WorkspaceSearchKind,
+    location: WorkspaceSearchLocation,
     tab_count: usize,
     pane_count: usize,
 }
@@ -56,7 +53,7 @@ impl WorkspaceSearchItem {
         workspace_id: WorkspaceId,
         name: String,
         path: String,
-        kind: &WorkspaceKind,
+        location: &WorkspaceLocation,
         tab_count: usize,
         pane_count: usize,
     ) -> Self {
@@ -64,14 +61,14 @@ impl WorkspaceSearchItem {
             workspace_id,
             name,
             path,
-            kind: kind.into(),
+            location: location.into(),
             tab_count,
             pane_count,
         }
     }
 
     fn into_palette_item(self) -> CommandPaletteItem<WorkspaceId> {
-        let icon_name = self.kind.icon();
+        let icon_name = self.location.icon();
         CommandPaletteItem::new(self.workspace_id, self.name)
             .description(self.path)
             .leading_icon(move |foreground| {
@@ -311,15 +308,13 @@ mod tests {
                     {
                         harness.reopen_on_selection = false;
                         search.update(cx, |search, cx| {
-                            let kind = WorkspaceKind::Scratch {
-                                directory_authority: crate::domain::DirectoryAuthority::initial(),
-                            };
+                            let location = WorkspaceLocation::Local;
                             search.open(
                                 vec![WorkspaceSearchItem::new(
                                     WorkspaceId::new(9),
                                     "Reopened".to_owned(),
                                     "/reopened".to_owned(),
-                                    &kind,
+                                    &location,
                                     1,
                                     1,
                                 )],
@@ -366,31 +361,25 @@ mod tests {
     }
 
     fn item(workspace_id: u64, name: &str, path: &str) -> WorkspaceSearchItem {
-        let kind = WorkspaceKind::Scratch {
-            directory_authority: crate::domain::DirectoryAuthority::initial(),
-        };
+        let location = WorkspaceLocation::Local;
         WorkspaceSearchItem::new(
             WorkspaceId::new(workspace_id),
             name.to_owned(),
             path.to_owned(),
-            &kind,
+            &location,
             workspace_id as usize,
             workspace_id as usize + 1,
         )
     }
 
     #[test]
-    fn workspace_kinds_should_use_distinct_semantic_icons() {
+    fn workspace_locations_should_use_distinct_semantic_icons() {
         assert!(matches!(
-            WorkspaceSearchKind::Scratch.icon(),
+            WorkspaceSearchLocation::Local.icon(),
             IconName::Terminal
         ));
         assert!(matches!(
-            WorkspaceSearchKind::LocalProject.icon(),
-            IconName::Folder
-        ));
-        assert!(matches!(
-            WorkspaceSearchKind::RemoteProject.icon(),
+            WorkspaceSearchLocation::Remote.icon(),
             IconName::Globe
         ));
     }

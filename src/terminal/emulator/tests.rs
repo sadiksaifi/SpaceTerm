@@ -2607,7 +2607,7 @@ fn remote_metadata_context_should_never_resolve_file_links_as_local_paths() {
     let metadata_context = TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
             crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
-            crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
     );
     let mut emulator = TerminalEmulator::new_with_local_filesystem(
@@ -3407,7 +3407,7 @@ fn kitty_remote_graphics_cannot_enable_local_file_or_shared_memory_transports() 
     let metadata_context = TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
             crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
-            crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
     );
     let mut emulator = TerminalEmulator::new_with_local_filesystem(

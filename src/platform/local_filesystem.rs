@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
-use crate::domain::ValidatedWorkspaceDirectory;
+use crate::domain::ValidatedLocalDirectory;
 
 pub(crate) mod picker;
 
@@ -119,9 +119,9 @@ impl LocalObjectIdentity {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct WorkspaceDirectoryIdentity(LocalObjectIdentity);
+pub(crate) struct LocalDirectoryIdentity(LocalObjectIdentity);
 
-impl WorkspaceDirectoryIdentity {
+impl LocalDirectoryIdentity {
     /// An unavailable startup directory carries no filesystem authority.
     pub(crate) fn unavailable() -> Self {
         Self(LocalObjectIdentity(IdentityValue::Unavailable, None))
@@ -181,10 +181,10 @@ impl LocalFilesystemAuthority {
         self.paths
     }
 
-    pub(crate) fn validate_workspace_directory(
+    pub(crate) fn validate_directory(
         &self,
         path: &Path,
-    ) -> Result<ValidatedWorkspaceDirectory, LocalFilesystemError> {
+    ) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
         validate_absolute_path(self.paths, path)?;
         let first = self.identify_kind(path, LocalObjectKind::Directory)?;
         fs::read_dir(path).map_err(|error| match classify_io_error(error) {
@@ -195,17 +195,17 @@ impl LocalFilesystemAuthority {
         if first != current {
             return Err(LocalFilesystemError::IdentityChanged);
         }
-        Ok(ValidatedWorkspaceDirectory::new(
+        Ok(ValidatedLocalDirectory::new(
             path.to_owned(),
-            WorkspaceDirectoryIdentity(first),
+            LocalDirectoryIdentity(first),
         ))
     }
 
-    pub(crate) fn revalidate_workspace_directory(
+    pub(crate) fn revalidate_directory(
         &self,
-        directory: &ValidatedWorkspaceDirectory,
-    ) -> Result<ValidatedWorkspaceDirectory, LocalFilesystemError> {
-        let current = self.validate_workspace_directory(directory.path())?;
+        directory: &ValidatedLocalDirectory,
+    ) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
+        let current = self.validate_directory(directory.path())?;
         if current.identity() != directory.identity() {
             return Err(LocalFilesystemError::IdentityChanged);
         }

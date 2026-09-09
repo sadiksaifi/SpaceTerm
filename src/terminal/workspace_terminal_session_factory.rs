@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -6,14 +7,17 @@ use gpui::Task;
 use thiserror::Error;
 
 use super::geometry::TerminalGeometry;
+use super::metadata::CurrentDirectory;
 use super::metadata::{RemoteTerminalMetadataContext, TerminalLocalFileCapabilities};
 use super::session::{
     LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, StartedTerminalSession,
     TerminalLaunchPlan, TerminalSessionFactory,
 };
-use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
+use crate::domain::{
+    PinnedDirectory, RemoteDirectory, RemoteDirectoryIdentity, ValidatedLocalDirectory,
+};
 use crate::platform::local_filesystem::{
-    LocalFilesystemAuthority, LocalFilesystemError as WorkspaceDirectoryError,
+    LocalFilesystemAuthority, LocalFilesystemError as LocalDirectoryError,
 };
 use crate::ssh::command::PreparedSshPaneChannelCommand;
 
@@ -25,7 +29,7 @@ enum WorkspaceTerminalLaunchContext {
 
 #[derive(Clone)]
 struct RemoteWorkspaceTerminalLaunchContext {
-    local_home: ValidatedWorkspaceDirectory,
+    local_home: ValidatedLocalDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
     channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
@@ -45,27 +49,34 @@ pub(crate) struct RemoteChannelUnavailable;
 pub(crate) enum RemoteChannelRevalidationError {
     #[error("the remote Terminal Session connection is unavailable")]
     ConnectionUnavailable,
-    #[error("the remote workspace directory could not be revalidated")]
+    #[error("the remote starting directory could not be revalidated")]
     DirectoryUnavailable,
-    #[error("the remote workspace directory identity changed")]
+    #[error("the remote starting directory identity changed")]
     IdentityChanged,
 }
 
 /// Workspace-owned authority for reserving single-use Remote Terminal Session channels.
 ///
 /// Each successful `revalidate` grants at most one immediately following `prepare`. The provider
-/// binds that grant to the current Control Connection generation and pinned physical directory
+/// binds that grant to the current Control Connection generation and selected physical directory
 /// identity. Callers must revalidate before hierarchy mutation and treat cancellation or a stale
 /// grant as no mutation. Implementations must not reinterpret the remote directory as a local path.
 pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
     /// Reports whether the owning Control Connection can currently accept child channels.
     fn is_ready(&self) -> bool;
 
-    /// Revalidates the pinned remote physical identity and authorizes one subsequent preparation.
-    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>>;
+    /// Revalidates the selected remote directory and authorizes one subsequent preparation.
+    fn revalidate(
+        &self,
+        directory: RemoteDirectory,
+        expected_identity: Option<RemoteDirectoryIdentity>,
+    ) -> Task<Result<(), RemoteChannelRevalidationError>>;
 
     /// Consumes the current revalidation grant into one prepared OpenSSH channel command.
-    fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
+    fn prepare(
+        &self,
+        directory: &RemoteDirectory,
+    ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
 }
 
 #[cfg(test)]
@@ -77,11 +88,18 @@ where
         true
     }
 
-    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+    fn revalidate(
+        &self,
+        _directory: RemoteDirectory,
+        _expected_identity: Option<RemoteDirectoryIdentity>,
+    ) -> Task<Result<(), RemoteChannelRevalidationError>> {
         Task::ready(Ok(()))
     }
 
-    fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+    fn prepare(
+        &self,
+        _directory: &RemoteDirectory,
+    ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
         self()
     }
 }
@@ -93,6 +111,19 @@ where
 /// command to exactly one Pane; dropping it abandons the reservation without starting a session.
 pub(crate) struct PreparedWorkspaceTerminalLaunch {
     launch_plan: TerminalLaunchPlan,
+}
+
+impl PreparedWorkspaceTerminalLaunch {
+    pub(crate) fn starting_directory(&self) -> CurrentDirectory {
+        match &self.launch_plan {
+            TerminalLaunchPlan::Local(plan) => {
+                CurrentDirectory::Local(plan.working_directory().path().to_owned())
+            }
+            TerminalLaunchPlan::Remote(plan) => {
+                CurrentDirectory::Remote(plan.remote_directory().clone())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -108,48 +139,42 @@ impl PreparedWorkspaceTerminalLaunch {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// The authority required before adding a child to a Workspace hierarchy.
-///
-/// Local validation returns local filesystem authority. Remote validation never returns a path;
-/// its physical identity grant remains encapsulated by `RemoteTerminalChannelProvider`.
-pub(crate) enum WorkspaceChildLaunchValidation {
-    Local(ValidatedWorkspaceDirectory),
-    Remote,
-}
-
 #[derive(Clone)]
-/// Binds Terminal Session creation to one Workspace's immutable Local or Remote launch context.
+/// Owns a Workspace's home and pin policy and captures individual Terminal Session launches.
 pub(crate) struct WorkspaceTerminalSessionFactory {
     session_factory: Rc<dyn TerminalSessionFactory>,
     local_filesystem: Option<LocalFilesystemAuthority>,
     launch_context: WorkspaceTerminalLaunchContext,
+    pinned_directory: Option<PinnedDirectory>,
+    expected_remote_identity: Option<RemoteDirectoryIdentity>,
 }
 
 impl WorkspaceTerminalSessionFactory {
     #[cfg(test)]
     pub(crate) fn new_local(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: ValidatedWorkspaceDirectory,
+        home_directory: ValidatedLocalDirectory,
     ) -> Self {
         Self::new_local_with_authority(
             session_factory,
-            working_directory,
+            home_directory,
             LocalFilesystemAuthority::testing(),
         )
     }
 
-    /// Creates a factory whose children start from one validated local Workspace Directory.
+    /// Creates a factory whose children start from one validated local home directory.
     pub(crate) fn new_local_with_authority(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: ValidatedWorkspaceDirectory,
+        home_directory: ValidatedLocalDirectory,
         local_filesystem: LocalFilesystemAuthority,
     ) -> Self {
         Self {
             session_factory,
+            pinned_directory: None,
+            expected_remote_identity: None,
             local_filesystem: Some(local_filesystem),
             launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
-                working_directory,
+                home_directory,
             )),
         }
     }
@@ -160,13 +185,16 @@ impl WorkspaceTerminalSessionFactory {
     /// remote startup data and must never be converted to a local `PathBuf`.
     pub(crate) fn new_remote(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home: ValidatedWorkspaceDirectory,
+        local_home: ValidatedLocalDirectory,
         metadata_context: RemoteTerminalMetadataContext,
+        initial_directory_identity: RemoteDirectoryIdentity,
         fallback_title: String,
         channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
     ) -> Self {
         Self {
             session_factory,
+            pinned_directory: None,
+            expected_remote_identity: Some(initial_directory_identity),
             local_filesystem: None,
             launch_context: WorkspaceTerminalLaunchContext::Remote(
                 RemoteWorkspaceTerminalLaunchContext {
@@ -192,7 +220,9 @@ impl WorkspaceTerminalSessionFactory {
                 if !context.channel_provider.is_ready() {
                     return Err(RemoteChannelUnavailable);
                 }
-                let pane_channel = context.channel_provider.prepare()?;
+                let pane_channel = context
+                    .channel_provider
+                    .prepare(context.metadata_context.initial_directory())?;
                 TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     context.local_home.clone(),
                     context.metadata_context.destination().clone(),
@@ -205,7 +235,7 @@ impl WorkspaceTerminalSessionFactory {
         Ok(PreparedWorkspaceTerminalLaunch { launch_plan })
     }
 
-    /// Revalidates the pinned physical identity and grants one subsequent Remote child launch.
+    /// Revalidates the selected remote directory and grants one subsequent Remote child launch.
     ///
     /// Local child launches have no remote authority to revalidate, so callers can keep their
     /// synchronous path by branching on `None`. Dropping the task or receiving an error authorizes
@@ -216,7 +246,10 @@ impl WorkspaceTerminalSessionFactory {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(_) => None,
             WorkspaceTerminalLaunchContext::Remote(context) => {
-                Some(context.channel_provider.revalidate())
+                Some(context.channel_provider.revalidate(
+                    context.metadata_context.initial_directory().clone(),
+                    self.expected_remote_identity.clone(),
+                ))
             }
         }
     }
@@ -272,42 +305,84 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    /// Revalidates Local directory identity without applying local validation to Remote values.
-    ///
-    /// A Remote result carries no path authority; callers must separately use the provider's
-    /// asynchronous physical-identity grant before reserving a channel.
-    pub(crate) fn validate_child_launch(
-        &self,
-    ) -> Result<WorkspaceChildLaunchValidation, WorkspaceDirectoryError> {
+    /// Revalidates retained local filesystem authority without interpreting Remote values locally.
+    fn validate_starting_directory(&self) -> Result<(), LocalDirectoryError> {
         let WorkspaceTerminalLaunchContext::Local(plan) = &self.launch_context else {
-            return Ok(WorkspaceChildLaunchValidation::Remote);
+            return Ok(());
         };
         #[cfg(test)]
         if plan.working_directory().identity().is_synthetic() {
-            return Ok(WorkspaceChildLaunchValidation::Local(
-                plan.working_directory().clone(),
-            ));
+            return Ok(());
         }
-        let directory = self
-            .local_filesystem
+        self.local_filesystem
             .as_ref()
-            .ok_or(WorkspaceDirectoryError::Other)?
-            .revalidate_workspace_directory(plan.working_directory())?;
-        Ok(WorkspaceChildLaunchValidation::Local(directory))
+            .ok_or(LocalDirectoryError::Other)?
+            .revalidate_directory(plan.working_directory())?;
+        Ok(())
     }
 
-    pub(crate) fn set_working_directory(
-        &mut self,
-        workspace_root: PathBuf,
-        identity: WorkspaceDirectoryIdentity,
-    ) {
-        let WorkspaceTerminalLaunchContext::Local(plan) = &mut self.launch_context else {
-            return;
-        };
-        *plan = LocalTerminalLaunchPlan::new(ValidatedWorkspaceDirectory::new(
-            workspace_root,
-            identity,
-        ));
+    pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
+        self.pinned_directory = directory;
+    }
+
+    /// Captures and validates the starting directory before asynchronous launch work begins.
+    /// The workspace factory retains immutable home; this clone owns only one launch selection.
+    pub(crate) fn for_source_directory(
+        &self,
+        source: Option<CurrentDirectory>,
+    ) -> Result<Self, LocalDirectoryError> {
+        let mut selected = self.clone();
+        match &mut selected.launch_context {
+            WorkspaceTerminalLaunchContext::Local(plan) => {
+                let authority = self
+                    .local_filesystem
+                    .as_ref()
+                    .ok_or(LocalDirectoryError::Other)?;
+                let directory = match (&self.pinned_directory, source) {
+                    (Some(PinnedDirectory::Local(directory)), _) => directory.clone(),
+                    (Some(PinnedDirectory::Remote { .. }), _)
+                    | (None, Some(CurrentDirectory::Remote(_))) => {
+                        return Err(LocalDirectoryError::Other);
+                    }
+                    (None, Some(CurrentDirectory::Local(path)))
+                        if path != plan.working_directory().path() =>
+                    {
+                        authority.validate_directory(&path)?
+                    }
+                    _ => plan.working_directory().clone(),
+                };
+                *plan = LocalTerminalLaunchPlan::new(directory);
+            }
+            WorkspaceTerminalLaunchContext::Remote(context) => {
+                let directory = match (&self.pinned_directory, source) {
+                    (
+                        Some(PinnedDirectory::Remote {
+                            directory,
+                            identity,
+                        }),
+                        _,
+                    ) => {
+                        selected.expected_remote_identity = Some(identity.clone());
+                        directory.clone()
+                    }
+                    (Some(PinnedDirectory::Local(_)), _)
+                    | (None, Some(CurrentDirectory::Local(_))) => {
+                        return Err(LocalDirectoryError::Other);
+                    }
+                    (None, Some(CurrentDirectory::Remote(directory))) => {
+                        selected.expected_remote_identity = None;
+                        directory
+                    }
+                    (None, None) => context.metadata_context.initial_directory().clone(),
+                };
+                context.metadata_context = RemoteTerminalMetadataContext::new(
+                    context.metadata_context.destination().clone(),
+                    directory,
+                );
+            }
+        }
+        selected.validate_starting_directory()?;
+        Ok(selected)
     }
 }
 
@@ -318,7 +393,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
@@ -328,6 +403,7 @@ mod tests {
     struct TestRemoteChannelProvider {
         ready: AtomicBool,
         preparations: AtomicUsize,
+        revalidations: Mutex<Vec<(RemoteDirectory, Option<RemoteDirectoryIdentity>)>>,
         results: Mutex<VecDeque<Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>>>,
     }
 
@@ -341,6 +417,7 @@ mod tests {
             Self {
                 ready: AtomicBool::new(ready),
                 preparations: AtomicUsize::new(0),
+                revalidations: Mutex::new(Vec::new()),
                 results: Mutex::new(results.into_iter().collect()),
             }
         }
@@ -351,7 +428,15 @@ mod tests {
             self.ready.load(Ordering::Acquire)
         }
 
-        fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+        fn revalidate(
+            &self,
+            directory: RemoteDirectory,
+            expected_identity: Option<RemoteDirectoryIdentity>,
+        ) -> Task<Result<(), RemoteChannelRevalidationError>> {
+            self.revalidations
+                .lock()
+                .unwrap()
+                .push((directory, expected_identity));
             if self.is_ready() {
                 Task::ready(Ok(()))
             } else {
@@ -359,7 +444,10 @@ mod tests {
             }
         }
 
-        fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+        fn prepare(
+            &self,
+            _directory: &RemoteDirectory,
+        ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
             self.preparations.fetch_add(1, Ordering::AcqRel);
             self.results
                 .lock()
@@ -388,13 +476,14 @@ mod tests {
         provider: Arc<dyn RemoteTerminalChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
-        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::new(TestTerminalSessionFactory::new(records)),
-            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+            crate::terminal::testing::test_local_directory(PathBuf::from(
                 "/local/home/used-only-as-process-cwd",
             )),
             RemoteTerminalMetadataContext::new(destination, remote_directory),
+            RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
         )
@@ -405,9 +494,9 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let directory = ValidatedWorkspaceDirectory::new(
+        let directory = ValidatedLocalDirectory::new(
             PathBuf::from("/typed-local-workspace"),
-            WorkspaceDirectoryIdentity::for_test(7011),
+            crate::domain::LocalDirectoryIdentity::for_test(7011),
         );
         let factory =
             WorkspaceTerminalSessionFactory::new_local(session_factory, directory.clone());
@@ -437,7 +526,7 @@ mod tests {
     fn remote_factory_should_preserve_context_and_prepare_one_channel_per_child() {
         let records = TestTerminalSessionRecords::default();
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
-        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
         let provider = Arc::new(TestRemoteChannelProvider::new(
             true,
             [
@@ -459,10 +548,7 @@ mod tests {
 
         assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
         assert_eq!(factory.local_working_directory(), None);
-        assert_eq!(
-            factory.validate_child_launch().unwrap(),
-            WorkspaceChildLaunchValidation::Remote
-        );
+        assert!(factory.validate_starting_directory().is_ok());
         assert_eq!(
             factory.local_file_capabilities(),
             TerminalLocalFileCapabilities::Disabled
@@ -531,5 +617,149 @@ mod tests {
             error,
             crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
         ));
+    }
+    #[test]
+    fn local_launch_policy_should_capture_source_pin_and_home_without_changing_existing_launches() {
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let home = fixture.path().to_path_buf();
+        let source = home.join("shell-integration/bash");
+        let pin = home.join("shell-integration/zsh");
+        let authority = LocalFilesystemAuthority::testing();
+        let records = TestTerminalSessionRecords::default();
+        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+            Rc::new(TestTerminalSessionFactory::new(records.clone())),
+            authority.validate_directory(&home).unwrap(),
+            authority.clone(),
+        );
+        let captured = factory
+            .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
+            .unwrap();
+        factory.set_pinned_directory(Some(PinnedDirectory::Local(
+            authority.validate_directory(&pin).unwrap(),
+        )));
+        let pinned = factory
+            .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
+            .unwrap();
+        assert_eq!(captured.local_working_directory(), Some(source.as_path()));
+        assert_eq!(pinned.local_working_directory(), Some(pin.as_path()));
+        factory.set_pinned_directory(None);
+        assert_eq!(
+            factory
+                .for_source_directory(None)
+                .unwrap()
+                .local_working_directory(),
+            Some(home.as_path())
+        );
+        assert_eq!(
+            factory
+                .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
+                .unwrap()
+                .local_working_directory(),
+            Some(source.as_path())
+        );
+        assert!(
+            factory
+                .for_source_directory(Some(CurrentDirectory::Local(home.join("missing"))))
+                .is_err()
+        );
+        assert!(
+            factory
+                .for_source_directory(Some(CurrentDirectory::Remote(
+                    RemoteDirectory::new("/tmp".into()).unwrap()
+                )))
+                .is_err()
+        );
+        assert!(
+            records.starts().is_empty(),
+            "directory policy must not mutate sessions"
+        );
+    }
+
+    #[test]
+    fn unavailable_explicit_pin_should_never_fall_back_to_source_or_home() {
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let authority = LocalFilesystemAuthority::testing();
+        let pin = fixture.path().join("pinned");
+        std::fs::create_dir(&pin).unwrap();
+        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+            Rc::new(TestTerminalSessionFactory::new(
+                TestTerminalSessionRecords::default(),
+            )),
+            authority.validate_directory(fixture.path()).unwrap(),
+            authority.clone(),
+        );
+        factory.set_pinned_directory(Some(PinnedDirectory::Local(
+            authority.validate_directory(&pin).unwrap(),
+        )));
+        std::fs::remove_dir(&pin).unwrap();
+        assert!(
+            factory
+                .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_launch_policy_should_capture_directory_and_identity_without_local_authority() {
+        let provider = Arc::new(TestRemoteChannelProvider::new(true, []));
+        let mut factory = remote_factory(TestTerminalSessionRecords::default(), provider.clone());
+        let source = RemoteDirectory::new("/srv/frontend".into()).unwrap();
+        let pin = RemoteDirectory::new("/srv/pinned".into()).unwrap();
+        let identity = RemoteDirectoryIdentity::new("/remote-identity".into()).unwrap();
+        let home_identity =
+            RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap();
+        let _initial_revalidation = factory.revalidate_remote_child_launch().unwrap();
+        let captured = factory
+            .for_source_directory(Some(CurrentDirectory::Remote(source.clone())))
+            .unwrap();
+        let _source_revalidation = captured.revalidate_remote_child_launch().unwrap();
+        factory.set_pinned_directory(Some(PinnedDirectory::Remote {
+            directory: pin.clone(),
+            identity: identity.clone(),
+        }));
+        let selected = factory
+            .for_source_directory(Some(CurrentDirectory::Remote(source.clone())))
+            .unwrap();
+        let _pin_revalidation = selected.revalidate_remote_child_launch().unwrap();
+        let WorkspaceTerminalLaunchContext::Remote(context) = &captured.launch_context else {
+            panic!("remote context")
+        };
+        assert_eq!(context.metadata_context.initial_directory(), &source);
+        let WorkspaceTerminalLaunchContext::Remote(context) = &selected.launch_context else {
+            panic!("remote context")
+        };
+        assert_eq!(context.metadata_context.initial_directory(), &pin);
+        assert_eq!(selected.expected_remote_identity, Some(identity.clone()));
+        assert_eq!(selected.local_working_directory(), None);
+        factory.set_pinned_directory(None);
+        let home = factory.for_source_directory(None).unwrap();
+        let _home_revalidation = home.revalidate_remote_child_launch().unwrap();
+        let WorkspaceTerminalLaunchContext::Remote(context) = home.launch_context else {
+            panic!("remote context")
+        };
+        assert_eq!(
+            context.metadata_context.initial_directory().as_str(),
+            "~/project"
+        );
+        assert_eq!(
+            provider.revalidations.lock().unwrap().as_slice(),
+            [
+                (
+                    RemoteDirectory::new("~/project".to_owned()).unwrap(),
+                    Some(home_identity.clone()),
+                ),
+                (source.clone(), None),
+                (pin, Some(identity)),
+                (
+                    RemoteDirectory::new("~/project".to_owned()).unwrap(),
+                    Some(home_identity),
+                ),
+            ]
+        );
+        assert!(
+            factory
+                .for_source_directory(Some(CurrentDirectory::Local(PathBuf::from("/tmp"))))
+                .is_err()
+        );
     }
 }

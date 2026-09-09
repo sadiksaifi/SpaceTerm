@@ -14,7 +14,7 @@ use super::process::{
     CancelOnDrop, CapturedProcessError, ProcessExit, SshProcessAdapter, SshProcessEnvironment,
     SshProcessMechanismError, run_captured_process,
 };
-use crate::domain::RemoteWorkspaceDirectory;
+use crate::domain::RemoteDirectory;
 
 pub(crate) const MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES: usize = 384 * 1024;
 const MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES: usize = 32 * 1024;
@@ -340,7 +340,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
     #[cfg(test)]
     pub(crate) async fn list_directories(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
     ) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
         self.list_directories_with_cancellation(directory, SshCancellationToken::default())
             .await
@@ -348,7 +348,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
 
     pub(crate) async fn list_directories_with_cancellation(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
         cancellation: SshCancellationToken,
     ) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
         let output = self
@@ -360,7 +360,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
     #[cfg(test)]
     pub(crate) async fn probe_exact_path(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
     ) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
         self.probe_exact_path_with_cancellation(directory, SshCancellationToken::default())
             .await
@@ -368,7 +368,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
 
     pub(crate) async fn probe_exact_path_with_cancellation(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
         cancellation: SshCancellationToken,
     ) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
         let output = self
@@ -383,7 +383,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
     #[cfg(test)]
     pub(crate) async fn create_directory_recursively(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
     ) -> Result<(), RemoteUtilityError> {
         self.create_directory_recursively_with_cancellation(
             directory,
@@ -394,7 +394,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
 
     pub(crate) async fn create_directory_recursively_with_cancellation(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
         cancellation: SshCancellationToken,
     ) -> Result<(), RemoteUtilityError> {
         let output = self
@@ -409,7 +409,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
     #[cfg(test)]
     pub(crate) async fn resolve_physical_directory(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
     ) -> Result<String, RemoteUtilityError> {
         self.resolve_physical_directory_with_cancellation(
             directory,
@@ -420,7 +420,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
 
     pub(crate) async fn resolve_physical_directory_with_cancellation(
         &self,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
         cancellation: SshCancellationToken,
     ) -> Result<String, RemoteUtilityError> {
         let output = self
@@ -989,7 +989,7 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::ssh::command::{OpenSshExecutable, SshCommandContext, SshCommandSpec};
     use crate::ssh::control_connection::SshCancellationToken;
     use crate::ssh::process::ProcessExit;
@@ -1094,8 +1094,8 @@ mod tests {
         ))
     }
 
-    pub(super) fn remote_directory(value: &str) -> RemoteWorkspaceDirectory {
-        RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    pub(super) fn remote_directory(value: &str) -> RemoteDirectory {
+        RemoteDirectory::new(value.to_owned()).unwrap()
     }
 
     #[gpui::test]

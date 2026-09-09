@@ -11,7 +11,7 @@ use spaceterm_ui::{
 pub(crate) struct DesktopWording {
     pub(crate) directory_selection: &'static str,
     pub(crate) file_preview: &'static str,
-    pub(crate) local_project_description: &'static str,
+    pub(crate) local_machine_label: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -156,19 +156,17 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 13] {
+fn required_presented_actions() -> [&'static str; 11] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
-        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
     [
-        CreateScratchWorkspace.name(),
         SearchWorkspaces.name(),
         NewWorkspace.name(),
-        OpenLocalProject.name(),
         CreateTab.name(),
         EditCopy.name(),
         EditPaste.name(),
@@ -185,8 +183,8 @@ fn required_presented_actions() -> [&'static str; 13] {
 pub(crate) fn testing_presentation() -> DesktopPresentation {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateScratchWorkspace, CreateTab, NewWorkspace, OpenLocalProject,
-        SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
@@ -194,14 +192,12 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         DesktopWording {
             directory_selection: "Choose Directory",
             file_preview: "Preview File",
-            local_project_description: "Pinned to a local folder",
+            local_machine_label: "This Computer",
         },
         "Primary+Enter",
         vec![
-            ActionShortcut::new(CreateScratchWorkspace, "Primary+Shift+N"),
             ActionShortcut::new(SearchWorkspaces, "Primary+P"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
-            ActionShortcut::new(OpenLocalProject, "Primary+O"),
             ActionShortcut::new(CreateTab, "Primary+T"),
             ActionShortcut::new(EditCopy, "Primary+C"),
             ActionShortcut::new(EditPaste, "Primary+V"),
@@ -232,7 +228,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{CreateScratchWorkspace, NewWorkspace, OpenLocalProject};
+    use crate::ui::{NewWorkspace, SearchWorkspaces};
     use gpui::Action;
 
     #[gpui::test]
@@ -279,8 +275,8 @@ mod tests {
             CommandPaletteKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
             vec![
-                KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
-                KeyBinding::new("shift-cmd-n", NewWorkspace, None),
+                KeyBinding::new("cmd-shift-p", SearchWorkspaces, None),
+                KeyBinding::new("shift-cmd-p", NewWorkspace, None),
             ],
             testing_presentation(),
             std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
@@ -295,7 +291,7 @@ mod tests {
         let mut presentation = testing_presentation();
         presentation
             .shortcuts
-            .retain(|shortcut| shortcut.action != OpenLocalProject.name());
+            .retain(|shortcut| shortcut.action != NewWorkspace.name());
 
         let result = DesktopProfile::new(
             ModalDesktopPolicy::mac_os(),

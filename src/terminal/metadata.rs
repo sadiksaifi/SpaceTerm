@@ -1,11 +1,27 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+use crate::domain::{RemoteDirectory, SshDestination};
 use crate::local_path::LocalPathSemantics;
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
+
+/// A Terminal Session's directory, retaining its machine boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum CurrentDirectory {
+    Local(std::path::PathBuf),
+    Remote(RemoteDirectory),
+}
+
+impl std::fmt::Debug for CurrentDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Local(_) => "CurrentDirectory::Local",
+            Self::Remote(_) => "CurrentDirectory::Remote",
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectoryProvenance {
@@ -81,13 +97,13 @@ pub(crate) enum ProgressMetadata {
 /// filesystem authority and must never be converted to `PathBuf` or locally validated.
 pub(crate) struct RemoteTerminalMetadataContext {
     destination: SshDestination,
-    initial_directory: RemoteWorkspaceDirectory,
+    initial_directory: RemoteDirectory,
 }
 
 impl RemoteTerminalMetadataContext {
     pub(crate) const fn new(
         destination: SshDestination,
-        initial_directory: RemoteWorkspaceDirectory,
+        initial_directory: RemoteDirectory,
     ) -> Self {
         Self {
             destination,
@@ -99,7 +115,7 @@ impl RemoteTerminalMetadataContext {
         &self.destination
     }
 
-    pub(crate) const fn initial_directory(&self) -> &RemoteWorkspaceDirectory {
+    pub(crate) const fn initial_directory(&self) -> &RemoteDirectory {
         &self.initial_directory
     }
 }
@@ -150,6 +166,15 @@ impl TerminalMetadataContext {
         match self {
             Self::Local { paths, .. } => Some(*paths),
             Self::Remote(_) => None,
+        }
+    }
+
+    pub(crate) fn current_directory(&self, directory: &str) -> Option<CurrentDirectory> {
+        match self {
+            Self::Local { .. } => self.local_directory(directory).map(CurrentDirectory::Local),
+            Self::Remote(_) => RemoteDirectory::new(directory.to_owned())
+                .ok()
+                .map(CurrentDirectory::Remote),
         }
     }
 
@@ -433,7 +458,7 @@ pub(crate) fn parse_osc7_directory(
         || context
             .local_hostname()
             .is_some_and(|hostname| authority.eq_ignore_ascii_case(hostname));
-    if !authority_is_local
+    if (context.is_local() && !authority_is_local)
         || !path.starts_with('/')
         || path.contains(['?', '#'])
         || path.chars().any(char::is_control)
@@ -485,23 +510,24 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::local_path::LocalPathSemantics;
 
     #[test]
     fn remote_metadata_context_should_preserve_typed_destination_and_directory() {
         let remote = RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
-            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            RemoteDirectory::new("~/project".to_owned()).unwrap(),
         );
         let context = TerminalMetadataContext::Remote(remote.clone());
 
-        let tracker = MetadataTracker::new_with_context(context, "Remote Project", Instant::now());
+        let tracker =
+            MetadataTracker::new_with_context(context, "Remote Workspace", Instant::now());
         let snapshot = tracker.snapshot();
 
         assert_eq!(snapshot.context.remote(), Some(&remote));
         assert_eq!(snapshot.directory.path.as_ref(), "~/project");
-        assert_eq!(snapshot.title.value.as_ref(), "Remote Project");
+        assert_eq!(snapshot.title.value.as_ref(), "Remote Workspace");
         assert!(!snapshot.context.is_local());
         assert_eq!(
             snapshot.context.local_file_capabilities(),
@@ -518,7 +544,7 @@ mod tests {
         );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
-            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ));
 
         assert_eq!(
@@ -536,22 +562,25 @@ mod tests {
         let local = TerminalMetadataContext::local(LocalPathSemantics::Posix, "/fixture", None);
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
-            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ));
         for context in [&local, &remote] {
             let mut tracker =
                 MetadataTracker::new_with_context(context.clone(), "shell", Instant::now());
-            assert!(tracker.set_reported_directory("file://localhost//project/My%20Folder/"));
+            assert!(tracker.set_reported_directory("file://localhost//project/My%20Directory/"));
             let snapshot = tracker.snapshot();
-            assert_eq!(&*snapshot.directory.path, "//project/My Folder/");
-            assert_eq!(&*snapshot.title.value, "My Folder");
+            assert_eq!(&*snapshot.directory.path, "//project/My Directory/");
+            assert_eq!(&*snapshot.title.value, "My Directory");
             assert_eq!(
                 context.local_directory(&snapshot.directory.path).is_some(),
                 context.is_local()
             );
             assert!(context.local_directory("relative").is_none());
             assert!(context.local_directory("C:\\project").is_none());
-            assert!(!tracker.set_reported_directory("file://remote/other"));
+            assert_eq!(
+                tracker.set_reported_directory("file://remote/other"),
+                !context.is_local()
+            );
             assert!(!tracker.set_reported_directory("file:///bad%00path"));
         }
     }
@@ -647,5 +676,21 @@ mod tests {
         assert_eq!(stale.freshness, MetadataFreshness::Stale);
         assert_eq!(stale.revision, live.revision + 1);
         assert!(!Arc::ptr_eq(&live, &stale));
+    }
+    #[test]
+    fn remote_osc7_accepts_machine_hostname_without_local_filesystem_authority() {
+        let context = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+            SshDestination::new("dev-alias".into()).unwrap(),
+            RemoteDirectory::new("~".into()).unwrap(),
+        ));
+        let report = parse_osc7_directory("file://actual-hostname/srv/my%20app", &context).unwrap();
+        assert_eq!(
+            context.current_directory(&report.path),
+            Some(CurrentDirectory::Remote(
+                RemoteDirectory::new("/srv/my app".into()).unwrap()
+            ))
+        );
+        assert!(context.local_directory(&report.path).is_none());
+        assert!(!context.local_file_capabilities().are_enabled());
     }
 }

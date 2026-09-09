@@ -12,7 +12,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "terminal/native_services.rs",
         "terminal/emulator.rs",
         "ui/workspace_manager.rs",
-        "ui/workspace_picker.rs",
+        "ui/directory_picker.rs",
         "ui/pane_host.rs",
         "ui/tab_manager.rs",
     ] {
@@ -29,7 +29,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
             "FromRawFd",
             "OpenOptionsExt",
             "PermissionsExt",
-            "NativeWorkspacePickerFilesystem",
+            "NativeDirectoryPickerFilesystem",
             "macos_local_identity",
             "target_os",
             "identity.device",
@@ -45,7 +45,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "terminal/native_services/file_preview.rs",
         "terminal/workspace_terminal_session_factory.rs",
         "ui/workspace_manager.rs",
-        "ui/workspace_picker.rs",
+        "ui/directory_picker.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).unwrap();
         let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
@@ -75,7 +75,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("desktop_profile/keybindings.rs"),
         root.join("ui/mod.rs"),
         root.join("ui/workspace_manager.rs"),
-        root.join("ui/workspace_picker.rs"),
+        root.join("ui/directory_picker.rs"),
         root.join("ui/terminal_pane.rs"),
         root.join("terminal/conformance.rs"),
         root.join("terminal/testing.rs"),
@@ -491,7 +491,7 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
         "tooltip.keyboard_equivalent(\"cmd-t\")",
         "let label = \"Choose with Finder\";",
         "let label = \"Quick Look\";",
-        "let description = \"Pinned to a folder on this Mac\";",
+        "let description = \"Pinned to a directory on this Mac\";",
         "let failure = \"macOS integration\";",
     ] {
         assert!(
@@ -519,7 +519,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         "terminal/native_services/file_insertion.rs",
         "terminal/native_services/hyperlink.rs",
         "terminal/native_services/file_preview.rs",
-        "ui/workspace_picker.rs",
+        "ui/directory_picker.rs",
         "ui/terminal_context_menu.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).unwrap();
@@ -586,7 +586,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         .next()
         .unwrap();
     assert!(!production.contains("LocalPathSemantics::Posix"));
-    let picker = std::fs::read_to_string(root.join("ui/workspace_picker.rs")).unwrap();
+    let picker = std::fs::read_to_string(root.join("ui/directory_picker.rs")).unwrap();
     let production = picker.split("#[cfg(test)]\nmod tests").next().unwrap();
     for forbidden in [
         "\"~/\"",

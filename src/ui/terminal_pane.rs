@@ -1,8 +1,8 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
 #[cfg(test)]
 use super::terminal_focus::TerminalFocusBlocker;
-pub(crate) use crate::domain::remote_project::RemotePaneLifecycleError;
-use crate::domain::remote_project::{RemotePaneFacts, RemoteRestartAuthority};
+pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
+use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
 #[cfg(test)]
 use crate::terminal::RemoteChannelUnavailable;
 use std::cell::Cell;
@@ -109,8 +109,8 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
+    PinDirectoryRequested,
     TitleChanged(SharedString),
-    ReportedWorkingDirectoryChanged(PathBuf),
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -119,10 +119,8 @@ impl std::fmt::Debug for TerminalPaneEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
+            Self::PinDirectoryRequested => "TerminalPaneEvent::PinDirectoryRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
-            Self::ReportedWorkingDirectoryChanged(_) => {
-                "TerminalPaneEvent::ReportedWorkingDirectoryChanged"
-            }
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
         })
@@ -210,6 +208,7 @@ impl PaneSessionStartFailure {
 struct PaneSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
+    starting_directory: Option<crate::terminal::metadata::CurrentDirectory>,
     local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
@@ -229,6 +228,9 @@ impl PaneSessionLifecycle {
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     ) -> Self {
         Self {
+            starting_directory: prepared_launch
+                .as_ref()
+                .map(PreparedWorkspaceTerminalLaunch::starting_directory),
             local_file_capabilities: session_factory.local_file_capabilities(),
             session_factory,
             prepared_launch,
@@ -278,6 +280,7 @@ impl PaneSessionLifecycle {
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
         self.session_factory = prepared.session_factory;
+        self.starting_directory = Some(prepared.prepared_launch.starting_directory());
         self.prepared_launch = Some(prepared.prepared_launch);
         self.local_file_capabilities = self.session_factory.local_file_capabilities();
         self.session_start_attempted = false;
@@ -1121,15 +1124,17 @@ impl TerminalPane {
         self.title.clone()
     }
 
-    pub(crate) fn reported_working_directory(&self) -> Option<PathBuf> {
+    pub(crate) fn current_directory(&self) -> Option<crate::terminal::metadata::CurrentDirectory> {
         use crate::terminal::metadata::MetadataFreshness;
-
+        if self.terminal_session.accepted_screen_generation.is_none() {
+            return self.terminal_session.starting_directory.clone();
+        }
         (self.screen.metadata.freshness == MetadataFreshness::Live)
             .then(|| {
                 self.screen
                     .metadata
                     .context
-                    .local_directory(&self.screen.metadata.directory.path)
+                    .current_directory(&self.screen.metadata.directory.path)
             })
             .flatten()
     }
@@ -1796,18 +1801,6 @@ impl TerminalPane {
                 if self.title.as_ref() != title {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
-                }
-                if screen.metadata.context.is_local()
-                    && screen.metadata.freshness
-                        == crate::terminal::metadata::MetadataFreshness::Live
-                    && (self.screen.metadata.directory.path != screen.metadata.directory.path
-                        || self.screen.metadata.freshness != screen.metadata.freshness)
-                    && let Some(path) = screen
-                        .metadata
-                        .context
-                        .local_directory(&screen.metadata.directory.path)
-                {
-                    cx.emit(TerminalPaneEvent::ReportedWorkingDirectoryChanged(path));
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
@@ -2656,6 +2649,9 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
 
         match command {
+            TerminalContextMenuCommand::PinDirectory if self.current_directory().is_some() => {
+                cx.emit(TerminalPaneEvent::PinDirectoryRequested);
+            }
             TerminalContextMenuCommand::Paste => self.paste_clipboard(&PasteClipboard, window, cx),
             TerminalContextMenuCommand::Find => self.open_find(&OpenTerminalFind, window, cx),
             TerminalContextMenuCommand::Copy if actions.copy => {
@@ -3522,6 +3518,7 @@ impl Render for TerminalPane {
         let context_menu_available = self.context_menu_available();
         let context_menu_entries = terminal_context_menu_entries(
             context_menu_actions,
+            self.current_directory().is_some(),
             crate::desktop_profile::DesktopPresentation::get(cx),
         );
         let context_open_pane = pane.clone();
@@ -3539,7 +3536,7 @@ impl Render for TerminalPane {
                 .h(context_target_size.height),
             context_menu_entries,
         )
-        .size(MenuSize::Regular)
+        .size(MenuSize::Wide)
         .preserve_trigger_cursor()
         .disabled(!context_menu_available)
         .debug_selector("terminal-context-menu")

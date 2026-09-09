@@ -13,67 +13,41 @@ const SOURCE_ICON_SIZE: f32 = 14.0;
 /// One way to bring a Workspace into existence, presented as a single New Workspace Panel row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NewWorkspaceSource {
-    LocalProject,
-    Scratch,
-    RemoteProject,
+    Local,
+    Remote,
 }
 
 impl NewWorkspaceSource {
-    /// Rows name their source rather than repeating the panel's own noun, so no label means one
-    /// thing on the panel and another on the control that opened it.
-    const fn label(self) -> &'static str {
+    fn label(self, presentation: &crate::desktop_profile::DesktopPresentation) -> &'static str {
         match self {
-            Self::LocalProject => "Local Project",
-            Self::Scratch => "Scratch Workspace",
-            Self::RemoteProject => "Remote over SSH",
+            Self::Local => presentation.wording().local_machine_label,
+            Self::Remote => "Remote over SSH",
         }
     }
 
-    /// The one behavioural difference between the Workspace Kinds, stated once, where the choice
-    /// is actually made.
-    fn description(
-        self,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-    ) -> &'static str {
+    const fn description(self) -> &'static str {
         match self {
-            Self::LocalProject => presentation.wording().local_project_description,
-            Self::Scratch => "Starts at ~, follows your shell",
-            Self::RemoteProject => "Pinned to a folder on another machine",
+            Self::Local => "Starts in your home directory on this machine",
+            Self::Remote => "Starts in your home directory on another machine",
         }
     }
 
     const fn icon(self) -> IconName {
         match self {
-            Self::LocalProject => IconName::Folder,
-            Self::Scratch => IconName::Terminal,
-            Self::RemoteProject => IconName::Globe,
-        }
-    }
-
-    fn accessory(
-        self,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-    ) -> Option<&'static str> {
-        match self {
-            Self::LocalProject => Some(presentation.shortcut(&crate::ui::OpenLocalProject)),
-            Self::Scratch => Some(presentation.shortcut(&crate::ui::CreateScratchWorkspace)),
-            Self::RemoteProject => None,
+            Self::Local => IconName::Terminal,
+            Self::Remote => IconName::Globe,
         }
     }
 
     const fn debug_selector(self) -> &'static str {
         match self {
-            Self::LocalProject => "new-workspace-source-local-project",
-            Self::Scratch => "new-workspace-source-scratch",
-            Self::RemoteProject => "new-workspace-source-remote-project",
+            Self::Local => "new-workspace-source-local",
+            Self::Remote => "new-workspace-source-remote",
         }
     }
 
-    /// Every source in presentation order.
-    const fn ordered() -> [Self; 3] {
-        // Local Project leads so that the default selection after the panel shortcut enters the Workspace
-        // Picker, keeping the most frequent path two keystrokes deep despite the added chooser.
-        [Self::LocalProject, Self::Scratch, Self::RemoteProject]
+    const fn ordered() -> [Self; 2] {
+        [Self::Local, Self::Remote]
     }
 
     fn into_palette_item(
@@ -82,14 +56,14 @@ impl NewWorkspaceSource {
         presentation: &crate::desktop_profile::DesktopPresentation,
     ) -> CommandPaletteItem<Self> {
         let icon_name = self.icon();
-        let unavailable = (self == Self::RemoteProject)
+        let unavailable = (self == Self::Remote)
             .then_some(remote_unavailable_reason)
             .flatten();
-        let item = CommandPaletteItem::new(self, self.label())
+        let item = CommandPaletteItem::new(self, self.label(presentation))
             .description(
                 unavailable
                     .clone()
-                    .unwrap_or_else(|| self.description(presentation).to_owned()),
+                    .unwrap_or_else(|| self.description().to_owned()),
             )
             .disabled(unavailable.is_some())
             .leading_icon(move |foreground| {
@@ -97,12 +71,9 @@ impl NewWorkspaceSource {
             })
             .debug_selector(self.debug_selector());
 
-        match (self.accessory(presentation), unavailable.as_ref()) {
-            (_, Some(_)) => item.trailing(CommandPaletteAccessory::Status("Unavailable".into())),
-            (Some(shortcut), None) => {
-                item.trailing(CommandPaletteAccessory::Shortcut(shortcut.into()))
-            }
-            (None, None) => item,
+        match unavailable {
+            Some(_) => item.trailing(CommandPaletteAccessory::Status("Unavailable".into())),
+            None => item,
         }
     }
 
@@ -112,17 +83,17 @@ impl NewWorkspaceSource {
         presentation: &crate::desktop_profile::DesktopPresentation,
     ) -> ComboBoxItem<Self> {
         let icon_name = self.icon();
-        let unavailable = (self == Self::RemoteProject)
+        let unavailable = (self == Self::Remote)
             .then_some(remote_unavailable_reason)
             .flatten();
-        let mut keywords = vec!["workspace".to_owned(), self.label().to_owned()];
+        let mut keywords = vec!["workspace".to_owned(), self.label(presentation).to_owned()];
         keywords.push(
             unavailable
                 .as_deref()
-                .unwrap_or_else(|| self.description(presentation))
+                .unwrap_or_else(|| self.description())
                 .to_owned(),
         );
-        let item = ComboBoxItem::new(self, self.label())
+        let item = ComboBoxItem::new(self, self.label(presentation))
             .keywords(keywords)
             .disabled(unavailable.is_some())
             .leading_icon(move |foreground| {
@@ -130,10 +101,9 @@ impl NewWorkspaceSource {
             })
             .debug_selector(self.debug_selector());
 
-        match (self.accessory(presentation), unavailable.as_ref()) {
-            (_, Some(_)) => item.trailing(ComboBoxAccessory::Status("Unavailable".into())),
-            (Some(shortcut), None) => item.trailing(ComboBoxAccessory::Shortcut(shortcut.into())),
-            (None, None) => item,
+        match unavailable {
+            Some(_) => item.trailing(ComboBoxAccessory::Status("Unavailable".into())),
+            None => item,
         }
     }
 
@@ -335,7 +305,7 @@ impl NewWorkspacePanel {
             }
             CommandPaletteEvent::Activated(activation) => {
                 let source = *activation.item_id();
-                if source != NewWorkspaceSource::RemoteProject {
+                if source != NewWorkspaceSource::Remote {
                     self.palette
                         .update(cx, |palette, cx| palette.dismiss(window, cx));
                 }
@@ -369,22 +339,17 @@ mod tests {
 
     use super::*;
 
-    #[gpui::test]
-    fn source_accessories_agree_with_the_installed_desktop_profile(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            crate::ui::init(cx).unwrap();
-            let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-            for (source, label) in [
-                (NewWorkspaceSource::LocalProject, "Primary+O"),
-                (NewWorkspaceSource::Scratch, "Primary+Shift+N"),
-            ] {
-                assert_eq!(source.accessory(presentation), Some(label));
-            }
-            assert_eq!(
-                NewWorkspaceSource::LocalProject.description(presentation),
-                "Pinned to a local folder"
-            );
-        });
+    #[test]
+    fn local_source_uses_the_platform_machine_label() {
+        let presentation = crate::desktop_profile::testing_presentation();
+        assert_eq!(
+            NewWorkspaceSource::Local.label(&presentation),
+            "This Computer"
+        );
+        assert_eq!(
+            NewWorkspaceSource::Remote.label(&presentation),
+            "Remote over SSH"
+        );
     }
 
     struct NewWorkspacePanelHarness {
@@ -443,24 +408,19 @@ mod tests {
     }
 
     #[test]
-    fn local_project_should_lead_so_the_default_selection_opens_the_picker() {
+    fn local_source_should_lead_the_two_choice_chooser() {
         assert_eq!(
             NewWorkspaceSource::ordered(),
-            [
-                NewWorkspaceSource::LocalProject,
-                NewWorkspaceSource::Scratch,
-                NewWorkspaceSource::RemoteProject,
-            ]
+            [NewWorkspaceSource::Local, NewWorkspaceSource::Remote,]
         );
     }
 
     #[test]
-    fn every_source_should_state_its_workspace_directory_behaviour() {
-        let presentation = crate::desktop_profile::testing_presentation();
+    fn every_source_should_state_its_starting_directory() {
         for source in NewWorkspaceSource::ordered() {
             assert!(
-                !source.description(&presentation).is_empty(),
-                "{source:?} listed no description, so the panel stops teaching the Kinds"
+                !source.description().is_empty(),
+                "{source:?} listed no description, so the panel omits its execution location"
             );
         }
     }
@@ -469,7 +429,7 @@ mod tests {
     fn rows_should_not_repeat_the_panel_noun() {
         for source in NewWorkspaceSource::ordered() {
             assert_ne!(
-                source.label(),
+                source.label(&crate::desktop_profile::testing_presentation()),
                 "New Workspace",
                 "{source:?} reused the panel's own name, which is the ambiguity it removes"
             );
@@ -477,21 +437,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_project_should_be_enabled_without_a_coming_soon_accessory() {
-        let remote = NewWorkspaceSource::RemoteProject;
+    fn remote_workspace_should_be_enabled_without_a_coming_soon_accessory() {
+        let remote = NewWorkspaceSource::Remote;
         let presentation = crate::desktop_profile::testing_presentation();
 
         assert!(!remote.into_palette_item(None, &presentation).is_disabled());
-        assert_eq!(remote.accessory(&presentation), None);
         assert!(matches!(remote.icon(), IconName::Globe));
     }
 
     #[test]
-    fn unavailable_remote_project_should_be_disabled_with_the_actionable_probe_reason() {
+    fn unavailable_remote_workspace_should_be_disabled_with_the_actionable_probe_reason() {
         let reason = "OpenSSH 9.0 or later is required";
         let presentation = crate::desktop_profile::testing_presentation();
-        let remote = NewWorkspaceSource::RemoteProject
-            .into_palette_item(Some(reason.to_owned()), &presentation);
+        let remote =
+            NewWorkspaceSource::Remote.into_palette_item(Some(reason.to_owned()), &presentation);
 
         assert!(remote.is_disabled());
         assert_eq!(remote.description_text(), Some(reason));
@@ -524,7 +483,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn opening_should_select_local_project_before_any_query(cx: &mut TestAppContext) {
+    fn opening_should_select_local_before_any_query(cx: &mut TestAppContext) {
         let (_, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
@@ -535,20 +494,20 @@ mod tests {
                 .read(cx)
                 .selected_item_id()
                 .copied()),
-            Some(NewWorkspaceSource::LocalProject)
+            Some(NewWorkspaceSource::Local)
         );
     }
 
     #[gpui::test]
-    fn remote_project_should_be_keyboard_selectable_and_emit_its_source(cx: &mut TestAppContext) {
+    fn remote_workspace_should_be_keyboard_selectable_and_emit_its_source(cx: &mut TestAppContext) {
         let (harness, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
-        cx.simulate_keystrokes("down down");
+        cx.simulate_keystrokes("down");
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds(NewWorkspaceSource::RemoteProject.debug_selector())
+            cx.debug_bounds(NewWorkspaceSource::Remote.debug_selector())
                 .is_some(),
             "Remote over SSH was not rendered"
         );
@@ -558,7 +517,7 @@ mod tests {
                 .read(cx)
                 .selected_item_id()
                 .copied()),
-            Some(NewWorkspaceSource::RemoteProject)
+            Some(NewWorkspaceSource::Remote)
         );
 
         cx.simulate_keystrokes("enter");
@@ -566,13 +525,13 @@ mod tests {
 
         assert_eq!(
             harness.read_with(cx, |harness, _| harness.selected_source),
-            Some(NewWorkspaceSource::RemoteProject)
+            Some(NewWorkspaceSource::Remote)
         );
         assert!(panel.read_with(cx, |panel, _| panel.is_open()));
     }
 
     #[gpui::test]
-    fn local_and_scratch_should_keep_their_completed_activation_behavior(cx: &mut TestAppContext) {
+    fn local_selection_should_complete_and_restore_focus(cx: &mut TestAppContext) {
         let (harness, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
@@ -580,17 +539,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             harness.read_with(cx, |harness, _| harness.selected_source),
-            Some(NewWorkspaceSource::LocalProject)
-        );
-        assert!(!panel.read_with(cx, |panel, _| panel.is_open()));
-        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
-
-        open(&panel, cx);
-        cx.simulate_keystrokes("down enter");
-        cx.run_until_parked();
-        assert_eq!(
-            harness.read_with(cx, |harness, _| harness.selected_source),
-            Some(NewWorkspaceSource::Scratch)
+            Some(NewWorkspaceSource::Local)
         );
         assert!(!panel.read_with(cx, |panel, _| panel.is_open()));
         assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));

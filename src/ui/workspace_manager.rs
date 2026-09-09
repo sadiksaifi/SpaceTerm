@@ -9,7 +9,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::directory_picker::{DirectoryPicker, DirectoryPickerEvent};
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
+use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
@@ -18,32 +20,29 @@ use super::remote_workspace_flow::{
 };
 use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
-use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
-    CloseTerminalFind, CloseWorkspace, CopySelection, CreateScratchWorkspace, CreateTab, FindNext,
-    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace,
-    OpenLocalProject, OpenTerminalFind, RemoteChildLaunchUnavailable, SearchWorkspaces, SplitDown,
-    SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent,
-    TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+    CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace, OpenTerminalFind,
+    RemoteChildLaunchUnavailable, SearchWorkspaces, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
+    TOP_CHROME_HEIGHT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
 use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
 #[cfg(test)]
 use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalTabCloseOutcome,
-    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
-    RemoteWorkspaceDirectory, RemoteWorkspaceKey, TabId, ValidatedWorkspaceDirectory,
-    WorkspaceCollection, WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity,
-    WorkspaceError, WorkspaceId, WorkspaceKind,
+    CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
+    PinnedDirectory, RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteDirectory, RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection,
+    WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
-use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
@@ -52,7 +51,7 @@ use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTe
 use crate::ssh::process::TransientSshErrorOutput;
 #[cfg(test)]
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
-use crate::terminal::metadata::RemoteTerminalMetadataContext;
+use crate::terminal::metadata::{CurrentDirectory, RemoteTerminalMetadataContext};
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
     TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
@@ -81,7 +80,7 @@ use spaceterm_ui::{
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
 const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
-// Reserve enough label width beside both actions for Default across desktop fonts.
+// Reserve enough label width beside both actions for Workspace names across desktop fonts.
 const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 // Vertical breathing room above and below the header's 28px `ButtonSize::Regular` actions. The
@@ -151,6 +150,8 @@ fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceMenuCommand {
     NewTab,
+    PinDirectory,
+    UnpinDirectory,
     Rename,
     Reconnect,
     Close,
@@ -179,7 +180,7 @@ struct WorkspaceRowViewModel {
     name: SharedString,
     path: SharedString,
     tooltip: SharedString,
-    local_project: bool,
+    pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     available: bool,
     tab_count: usize,
@@ -260,7 +261,7 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) permission_recovery: Option<Rc<dyn PermissionRecoveryOpener>>,
 }
 
-struct PendingRemoteProjectActivation {
+struct PendingRemoteActivation {
     flow: Entity<RemoteWorkspaceFlow>,
     handle: RemoteWorkspaceFlowCompletionHandle,
     completion: RemoteWorkspaceFlowCompletion,
@@ -403,15 +404,15 @@ impl WorkspaceSidebar {
 
 /// Coordinates mutually exclusive local Workspace choosers and their return navigation.
 struct WorkspaceTransientUi {
-    picker: Entity<WorkspacePicker>,
+    picker: Entity<DirectoryPicker>,
     search: Entity<WorkspaceSearch>,
     new_workspace: Entity<NewWorkspacePanel>,
-    picker_entered_from_panel: bool,
+    pin_target: Option<WorkspaceId>,
 }
 
 impl WorkspaceTransientUi {
     fn show_search(&mut self, items: Vec<WorkspaceSearchItem>, window: &mut Window, cx: &mut App) {
-        self.picker_entered_from_panel = false;
+        self.pin_target = None;
         self.new_workspace
             .update(cx, |panel, cx| panel.dismiss(window, cx));
         self.picker
@@ -429,7 +430,7 @@ impl WorkspaceTransientUi {
     }
 
     fn show_new_workspace(&mut self, window: &mut Window, cx: &mut App) {
-        self.picker_entered_from_panel = false;
+        self.pin_target = None;
         self.search
             .update(cx, |search, cx| search.dismiss(window, cx));
         self.picker
@@ -446,12 +447,14 @@ pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     pane_construction: PaneConstruction,
-    default_workspace_root: PathBuf,
-    default_workspace_identity: WorkspaceDirectoryIdentity,
+    local_home_directory_path: PathBuf,
+    local_home_identity: LocalDirectoryIdentity,
     directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
     remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
+    remote_pin_picker: Option<Entity<RemoteDirectoryPicker>>,
+    pin_operation: u64,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
     remote_workspace_focus_restore_pending: bool,
@@ -468,14 +471,14 @@ impl WorkspaceManager {
     #[cfg(test)]
     fn new_with_remote_workspace_backend_factory(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        default_workspace_root: PathBuf,
+        local_home_directory_path: PathBuf,
         remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_adapters(
             session_factory,
-            default_workspace_root,
+            local_home_directory_path,
             WorkspaceManagerAdapters {
                 local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
@@ -495,7 +498,7 @@ impl WorkspaceManager {
     #[cfg(test)]
     fn new_with_directory_selection_fallback(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        default_workspace_root: PathBuf,
+        local_home_directory_path: PathBuf,
         directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
         remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -503,7 +506,7 @@ impl WorkspaceManager {
     ) -> Self {
         Self::new_with_adapters(
             session_factory,
-            default_workspace_root,
+            local_home_directory_path,
             WorkspaceManagerAdapters {
                 local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
@@ -523,7 +526,7 @@ impl WorkspaceManager {
     #[cfg(test)]
     fn new_with_operating_system_window_drag_platform(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        default_workspace_root: PathBuf,
+        local_home_directory_path: PathBuf,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -531,7 +534,7 @@ impl WorkspaceManager {
     ) -> Self {
         Self::new_with_adapters(
             session_factory,
-            default_workspace_root,
+            local_home_directory_path,
             WorkspaceManagerAdapters {
                 local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
@@ -550,7 +553,7 @@ impl WorkspaceManager {
 
     pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        default_workspace_root: PathBuf,
+        local_home_directory_path: PathBuf,
         adapters: WorkspaceManagerAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -573,19 +576,17 @@ impl WorkspaceManager {
             lifecycle_dependencies,
         );
         let (default_directory, initial_directory_error) =
-            initial_workspace_directory(default_workspace_root.clone(), &local_filesystem);
-        let default_workspace_identity = default_directory.identity();
+            initial_home_directory(local_home_directory_path.clone(), &local_filesystem);
+        let local_home_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces = WorkspaceCollection::new_scratch(
-            default_directory,
-            DirectoryAuthority::initial(),
-            |workspace_id, workspace_root| {
+        let mut workspaces =
+            WorkspaceCollection::new_local(default_directory, |workspace_id, home_directory| {
                 Self::create_local_tab_manager(
                     WorkspaceTerminalSessionFactory::new_local_with_authority(
                         Rc::clone(&session_factory),
-                        ValidatedWorkspaceDirectory::new(
-                            workspace_root.to_path_buf(),
+                        ValidatedLocalDirectory::new(
+                            home_directory.to_path_buf(),
                             initial_workspace_identity,
                         ),
                         local_filesystem.clone(),
@@ -602,8 +603,7 @@ impl WorkspaceManager {
                     window,
                     cx,
                 )
-            },
-        );
+            });
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
@@ -636,11 +636,11 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        let workspace_picker_home =
-            Self::workspace_picker_starting_directory(&default_workspace_root);
-        let workspace_picker = cx.new(|cx| {
-            WorkspacePicker::new(
-                workspace_picker_home,
+        let directory_picker_home =
+            Self::directory_picker_starting_directory(&local_home_directory_path);
+        let directory_picker = cx.new(|cx| {
+            DirectoryPicker::new(
+                directory_picker_home,
                 Arc::new(local_filesystem.clone()),
                 permission_recovery,
                 window,
@@ -648,10 +648,10 @@ impl WorkspaceManager {
             )
         });
         cx.subscribe_in(
-            &workspace_picker,
+            &directory_picker,
             window,
-            |manager, _, event: &WorkspacePickerEvent, window, cx| {
-                manager.handle_workspace_picker_event(event, window, cx);
+            |manager, _, event: &DirectoryPickerEvent, window, cx| {
+                manager.handle_directory_picker_event(event, window, cx);
             },
         )
         .detach();
@@ -692,22 +692,24 @@ impl WorkspaceManager {
 
         Self {
             transient: WorkspaceTransientUi {
-                picker: workspace_picker,
+                picker: directory_picker,
                 search: workspace_search,
                 new_workspace: new_workspace_panel,
-                picker_entered_from_panel: false,
+                pin_target: None,
             },
             sidebar: WorkspaceSidebar::new(scrollbar, cx.focus_handle()),
             workspaces,
             local_filesystem,
             session_factory,
             pane_construction,
-            default_workspace_root,
-            default_workspace_identity,
+            local_home_directory_path,
+            local_home_identity,
             directory_selection_fallback,
             remote_workspace_backend,
             remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
+            remote_pin_picker: None,
+            pin_operation: 0,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
             remote_workspace_focus_restore_pending: false,
@@ -818,64 +820,13 @@ impl WorkspaceManager {
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
-                TabManagerEvent::ReportedWorkingDirectoryChanged {
-                    tab_id,
-                    pane_id,
-                    path,
-                } => workspace_manager.handle_directory_report(
-                    workspace_id,
-                    DirectoryAuthority::new(*tab_id, *pane_id),
-                    path,
-                    window,
-                    cx,
-                ),
-                TabManagerEvent::PaneClosed {
-                    tab_id,
-                    pane_id,
-                    promoted_pane_id,
-                    promoted_directory,
-                } => workspace_manager.handle_authority_promotion(
-                    workspace_id,
-                    DirectoryAuthority::new(*tab_id, *pane_id),
-                    DirectoryAuthority::new(*tab_id, *promoted_pane_id),
-                    promoted_directory.as_deref(),
-                    window,
-                    cx,
-                ),
-                TabManagerEvent::TabClosed {
-                    tab_id,
-                    promoted_tab_id,
-                    promoted_pane_id,
-                    promoted_directory,
-                } => workspace_manager.handle_tab_authority_promotion(
-                    workspace_id,
-                    *tab_id,
-                    DirectoryAuthority::new(*promoted_tab_id, *promoted_pane_id),
-                    promoted_directory.as_deref(),
-                    window,
-                    cx,
-                ),
-                TabManagerEvent::DirectoryAvailable { identity } => {
-                    if workspace_manager
-                        .workspaces
-                        .set_directory_available(workspace_id, identity.clone())
-                        .is_ok()
-                    {
-                        workspace_manager.synchronize_tab_manager_layout(
-                            workspace_manager.workspaces.active_workspace_id(),
-                            window,
-                            cx,
-                        );
-                    }
-                    workspace_manager.refresh_workspace_search(cx);
-                    cx.notify();
-                }
-                TabManagerEvent::DirectoryUnavailable { reason } => {
-                    let _ = workspace_manager
-                        .workspaces
-                        .set_directory_unavailable(workspace_id, reason.clone());
-                    workspace_manager.refresh_workspace_search(cx);
-                    cx.notify();
+                TabManagerEvent::PinDirectoryRequested { directory } => {
+                    workspace_manager.pin_current_directory(
+                        workspace_id,
+                        directory.clone(),
+                        window,
+                        cx,
+                    );
                 }
             },
         )
@@ -925,90 +876,6 @@ impl WorkspaceManager {
             }
         };
         self.present_remote_workspace_reconnect_error(failure, window, cx);
-    }
-
-    fn handle_directory_report(
-        &mut self,
-        workspace_id: WorkspaceId,
-        authority: DirectoryAuthority,
-        path: &std::path::Path,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_directory_change(
-            workspace_id,
-            crate::domain::DirectoryChange::Report(authority),
-            Some(path),
-            window,
-            cx,
-        );
-    }
-
-    fn handle_authority_promotion(
-        &mut self,
-        workspace_id: WorkspaceId,
-        removed: DirectoryAuthority,
-        successor: DirectoryAuthority,
-        report: Option<&std::path::Path>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_directory_change(
-            workspace_id,
-            crate::domain::DirectoryChange::PaneClosed { removed, successor },
-            report,
-            window,
-            cx,
-        );
-    }
-
-    fn handle_tab_authority_promotion(
-        &mut self,
-        workspace_id: WorkspaceId,
-        removed: TabId,
-        successor: DirectoryAuthority,
-        report: Option<&std::path::Path>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_directory_change(
-            workspace_id,
-            crate::domain::DirectoryChange::TabClosed { removed, successor },
-            report,
-            window,
-            cx,
-        );
-    }
-
-    fn apply_directory_change(
-        &mut self,
-        workspace_id: WorkspaceId,
-        change: crate::domain::DirectoryChange,
-        report: Option<&std::path::Path>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let filesystem = &self.local_filesystem;
-        let changed = self.workspaces.apply_directory_change(
-            workspace_id,
-            change,
-            report,
-            |path| {
-                filesystem
-                    .validate_workspace_directory(path)
-                    .map_err(|error| error.to_string())
-            },
-            |manager, directory| {
-                manager.update(cx, |manager, cx| {
-                    manager.set_workspace_directory(directory.path(), directory.identity(), cx);
-                })
-            },
-        );
-        if changed {
-            self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
-            self.refresh_workspace_search(cx);
-            cx.notify();
-        }
     }
 
     fn report_workspace_error(operation: &str, error: WorkspaceError) {
@@ -1094,7 +961,11 @@ impl WorkspaceManager {
         cx: &App,
     ) -> Option<TerminalFocusBlocker> {
         TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
-            picker: self.transient.picker.read(cx).blocks_terminal_input(),
+            picker: self.transient.picker.read(cx).blocks_terminal_input()
+                || self
+                    .remote_pin_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
             remote_flow: self
                 .remote_workspace_flow
                 .as_ref()
@@ -1122,13 +993,13 @@ impl WorkspaceManager {
                 WorkspaceSearchItem::new(
                     workspace.id(),
                     workspace.name().to_owned(),
-                    workspace_directory_labels(
-                        workspace.working_directory(),
-                        workspace.remote_workspace_directory(),
-                        &self.default_workspace_root,
+                    directory_labels(
+                        workspace.local_display_directory(),
+                        workspace.remote_display_directory(),
+                        &self.local_home_directory_path,
                     )
                     .0,
-                    workspace.kind(),
+                    workspace.location(),
                     tab_count,
                     pane_count,
                 )
@@ -1393,7 +1264,7 @@ impl WorkspaceManager {
         self.sidebar.reveal_scrollbar(cx);
     }
 
-    fn create_scratch_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_local_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let local_filesystem = self.local_filesystem.clone();
         let session_factory = Rc::clone(&self.session_factory);
@@ -1401,33 +1272,37 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.visible;
         let sidebar_width = self.sidebar.width;
-        let (directory, unavailable_reason) = self.default_workspace_directory();
+        let directory = match self.local_home_directory() {
+            Ok(directory) => directory,
+            Err(_) => {
+                Self::show_home_directory_unavailable(window, cx);
+                return;
+            }
+        };
         let directory_identity = directory.identity();
-        let result = self.workspaces.create_scratch_workspace(
-            directory,
-            DirectoryAuthority::initial(),
-            |workspace_id, workspace_root| {
-                Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local_with_authority(
-                        session_factory,
-                        ValidatedWorkspaceDirectory::new(
-                            workspace_root.to_path_buf(),
-                            directory_identity,
+        let result =
+            self.workspaces
+                .create_local_workspace(directory, |workspace_id, home_directory| {
+                    Self::create_local_tab_manager(
+                        WorkspaceTerminalSessionFactory::new_local_with_authority(
+                            session_factory,
+                            ValidatedLocalDirectory::new(
+                                home_directory.to_path_buf(),
+                                directory_identity,
+                            ),
+                            local_filesystem.clone(),
                         ),
-                        local_filesystem.clone(),
-                    ),
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag_platform,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            },
-        );
+                        TabManagerCreation {
+                            workspace_id,
+                            sidebar_visible,
+                            sidebar_width,
+                            operating_system_window_drag_platform: window_drag_platform,
+                            pane_construction,
+                        },
+                        window,
+                        cx,
+                    )
+                });
         let workspace_id = match result {
             Ok(workspace_id) => workspace_id,
             Err(error) => {
@@ -1435,11 +1310,6 @@ impl WorkspaceManager {
                 return;
             }
         };
-        if let Some(reason) = unavailable_reason {
-            let _ = self
-                .workspaces
-                .set_directory_unavailable(workspace_id, reason);
-        }
         let Some(next_manager) = self
             .workspaces
             .workspace(workspace_id)
@@ -1458,11 +1328,246 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn workspace_picker_starting_directory(configured_home: &std::path::Path) -> PathBuf {
+    fn directory_picker_starting_directory(configured_home: &std::path::Path) -> PathBuf {
         configured_home.to_path_buf()
     }
 
-    fn open_local_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_validated_local_pin(
+        &mut self,
+        workspace_id: WorkspaceId,
+        directory: ValidatedLocalDirectory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
+            return false;
+        };
+        self.apply_directory_pin(
+            workspace_id,
+            Some(PinnedDirectory::Local(directory)),
+            window,
+            cx,
+        )
+    }
+
+    fn apply_directory_pin(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pin: Option<PinnedDirectory>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .workspaces
+            .set_pinned_directory(workspace_id, pin.clone())
+            .is_err()
+        {
+            return false;
+        }
+        self.pin_operation = self.pin_operation.wrapping_add(1);
+        self.transient.pin_target = None;
+        if let Some(workspace) = self.workspaces.workspace(workspace_id) {
+            workspace
+                .payload()
+                .update(cx, |manager, cx| manager.set_pinned_directory(pin, cx));
+        }
+        self.refresh_workspace_search(cx);
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn pin_current_directory(
+        &mut self,
+        workspace_id: WorkspaceId,
+        directory: CurrentDirectory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pin_operation = self.pin_operation.wrapping_add(1);
+        let operation = self.pin_operation;
+        match directory {
+            CurrentDirectory::Local(path) => {
+                match self.local_filesystem.validate_directory(&path) {
+                    Ok(directory) => {
+                        self.apply_directory_pin(
+                            workspace_id,
+                            Some(PinnedDirectory::Local(directory)),
+                            window,
+                            cx,
+                        );
+                    }
+                    Err(_) => Self::show_pin_error(window, cx),
+                }
+            }
+            CurrentDirectory::Remote(directory) => {
+                let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
+                    return;
+                };
+                let Some(session) = runtime.session.as_ref() else {
+                    Self::show_pin_error(window, cx);
+                    return;
+                };
+                let generation = runtime.generation;
+                let validation = session
+                    .provider()
+                    .validate_physical_identity(directory.clone());
+                cx.spawn_in(window, async move |manager, cx| {
+                    let identity = validation.await;
+                    let _ = manager.update_in(cx, |manager, window, cx| {
+                        if manager.pin_operation != operation
+                            || manager
+                                .remote_workspace_runtimes
+                                .get(&workspace_id)
+                                .is_none_or(|runtime| {
+                                    runtime.generation != generation || runtime.session.is_none()
+                                })
+                        {
+                            return;
+                        }
+                        match identity {
+                            Ok(identity) => {
+                                manager.apply_directory_pin(
+                                    workspace_id,
+                                    Some(PinnedDirectory::Remote {
+                                        directory,
+                                        identity,
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            }
+                            Err(_) => Self::show_pin_error(window, cx),
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn show_pin_error(window: &mut Window, cx: &mut Context<Self>) {
+        drop(window.prompt(gpui::PromptLevel::Warning, "Directory Unavailable", Some("The directory could not be pinned. Check that it exists and is accessible, then try again."), &[gpui::PromptButton::ok("OK")], cx));
+    }
+
+    fn open_remote_pin_picker(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
+            return;
+        };
+        let Some(session) = runtime.session.as_ref() else {
+            Self::show_pin_error(window, cx);
+            return;
+        };
+        let generation = runtime.generation;
+        let operation = self.pin_operation;
+        let provider = session.provider();
+        let picker = cx.new(|cx| RemoteDirectoryPicker::new(provider, window, cx));
+        cx.subscribe_in(
+            &picker,
+            window,
+            move |manager, picker, event: &RemoteDirectoryPickerEvent, window, cx| {
+                if manager.remote_pin_picker.as_ref() != Some(picker) {
+                    return;
+                }
+                match event {
+                    RemoteDirectoryPickerEvent::Confirmed(selection) => {
+                        let current = manager.pin_operation == operation
+                            && manager
+                                .remote_workspace_runtimes
+                                .get(&workspace_id)
+                                .is_some_and(|runtime| {
+                                    runtime.generation == generation && runtime.session.is_some()
+                                });
+                        let applied = current
+                            && manager.apply_directory_pin(
+                                workspace_id,
+                                Some(PinnedDirectory::Remote {
+                                    directory: selection.directory().clone(),
+                                    identity: selection.physical_directory().clone(),
+                                }),
+                                window,
+                                cx,
+                            );
+                        let picker = picker.clone();
+                        let owner = cx.entity();
+                        window.defer(cx, move |window, cx| {
+                            picker.update(cx, |picker, cx| {
+                                if applied {
+                                    picker.complete_activation(window, cx);
+                                } else {
+                                    picker.activation_failed(window, cx);
+                                }
+                            });
+                            if applied {
+                                owner.update(cx, |manager, cx| {
+                                    manager.remote_pin_picker = None;
+                                    manager.sync_terminal_focus_blocker(window, cx);
+                                    manager.focus(window, cx);
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    }
+                    RemoteDirectoryPickerEvent::Dismissed => {
+                        manager.remote_pin_picker = None;
+                        manager.transient.pin_target = None;
+                    }
+                    RemoteDirectoryPickerEvent::StateChanged => {}
+                }
+                manager.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        self.remote_pin_picker = Some(picker.clone());
+        self.transient
+            .new_workspace
+            .update(cx, |panel, cx| panel.dismiss(window, cx));
+        self.transient
+            .picker
+            .update(cx, |picker, cx| picker.dismiss(window, cx));
+        picker.update(cx, |picker, cx| {
+            picker.open(window, cx);
+        });
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn open_pin_directory_picker(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if spaceterm_ui::window_menu_is_open(window, cx) {
+            let manager = cx.entity();
+            window.defer(cx, move |window, cx| {
+                spaceterm_ui::dismiss_active_menu(window, cx);
+                manager.update(cx, |manager, cx| {
+                    manager.open_pin_directory_picker(workspace_id, window, cx)
+                });
+            });
+            return;
+        }
+
+        self.transient.pin_target = Some(workspace_id);
+        self.pin_operation = self.pin_operation.wrapping_add(1);
+        if self
+            .workspaces
+            .workspace(workspace_id)
+            .is_some_and(|workspace| {
+                matches!(workspace.location(), WorkspaceLocation::Remote { .. })
+            })
+        {
+            self.open_remote_pin_picker(workspace_id, window, cx);
+            return;
+        }
+
         if self.transient.picker.read(cx).is_open() {
             self.transient
                 .picker
@@ -1474,15 +1579,15 @@ impl WorkspaceManager {
             window.defer(cx, move |window, cx| {
                 spaceterm_ui::dismiss_active_menu(window, cx);
                 manager.update(cx, |manager, cx| {
-                    manager.present_workspace_picker(window, cx)
+                    manager.present_directory_picker(window, cx)
                 });
             });
             return;
         }
-        self.present_workspace_picker(window, cx);
+        self.present_directory_picker(window, cx);
     }
 
-    fn present_workspace_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn present_directory_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.transient.picker.read(cx).is_open() {
             self.transient
                 .picker
@@ -1544,15 +1649,11 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match source {
-            NewWorkspaceSource::LocalProject => {
-                self.transient.picker_entered_from_panel = entered_from_panel;
-                self.present_workspace_picker(window, cx);
-            }
-            NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
-            NewWorkspaceSource::RemoteProject if entered_from_panel => {
+            NewWorkspaceSource::Local => self.create_local_workspace(window, cx),
+            NewWorkspaceSource::Remote if entered_from_panel => {
                 self.present_remote_workspace_flow(window, cx);
             }
-            NewWorkspaceSource::RemoteProject => {
+            NewWorkspaceSource::Remote => {
                 self.present_remote_workspace_flow_from_combo_box(window, cx);
             }
         }
@@ -1645,12 +1746,12 @@ impl WorkspaceManager {
                 cx.notify();
             }
             RemoteWorkspaceFlowEvent::Completed(handle) => {
-                self.activate_remote_project(source, handle, window, cx);
+                self.activate_remote_workspace(source, handle, window, cx);
             }
         }
     }
 
-    fn activate_remote_project(
+    fn activate_remote_workspace(
         &mut self,
         flow: &Entity<RemoteWorkspaceFlow>,
         handle: &RemoteWorkspaceFlowCompletionHandle,
@@ -1660,37 +1761,29 @@ impl WorkspaceManager {
         let Some(completion) = handle.take() else {
             return;
         };
-        let key = RemoteWorkspaceKey::new(
+        let key = RemoteWorkspaceTarget::new(
             completion.destination().clone(),
             completion.physical_directory().clone(),
         );
-        if self.workspaces.remote_project_workspace(&key).is_some() {
-            match self.try_activate_existing_remote_project(key, completion, window, cx) {
-                Ok(()) => self.acknowledge_remote_project_activation(flow, handle, window, cx),
-                Err(completion) => {
-                    self.return_remote_project_activation(flow, handle, *completion, window, cx)
-                }
-            }
-            return;
-        }
 
         let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
             Rc::clone(&self.session_factory),
-            ValidatedWorkspaceDirectory::new(
-                self.default_workspace_root.clone(),
-                self.default_workspace_identity.clone(),
+            ValidatedLocalDirectory::new(
+                self.local_home_directory_path.clone(),
+                self.local_home_identity.clone(),
             ),
             RemoteTerminalMetadataContext::new(
                 completion.destination().clone(),
                 completion.directory().clone(),
             ),
+            completion.physical_directory().clone(),
             remote_workspace_fallback_title(&key, completion.remote_home_identity()),
             completion.terminal_channels(),
         );
         let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
             unreachable!("a Remote Workspace Terminal factory must require revalidation")
         };
-        let activation = PendingRemoteProjectActivation {
+        let activation = PendingRemoteActivation {
             flow: flow.clone(),
             handle: handle.clone(),
             completion,
@@ -1700,21 +1793,26 @@ impl WorkspaceManager {
             Some(cx.spawn_in(window, async move |manager, cx| {
                 let revalidation = revalidation.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.finish_remote_project_activation(activation, revalidation, window, cx);
+                    manager.finish_remote_workspace_activation(
+                        activation,
+                        revalidation,
+                        window,
+                        cx,
+                    );
                 });
             }));
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
-    fn finish_remote_project_activation(
+    fn finish_remote_workspace_activation(
         &mut self,
-        activation: PendingRemoteProjectActivation,
+        activation: PendingRemoteActivation,
         revalidation: Result<(), crate::terminal::RemoteChannelRevalidationError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let PendingRemoteProjectActivation {
+        let PendingRemoteActivation {
             flow,
             handle,
             completion,
@@ -1728,76 +1826,32 @@ impl WorkspaceManager {
         }
         if let Err(error) = revalidation {
             eprintln!("cannot create Remote Workspace because {error}");
-            self.return_remote_project_activation(&flow, &handle, completion, window, cx);
-            return;
-        }
-        let key = RemoteWorkspaceKey::new(
-            completion.destination().clone(),
-            completion.physical_directory().clone(),
-        );
-        if self.workspaces.remote_project_workspace(&key).is_some() {
-            match self.try_activate_existing_remote_project(key, completion, window, cx) {
-                Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
-                Err(completion) => {
-                    self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
-                }
-            }
+            self.return_remote_workspace_activation(&flow, &handle, completion, window, cx);
             return;
         }
         let prepared_launch = match terminal_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => {
                 eprintln!("cannot create Remote Workspace because {error}");
-                self.return_remote_project_activation(&flow, &handle, completion, window, cx);
+                self.return_remote_workspace_activation(&flow, &handle, completion, window, cx);
                 return;
             }
         };
-        match self.try_create_remote_project(
+        match self.try_create_remote_workspace(
             completion,
             terminal_factory,
             prepared_launch,
             window,
             cx,
         ) {
-            Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
+            Ok(()) => self.acknowledge_remote_workspace_activation(&flow, &handle, window, cx),
             Err(completion) => {
-                self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
+                self.return_remote_workspace_activation(&flow, &handle, *completion, window, cx)
             }
         }
     }
 
-    fn try_activate_existing_remote_project(
-        &mut self,
-        key: RemoteWorkspaceKey,
-        completion: RemoteWorkspaceFlowCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
-        let previous_workspace_id = self.workspaces.active_workspace_id();
-        let previous_manager = self.workspaces.active_workspace().payload().clone();
-        let outcome = self.workspaces.create_remote_project_workspace(
-            key,
-            completion.directory().clone(),
-            completion.remote_home_identity().clone(),
-            RemoteConnectionState::connected(1),
-            |_| unreachable!("deduplication must not create a replacement payload"),
-        );
-        let Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) = outcome else {
-            return Err(Box::new(completion));
-        };
-        self.activate_remote_tab_manager(
-            previous_workspace_id,
-            previous_manager,
-            workspace_id,
-            window,
-            cx,
-        );
-        drop(completion);
-        self.debug_assert_remote_runtime_invariants();
-        Ok(())
-    }
-
-    fn try_create_remote_project(
+    fn try_create_remote_workspace(
         &mut self,
         completion: RemoteWorkspaceFlowCompletion,
         terminal_factory: WorkspaceTerminalSessionFactory,
@@ -1809,7 +1863,7 @@ impl WorkspaceManager {
             Ok(alias_pin) => alias_pin,
             Err(_) => return Err(Box::new(completion)),
         };
-        let key = RemoteWorkspaceKey::new(
+        let key = RemoteWorkspaceTarget::new(
             completion.destination().clone(),
             completion.physical_directory().clone(),
         );
@@ -1819,7 +1873,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar.width;
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let pane_construction = self.pane_construction.clone();
-        let result = self.workspaces.create_remote_project_workspace(
+        let result = self.workspaces.create_remote_workspace(
             key,
             completion.directory().clone(),
             completion.remote_home_identity().clone(),
@@ -1841,19 +1895,7 @@ impl WorkspaceManager {
             },
         );
         let workspace_id = match result {
-            Ok(CreateRemoteProjectOutcome::Created { workspace_id }) => workspace_id,
-            Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) => {
-                drop(completion);
-                self.activate_remote_tab_manager(
-                    previous_workspace_id,
-                    previous_manager,
-                    workspace_id,
-                    window,
-                    cx,
-                );
-                self.debug_assert_remote_runtime_invariants();
-                return Ok(());
-            }
+            Ok(workspace_id) => workspace_id,
             Err(_) => return Err(Box::new(completion)),
         };
         let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
@@ -1877,7 +1919,7 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    fn return_remote_project_activation(
+    fn return_remote_workspace_activation(
         &mut self,
         flow: &Entity<RemoteWorkspaceFlow>,
         handle: &RemoteWorkspaceFlowCompletionHandle,
@@ -1892,7 +1934,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn acknowledge_remote_project_activation(
+    fn acknowledge_remote_workspace_activation(
         &mut self,
         flow: &Entity<RemoteWorkspaceFlow>,
         handle: &RemoteWorkspaceFlowCompletionHandle,
@@ -1949,12 +1991,12 @@ impl WorkspaceManager {
                     self.workspaces
                         .workspace(*workspace_id)
                         .is_some_and(|workspace| {
-                            matches!(workspace.kind(), WorkspaceKind::RemoteProject { .. })
+                            matches!(workspace.location(), WorkspaceLocation::Remote { .. })
                         })
                 })
         );
         debug_assert!(self.workspaces.iter().all(|workspace| {
-            !matches!(workspace.kind(), WorkspaceKind::RemoteProject { .. })
+            !matches!(workspace.location(), WorkspaceLocation::Remote { .. })
                 || self.remote_workspace_runtimes.contains_key(&workspace.id())
         }));
     }
@@ -2055,7 +2097,7 @@ impl WorkspaceManager {
         let Some(key) = workspace.remote_workspace_key().cloned() else {
             return;
         };
-        let Some(directory) = workspace.remote_workspace_directory().cloned() else {
+        let Some(directory) = workspace.remote_starting_directory().cloned() else {
             return;
         };
         let Some(state) = workspace.remote_connection_state() else {
@@ -2063,11 +2105,12 @@ impl WorkspaceManager {
         };
         let generation = state.generation();
         let destination = key.destination().clone();
+        let pinned_directory = workspace.pinned_directory().cloned();
         let expected_identity = key.physical_directory().clone();
         let tab_manager = workspace.payload().clone();
-        let local_root = ValidatedWorkspaceDirectory::new(
-            self.default_workspace_root.clone(),
-            self.default_workspace_identity.clone(),
+        let local_root = ValidatedLocalDirectory::new(
+            self.local_home_directory_path.clone(),
+            self.local_home_identity.clone(),
         );
         let session_factory = Rc::clone(&self.session_factory);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2146,24 +2189,22 @@ impl WorkspaceManager {
                     return Err(RemoteWorkspaceReconnectFailure::IdentityChanged);
                 }
                 let channels = session
-                    .bind_terminal_channels_for_identity(
-                        &directory,
-                        &expected_identity,
-                        account.login_shell(),
-                    )
+                    .bind_terminal_channels(account.login_shell())
                     .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
                         detail: None,
                     })?;
                 let lifecycle = session
                     .take_lifecycle_observer()
                     .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
-                let factory = WorkspaceTerminalSessionFactory::new_remote(
+                let mut factory = WorkspaceTerminalSessionFactory::new_remote(
                     session_factory,
                     local_root,
                     RemoteTerminalMetadataContext::new(destination, directory),
+                    expected_identity.clone(),
                     remote_workspace_fallback_title(&key, account.home_identity()),
                     channels,
                 );
+                factory.set_pinned_directory(pinned_directory);
                 let restart = tab_manager
                     .update(cx, |manager, cx| {
                         manager.prepare_remote_restart(factory, generation, cx)
@@ -2512,31 +2553,21 @@ impl WorkspaceManager {
         }
     }
 
-    fn handle_workspace_picker_event(
+    fn handle_directory_picker_event(
         &mut self,
-        event: &WorkspacePickerEvent,
+        event: &DirectoryPickerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            WorkspacePickerEvent::StateChanged => {
+            DirectoryPickerEvent::StateChanged => {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
-            WorkspacePickerEvent::Escaped => {
-                if !self.transient.picker_entered_from_panel {
-                    return;
-                }
-                // Reopening is deferred so the picker finishes closing first; otherwise the two
-                // palettes would contend for the responder and the panel would open unfocused.
-                let manager = cx.entity();
-                window.defer(cx, move |window, cx| {
-                    manager.update(cx, |manager, cx| {
-                        manager.present_new_workspace_panel(window, cx)
-                    });
-                });
+            DirectoryPickerEvent::Escaped => {
+                self.transient.pin_target = None;
             }
-            WorkspacePickerEvent::DirectorySelectionRequested => {
+            DirectoryPickerEvent::DirectorySelectionRequested => {
                 let identity = self
                     .transient
                     .picker
@@ -2556,13 +2587,15 @@ impl WorkspaceManager {
                 })
                 .detach();
             }
-            WorkspacePickerEvent::Confirmed(directory) => {
-                let activated =
-                    self.activate_validated_local_project(directory.clone(), window, cx);
+            DirectoryPickerEvent::Confirmed(directory) => {
+                let activated = self.transient.pin_target.is_some_and(|workspace_id| {
+                    self.apply_validated_local_pin(workspace_id, directory.clone(), window, cx)
+                });
                 if activated {
-                    self.transient.picker_entered_from_panel = false;
+                    self.transient.pin_target = None;
                 }
                 let picker = self.transient.picker.clone();
+                let owner = cx.entity();
                 window.defer(cx, move |window, cx| {
                     picker.update(cx, |picker, cx| {
                         if activated {
@@ -2571,129 +2604,31 @@ impl WorkspaceManager {
                             picker.activation_failed(window, cx);
                         }
                     });
+                    if activated {
+                        owner.update(cx, |manager, cx| {
+                            manager.sync_terminal_focus_blocker(window, cx);
+                            manager.focus(window, cx);
+                            cx.notify();
+                        });
+                    }
                 });
             }
         }
     }
 
-    fn activate_validated_local_project(
-        &mut self,
-        directory: ValidatedWorkspaceDirectory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Ok(directory) = self
-            .local_filesystem
-            .revalidate_workspace_directory(&directory)
-        else {
-            return false;
-        };
-        if let Some(workspace_id) = self
-            .workspaces
-            .local_project_workspace(directory.identity())
-        {
-            return self.activate_workspace(workspace_id, window, cx);
-        }
-
-        let previous_manager = self.workspaces.active_workspace().payload().clone();
-        let local_filesystem = self.local_filesystem.clone();
-        let session_factory = Rc::clone(&self.session_factory);
-        let pane_construction = self.pane_construction.clone();
-        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let sidebar_visible = self.sidebar.visible;
-        let sidebar_width = self.sidebar.width;
-        let project_root_identity = directory.identity();
-        let result = self.workspaces.create_local_project_workspace(
-            directory,
-            |workspace_id, project_root| {
-                Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local_with_authority(
-                        session_factory,
-                        ValidatedWorkspaceDirectory::new(
-                            project_root.to_path_buf(),
-                            project_root_identity,
-                        ),
-                        local_filesystem.clone(),
-                    ),
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag_platform,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            },
-        );
-        let workspace_id = match result {
-            Ok(workspace_id) => workspace_id,
-            Err(error) => {
-                Self::report_workspace_error("open Local Project", error);
-                return false;
-            }
-        };
-        let Some(next_manager) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.payload().clone())
-        else {
-            unreachable!("a newly opened Local Project must remain owned by its collection")
-        };
-        self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
-        next_manager.update(cx, |manager, cx| manager.activate(window, cx));
-        self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view();
-        self.refresh_workspace_search(cx);
-        cx.notify();
-        true
+    fn local_home_directory(&self) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
+        self.local_filesystem
+            .validate_directory(&self.local_home_directory_path)
     }
 
-    fn revalidate_local_project(&mut self, workspace_id: WorkspaceId) {
-        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-            return;
-        };
-        let (Some(path), Some(expected_identity)) = (
-            workspace.working_directory(),
-            workspace.directory_identity(),
-        ) else {
-            unreachable!("a Local Project Workspace must own a local Workspace Directory")
-        };
-        let expected =
-            ValidatedWorkspaceDirectory::new(path.to_path_buf(), expected_identity.clone());
-        match self
-            .local_filesystem
-            .revalidate_workspace_directory(&expected)
-        {
-            Ok(_) => {
-                let _ = self
-                    .workspaces
-                    .set_directory_available(workspace_id, expected_identity);
-            }
-            Err(error) => {
-                let _ = self
-                    .workspaces
-                    .set_directory_unavailable(workspace_id, error.to_string());
-            }
-        }
-    }
-
-    fn default_workspace_directory(&self) -> (ValidatedWorkspaceDirectory, Option<String>) {
-        match self
-            .local_filesystem
-            .validate_workspace_directory(&self.default_workspace_root)
-        {
-            Ok(directory) => (directory, None),
-            Err(error) => (
-                ValidatedWorkspaceDirectory::new(
-                    self.default_workspace_root.clone(),
-                    self.default_workspace_identity.clone(),
-                ),
-                Some(error.to_string()),
-            ),
-        }
+    fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
+        drop(window.prompt(
+            gpui::PromptLevel::Warning,
+            "Home Directory Unavailable",
+            Some("A workspace could not be created. Check that your home directory exists and is accessible, then try again."),
+            &[gpui::PromptButton::ok("OK")],
+            cx,
+        ));
     }
 
     fn activate_workspace(
@@ -2702,14 +2637,6 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if matches!(
-            self.workspaces
-                .workspace(workspace_id)
-                .map(|workspace| workspace.kind()),
-            Some(WorkspaceKind::LocalProject { .. })
-        ) {
-            self.revalidate_local_project(workspace_id);
-        }
         let Some(next_manager) = self
             .workspaces
             .workspace(workspace_id)
@@ -2940,6 +2867,20 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let replacement = if self.workspaces.len() == 1 {
+            match self.local_home_directory() {
+                Ok(directory) => directory,
+                Err(_) => {
+                    Self::show_home_directory_unavailable(window, cx);
+                    return;
+                }
+            }
+        } else {
+            ValidatedLocalDirectory::new(
+                self.local_home_directory_path.clone(),
+                self.local_home_identity.clone(),
+            )
+        };
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let local_filesystem = self.local_filesystem.clone();
@@ -2948,18 +2889,16 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.visible;
         let sidebar_width = self.sidebar.width;
-        let (replacement, unavailable_reason) = self.default_workspace_directory();
         let replacement_identity = replacement.identity();
-        let outcome = self.workspaces.close_workspace_with_scratch_replacement(
+        let outcome = self.workspaces.close_workspace_with_local_replacement(
             workspace_id,
             replacement,
-            DirectoryAuthority::initial(),
-            |replacement_workspace_id, workspace_root| {
+            |replacement_workspace_id, home_directory| {
                 Self::create_local_tab_manager(
                     WorkspaceTerminalSessionFactory::new_local_with_authority(
                         session_factory,
-                        ValidatedWorkspaceDirectory::new(
-                            workspace_root.to_path_buf(),
+                        ValidatedLocalDirectory::new(
+                            home_directory.to_path_buf(),
                             replacement_identity,
                         ),
                         local_filesystem.clone(),
@@ -2983,17 +2922,6 @@ impl WorkspaceManager {
                 return;
             }
         };
-        if matches!(
-            outcome,
-            CloseWorkspaceOutcome::FinalWorkspaceReplaced { .. }
-        ) && let Some(reason) = unavailable_reason
-        {
-            let replacement_id = self.workspaces.active_workspace_id();
-            let _ = self
-                .workspaces
-                .set_directory_unavailable(replacement_id, reason);
-        }
-
         let closed_manager = match outcome {
             CloseWorkspaceOutcome::WorkspaceClosed { payload, .. }
             | CloseWorkspaceOutcome::FinalWorkspaceReplaced { payload, .. } => payload,
@@ -3102,6 +3030,17 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.transient.pin_target == Some(workspace_id) {
+            self.pin_operation = self.pin_operation.wrapping_add(1);
+            self.transient.pin_target = None;
+            self.transient
+                .picker
+                .update(cx, |picker, cx| picker.dismiss(window, cx));
+            if let Some(picker) = self.remote_pin_picker.take() {
+                picker.update(cx, |picker, cx| picker.cancel(window, cx));
+            }
+        }
+
         if self
             .workspaces
             .workspace(workspace_id)
@@ -3212,6 +3151,12 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match command {
+            WorkspaceMenuCommand::PinDirectory => {
+                self.open_pin_directory_picker(workspace_id, window, cx)
+            }
+            WorkspaceMenuCommand::UnpinDirectory => {
+                self.apply_directory_pin(workspace_id, None, window, cx);
+            }
             WorkspaceMenuCommand::NewTab => {
                 if let Some(workspace) = self.workspaces.workspace(workspace_id) {
                     workspace
@@ -3353,15 +3298,6 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn on_create_scratch_workspace(
-        &mut self,
-        _: &CreateScratchWorkspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.create_scratch_workspace(window, cx);
-    }
-
     fn on_search_workspaces(
         &mut self,
         _: &SearchWorkspaces,
@@ -3369,15 +3305,6 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.open_workspace_search(window, cx);
-    }
-
-    fn on_open_local_project(
-        &mut self,
-        _: &OpenLocalProject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_local_project(window, cx);
     }
 
     fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -3510,10 +3437,9 @@ impl WorkspaceManager {
     /// chip would be duplicate chrome; with it closed nothing on screen does.
     fn render_workspace_chip(&self) -> AnyElement {
         let workspace = self.workspaces.active_workspace();
-        let workspace_icon = match workspace.kind() {
-            WorkspaceKind::LocalProject { .. } => IconName::Folder,
-            WorkspaceKind::RemoteProject { .. } => IconName::Globe,
-            WorkspaceKind::Scratch { .. } => IconName::Terminal,
+        let workspace_icon = match workspace.location() {
+            WorkspaceLocation::Remote { .. } => IconName::Globe,
+            WorkspaceLocation::Local => IconName::Terminal,
         };
         let available = workspace.availability().is_available();
         let remote_connection_phase = workspace
@@ -3522,10 +3448,10 @@ impl WorkspaceManager {
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color = remote_connection_phase.map(remote_connection_color);
         let name = workspace.name().to_owned();
-        let (path, _) = workspace_directory_labels(
-            workspace.working_directory(),
-            workspace.remote_workspace_directory(),
-            &self.default_workspace_root,
+        let (path, _) = directory_labels(
+            workspace.local_display_directory(),
+            workspace.remote_display_directory(),
+            &self.local_home_directory_path,
         );
         let foreground = gpui_color(if available {
             ACTIVE_THEME.text
@@ -3554,6 +3480,13 @@ impl WorkspaceManager {
                 px(WORKSPACE_CHIP_ICON_SIZE),
                 remote_color.map(gpui_color).unwrap_or(icon_color),
             ))
+            .when(workspace.pinned_directory().is_some(), |chip| {
+                chip.child(
+                    div()
+                        .debug_selector(|| "workspace-chip-pin".to_owned())
+                        .child(Icon::new(IconName::Pin, px(12.0), icon_color)),
+                )
+            })
             .child(
                 div()
                     .debug_selector(|| "workspace-chip-label".to_owned())
@@ -3731,7 +3664,7 @@ impl WorkspaceManager {
             name,
             path,
             tooltip,
-            local_project,
+            pinned,
             remote_connection_phase,
             available,
             tab_count,
@@ -3797,8 +3730,10 @@ impl WorkspaceManager {
             .unwrap_or_else(|| tooltip.to_string());
         let tooltip_label = if remote_status.is_some() {
             "Remote Workspace connection"
+        } else if pinned {
+            "Pinned Directory"
         } else if available {
-            "Workspace Directory"
+            "Home Directory"
         } else {
             "Workspace unavailable"
         };
@@ -3845,9 +3780,7 @@ impl WorkspaceManager {
                         div()
                             .relative()
                             .child(Icon::new(
-                                if local_project {
-                                    IconName::Folder
-                                } else if remote_connection_phase.is_some() {
+                                if remote_connection_phase.is_some() {
                                     IconName::Globe
                                 } else {
                                     IconName::Terminal
@@ -3892,6 +3825,20 @@ impl WorkspaceManager {
                             .items_center()
                             .gap(px(8.0))
                             .child(div().min_w_0().flex_1().child(first_line))
+                            .when(pinned, |row| {
+                                row.child(
+                                    div()
+                                        .id(("workspace-row-pin", workspace_id.get()))
+                                        .debug_selector(move || {
+                                            format!("workspace-row-pin-{}", workspace_id.get())
+                                        })
+                                        .child(Icon::new(
+                                            IconName::Pin,
+                                            px(12.0),
+                                            gpui_color(ACTIVE_THEME.icon),
+                                        )),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -3964,9 +3911,9 @@ impl WorkspaceManager {
                     ("workspace-menu-controls", workspace_id.get()),
                     accessibility_name,
                     row,
-                    workspace_menu_entries(remote_connection_phase, presentation),
+                    workspace_menu_entries(pinned, remote_connection_phase, presentation),
                 )
-                .size(MenuSize::Small)
+                .size(MenuSize::Wide)
                 .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
                 .on_open_request(move |_, window, cx| {
                     open_manager
@@ -4026,14 +3973,14 @@ impl WorkspaceManager {
         let active_workspace_id = self.workspaces.active_workspace_id();
         for workspace in self.workspaces.iter() {
             let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
-            let (path, directory_tooltip) = workspace_directory_labels(
-                workspace.working_directory(),
-                workspace.remote_workspace_directory(),
-                &self.default_workspace_root,
+            let (path, directory_tooltip) = directory_labels(
+                workspace.local_display_directory(),
+                workspace.remote_display_directory(),
+                &self.local_home_directory_path,
             );
             let (available, tooltip) = match workspace.availability() {
-                WorkspaceDirectoryAvailability::Available => (true, directory_tooltip),
-                WorkspaceDirectoryAvailability::Unavailable { reason } => {
+                DirectoryAvailability::Available => (true, directory_tooltip),
+                DirectoryAvailability::Unavailable { reason } => {
                     (false, format!("{directory_tooltip}: {reason}"))
                 }
             };
@@ -4044,10 +3991,7 @@ impl WorkspaceManager {
                         name: workspace.name().to_owned().into(),
                         path: path.into(),
                         tooltip: tooltip.into(),
-                        local_project: matches!(
-                            workspace.kind(),
-                            WorkspaceKind::LocalProject { .. }
-                        ),
+                        pinned: workspace.pinned_directory().is_some(),
                         remote_connection_phase: workspace
                             .remote_connection_state()
                             .map(RemoteConnectionState::phase),
@@ -4297,9 +4241,7 @@ impl Render for WorkspaceManager {
                 .absolute()
                 .inset_0(),
             )
-            .on_action(cx.listener(Self::on_create_scratch_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
-            .on_action(cx.listener(Self::on_open_local_project))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
@@ -4339,6 +4281,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
+            .children(self.remote_pin_picker.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone(), window, cx))
             .when(self.sidebar.visible, |root| {
                 root.child(self.render_sidebar(manager.clone(), window, cx))
@@ -4353,6 +4296,7 @@ impl Render for WorkspaceManager {
 }
 
 fn workspace_menu_entries(
+    pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<WorkspaceMenuCommand>> {
@@ -4368,6 +4312,24 @@ fn workspace_menu_entries(
             .icon(|foreground| Icon::new(IconName::Pencil, px(14.0), foreground).into_any_element())
             .debug_selector("workspace-menu-row-rename"),
     ];
+    entries.push(
+        MenuEntry::action(
+            if pinned {
+                "Change Pinned Directory"
+            } else {
+                "PIN WORKSPACE TO A DIRECTORY"
+            },
+            WorkspaceMenuCommand::PinDirectory,
+        )
+        .icon(|foreground| Icon::new(IconName::Pin, px(14.0), foreground).into_any_element())
+        .debug_selector("workspace-menu-row-pin-directory"),
+    );
+    if pinned {
+        entries.push(
+            MenuEntry::action("Unpin Directory", WorkspaceMenuCommand::UnpinDirectory)
+                .debug_selector("workspace-menu-row-unpin-directory"),
+        );
+    }
     if let Some(phase) = remote_connection_phase {
         entries.push(
             MenuEntry::action("Reconnect", WorkspaceMenuCommand::Reconnect)
@@ -4470,12 +4432,12 @@ fn remote_workspace_reconnect_error_content(
         )),
         RemoteWorkspaceReconnectFailure::DirectoryUnavailable => Some((
             "Remote Directory Unavailable",
-            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project."
+            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace."
                 .to_owned(),
         )),
         RemoteWorkspaceReconnectFailure::IdentityChanged => Some((
             "Remote Directory Changed",
-            "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it."
+            "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it."
                 .to_owned(),
         )),
     }
@@ -4504,9 +4466,9 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn workspace_directory_labels(
+fn directory_labels(
     local_directory: Option<&std::path::Path>,
-    remote_directory: Option<&RemoteWorkspaceDirectory>,
+    remote_directory: Option<&RemoteDirectory>,
     local_home: &std::path::Path,
 ) -> (String, String) {
     match (local_directory, remote_directory) {
@@ -4525,7 +4487,7 @@ fn workspace_directory_labels(
 }
 
 fn remote_workspace_fallback_title(
-    key: &RemoteWorkspaceKey,
+    key: &RemoteWorkspaceTarget,
     home_identity: &crate::domain::RemoteDirectoryIdentity,
 ) -> String {
     if key.physical_directory() == home_identity {
@@ -4544,22 +4506,22 @@ fn remote_workspace_fallback_title(
     format!("{basename} · {}", key.destination().as_str())
 }
 
-fn initial_workspace_directory(
+fn initial_home_directory(
     path: PathBuf,
     local_filesystem: &LocalFilesystemAuthority,
-) -> (ValidatedWorkspaceDirectory, Option<String>) {
+) -> (ValidatedLocalDirectory, Option<String>) {
     #[cfg(test)]
     let _ = local_filesystem;
     #[cfg(test)]
     return (
-        ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::for_test(0)),
+        ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::for_test(0)),
         None,
     );
     #[cfg(not(test))]
-    match local_filesystem.validate_workspace_directory(&path) {
+    match local_filesystem.validate_directory(&path) {
         Ok(directory) => (directory, None),
         Err(error) => (
-            ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::unavailable()),
+            ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::unavailable()),
             Some(error.to_string()),
         ),
     }
@@ -4567,6 +4529,10 @@ fn initial_workspace_directory(
 
 #[cfg(test)]
 impl WorkspaceManager {
+    pub(crate) fn new_workspace_panel_is_open(&self, cx: &App) -> bool {
+        self.transient.new_workspace.read(cx).is_open()
+    }
+
     pub(crate) fn assert_application_capabilities(
         &self,
         expected: &crate::app::ApplicationCapabilities,

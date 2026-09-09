@@ -12,9 +12,9 @@ use spaceterm_ui::{
 };
 use thiserror::Error;
 
-use super::remote_workspace_picker::{
-    RemoteWorkspaceAccount, RemoteWorkspacePicker, RemoteWorkspacePickerEvent,
-    RemoteWorkspaceProvider, RemoteWorkspaceSelection,
+use super::remote_directory_picker::RemoteDirectoryProviderError;
+use super::remote_directory_picker::{
+    RemoteDirectoryProvider, RemoteDirectorySelection, RemoteWorkspaceAccount,
 };
 use super::ssh_host_form::{
     ManagedHostFormBackend, ManagedHostFormBackendError, SshHostForm, SshHostFormEvent,
@@ -23,7 +23,7 @@ use super::ssh_host_form::{
 use super::ssh_host_picker::{
     HostDiscoveryProvider, SshHostPicker, SshHostPickerEvent, SshHostPickerLifecycleEvent,
 };
-use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
+use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, SshDestination};
 use crate::ssh::command::ValidatedRemoteLoginShell;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
@@ -45,6 +45,7 @@ pub(crate) enum RemoteWorkspaceConnectionProgress {
     CheckingCompatibility,
     Connecting,
     Authenticating,
+    PreparingHome,
 }
 
 impl RemoteWorkspaceConnectionProgress {
@@ -53,6 +54,7 @@ impl RemoteWorkspaceConnectionProgress {
             Self::CheckingCompatibility => "Checking remote compatibility",
             Self::Connecting => "Connecting securely",
             Self::Authenticating => "Waiting for authentication",
+            Self::PreparingHome => "Preparing remote home directory",
         }
     }
 }
@@ -105,6 +107,8 @@ pub(crate) enum RemoteWorkspaceFlowBackendError {
     HostInUse,
     #[error("the remote server is incompatible")]
     IncompatibleServer,
+    #[error("the remote home directory is unavailable")]
+    HomeDirectoryUnavailable,
     #[error("the required OpenSSH version is unavailable")]
     OpenSshUnavailable,
     #[error("the app-owned SSH configuration is unavailable")]
@@ -143,6 +147,7 @@ impl fmt::Debug for RemoteWorkspaceFlowBackendError {
             Self::DeleteFailed => "DeleteFailed",
             Self::HostInUse => "HostInUse",
             Self::IncompatibleServer => "IncompatibleServer",
+            Self::HomeDirectoryUnavailable => "HomeDirectoryUnavailable",
             Self::OpenSshUnavailable => "OpenSshUnavailable",
             Self::SshConfigurationUnavailable => "SshConfigurationUnavailable",
             Self::SshRuntimeUnavailable => "SshRuntimeUnavailable",
@@ -168,8 +173,11 @@ fn connection_error_content(
         Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
             "This host does not provide the remote capabilities SpaceTerm requires."
         }
+        Some(RemoteWorkspaceFlowBackendError::HomeDirectoryUnavailable) => {
+            "SpaceTerm could not open the remote home directory. Check that the account has an accessible home directory, then retry."
+        }
         Some(RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable) => {
-            "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration folder and retry."
+            "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration directory and retry."
         }
         Some(RemoteWorkspaceFlowBackendError::SshRuntimeUnavailable) => {
             "SpaceTerm couldn\u{2019}t prepare its private SSH runtime. Check permissions for SpaceTerm\u{2019}s runtime storage and retry."
@@ -216,11 +224,9 @@ pub(crate) trait RemoteWorkspaceSessionOwner: Send + 'static {
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError>;
 
-    /// Binds a fallible channel provider to the visible directory and its physical identity.
-    fn bind_terminal_channels_for_identity(
+    /// Binds a fallible per-launch channel provider to this connected account.
+    fn bind_terminal_channels(
         &self,
-        directory: &RemoteWorkspaceDirectory,
-        expected_identity: &RemoteDirectoryIdentity,
         login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
@@ -236,14 +242,14 @@ pub(crate) trait RemoteWorkspaceSessionOwner: Send + 'static {
 /// This value is intentionally non-Clone. Dropping it closes the session exactly once.
 pub(crate) struct RemoteWorkspaceConnectedSession {
     owner: Option<Box<dyn RemoteWorkspaceSessionOwner>>,
-    provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+    provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
 }
 
 impl RemoteWorkspaceConnectedSession {
     /// Creates a connected session from its singular owner and narrow utility provider.
     pub(crate) fn new(
         owner: Box<dyn RemoteWorkspaceSessionOwner>,
-        provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+        provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
     ) -> Self {
         Self {
             owner: Some(owner),
@@ -251,21 +257,19 @@ impl RemoteWorkspaceConnectedSession {
         }
     }
 
-    pub(crate) fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
+    pub(crate) fn provider(&self) -> Arc<dyn RemoteDirectoryProvider + Send + Sync> {
         Arc::clone(&self.provider)
     }
 
     /// Creates a provider that requires physical revalidation before every child reservation.
-    pub(crate) fn bind_terminal_channels_for_identity(
+    pub(crate) fn bind_terminal_channels(
         &self,
-        directory: &RemoteWorkspaceDirectory,
-        expected_identity: &RemoteDirectoryIdentity,
         login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
         self.owner
             .as_ref()
             .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
-            .bind_terminal_channels_for_identity(directory, expected_identity, login_shell)
+            .bind_terminal_channels(login_shell)
     }
 
     /// Transfers the session-paired lifecycle observer at most once.
@@ -368,7 +372,7 @@ impl ManagedHostFormBackend for FlowManagedHostBackend {
 pub(crate) struct RemoteWorkspaceFlowCompletion {
     session: RemoteWorkspaceConnectedSession,
     destination: SshDestination,
-    directory: RemoteWorkspaceDirectory,
+    directory: RemoteDirectory,
     physical_directory: RemoteDirectoryIdentity,
     account: RemoteWorkspaceAccount,
     terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
@@ -380,7 +384,7 @@ impl RemoteWorkspaceFlowCompletion {
     pub(crate) fn for_test(
         session: RemoteWorkspaceConnectedSession,
         destination: SshDestination,
-        directory: RemoteWorkspaceDirectory,
+        directory: RemoteDirectory,
         physical_directory: RemoteDirectoryIdentity,
         account: RemoteWorkspaceAccount,
         terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
@@ -401,7 +405,7 @@ impl RemoteWorkspaceFlowCompletion {
         &self.destination
     }
 
-    pub(crate) const fn directory(&self) -> &RemoteWorkspaceDirectory {
+    pub(crate) const fn directory(&self) -> &RemoteDirectory {
         &self.directory
     }
 
@@ -431,7 +435,7 @@ impl RemoteWorkspaceFlowCompletion {
     ) -> (
         RemoteWorkspaceConnectedSession,
         SshDestination,
-        RemoteWorkspaceDirectory,
+        RemoteDirectory,
         RemoteDirectoryIdentity,
         RemoteWorkspaceAccount,
         Arc<dyn RemoteTerminalChannelProvider>,
@@ -498,7 +502,7 @@ pub(crate) enum RemoteWorkspaceFlowStage {
     DeletingHost,
     Connecting(RemoteWorkspaceConnectionProgress),
     ConnectionError,
-    DirectorySelection,
+    PreparingHome,
     AwaitingActivation,
     Completed,
     Cancelled,
@@ -546,7 +550,6 @@ impl Drop for ConnectionAttempt {
 
 struct PendingActivation {
     handle: RemoteWorkspaceFlowCompletionHandle,
-    picker: Option<Entity<RemoteWorkspacePicker>>,
 }
 
 impl Drop for PendingActivation {
@@ -591,9 +594,10 @@ enum RemoteWorkspaceFlowState {
         destination: SshDestination,
         alert: Option<ModalPresentationHandle>,
     },
-    DirectorySelection {
+    PreparingHome {
         connection: ConnectedHost,
-        picker: Option<Entity<RemoteWorkspacePicker>>,
+        task: Option<Task<()>>,
+        progress: Option<ProgressDialogHandle>,
     },
     AwaitingActivation(PendingActivation),
     Completed,
@@ -614,7 +618,7 @@ impl RemoteWorkspaceFlowState {
             Self::ConnectionFailed { .. } | Self::ConnectionError { .. } => {
                 RemoteWorkspaceFlowStage::ConnectionError
             }
-            Self::DirectorySelection { .. } => RemoteWorkspaceFlowStage::DirectorySelection,
+            Self::PreparingHome { .. } => RemoteWorkspaceFlowStage::PreparingHome,
             Self::AwaitingActivation(_) => RemoteWorkspaceFlowStage::AwaitingActivation,
             Self::Completed => RemoteWorkspaceFlowStage::Completed,
             Self::Cancelled => RemoteWorkspaceFlowStage::Cancelled,
@@ -636,9 +640,9 @@ impl RemoteWorkspaceFlowState {
     fn progress(&self) -> Option<&ProgressDialogHandle> {
         match self {
             Self::Connecting(attempt) => attempt.progress.as_ref(),
-            Self::ConnectionReady { progress, .. } | Self::ConnectionFailed { progress, .. } => {
-                progress.as_ref()
-            }
+            Self::ConnectionReady { progress, .. }
+            | Self::ConnectionFailed { progress, .. }
+            | Self::PreparingHome { progress, .. } => progress.as_ref(),
             _ => None,
         }
     }
@@ -646,17 +650,9 @@ impl RemoteWorkspaceFlowState {
     fn take_progress(&mut self) -> Option<ProgressDialogHandle> {
         match self {
             Self::Connecting(attempt) => attempt.progress.take(),
-            Self::ConnectionReady { progress, .. } | Self::ConnectionFailed { progress, .. } => {
-                progress.take()
-            }
-            _ => None,
-        }
-    }
-
-    fn remote_picker(&self) -> Option<&Entity<RemoteWorkspacePicker>> {
-        match self {
-            Self::DirectorySelection { picker, .. } => picker.as_ref(),
-            Self::AwaitingActivation(pending) => pending.picker.as_ref(),
+            Self::ConnectionReady { progress, .. }
+            | Self::ConnectionFailed { progress, .. }
+            | Self::PreparingHome { progress, .. } => progress.take(),
             _ => None,
         }
     }
@@ -683,14 +679,8 @@ impl RemoteWorkspaceFlowState {
             }
             Self::AwaitingActivation(pending) => {
                 drop(pending.handle.take());
-                if let Some(picker) = &pending.picker {
-                    picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-                }
             }
             _ => {}
-        }
-        if let Some(picker) = self.remote_picker() {
-            picker.update(cx, |picker, cx| picker.dismiss(window, cx));
         }
     }
 }
@@ -729,6 +719,13 @@ impl RemoteWorkspaceFlow {
             },
         )
         .detach();
+        cx.observe_window_activation(window, |flow, window, cx| {
+            if !window.is_window_active() && flow.stage() == RemoteWorkspaceFlowStage::PreparingHome
+            {
+                flow.cancel_flow(window, cx);
+            }
+        })
+        .detach();
         Self {
             backend,
             host_picker,
@@ -759,7 +756,6 @@ impl RemoteWorkspaceFlow {
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
         self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
             handle: handle.clone(),
-            picker: None,
         });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
@@ -1111,7 +1107,7 @@ impl RemoteWorkspaceFlow {
         let (title, message) = match error {
             RemoteWorkspaceFlowBackendError::HostInUse => (
                 "SSH Host Is in Use",
-                "Close the Remote Project Workspace using this SSH host, then try again.",
+                "Close the Remote Workspace using this SSH host, then try again.",
             ),
             _ => (
                 "Couldn\u{2019}t Delete SSH Host",
@@ -1170,7 +1166,7 @@ impl RemoteWorkspaceFlow {
         if matches!(&self.state, RemoteWorkspaceFlowState::HostSelection { retained: Some(connection) }
             if connection.destination == destination)
         {
-            self.open_remote_picker(window, cx);
+            self.prepare_home(window, cx);
             return;
         }
         self.action_generation = self.action_generation.wrapping_add(1);
@@ -1272,10 +1268,13 @@ impl RemoteWorkspaceFlow {
         let Ok(progress) = dialog else {
             return false;
         };
-        let RemoteWorkspaceFlowState::Connecting(attempt) = &mut self.state else {
-            return false;
-        };
-        attempt.progress = Some(progress);
+        match &mut self.state {
+            RemoteWorkspaceFlowState::Connecting(attempt) => attempt.progress = Some(progress),
+            RemoteWorkspaceFlowState::PreparingHome {
+                progress: pending, ..
+            } => *pending = Some(progress),
+            _ => return false,
+        }
         true
     }
 
@@ -1353,7 +1352,7 @@ impl RemoteWorkspaceFlow {
             } => {
                 let _ = handle.complete(window, cx);
             }
-            RemoteWorkspaceFlowState::ConnectionReady { .. } => self.open_remote_picker(window, cx),
+            RemoteWorkspaceFlowState::ConnectionReady { .. } => self.prepare_home(window, cx),
             RemoteWorkspaceFlowState::ConnectionFailed {
                 progress: Some(handle),
                 ..
@@ -1387,7 +1386,7 @@ impl RemoteWorkspaceFlow {
             ProgressDialogOutcome::Completed
                 if matches!(self.state, RemoteWorkspaceFlowState::ConnectionReady { .. }) =>
             {
-                self.open_remote_picker(window, cx);
+                self.prepare_home(window, cx);
             }
             ProgressDialogOutcome::Failed
                 if matches!(
@@ -1536,10 +1535,10 @@ impl RemoteWorkspaceFlow {
         }
     }
 
-    fn open_remote_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn prepare_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let connection = match std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle) {
-            RemoteWorkspaceFlowState::ConnectionReady { connection, .. } => connection,
-            RemoteWorkspaceFlowState::HostSelection {
+            RemoteWorkspaceFlowState::ConnectionReady { connection, .. }
+            | RemoteWorkspaceFlowState::HostSelection {
                 retained: Some(connection),
             } => connection,
             state => {
@@ -1550,90 +1549,114 @@ impl RemoteWorkspaceFlow {
         };
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        let provider = connection.session.provider();
-        let picker = cx.new(|cx| RemoteWorkspacePicker::new(provider, window, cx));
-        cx.subscribe_in(
-            &picker,
+        let discovery = connection.session.provider().discover_account();
+        self.host_picker
+            .update(cx, |picker, cx| picker.dismiss(window, cx));
+        self.state = RemoteWorkspaceFlowState::PreparingHome {
+            connection,
+            task: None,
+            progress: None,
+        };
+        if !self.present_connection_progress(
+            generation,
+            RemoteWorkspaceConnectionProgress::PreparingHome,
             window,
-            move |flow, _, event: &RemoteWorkspacePickerEvent, window, cx| {
-                flow.reduce_remote_picker_event(generation, event, window, cx);
-            },
-        )
-        .detach();
-        let replacement = self
-            .host_picker
-            .update(cx, |host, cx| host.dismiss_for_replacement(window, cx));
-        let opened = picker.update(cx, |picker, cx| match replacement {
-            Some(replacement) => picker.open_replacing(replacement, window, cx),
-            None => picker.open(window, cx),
-        });
-        if !opened {
+            cx,
+        ) {
             self.cancel_flow(window, cx);
             return;
         }
-        self.state = RemoteWorkspaceFlowState::DirectorySelection {
-            connection,
-            picker: Some(picker),
-        };
+        let task = cx.spawn_in(window, async move |flow, cx| {
+            let result = discovery.await;
+            let _ = flow.update_in(cx, |flow, window, cx| {
+                if flow.action_generation != generation
+                    || flow.stage() != RemoteWorkspaceFlowStage::PreparingHome
+                {
+                    return;
+                }
+                match result {
+                    Ok(account) => {
+                        let directory = RemoteDirectory::new("~/".to_owned())
+                            .expect("remote home is a valid remote directory");
+                        let selection = RemoteDirectorySelection::new(
+                            directory,
+                            account.home_identity().clone(),
+                            account,
+                        );
+                        flow.complete(selection, window, cx);
+                    }
+                    Err(error) => {
+                        let error = match error {
+                            RemoteDirectoryProviderError::ConnectionLost => {
+                                RemoteWorkspaceFlowBackendError::ConnectionFailed
+                            }
+                            RemoteDirectoryProviderError::UnsupportedLoginShell => {
+                                RemoteWorkspaceFlowBackendError::IncompatibleServer
+                            }
+                            _ => RemoteWorkspaceFlowBackendError::HomeDirectoryUnavailable,
+                        };
+                        flow.fail_home_preparation(error, window, cx);
+                    }
+                }
+            });
+        });
+        if let RemoteWorkspaceFlowState::PreparingHome { task: pending, .. } = &mut self.state {
+            *pending = Some(task);
+        }
         self.publish(cx);
     }
 
-    fn reduce_remote_picker_event(
+    fn fail_home_preparation(
         &mut self,
-        generation: u64,
-        event: &RemoteWorkspacePickerEvent,
+        error: RemoteWorkspaceFlowBackendError,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.action_generation != generation
-            || self.stage() != RemoteWorkspaceFlowStage::DirectorySelection
-        {
+        let RemoteWorkspaceFlowState::PreparingHome {
+            connection,
+            progress,
+            ..
+        } = std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
+        else {
             return;
+        };
+        self.state = RemoteWorkspaceFlowState::ConnectionFailed {
+            destination: connection.destination,
+            error,
+            progress,
+        };
+        if let RemoteWorkspaceFlowState::ConnectionFailed {
+            progress: Some(progress),
+            ..
+        } = &self.state
+        {
+            let _ = progress.fail(window, cx);
+        } else {
+            self.present_connection_error(self.action_generation, window, cx);
         }
-        match event {
-            RemoteWorkspacePickerEvent::StateChanged => cx.notify(),
-            RemoteWorkspacePickerEvent::BackToHost => {
-                self.action_generation = self.action_generation.wrapping_add(1);
-                let RemoteWorkspaceFlowState::DirectorySelection { connection, .. } =
-                    std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
-                else {
-                    return;
-                };
-                self.state = RemoteWorkspaceFlowState::HostSelection {
-                    retained: Some(connection),
-                };
-                self.host_picker
-                    .update(cx, |picker, cx| picker.open(window, cx));
-                self.publish(cx);
-            }
-            RemoteWorkspacePickerEvent::Dismissed => self.cancel_flow(window, cx),
-            RemoteWorkspacePickerEvent::Confirmed(selection) => {
-                self.complete(selection.clone(), window, cx)
-            }
-        }
+        self.publish(cx);
     }
 
     fn complete(
         &mut self,
-        selection: RemoteWorkspaceSelection,
+        selection: RemoteDirectorySelection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let RemoteWorkspaceFlowState::DirectorySelection { connection, picker } = &mut self.state
-        else {
+        let RemoteWorkspaceFlowState::PreparingHome { connection, .. } = &mut self.state else {
             return;
         };
-        let terminal_channels = match connection.session.bind_terminal_channels_for_identity(
-            selection.directory(),
-            selection.physical_directory(),
-            selection.account().login_shell(),
-        ) {
+        let terminal_channels = match connection
+            .session
+            .bind_terminal_channels(selection.account().login_shell())
+        {
             Ok(provider) => provider,
             Err(_) => {
-                if let Some(picker) = picker {
-                    picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-                }
-                self.publish(cx);
+                self.fail_home_preparation(
+                    RemoteWorkspaceFlowBackendError::ConnectionFailed,
+                    window,
+                    cx,
+                );
                 return;
             }
         };
@@ -1642,17 +1665,24 @@ impl RemoteWorkspaceFlow {
             .take()
             .or_else(|| connection.session.take_lifecycle_observer());
         let Some(lifecycle) = lifecycle else {
-            if let Some(picker) = picker {
-                picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-            }
-            self.publish(cx);
+            self.fail_home_preparation(
+                RemoteWorkspaceFlowBackendError::ConnectionFailed,
+                window,
+                cx,
+            );
             return;
         };
-        let RemoteWorkspaceFlowState::DirectorySelection { connection, picker } =
-            std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
+        let RemoteWorkspaceFlowState::PreparingHome {
+            connection,
+            progress,
+            ..
+        } = std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
         else {
             unreachable!();
         };
+        if let Some(progress) = progress {
+            let _ = progress.complete(window, cx);
+        }
         let completion = RemoteWorkspaceFlowCompletion {
             session: connection.session,
             destination: connection.destination,
@@ -1665,7 +1695,6 @@ impl RemoteWorkspaceFlow {
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
         self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
             handle: handle.clone(),
-            picker,
         });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
@@ -1675,14 +1704,11 @@ impl RemoteWorkspaceFlow {
     pub(crate) fn activation_succeeded(
         &mut self,
         handle: &RemoteWorkspaceFlowCompletionHandle,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.owns_activation(handle) {
             return false;
-        }
-        if let Some(picker) = self.state.remote_picker() {
-            picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
         }
         self.state = RemoteWorkspaceFlowState::Completed;
         self.action_generation = self.action_generation.wrapping_add(1);
@@ -1690,7 +1716,7 @@ impl RemoteWorkspaceFlow {
         true
     }
 
-    /// Returns a completion whose Workspace creation failed, restoring the retained picker.
+    /// Reports failed activation and offers a fresh connection attempt.
     pub(crate) fn activation_failed(
         &mut self,
         handle: &RemoteWorkspaceFlowCompletionHandle,
@@ -1701,27 +1727,14 @@ impl RemoteWorkspaceFlow {
         if !self.owns_activation(handle) {
             return Err(Box::new(completion));
         }
-        let RemoteWorkspaceFlowState::AwaitingActivation(mut pending) =
-            std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
-        else {
-            unreachable!();
-        };
-        let RemoteWorkspaceFlowCompletion {
-            session,
+        let destination = completion.destination().clone();
+        drop(completion);
+        self.state = RemoteWorkspaceFlowState::ConnectionFailed {
             destination,
-            lifecycle,
-            ..
-        } = completion;
-        let connection = ConnectedHost {
-            session,
-            destination,
-            retained_lifecycle: Some(lifecycle),
+            error: RemoteWorkspaceFlowBackendError::ConnectionFailed,
+            progress: None,
         };
-        let picker = pending.picker.take();
-        if let Some(picker) = &picker {
-            picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-        }
-        self.state = RemoteWorkspaceFlowState::DirectorySelection { connection, picker };
+        self.present_connection_error(self.action_generation, window, cx);
         self.publish(cx);
         Ok(())
     }
@@ -1779,7 +1792,6 @@ impl Render for RemoteWorkspaceFlow {
             .size_full()
             .track_focus(&self.focus_scope)
             .child(self.host_picker.clone())
-            .children(self.state.remote_picker().cloned())
     }
 }
 
@@ -1799,46 +1811,45 @@ mod tests {
     use crate::ui::new_workspace_panel::{
         NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource,
     };
-    use crate::ui::remote_workspace_picker::{
-        RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
-        RemoteWorkspaceProviderError,
+    use crate::ui::remote_directory_picker::{
+        RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProviderError,
     };
 
     #[derive(Default)]
     struct ReadyRemoteProvider;
 
-    impl RemoteWorkspaceProvider for ReadyRemoteProvider {
+    impl RemoteDirectoryProvider for ReadyRemoteProvider {
         fn discover_account(
             &self,
-        ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+        ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
             Task::ready(Ok(remote_account()))
         }
 
         fn list_directories(
             &self,
-            _: RemoteWorkspaceDirectory,
-        ) -> Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
-            Task::ready(Ok(RemoteWorkspaceDirectoryListing::new(Vec::new())))
+            _: RemoteDirectory,
+        ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+            Task::ready(Ok(RemoteDirectoryListing::new(Vec::new())))
         }
 
         fn probe_exact_path(
             &self,
-            _: RemoteWorkspaceDirectory,
-        ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
-            Task::ready(Ok(RemoteWorkspaceExactPathState::ReadableDirectory))
+            _: RemoteDirectory,
+        ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+            Task::ready(Ok(RemoteDirectoryExactPathState::ReadableDirectory))
         }
 
         fn create_directory_recursively(
             &self,
-            _: RemoteWorkspaceDirectory,
-        ) -> Task<Result<(), RemoteWorkspaceProviderError>> {
+            _: RemoteDirectory,
+        ) -> Task<Result<(), RemoteDirectoryProviderError>> {
             Task::ready(Ok(()))
         }
 
         fn validate_physical_identity(
             &self,
-            _: RemoteWorkspaceDirectory,
-        ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>> {
+            _: RemoteDirectory,
+        ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
             Task::ready(Ok(remote_identity("/home/tester")))
         }
     }
@@ -1855,10 +1866,8 @@ mod tests {
             Ok(None)
         }
 
-        fn bind_terminal_channels_for_identity(
+        fn bind_terminal_channels(
             &self,
-            _: &RemoteWorkspaceDirectory,
-            _: &RemoteDirectoryIdentity,
             _: &ValidatedRemoteLoginShell,
         ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
@@ -1901,10 +1910,8 @@ mod tests {
                 .transpose()
         }
 
-        fn bind_terminal_channels_for_identity(
+        fn bind_terminal_channels(
             &self,
-            _: &RemoteWorkspaceDirectory,
-            _: &RemoteDirectoryIdentity,
             _: &ValidatedRemoteLoginShell,
         ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
@@ -2194,7 +2201,7 @@ mod tests {
                  cx| {
                     if matches!(
                         event,
-                        NewWorkspacePanelEvent::SourceSelected(NewWorkspaceSource::RemoteProject)
+                        NewWorkspacePanelEvent::SourceSelected(NewWorkspaceSource::Remote)
                     ) {
                         harness.source_callbacks += 1;
                         harness.transfer_remote(window, cx);
@@ -2292,7 +2299,7 @@ mod tests {
                 Arc::new(ReadyRemoteProvider),
             ),
             destination("work"),
-            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
+            RemoteDirectory::new("~/src".to_owned()).unwrap(),
             remote_identity("/home/tester/src"),
             remote_account(),
             Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)),
@@ -2341,7 +2348,7 @@ mod tests {
         let (harness, panel, flow, cx) = replacement_window(backend, cx);
         assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
 
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
 
         assert_eq!(
@@ -2385,7 +2392,7 @@ mod tests {
 
         cx.update(|window, cx| panel.update(cx, |panel, cx| panel.open(window, cx)));
         cx.run_until_parked();
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
         assert_eq!(
             harness.read_with(cx, |harness, _| (
@@ -2448,7 +2455,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_progress_should_suspend_during_authentication_and_resume_before_opening_picker(
+    fn connection_progress_should_suspend_during_authentication_and_resume_before_preparing_home(
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
@@ -2512,7 +2519,7 @@ mod tests {
 
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
+            RemoteWorkspaceFlowStage::AwaitingActivation
         );
         assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_none()));
         assert_eq!(backend.discoveries.load(Ordering::SeqCst), 1);
@@ -2675,8 +2682,9 @@ mod tests {
 
     #[gpui::test]
     fn add_save_and_connect_then_edit_should_preserve_flow_ownership(cx: &mut TestAppContext) {
-        let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Err(
+            RemoteWorkspaceFlowBackendError::ConnectionFailed,
+        ))]);
         backend.push_save(Ok(()));
         backend.push_save(Ok(()));
         let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
@@ -2704,15 +2712,14 @@ mod tests {
 
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
+            RemoteWorkspaceFlowStage::ConnectionError
         );
-        cx.simulate_keystrokes("escape");
+        click("modal-action-remote-workspace-back-to-hosts", cx);
         cx.run_until_parked();
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
         );
-        assert_eq!(closes.load(Ordering::SeqCst), 0);
 
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
@@ -3033,7 +3040,7 @@ mod tests {
         assert_eq!(
             (content.message, content.detail, format!("{error:?}")),
             (
-                "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration folder and retry.",
+                "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration directory and retry.",
                 None,
                 "SshConfigurationUnavailable".to_owned(),
             )
@@ -3115,7 +3122,7 @@ mod tests {
 
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
+            RemoteWorkspaceFlowStage::AwaitingActivation
         );
         assert_eq!(backend.state.lock().unwrap().connect_records.len(), 2);
         assert_eq!(backend.discoveries.load(Ordering::SeqCst), 1);
@@ -3258,207 +3265,39 @@ mod tests {
     }
 
     #[gpui::test]
-    fn exact_completion_should_transfer_live_session_and_remote_metadata_once(
-        cx: &mut TestAppContext,
-    ) {
+    fn connection_should_create_at_home_without_directory_selection(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
         let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
         let (_, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "deploy@work", cx);
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
-        );
-
-        let selection = RemoteWorkspaceSelection::new(
-            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
-            remote_identity("/home/tester/src"),
-            remote_account(),
-        );
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                let generation = flow.action_generation;
-                flow.reduce_remote_picker_event(
-                    generation,
-                    &RemoteWorkspacePickerEvent::Confirmed(selection),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::AwaitingActivation
         );
+        assert!(!flow.read_with(cx, |flow, cx| flow.host_picker.read(cx).is_open()));
         let handle = events.borrow().completions[0].clone();
         let completion = handle.take().unwrap();
         assert_eq!(completion.destination().as_str(), "deploy@work");
-        assert_eq!(completion.directory().as_str(), "~/src");
-        assert_eq!(completion.physical_directory().as_str(), "/home/tester/src");
+        assert_eq!(completion.directory().as_str(), "~/");
+        assert_eq!(completion.physical_directory().as_str(), "/home/tester");
         assert_eq!(completion.remote_home_identity().as_str(), "/home/tester");
         assert!(handle.take().is_none());
         assert_eq!(closes.load(Ordering::SeqCst), 0);
-        let (session, destination, directory, physical, account, terminal_channels, lifecycle) =
-            completion.into_parts();
-        assert_eq!(destination.as_str(), "deploy@work");
-        assert_eq!(directory.as_str(), "~/src");
-        assert_eq!(physical.as_str(), "/home/tester/src");
-        assert_eq!(account.user(), "tester");
-        assert_eq!(account.login_shell().as_str(), "/bin/zsh");
-        assert!(terminal_channels.is_ready());
-        let _ = lifecycle;
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
                 assert!(flow.activation_succeeded(&handle, window, cx));
-            });
+            })
         });
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::Completed
         );
-        drop(session);
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
-    }
-
-    #[gpui::test]
-    fn failed_workspace_creation_should_restore_picker_and_deduplicate_completion(
-        cx: &mut TestAppContext,
-    ) {
-        let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
-        let (_, flow, events, cx) = flow_window(backend, cx);
-        select_destination(&flow, "work", cx);
-        let selection = RemoteWorkspaceSelection::new(
-            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
-            remote_identity("/home/tester/src"),
-            remote_account(),
-        );
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                let generation = flow.action_generation;
-                flow.reduce_remote_picker_event(
-                    generation,
-                    &RemoteWorkspacePickerEvent::Confirmed(selection.clone()),
-                    window,
-                    cx,
-                );
-                flow.reduce_remote_picker_event(
-                    generation,
-                    &RemoteWorkspacePickerEvent::Confirmed(selection.clone()),
-                    window,
-                    cx,
-                );
-            });
-        });
-        assert_eq!(events.borrow().completions.len(), 1);
-        let first = events.borrow().completions[0].clone();
-        let returned = first.take().unwrap();
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                assert!(flow.activation_failed(&first, returned, window, cx).is_ok());
-            });
-        });
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
-        );
-        assert_eq!(closes.load(Ordering::SeqCst), 0);
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                let generation = flow.action_generation;
-                flow.reduce_remote_picker_event(
-                    generation,
-                    &RemoteWorkspacePickerEvent::Confirmed(selection),
-                    window,
-                    cx,
-                );
-            });
-        });
-        assert_eq!(events.borrow().completions.len(), 2);
-        let second = events.borrow().completions[1].clone();
-        let completion = second.take().unwrap();
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                assert!(flow.activation_succeeded(&second, window, cx));
-            });
-        });
         drop(completion);
         assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[gpui::test]
-    fn back_should_reuse_same_connected_destination_and_ignore_stale_picker_events(
-        cx: &mut TestAppContext,
-    ) {
-        let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
-        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
-        select_destination(&flow, "work", cx);
-        let stale_generation = flow.read_with(cx, |flow, _| flow.action_generation);
-
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        select_destination(&flow, "work", cx);
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
-        );
-        assert_ne!(
-            flow.read_with(cx, |flow, _| flow.action_generation),
-            stale_generation
-        );
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_remote_picker_event(
-                    stale_generation,
-                    &RemoteWorkspacePickerEvent::Dismissed,
-                    window,
-                    cx,
-                );
-            });
-        });
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
-        );
-        assert_eq!(closes.load(Ordering::SeqCst), 0);
-        assert_eq!(backend.state.lock().unwrap().connect_records.len(), 1);
-    }
-
-    #[gpui::test]
-    fn choosing_different_destination_after_back_should_close_retained_connection(
-        cx: &mut TestAppContext,
-    ) {
-        let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([
-            Task::ready(Ok(session(&closes))),
-            Task::ready(Ok(session(&closes))),
-        ]);
-        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
-        select_destination(&flow, "work", cx);
-
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert_eq!(closes.load(Ordering::SeqCst), 0);
-        select_destination(&flow, "other", cx);
-
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DirectorySelection
-        );
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
-        assert_eq!(backend.state.lock().unwrap().connect_records.len(), 2);
-    }
-
-    #[gpui::test]
-    fn failed_activation_then_different_host_should_use_the_new_session_observer(
-        cx: &mut TestAppContext,
-    ) {
+    fn failed_activation_should_close_session_and_offer_retry(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
         let first_observer_takes = Arc::new(AtomicUsize::new(0));
         let second_observer_takes = Arc::new(AtomicUsize::new(0));
@@ -3473,63 +3312,39 @@ mod tests {
             ))),
         ]);
         let (_, flow, events, cx) = flow_window(backend, cx);
-        let selection = RemoteWorkspaceSelection::new(
-            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
-            remote_identity("/home/tester/src"),
-            remote_account(),
-        );
-
         select_destination(&flow, "work", cx);
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| flow.complete(selection.clone(), window, cx));
-        });
         let first = events.borrow().completions[0].clone();
         let returned = first.take().unwrap();
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
                 assert!(flow.activation_failed(&first, returned, window, cx).is_ok());
-            });
+            })
         });
-        assert_eq!(first_observer_takes.load(Ordering::SeqCst), 1);
-
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        select_destination(&flow, "other", cx);
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| flow.complete(selection, window, cx));
-        });
-
         assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(first_observer_takes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::ConnectionError
+        );
+        click("modal-action-remote-workspace-retry", cx);
         assert_eq!(events.borrow().completions.len(), 2);
         assert_eq!(second_observer_takes.load(Ordering::SeqCst), 1);
     }
 
     #[gpui::test]
-    fn full_remote_picker_dismissal_should_close_retained_connection(cx: &mut TestAppContext) {
+    fn cancelling_pending_activation_should_close_session_once(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
         let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
-        let (harness, flow, events, cx) = flow_window(backend, cx);
+        let (_, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "work", cx);
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                let generation = flow.action_generation;
-                flow.reduce_remote_picker_event(
-                    generation,
-                    &RemoteWorkspacePickerEvent::Dismissed,
-                    window,
-                    cx,
-                );
-            });
-        });
-
+        cx.update(|window, cx| flow.update(cx, |flow, cx| flow.cancel_flow(window, cx)));
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::Cancelled
         );
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
-        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+        assert!(events.borrow().completions[0].take().is_none());
     }
 
     #[test]

@@ -13,7 +13,7 @@ fn listing_should_hide_dot_prefixed_names_before_metadata_probes() {
 
     assert_eq!(
         result,
-        vec![WorkspacePickerDirectoryEntry {
+        vec![DirectoryPickerDirectoryEntry {
             name: String::from("visible"),
             path: visible,
         }]
@@ -42,7 +42,7 @@ fn listing_should_follow_directory_symlinks_without_changing_their_spelling() {
 
     let result = filesystem.list_directories(&root.path, true).unwrap();
 
-    assert!(result.contains(&WorkspacePickerDirectoryEntry {
+    assert!(result.contains(&DirectoryPickerDirectoryEntry {
         name: String::from("linked"),
         path: link,
     }));
@@ -67,16 +67,13 @@ fn final_validation_should_preserve_the_exact_path_and_capture_retained_identity
     symlink(&target, &selected).unwrap();
     let filesystem = crate::platform::macos_adapter_tests::local_filesystem();
 
-    let result = filesystem.validate_workspace_directory(&selected).unwrap();
+    let result = filesystem.validate_directory(&selected).unwrap();
 
     assert_eq!(
         (result.path(), result.identity()),
         (
             selected.as_path(),
-            filesystem
-                .validate_workspace_directory(&target)
-                .unwrap()
-                .identity(),
+            filesystem.validate_directory(&target).unwrap().identity(),
         )
     );
 }

@@ -62,23 +62,23 @@ impl SessionLaunch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// A local Terminal Session launch bound to one validated local Workspace Directory.
+/// A local Terminal Session launch bound to one validated local directory.
 ///
 /// Its directory is local filesystem authority and is the only launch directory passed to local
 /// process `chdir` and identity validation.
 pub(crate) struct LocalTerminalLaunchPlan {
-    working_directory: crate::domain::ValidatedWorkspaceDirectory,
+    working_directory: crate::domain::ValidatedLocalDirectory,
 }
 
 #[derive(Clone, Eq, PartialEq)]
 /// A Remote Terminal Session launch bound to one prepared OpenSSH Pane channel.
 ///
 /// `local_home` is used only as the local SSH process working directory. Destination and Remote
-/// Workspace Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
+/// Starting Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
 /// or local filesystem validation. The prepared channel is single-use and sensitive Debug output
 /// is deliberately redacted.
 pub(crate) struct RemoteTerminalLaunchPlan {
-    local_home: crate::domain::ValidatedWorkspaceDirectory,
+    local_home: crate::domain::ValidatedLocalDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
     pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
@@ -94,9 +94,9 @@ impl fmt::Debug for RemoteTerminalLaunchPlan {
 
 impl RemoteTerminalLaunchPlan {
     pub(crate) const fn new(
-        local_home: crate::domain::ValidatedWorkspaceDirectory,
+        local_home: crate::domain::ValidatedLocalDirectory,
         destination: crate::domain::SshDestination,
-        remote_directory: crate::domain::RemoteWorkspaceDirectory,
+        remote_directory: crate::domain::RemoteDirectory,
         fallback_title: String,
         pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
     ) -> Self {
@@ -109,7 +109,7 @@ impl RemoteTerminalLaunchPlan {
     }
 
     #[cfg(test)]
-    pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
+    pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedLocalDirectory {
         &self.local_home
     }
 
@@ -118,8 +118,7 @@ impl RemoteTerminalLaunchPlan {
         self.metadata_context.destination()
     }
 
-    #[cfg(test)]
-    pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteWorkspaceDirectory {
+    pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteDirectory {
         self.metadata_context.initial_directory()
     }
 
@@ -143,11 +142,11 @@ impl RemoteTerminalLaunchPlan {
 }
 
 impl LocalTerminalLaunchPlan {
-    pub(crate) const fn new(working_directory: crate::domain::ValidatedWorkspaceDirectory) -> Self {
+    pub(crate) const fn new(working_directory: crate::domain::ValidatedLocalDirectory) -> Self {
         Self { working_directory }
     }
 
-    pub(crate) const fn working_directory(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
+    pub(crate) const fn working_directory(&self) -> &crate::domain::ValidatedLocalDirectory {
         &self.working_directory
     }
 }

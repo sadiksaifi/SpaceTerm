@@ -12,25 +12,25 @@ use super::remote_utility::{
     PreparedSshRemoteUtilityCommand, RemoteDirectoryProbe, RemoteUtilityError,
     SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
-use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory};
-use crate::ui::remote_workspace_picker::{
-    RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceDirectoryRow,
-    RemoteWorkspaceExactPathState, RemoteWorkspaceProvider, RemoteWorkspaceProviderError,
+use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
+use crate::ui::remote_directory_picker::{
+    RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
+    RemoteDirectoryProviderError, RemoteDirectoryRow, RemoteWorkspaceAccount,
 };
 
-const REMOTE_WORKSPACE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_DIRECTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Picker-facing provider backed by one live SSH remote utility client.
 ///
 /// Every operation receives its own cancellation scope and fixed wall deadline. Dropping or
 /// superseding the returned task cancels the underlying utility process rather than merely
 /// ignoring its result. Only typed, validated protocol values cross into picker state.
-pub(crate) struct SshRemoteWorkspaceProvider<R: SshRemoteUtilityRunner> {
+pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
     client: Arc<SshRemoteUtilityClient<R>>,
     executor: BackgroundExecutor,
 }
 
-impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
+impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
     /// Binds provider operations to one prepared live command and session cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
@@ -47,11 +47,11 @@ impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
     fn spawn_operation<T, F, Fut>(
         &self,
         operation: F,
-    ) -> Task<Result<T, RemoteWorkspaceProviderError>>
+    ) -> Task<Result<T, RemoteDirectoryProviderError>>
     where
         T: Send + 'static,
         F: FnOnce(Arc<SshRemoteUtilityClient<R>>, SshCancellationToken) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<T, RemoteWorkspaceProviderError>> + Send + 'static,
+        Fut: Future<Output = Result<T, RemoteDirectoryProviderError>> + Send + 'static,
     {
         let client = Arc::clone(&self.client);
         let timer_executor = self.executor.clone();
@@ -59,7 +59,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
             let cancellation = SshCancellationToken::default();
             let mut cancel_on_drop = CancelOperationOnDrop::new(cancellation.clone());
             let operation = operation(client, cancellation.clone());
-            let timeout = timer_executor.timer(REMOTE_WORKSPACE_OPERATION_TIMEOUT);
+            let timeout = timer_executor.timer(REMOTE_DIRECTORY_OPERATION_TIMEOUT);
             let result = race_operation_with_timeout(operation, timeout, &cancellation).await;
             cancel_on_drop.disarm();
             result
@@ -67,35 +67,35 @@ impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
     }
 }
 
-impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspaceProvider<R> {
+impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryProvider<R> {
     fn discover_account(
         &self,
-    ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+    ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
         self.spawn_operation(|client, cancellation| async move {
             let metadata = client
                 .discover_account_with_cancellation(cancellation)
                 .await
                 .map_err(map_error)?;
             let home_identity = RemoteDirectoryIdentity::new(metadata.physical_home().to_owned())
-                .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)?;
+                .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
             let login_shell = ValidatedRemoteLoginShell::from_discovery(
                 metadata.login_shell().to_owned(),
                 metadata.posix_sh_login_capability(),
             )
-            .map_err(|_| RemoteWorkspaceProviderError::UnsupportedLoginShell)?;
+            .map_err(|_| RemoteDirectoryProviderError::UnsupportedLoginShell)?;
             RemoteWorkspaceAccount::from_validated_login_shell(
                 metadata.user().to_owned(),
                 home_identity,
                 login_shell,
             )
-            .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)
+            .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)
         })
     }
 
     fn list_directories(
         &self,
-        directory: RemoteWorkspaceDirectory,
-    ) -> Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
+        directory: RemoteDirectory,
+    ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             let listing = client
                 .list_directories_with_cancellation(directory, cancellation)
@@ -104,10 +104,10 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
             let rows = listing
                 .names()
                 .iter()
-                .map(|name| RemoteWorkspaceDirectoryRow::new(name.clone()))
+                .map(|name| RemoteDirectoryRow::new(name.clone()))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)?;
-            Ok(RemoteWorkspaceDirectoryListing::from_remote(
+                .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
+            Ok(RemoteDirectoryListing::from_remote(
                 rows,
                 listing.is_truncated(),
             ))
@@ -116,17 +116,17 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
 
     fn probe_exact_path(
         &self,
-        directory: RemoteWorkspaceDirectory,
-    ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
+        directory: RemoteDirectory,
+    ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             client
                 .probe_exact_path_with_cancellation(directory, cancellation)
                 .await
                 .map(|state| match state {
                     RemoteDirectoryProbe::ReadableDirectory => {
-                        RemoteWorkspaceExactPathState::ReadableDirectory
+                        RemoteDirectoryExactPathState::ReadableDirectory
                     }
-                    RemoteDirectoryProbe::Missing => RemoteWorkspaceExactPathState::Missing,
+                    RemoteDirectoryProbe::Missing => RemoteDirectoryExactPathState::Missing,
                 })
                 .map_err(map_error)
         })
@@ -134,8 +134,8 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
 
     fn create_directory_recursively(
         &self,
-        directory: RemoteWorkspaceDirectory,
-    ) -> Task<Result<(), RemoteWorkspaceProviderError>> {
+        directory: RemoteDirectory,
+    ) -> Task<Result<(), RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             client
                 .create_directory_recursively_with_cancellation(directory, cancellation)
@@ -146,24 +146,24 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
 
     fn validate_physical_identity(
         &self,
-        directory: RemoteWorkspaceDirectory,
-    ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>> {
+        directory: RemoteDirectory,
+    ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             let physical = client
                 .resolve_physical_directory_with_cancellation(directory, cancellation)
                 .await
                 .map_err(map_error)?;
             RemoteDirectoryIdentity::new(physical)
-                .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)
+                .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)
         })
     }
 }
 
 async fn race_operation_with_timeout<T>(
-    operation: impl Future<Output = Result<T, RemoteWorkspaceProviderError>>,
+    operation: impl Future<Output = Result<T, RemoteDirectoryProviderError>>,
     timeout: Task<()>,
     cancellation: &SshCancellationToken,
-) -> Result<T, RemoteWorkspaceProviderError> {
+) -> Result<T, RemoteDirectoryProviderError> {
     let mut operation = pin!(operation);
     let mut timeout = pin!(timeout);
     poll_fn(|cx| {
@@ -172,7 +172,7 @@ async fn race_operation_with_timeout<T>(
         }
         if timeout.as_mut().poll(cx).is_ready() {
             cancellation.cancel();
-            return Poll::Ready(Err(RemoteWorkspaceProviderError::Other));
+            return Poll::Ready(Err(RemoteDirectoryProviderError::Other));
         }
         Poll::Pending
     })
@@ -205,25 +205,25 @@ impl Drop for CancelOperationOnDrop {
     }
 }
 
-fn map_error(error: RemoteUtilityError) -> RemoteWorkspaceProviderError {
+fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
     match error {
         RemoteUtilityError::Cancelled | RemoteUtilityError::Transport => {
-            RemoteWorkspaceProviderError::ConnectionLost
+            RemoteDirectoryProviderError::ConnectionLost
         }
         RemoteUtilityError::CommandFailed(Some(255)) => {
-            RemoteWorkspaceProviderError::ConnectionLost
+            RemoteDirectoryProviderError::ConnectionLost
         }
-        RemoteUtilityError::Missing => RemoteWorkspaceProviderError::Missing,
-        RemoteUtilityError::NotDirectory => RemoteWorkspaceProviderError::NotDirectory,
-        RemoteUtilityError::PermissionDenied => RemoteWorkspaceProviderError::PermissionDenied,
+        RemoteUtilityError::Missing => RemoteDirectoryProviderError::Missing,
+        RemoteUtilityError::NotDirectory => RemoteDirectoryProviderError::NotDirectory,
+        RemoteUtilityError::PermissionDenied => RemoteDirectoryProviderError::PermissionDenied,
         RemoteUtilityError::UnsupportedLoginShell => {
-            RemoteWorkspaceProviderError::UnsupportedLoginShell
+            RemoteDirectoryProviderError::UnsupportedLoginShell
         }
         RemoteUtilityError::RequestTooLarge
         | RemoteUtilityError::OutputTooLarge
-        | RemoteUtilityError::InvalidResponse => RemoteWorkspaceProviderError::InvalidResponse,
+        | RemoteUtilityError::InvalidResponse => RemoteDirectoryProviderError::InvalidResponse,
         RemoteUtilityError::CommandFailed(_) | RemoteUtilityError::RemoteFailed => {
-            RemoteWorkspaceProviderError::Other
+            RemoteDirectoryProviderError::Other
         }
     }
 }
@@ -315,7 +315,7 @@ mod tests {
     fn provider(
         cx: &TestAppContext,
         outputs: impl IntoIterator<Item = Vec<u8>>,
-    ) -> SshRemoteWorkspaceProvider<FakeRunner> {
+    ) -> SshRemoteDirectoryProvider<FakeRunner> {
         let command = SshCommandContext::new(
             crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -324,7 +324,7 @@ mod tests {
         )
         .unwrap()
         .remote_utility();
-        SshRemoteWorkspaceProvider::new(
+        SshRemoteDirectoryProvider::new(
             PreparedSshRemoteUtilityCommand::new(command),
             Arc::new(FakeRunner::new(outputs)),
             SshCancellationToken::default(),
@@ -335,7 +335,7 @@ mod tests {
     fn pending_provider(
         cx: &TestAppContext,
     ) -> (
-        SshRemoteWorkspaceProvider<PendingRunner>,
+        SshRemoteDirectoryProvider<PendingRunner>,
         Arc<PendingRunner>,
     ) {
         let command = SshCommandContext::new(
@@ -348,7 +348,7 @@ mod tests {
         .remote_utility();
         let runner = Arc::new(PendingRunner::default());
         (
-            SshRemoteWorkspaceProvider::new(
+            SshRemoteDirectoryProvider::new(
                 PreparedSshRemoteUtilityCommand::new(command),
                 Arc::clone(&runner),
                 SshCancellationToken::default(),
@@ -358,8 +358,8 @@ mod tests {
         )
     }
 
-    fn directory(value: &str) -> RemoteWorkspaceDirectory {
-        RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    fn directory(value: &str) -> RemoteDirectory {
+        RemoteDirectory::new(value.to_owned()).unwrap()
     }
 
     #[gpui::test]
@@ -400,7 +400,7 @@ mod tests {
             listing
                 .rows()
                 .iter()
-                .map(RemoteWorkspaceDirectoryRow::name)
+                .map(RemoteDirectoryRow::name)
                 .collect::<Vec<_>>(),
             ["Space Term", "-archive"]
         );
@@ -409,7 +409,7 @@ mod tests {
             cx.executor()
                 .block(provider.probe_exact_path(directory("/srv/missing")))
                 .unwrap(),
-            RemoteWorkspaceExactPathState::Missing
+            RemoteDirectoryExactPathState::Missing
         );
         cx.executor()
             .block(provider.create_directory_recursively(directory("/srv/new")))
@@ -470,7 +470,7 @@ mod tests {
             cx.executor()
                 .block(provider.discover_account())
                 .unwrap_err(),
-            RemoteWorkspaceProviderError::UnsupportedLoginShell
+            RemoteDirectoryProviderError::UnsupportedLoginShell
         );
     }
 
@@ -509,12 +509,12 @@ mod tests {
         cx.run_until_parked();
         let second = runner.cancellations.lock().unwrap()[1].clone();
         cx.executor()
-            .advance_clock(REMOTE_WORKSPACE_OPERATION_TIMEOUT);
+            .advance_clock(REMOTE_DIRECTORY_OPERATION_TIMEOUT);
         cx.run_until_parked();
 
         assert_eq!(
             cx.executor().block(timed_out).unwrap_err(),
-            RemoteWorkspaceProviderError::Other
+            RemoteDirectoryProviderError::Other
         );
         assert!(second.is_cancelled());
     }

@@ -9,31 +9,24 @@ Pane-owned Terminal Sessions.
 The application that owns all Workspaces.
 
 **Workspace**:
-A named top-level scope with one immutable Workspace Kind, one Workspace Directory, and one or more
-Tabs.
-_Avoid_: session, project
+A named top-level scope containing one or more Tabs and an optional Pinned Directory.
 
-**Workspace Kind**:
-The immutable classification of a Workspace as Scratch, Local Project, or Remote Project.
+**Local Workspace**:
+A Workspace whose Terminal Sessions run on this machine.
 
-**Scratch Workspace**:
-A Workspace created at `HOME` whose Workspace Directory follows its Directory Authority.
+**Remote Workspace**:
+A Workspace whose Terminal Sessions run on a machine identified by an SSH Destination.
 
-**Local Project Workspace**:
-A Workspace opened at one immutable local Project Root.
+**Current Directory**:
+An individual Terminal Session's current working directory on its machine.
 
-**Remote Project Workspace**:
-A Workspace pinned to one SSH Destination and one Physical Directory Identity.
+**Starting Directory**:
+The directory selected when creating one Terminal Session: the Pinned Directory when set,
+otherwise the source Pane's Current Directory, or the user's home directory when no source is known.
 
-**Workspace Directory**:
-The exact directory value used to start new Terminal Sessions in a Workspace.
-
-**Directory Authority**:
-The Pane whose valid Reported Working Directory may update a Scratch Workspace's Workspace
-Directory.
-
-**Project Root**:
-The exact selected path and retained filesystem identity of a Local Project Workspace.
+**Pinned Directory**:
+An explicitly selected directory used as the Starting Directory for future Terminal Sessions
+in one Workspace.
 
 **Tab**:
 An ordered work area that belongs to one Workspace and owns one Pane Layout.
@@ -71,29 +64,28 @@ released input.
 The Focused Pane presented alone while its Pane Layout remains intact.
 
 **New Workspace Panel**:
-The transient chooser that selects a Workspace Source for later creation.
+The transient chooser for creating a Local Workspace or Remote Workspace.
 
-**Workspace Picker**:
-The in-app, one-level local directory navigator used by Open Local Project.
+**Directory Picker**:
+The directory navigator used to select a Pinned Directory explicitly.
 
 **System Directory Selection**:
-The system chooser available as an explicit fallback from the Workspace Picker.
+The system chooser available as an explicit fallback from the Directory Picker.
 
 ## Workspace sources and remote identity
 
 **Workspace Source**:
-A New Workspace Panel choice for a Scratch, Local Project, or Remote Project Workspace.
+A New Workspace Panel choice identifying where a Workspace runs.
 
 **SSH Destination**:
-The exact validated OpenSSH destination token selected for a Remote Project Workspace; different
+The exact validated OpenSSH destination token selected for a Remote Workspace; different
 aliases remain distinct.
 
-**Remote Workspace Directory**:
-The exact absolute or home-relative remote path spelling used to start remote Terminal Sessions.
+**Remote Directory**:
+An absolute or home-relative directory value on the remote machine, without local filesystem authority.
 
 **Physical Directory Identity**:
-The resolved absolute remote directory paired with an SSH Destination for deduplication and
-automatic naming.
+The resolved absolute identity of a Remote Directory used to validate an explicit pin.
 
 **Control Connection**:
 The Workspace-owned OpenSSH transport shared by its Remote Panes.
@@ -115,11 +107,8 @@ _Avoid_: session, terminal
 The state machine that interprets terminal output and owns screen state.
 
 **Terminal Metadata**:
-Sanitized title, Reported Working Directory, Semantic Zone, command, and progress facts associated
+Sanitized title, Current Directory, Semantic Zone, command, and progress facts associated
 with terminal screen state.
-
-**Reported Working Directory**:
-The last valid local absolute directory reported by trusted OSC 7 metadata.
 
 ## Terminal interaction and safety
 

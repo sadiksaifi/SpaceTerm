@@ -2132,12 +2132,12 @@ mod tests {
     #[test]
     fn filtering_should_require_every_token_across_semantic_fields() {
         let items = vec![
-            ComboBoxItem::new(1, "Local Project")
-                .description("Open a directory")
+            ComboBoxItem::new(1, "This Mac")
+                .description("Start at home")
                 .keywords(["workspace"]),
         ];
 
-        assert_eq!(filter_items(&items, "local directory workspace"), vec![0]);
+        assert_eq!(filter_items(&items, "mac home workspace"), vec![0]);
     }
 
     #[test]
