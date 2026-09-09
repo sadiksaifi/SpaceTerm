@@ -13,12 +13,9 @@ Run in a dedicated Pane, since the workload clears and fills its terminal screen
 mise run bench:workload scroll 60 60
 ```
 
-`idle` fills forty lines and waits. `partial` updates a fixed row. `scroll` writes
-eight lines per update, or 480 lines per second at the default rate. Use at least
-120 columns so these payloads do not wrap. Geometry and wrapping must match in
-every application. A delayed producer does not flood output to catch up, so
-backpressure can reduce delivered rate; a lower resource number alone does not
-prove equivalent throughput. The maximum requested duration is one hour.
+Use at least 120 columns so the text workloads do not wrap. Geometry and wrapping
+must match in every application. Backpressure can reduce delivered rate; a lower
+resource number alone does not prove equivalent throughput.
 
 On completion the producer writes one JSON summary to stderr with mode, completed
 updates, emitted lines and bytes, and elapsed seconds. Counts include any initial
@@ -84,25 +81,16 @@ Kitty graphics, using synchronized output and complete buffered writes:
 mise run bench:workload image 120
 ```
 
-Image mode uses a one-second startup delay to let launch geometry settle, emits
-one image, then waits for the remainder of the duration. Duration includes startup
-and image generation; ordinary image runs require more than one second. Smoke
-runs skip startup delay. The rate option does not affect image or idle modes.
-The image generator releases its temporary buffers before waiting.
-
 Start this fixture in two dedicated Tabs, switch between them to hide each Pane,
 then return to verify image restoration without new output. Compare settled
-memory with matching visible geometry and Tab counts. Hidden Panes should release
-derived presentation resources; their original native image data and complete
-Screen snapshots intentionally remain available for restoration. The fixed image
-contains 16 MiB of decoded pixels; process footprint can include additional native,
+memory with matching visible geometry and Tab counts. The fixed image contains
+16 MiB of decoded pixels; process footprint can include additional native,
 snapshot, upload, and GPU representations, and should be measured rather than
 estimated by multiplying that size.
 
-Use the same number of graphics-enabled Sessions when comparing runs. Graphics
-admission tracks retained native and RGBA snapshot bytes across Sessions against
-a 384 MiB aggregate limit; it does not impose a fixed two-Session limit. Keep the
-fixture below that budget when measuring rendering rather than quota behavior.
+Use the same number of graphics-enabled Sessions when comparing runs. Keep the
+fixture below the graphics admission limits when measuring rendering rather than
+quota behavior; the current limits are defined in `src/terminal/graphics.rs`.
 
 Optional native power captures require the user's available privileges and should
 use matching workload and sampling windows. Whole-system CPU/GPU power includes

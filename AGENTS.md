@@ -11,6 +11,8 @@ SpaceTerm is a native desktop terminal multiplexer.
 
 Code and tests own implementation detail and executable invariants. ADRs own the rationale for
 important durable decisions.
+Keep docs concise and limited to information not readily available from code, tests, or configuration.
+Put task plans and validation reports in issues or PRs.
 
 ## Architecture
 
