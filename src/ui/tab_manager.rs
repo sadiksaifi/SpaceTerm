@@ -7,9 +7,7 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
-use super::pane_action_menu::{
-    CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
-};
+use super::pane_action_menu::{CloseTarget, PaneActionMenuCommand, pane_action_menu_entries};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
@@ -79,6 +77,62 @@ const TAB_ITEM_RIGHT_PADDING: f32 = 6.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 const TAB_CONTROL_SIZE: f32 = 28.0;
 const TAB_CONTROL_INSET: f32 = 4.0;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabChromePresentation {
+    background: Color,
+    active_tab_background: Color,
+    inactive_tab_background: Color,
+    active_tab_foreground: Color,
+    inactive_tab_foreground: Color,
+    icon_foreground: Color,
+    hover_background: Color,
+    active_tab_underline: Color,
+}
+
+impl TabChromePresentation {
+    fn resolve(window_active: bool) -> Self {
+        if window_active {
+            Self {
+                background: ACTIVE_THEME.title_bar_background,
+                active_tab_background: ACTIVE_THEME.tab_active_background,
+                inactive_tab_background: ACTIVE_THEME.tab_inactive_background,
+                active_tab_foreground: ACTIVE_THEME.text_accent,
+                inactive_tab_foreground: ACTIVE_THEME.text_muted,
+                icon_foreground: ACTIVE_THEME.icon,
+                hover_background: ACTIVE_THEME.ghost_element_hover,
+                active_tab_underline: ACTIVE_THEME.border_selected,
+            }
+        } else {
+            Self {
+                background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_background: ACTIVE_THEME.title_bar_inactive_background,
+                inactive_tab_background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_foreground: ACTIVE_THEME.text_muted,
+                inactive_tab_foreground: ACTIVE_THEME.text_muted,
+                icon_foreground: ACTIVE_THEME.text_muted,
+                hover_background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_underline: ACTIVE_THEME.border,
+            }
+        }
+    }
+
+    fn tab_background(&self, active: bool) -> Color {
+        if active {
+            self.active_tab_background
+        } else {
+            self.inactive_tab_background
+        }
+    }
+
+    fn tab_foreground(&self, active: bool) -> Color {
+        if active {
+            self.active_tab_foreground
+        } else {
+            self.inactive_tab_foreground
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TabMenuInvocation {
@@ -164,6 +218,8 @@ pub(crate) struct TabManager {
     tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
+    #[cfg(test)]
+    rendered_window_active: bool,
 }
 
 impl TabManager {
@@ -240,6 +296,8 @@ impl TabManager {
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
+            #[cfg(test)]
+            rendered_window_active: window.is_window_active(),
         }
     }
 
@@ -1136,6 +1194,7 @@ impl TabManager {
         tab_id: TabId,
         title: SharedString,
         active: bool,
+        presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         cx: &App,
     ) -> AnyElement {
@@ -1146,6 +1205,11 @@ impl TabManager {
         let context_activation_manager = manager.clone();
         let context_lifecycle_manager = manager.clone();
         let close_manager = manager;
+        let background = presentation.tab_background(active);
+        let foreground = presentation.tab_foreground(active);
+        let icon_foreground = gpui_color(presentation.icon_foreground);
+        let hover_background = presentation.hover_background;
+        let active_tab_underline = presentation.active_tab_underline;
         let tab_group = format!("tab-item-{}", tab_id.get());
         let (zoomed, zoom_enabled) = self
             .tabs
@@ -1180,18 +1244,10 @@ impl TabManager {
             .items_center()
             .cursor_pointer()
             .block_mouse_except_scroll()
-            .bg(gpui_color(if active {
-                ACTIVE_THEME.tab_active_background
-            } else {
-                ACTIVE_THEME.tab_inactive_background
-            }))
+            .bg(gpui_color(background))
             .text_size(px(12.0))
-            .text_color(gpui_color(if active {
-                ACTIVE_THEME.text_accent
-            } else {
-                ACTIVE_THEME.text_muted
-            }))
-            .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
+            .text_color(gpui_color(foreground))
+            .hover(move |item| item.bg(gpui_color(hover_background)))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1231,8 +1287,8 @@ impl TabManager {
                         IconButton::new(
                             ("tab-close-button", tab_id.get()),
                             "Close Tab",
-                            |foreground| {
-                                Icon::new(IconName::X, px(TAB_CLOSE_ICON_SIZE), foreground)
+                            move |_| {
+                                Icon::new(IconName::X, px(TAB_CLOSE_ICON_SIZE), icon_foreground)
                                     .into_any_element()
                             },
                         )
@@ -1283,7 +1339,7 @@ impl TabManager {
                         .left_0()
                         .w_full()
                         .h(px(TAB_BAR_DIVIDER_SIZE))
-                        .bg(gpui_color(ACTIVE_THEME.border_selected)),
+                        .bg(gpui_color(active_tab_underline)),
                 )
             });
 
@@ -1329,8 +1385,15 @@ impl TabManager {
         .into_any_element()
     }
 
-    fn render_tab_bar(&self, manager: gpui::WeakEntity<Self>, cx: &App) -> AnyElement {
+    fn render_tab_bar(
+        &self,
+        presentation: &TabChromePresentation,
+        manager: gpui::WeakEntity<Self>,
+        cx: &App,
+    ) -> AnyElement {
         let active_tab_id = self.tabs.active_tab_id();
+        let background = presentation.background;
+        let icon_foreground = gpui_color(presentation.icon_foreground);
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
@@ -1346,6 +1409,7 @@ impl TabManager {
                 tab_id,
                 pane_host.read(cx).tab_title(),
                 tab_id == active_tab_id,
+                presentation,
                 manager.clone(),
                 cx,
             ));
@@ -1374,7 +1438,7 @@ impl TabManager {
             .flex_row()
             .items_center()
             .pr(px(TAB_CONTROL_SIZE + TAB_CONTROL_INSET * 2.0))
-            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .bg(gpui_color(background))
             .child(
                 div()
                     .id("tab-bar-divider")
@@ -1388,8 +1452,8 @@ impl TabManager {
             )
             .child(items)
             .child(
-                IconButton::new("create-tab-button", "Create Tab", |foreground| {
-                    Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
+                IconButton::new("create-tab-button", "Create Tab", move |_| {
+                    Icon::new(IconName::Plus, px(14.0), icon_foreground).into_any_element()
                 })
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
@@ -1424,7 +1488,10 @@ impl TabManager {
                                 crate::desktop_profile::DesktopPresentation::get(cx),
                             ),
                         )
-                        .icon_trigger(menu_icon(IconName::Ellipsis))
+                        .icon_trigger(move |_| {
+                            Icon::new(IconName::Ellipsis, px(14.0), icon_foreground)
+                                .into_any_element()
+                        })
                         .size(MenuSize::Wide)
                         .placement(
                             MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
@@ -1479,18 +1546,23 @@ impl TabManager {
             .min_w_0()
             .flex_1()
             .flex_shrink_0()
-            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .bg(gpui_color(background))
             .child(drag_region)
             .into_any_element()
     }
 }
 
 impl Render for TabManager {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.tabs.len() > 0);
+        #[cfg(test)]
+        {
+            self.rendered_window_active = window.is_window_active();
+        }
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
-        let tab_bar = self.render_tab_bar(manager.clone(), cx);
+        let presentation = TabChromePresentation::resolve(window.is_window_active());
+        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
 
         div()
             .id("tab-manager")
@@ -1529,7 +1601,7 @@ impl Render for TabManager {
                             .w(self.top_chrome_width)
                             .h_full()
                             .flex_shrink_0()
-                            .bg(gpui_color(ACTIVE_THEME.tab_bar_background)),
+                            .bg(gpui_color(presentation.background)),
                     )
                     .child(tab_bar),
             )
@@ -1578,6 +1650,44 @@ mod tests {
         assert_eq!(
             create_tab_shortcut(&crate::desktop_profile::testing_presentation()),
             "Primary+T"
+        );
+    }
+
+    #[test]
+    fn active_window_tab_chrome_should_preserve_the_existing_presentation() {
+        let presentation = TabChromePresentation::resolve(true);
+
+        assert_eq!(
+            presentation,
+            TabChromePresentation {
+                background: ACTIVE_THEME.title_bar_background,
+                active_tab_background: ACTIVE_THEME.tab_active_background,
+                inactive_tab_background: ACTIVE_THEME.tab_inactive_background,
+                active_tab_foreground: ACTIVE_THEME.text_accent,
+                inactive_tab_foreground: ACTIVE_THEME.text_muted,
+                icon_foreground: ACTIVE_THEME.icon,
+                hover_background: ACTIVE_THEME.ghost_element_hover,
+                active_tab_underline: ACTIVE_THEME.border_selected,
+            }
+        );
+    }
+
+    #[test]
+    fn inactive_window_tab_chrome_should_be_one_muted_title_bar_band() {
+        let presentation = TabChromePresentation::resolve(false);
+
+        assert_eq!(
+            presentation,
+            TabChromePresentation {
+                background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_background: ACTIVE_THEME.title_bar_inactive_background,
+                inactive_tab_background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_foreground: ACTIVE_THEME.text_muted,
+                inactive_tab_foreground: ACTIVE_THEME.text_muted,
+                icon_foreground: ACTIVE_THEME.text_muted,
+                hover_background: ACTIVE_THEME.title_bar_inactive_background,
+                active_tab_underline: ACTIVE_THEME.border,
+            }
         );
     }
     use crate::domain::PaneId;
@@ -2047,6 +2157,22 @@ mod tests {
                 gpui::size(active_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
             )
         );
+    }
+
+    #[gpui::test]
+    fn tab_bar_should_follow_operating_system_window_activation(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        let active_before = manager.read_with(cx, |manager, _| manager.rendered_window_active);
+
+        cx.deactivate_window();
+        cx.run_until_parked();
+        let inactive = manager.read_with(cx, |manager, _| manager.rendered_window_active);
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let active_after = manager.read_with(cx, |manager, _| manager.rendered_window_active);
+
+        assert_eq!((active_before, inactive, active_after), (true, false, true));
     }
 
     #[gpui::test]
