@@ -18,14 +18,3 @@ See [the integration guide](../../docs/ghostty-integration.md) for source and bi
 - Installed libraries are never discovered through `pkg-config`; builds use the matched source.
 - libghostty-vt is pre-1.0, so these bindings do not guarantee compatibility
   with arbitrary installed C API revisions.
-
-## SpaceTerm patch ledger
-
-- `spaceterm-kitty-graphics.patch` exposes the bounded Kitty graphics seams used by SpaceTerm.
-- `spaceterm-terminal-effects.patch` adds synchronous, bounded accepted-event effects for OSC 8
-  URI resolution and OSC 133 semantic prompts. Progress uses Ghostty's upstream callback.
-  Hyperlink input/output memory is
-  callback-scoped and copied by libghostty before return; bounded resolver-only hyperlink metadata
-  follows the retained page entry without entering formatted terminal content. Absent callbacks
-  preserve upstream behavior exactly.
-- `spaceterm-accessibility.patch` exposes bounded accessibility snapshots and selection operations.

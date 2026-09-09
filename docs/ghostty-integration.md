@@ -75,20 +75,6 @@ transports remain disabled for both local and remote Sessions. Use `kitty +kitte
 --transfer-mode=stream <image>` when selecting a transport explicitly. Supporting additional
 transports requires an explicit local-authority design, not merely enabling an upstream flag.
 
-Graphics admission uses actual retained engine and snapshot bytes across Sessions, with a
-384 MiB aggregate residency limit and a separate 128 MiB APC scratch limit. After a Session
-receives an APC sequence, its native input feed holds a shared admission lock through decoding
-so concurrent Sessions cannot each claim the same capacity. This bounds residency but can
-serialize input processing across those Sessions.
-RGB-to-RGBA conversion for animation also admits its retained growth against the native limit.
-PNG decoding scratch is released when each decode finishes, including failed decodes.
-Animation schedules advance visible Panes without requiring new terminal output; hidden Panes
-suspend presentation work and resume when shown.
-Chunked frame uploads retain the image's identity across playback ticks, while actual image
-replacement invalidates the upload.
-Snapshots deferred by retained UI pixels retry when capacity is released, without polling or
-requiring further terminal output.
-
 PTY pixel dimensions and terminal size-query replies use the same integer cell dimensions as
 Ghostty. GPUI rendering and pointer coordinates retain fractional geometry. Keeping the protocol
 reports consistent prevents tools that divide the PTY pixel width by its column count from
