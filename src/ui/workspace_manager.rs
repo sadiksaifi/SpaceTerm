@@ -66,18 +66,23 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
-    AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ContextMenu, Icon, IconButton,
-    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
-    OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
-    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis,
-    ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
-    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
-    WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
+    AnchoredPlacementConfig, Button, ButtonShape, ButtonSize, ButtonVariant, ComboBox, ContextMenu,
+    CustomIconName, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize,
+    MiddleTruncatedText, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
+    ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle,
+    ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput,
+    TextInputEvent, TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility,
+    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    window_combo_box_is_open, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
+const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
+const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
+// Reserve enough label width beside both actions for Default across desktop fonts.
+const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 // Vertical breathing room above and below the header's 28px `ButtonSize::Regular` actions. The
 // header height is derived from it so the two cannot drift apart.
@@ -137,8 +142,10 @@ fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
     let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
         + WORKSPACE_CHIP_ICON_SIZE
         + WORKSPACE_CHIP_GAP
-        + TRAFFIC_LIGHT_CLEARANCE / 2.0);
-    (fixed_width + name_width).min(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+        + TOP_CHROME_ACTION_CLEARANCE);
+    (fixed_width + name_width)
+        .ceil()
+        .min(px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1332,7 +1339,14 @@ impl WorkspaceManager {
             ResizeHandleEvent::ResizeRequested {
                 requested_value, ..
             } => {
-                if self.sidebar.visible || requested_value >= WORKSPACE_SIDEBAR_MINIMUM_WIDTH {
+                let should_resize = self.sidebar.visible
+                    || px(requested_value)
+                        >= collapsed_top_chrome_width(
+                            self.workspaces.active_workspace().name(),
+                            window,
+                        )
+                        .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+                if should_resize {
                     self.resize_sidebar(px(requested_value), window, cx);
                 }
             }
@@ -3542,6 +3556,7 @@ impl WorkspaceManager {
             ))
             .child(
                 div()
+                    .debug_selector(|| "workspace-chip-label".to_owned())
                     .min_w_0()
                     .truncate()
                     .text_size(px(WORKSPACE_CHIP_TEXT_SIZE))
@@ -3556,7 +3571,12 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_top_left_chrome(&self, manager: WeakEntity<Self>, window: &Window) -> AnyElement {
+    fn render_top_left_chrome(
+        &self,
+        manager: WeakEntity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let width = if self.sidebar.visible {
             self.sidebar.width
         } else {
@@ -3564,7 +3584,49 @@ impl WorkspaceManager {
         };
         let (toggle_icon, toggle_label) = sidebar_toggle_presentation(self.sidebar.visible);
         let drag_manager = manager.clone();
-        let toggle_manager = manager;
+        let toggle_manager = manager.clone();
+        let combo_lifecycle_manager = manager.clone();
+        let combo_lifecycle_window = window.window_handle();
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let chooser = ComboBox::new(
+            "new-workspace-chooser",
+            "New Workspace",
+            None,
+            "New Workspace",
+            NewWorkspaceSource::combo_box_items(
+                self.remote_workspace_unavailable_reason.clone(),
+                presentation,
+            ),
+        )
+        .icon_trigger(|foreground| {
+            Icon::custom(CustomIconName::RectangleStack, px(14.0), foreground).into_any_element()
+        })
+        .placement(AnchoredPlacementConfig::new(
+            AnchoredPlacement::Bottom,
+            AnchoredAlignment::End,
+        ))
+        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
+        .debug_selector("new-workspace-chooser")
+        .tooltip(Tooltip::new(
+            "new-workspace-chooser-tooltip",
+            "New Workspace",
+        ))
+        .on_lifecycle(move |_, cx| {
+            let manager = combo_lifecycle_manager.clone();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(combo_lifecycle_window, |_, window, cx| {
+                    let _ = manager.update(cx, |manager, cx| {
+                        manager.sync_terminal_focus_blocker(window, cx);
+                        cx.notify();
+                    });
+                });
+            });
+        })
+        .on_accept(move |acceptance, window, cx| {
+            let _ = manager.update(cx, |manager, cx| {
+                manager.handle_new_workspace_source(*acceptance.item_id(), false, window, cx);
+            });
+        });
         let content = div()
             .relative()
             .size_full()
@@ -3575,7 +3637,7 @@ impl WorkspaceManager {
                         .top_0()
                         .bottom_0()
                         .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                        .right(px(TRAFFIC_LIGHT_CLEARANCE / 2.0))
+                        .right(px(TOP_CHROME_ACTION_CLEARANCE))
                         .flex()
                         .items_center()
                         .min_w_0()
@@ -3598,6 +3660,9 @@ impl WorkspaceManager {
                     .absolute()
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
+                    .flex()
+                    .items_center()
+                    .child(chooser)
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
                             Icon::new(toggle_icon, px(14.0), foreground).into_any_element()
@@ -4000,13 +4065,8 @@ impl WorkspaceManager {
 
         let scrollbar = self.sidebar.scrollbar.clone();
         let panel_manager = manager.clone();
-        let combo_lifecycle_manager = manager.clone();
-        let combo_lifecycle_window = window.window_handle();
         let search_manager = manager.clone();
-        let new_workspace_items = NewWorkspaceSource::combo_box_items(
-            self.remote_workspace_unavailable_reason.clone(),
-            presentation,
-        );
+        let new_workspace_shortcut = shortcuts.new_workspace_button;
         let header = div()
             .id("workspace-sidebar-header")
             .debug_selector(|| "workspace-sidebar-header".to_owned())
@@ -4078,48 +4138,27 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        ComboBox::new(
-                            "new-workspace-button",
-                            "New Workspace source",
-                            None,
-                            "New Workspace",
-                            new_workspace_items,
-                        )
-                        .placement(
-                            AnchoredPlacementConfig::new(
-                                AnchoredPlacement::Top,
-                                AnchoredAlignment::Center,
-                            )
-                            .offset(px(0.0)),
-                        )
-                        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
-                        .full_width(true)
-                        .debug_selector("new-workspace-button")
-                        .leading(|foreground| {
-                            Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
-                        })
-                        .on_lifecycle(move |_, cx| {
-                            let manager = combo_lifecycle_manager.clone();
-                            cx.defer(move |cx| {
-                                let _ =
-                                    cx.update_window(combo_lifecycle_window, |_, window, cx| {
-                                        let _ = manager.update(cx, |manager, cx| {
-                                            manager.sync_terminal_focus_blocker(window, cx);
-                                            cx.notify();
-                                        });
-                                    });
-                            });
-                        })
-                        .on_accept(move |acceptance, window, cx| {
-                            let _ = panel_manager.update(cx, |manager, cx| {
-                                manager.handle_new_workspace_source(
-                                    *acceptance.item_id(),
-                                    false,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }),
+                        Button::new("new-workspace-button", "New Workspace")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::Large)
+                            .shape(ButtonShape::Square)
+                            .full_width(true)
+                            .debug_selector("new-workspace-button")
+                            .leading(|foreground| {
+                                Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
+                            })
+                            .trailing(move |_| {
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(gpui_color(ACTIVE_THEME.icon))
+                                    .child(new_workspace_shortcut)
+                                    .into_any_element()
+                            })
+                            .on_activate(move |_, window, cx| {
+                                let _ = panel_manager.update(cx, |manager, cx| {
+                                    manager.show_new_workspace_panel(window, cx);
+                                });
+                            }),
                     )
                     .child(
                         div()
@@ -4300,7 +4339,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
-            .child(self.render_top_left_chrome(manager.clone(), window))
+            .child(self.render_top_left_chrome(manager.clone(), window, cx))
             .when(self.sidebar.visible, |root| {
                 root.child(self.render_sidebar(manager.clone(), window, cx))
             })

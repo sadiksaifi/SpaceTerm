@@ -23,6 +23,7 @@ use crate::{
     anchored_placement::{
         AnchoredPlacementConfig, AnchoredTextDirection, constrain_anchored_size, place_anchored,
     },
+    tooltip::{Tooltip, TooltipTargetVisibility},
 };
 
 const KEY_CONTEXT: &str = "SpaceTermComboBox";
@@ -344,6 +345,7 @@ pub struct ComboBoxMetrics {
     panel_width: Pixels,
     maximum_height: Pixels,
     trigger_height: Pixels,
+    icon_trigger_size: Pixels,
     input_height: Pixels,
     row_height: Pixels,
     described_row_height: Pixels,
@@ -364,6 +366,7 @@ impl ComboBoxMetrics {
             panel_width,
             maximum_height: px(320.0),
             trigger_height,
+            icon_trigger_size: px(28.0),
             input_height: px(34.0),
             row_height: px(30.0),
             described_row_height: px(46.0),
@@ -376,6 +379,12 @@ impl ComboBoxMetrics {
             label_size: px(12.0),
             secondary_size: px(11.0),
         }
+    }
+
+    /// Sets the square target size used by icon-only triggers.
+    pub fn icon_trigger_size(mut self, size: Pixels) -> Self {
+        self.icon_trigger_size = size.max(px(0.0));
+        self
     }
 
     /// Sets maximum panel, editor, plain-row, and described-row heights.
@@ -473,6 +482,8 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     panel_width: Option<Pixels>,
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
+    icon_trigger: bool,
+    tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
     on_accept: Option<AcceptanceHandler<I>>,
     on_lifecycle: Option<LifecycleHandler>,
@@ -501,6 +512,8 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             panel_width: None,
             full_width: false,
             trigger_leading: None,
+            icon_trigger: false,
+            tooltip: None,
             debug_selector: None,
             on_accept: None,
             on_lifecycle: None,
@@ -555,7 +568,9 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
-    /// Makes the trigger fill the width allocated by its parent.
+    /// Makes a text trigger fill the width allocated by its parent.
+    ///
+    /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
         self
@@ -564,6 +579,22 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Adds optional leading trigger content using the resolved foreground color.
     pub fn leading(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.trigger_leading = Some(Rc::new(build));
+        self
+    }
+
+    /// Uses a compact icon-only trigger while retaining its logical accessibility name.
+    ///
+    /// The icon replaces the visible prompt, selected label, and disclosure chevron. Its square
+    /// target size comes from [`ComboBoxMetrics::icon_trigger_size`].
+    pub fn icon_trigger(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+        self.trigger_leading = Some(Rc::new(build));
+        self.icon_trigger = true;
+        self
+    }
+
+    /// Adds help for the enabled, closed trigger without changing its layout or focus behavior.
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.tooltip = Some(tooltip);
         self
     }
 
@@ -1480,21 +1511,30 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let accessibility_name = self.accessibility_name;
         let paint = theme.paint;
         let metrics = theme.metrics;
+        let icon_trigger = self.icon_trigger;
+        let fill_parent = self.full_width && !icon_trigger;
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
                 debug_selector.unwrap_or_else(|| accessibility_name.to_string())
             })
             .relative()
-            .h(metrics.trigger_height)
-            .when(self.full_width, |trigger| trigger.w_full())
-            .when(!self.full_width, |trigger| {
-                trigger.min_w(metrics.panel_width)
+            .when(icon_trigger, |trigger| {
+                trigger
+                    .size(metrics.icon_trigger_size)
+                    .flex_shrink_0()
+                    .justify_center()
             })
-            .px(metrics.horizontal_padding)
+            .when(!icon_trigger, |trigger| {
+                trigger
+                    .h(metrics.trigger_height)
+                    .when(fill_parent, |trigger| trigger.w_full())
+                    .when(!fill_parent, |trigger| trigger.min_w(metrics.panel_width))
+                    .px(metrics.horizontal_padding)
+                    .gap(metrics.gap)
+            })
             .flex()
             .items_center()
-            .gap(metrics.gap)
             .rounded(metrics.corner_radius)
             .border(metrics.border_width)
             .border_color(if focused {
@@ -1514,7 +1554,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             })
             .text_size(metrics.label_size)
             .cursor_default()
-            .track_focus(&focus)
+            .when(enabled, |trigger| trigger.track_focus(&focus))
             .when(enabled && !open, |trigger| {
                 trigger.hover(move |style| style.bg(paint.trigger_hover_background))
             })
@@ -1525,8 +1565,18 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     paint.disabled
                 })
             }))
-            .child(div().min_w_0().flex_1().truncate().child(label))
-            .child(Icon::new(IconName::ChevronDown, px(12.0), paint.muted))
+            .when(!icon_trigger, |trigger| {
+                trigger
+                    .child(
+                        div()
+                            .debug_selector(|| "combo-box-trigger-label".to_owned())
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .child(label),
+                    )
+                    .child(Icon::new(IconName::ChevronDown, px(12.0), paint.muted))
+            })
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !enabled || key_event_is_modified(event) {
@@ -1549,10 +1599,21 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 });
                 cx.stop_propagation();
             });
+        let trigger = if let Some(tooltip) = self.tooltip {
+            tooltip
+                .attach(trigger, TooltipTargetVisibility::Visible)
+                .disabled(!enabled || open)
+                .into_any_element()
+        } else {
+            trigger.into_any_element()
+        };
 
         div()
             .relative()
-            .when(self.full_width, |root| root.w_full())
+            .when(fill_parent, |root| root.w_full())
+            .when(icon_trigger, |root| {
+                root.size(metrics.icon_trigger_size).flex_shrink_0()
+            })
             .child(trigger)
             .when(open, |root| root.child(render_overlay(state, window, cx)))
             .into_any_element()

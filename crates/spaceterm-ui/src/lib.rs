@@ -43,7 +43,7 @@ pub use command_palette::{
     CommandPalettePaint, CommandPaletteQuery, CommandPaletteReplacementFocus, CommandPaletteTheme,
     install_command_palette_keybindings,
 };
-pub use icon::{Icon, IconName};
+pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuPlacement,

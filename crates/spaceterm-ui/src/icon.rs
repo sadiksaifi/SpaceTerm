@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    App, FontFallbacks, Global, IntoElement, ParentElement as _, Pixels, RenderOnce, Rgba,
-    Styled as _, Window, div, font,
+    App, AssetSource, FontFallbacks, Global, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    Rgba, SharedString, Styled as _, Window, div, font, svg,
 };
 
 /// The Lucide family embedded by `lucide-icons` 1.34.0.
@@ -37,13 +37,68 @@ fn register_font_with(
     Ok(())
 }
 
-/// A typed Lucide icon rendered at an explicit logical size and tint.
+/// A bundled vector icon outside the Lucide family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CustomIconName {
+    /// Stacked rectangular surfaces, using the supplied rectangle.stack artwork.
+    RectangleStack,
+}
+
+impl CustomIconName {
+    fn path(self) -> &'static str {
+        match self {
+            Self::RectangleStack => "spaceterm-ui/icons/rectangle-stack.svg",
+        }
+    }
+}
+
+const EMBEDDED_ICONS: &[(&str, &[u8])] = &[(
+    "spaceterm-ui/icons/rectangle-stack.svg",
+    include_bytes!("../assets/icons/rectangle-stack.svg"),
+)];
+
+/// The reusable UI crate's bundled assets, registered with GPUI's
+/// `Application::with_assets` before rendering custom icons.
 ///
-/// The fixed square and matched line height keep the 24-by-24 Lucide canvas aligned with adjacent
-/// typography without exposing raw private-use glyphs to callers.
+/// Only paths in the `spaceterm-ui` namespace are provided. Applications with
+/// additional assets can delegate these lookups from their own `AssetSource`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EmbeddedAssets;
+
+impl AssetSource for EmbeddedAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(EMBEDDED_ICONS
+            .iter()
+            .find_map(|(name, bytes)| (*name == path).then_some(Cow::Borrowed(*bytes))))
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let directory = path.trim_end_matches('/');
+        Ok(EMBEDDED_ICONS
+            .iter()
+            .filter(|(name, _)| {
+                directory.is_empty()
+                    || name
+                        .strip_prefix(directory)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(name, _)| SharedString::from(*name))
+            .collect())
+    }
+}
+
+enum IconSource {
+    Lucide(IconName),
+    Custom(CustomIconName),
+}
+
+/// A typed icon rendered at an explicit logical size and tint.
+///
+/// The fixed square keeps bundled vectors and Lucide glyphs aligned with adjacent
+/// typography without exposing raw asset paths or private-use glyphs to callers.
 #[derive(IntoElement)]
 pub struct Icon {
-    name: IconName,
+    source: IconSource,
     size: Pixels,
     tint: Rgba,
 }
@@ -51,27 +106,51 @@ pub struct Icon {
 impl Icon {
     /// Creates an icon with no implicit size or color policy.
     pub fn new(name: IconName, size: Pixels, tint: Rgba) -> Self {
-        Self { name, size, tint }
+        Self {
+            source: IconSource::Lucide(name),
+            size,
+            tint,
+        }
+    }
+
+    /// Creates a bundled custom icon with the same size and tint contract as Lucide icons.
+    /// Register [`EmbeddedAssets`] with the GPUI application before rendering it.
+    pub fn custom(name: CustomIconName, size: Pixels, tint: Rgba) -> Self {
+        Self {
+            source: IconSource::Custom(name),
+            size,
+            tint,
+        }
     }
 }
 
 impl RenderOnce for Icon {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let content = match self.source {
+            IconSource::Lucide(name) => div()
+                .font({
+                    let mut icon_font = font(LUCIDE_FONT_FAMILY);
+                    icon_font.fallbacks = Some(EMPTY_FONT_FALLBACKS.clone());
+                    icon_font
+                })
+                .text_size(self.size)
+                .line_height(self.size)
+                .text_color(self.tint)
+                .child(name.unicode().to_string())
+                .into_any_element(),
+            IconSource::Custom(name) => svg()
+                .path(name.path())
+                .size(self.size)
+                .text_color(self.tint)
+                .into_any_element(),
+        };
         div()
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
             .size(self.size)
-            .font({
-                let mut icon_font = font(LUCIDE_FONT_FAMILY);
-                icon_font.fallbacks = Some(EMPTY_FONT_FALLBACKS.clone());
-                icon_font
-            })
-            .text_size(self.size)
-            .line_height(self.size)
-            .text_color(self.tint)
-            .child(self.name.unicode().to_string())
+            .child(content)
     }
 }
 
@@ -186,6 +265,67 @@ mod tests {
 
         assert_eq!(glyphs.len(), names.len());
         assert!(glyphs.iter().all(|glyph| !glyph.is_whitespace()));
+    }
+
+    #[test]
+    fn embedded_assets_should_only_resolve_owned_asset_paths() {
+        let path = CustomIconName::RectangleStack.path();
+        assert!(matches!(
+            EmbeddedAssets.load(path).expect("asset lookup"),
+            Some(Cow::Borrowed(_))
+        ));
+        assert!(
+            EmbeddedAssets
+                .load("icons/rectangle-stack.svg")
+                .expect("unknown path")
+                .is_none()
+        );
+        assert!(
+            EmbeddedAssets
+                .load("spaceterm-ui/icons/../rectangle-stack.svg")
+                .expect("unknown path")
+                .is_none()
+        );
+        assert_eq!(
+            EmbeddedAssets
+                .list("spaceterm-ui/icons")
+                .expect("owned directory"),
+            vec![SharedString::from(path)]
+        );
+        assert!(
+            EmbeddedAssets
+                .list("other/icons")
+                .expect("unknown directory")
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn custom_vector_should_rasterize_into_an_unclipped_square(cx: &mut TestAppContext) {
+        let bytes = EmbeddedAssets
+            .load(CustomIconName::RectangleStack.path())
+            .expect("asset lookup")
+            .expect("bundled rectangle.stack asset");
+        cx.update(|cx| {
+            let rendered = gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.into_owned())
+                .to_image_data(cx.svg_renderer())
+                .expect("bundled vector should parse and rasterize through GPUI");
+            assert_eq!(
+                rendered.size(0),
+                size(gpui::DevicePixels(24), gpui::DevicePixels(24))
+            );
+            let pixels = rendered.as_bytes(0).expect("rasterized SVG frame");
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
+            let width = 24;
+            assert!(
+                pixels.chunks_exact(4).enumerate().all(|(index, pixel)| {
+                    let x = index % width;
+                    let y = index / width;
+                    (x != 0 && y != 0 && x != width - 1 && y != width - 1) || pixel[3] == 0
+                }),
+                "artwork should not reach the square canvas edge"
+            );
+        });
     }
 
     #[gpui::test]

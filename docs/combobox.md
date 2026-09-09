@@ -3,8 +3,9 @@
 `spaceterm-ui::ComboBox<I>` is a controlled selector with a searchable popup.
 The caller supplies the committed identity; navigating results only changes the
 provisional highlight. Acceptance closes the popup before calling the owner.
-The New Workspace integration uses an ephemeral selection and routes the chosen
-Workspace Source through the Workspace Manager.
+The top-chrome New Workspace icon uses an ephemeral selection and routes the
+chosen Workspace Source through the Workspace Manager. The bottom sidebar
+button retains the full New Workspace Panel.
 
 ## Desktop interaction
 
@@ -45,7 +46,8 @@ The result container owns its padding once, equally on all four sides. Rows do
 not add another outer margin. The popup explicitly sets its text size and line
 height so the search editor and caret do not inherit the surrounding app size.
 The Workspace theme uses 12px primary text with a 16px line, a 28px search row,
-30px single-line options, and 4px result padding.
+30px single-line options, and 4px result padding. An icon-only trigger uses a
+theme-owned 28px square, with the same editing, focus, and popup behavior.
 
 ## References and limits
 

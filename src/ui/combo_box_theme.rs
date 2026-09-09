@@ -19,6 +19,7 @@ pub(super) fn theme() -> ComboBoxTheme {
             gpui_color(ACTIVE_THEME.border_focused),
         ),
         ComboBoxMetrics::new(px(240.0), px(40.0))
+            .icon_trigger_size(px(28.0))
             .geometry(px(260.0), px(28.0), px(30.0), px(46.0))
             .spacing(px(4.0), px(10.0), px(18.0), px(8.0))
             .shape(px(7.0), px(1.0))

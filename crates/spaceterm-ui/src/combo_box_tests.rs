@@ -5,9 +5,9 @@ use std::{
 };
 
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, Keystroke, Modifiers,
-    MouseButton, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
-    TestAppContext, TouchPhase, VisualTestContext, Window, div, point, px, rgba,
+    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement as _,
+    Keystroke, Modifiers, MouseButton, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent,
+    Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div, point, px, rgba,
 };
 
 use crate::{
@@ -145,6 +145,52 @@ struct ReentrantComboReplacementRoot {
 struct WheelContainmentRoot {
     underlay_scrolls: Rc<Cell<usize>>,
     accepted: Rc<RefCell<Vec<u8>>>,
+}
+
+struct IconTriggerRoot {
+    disabled: bool,
+    before_focus: FocusHandle,
+    after_focus: FocusHandle,
+    events: Rc<RefCell<Vec<ComboBoxLifecycleEvent>>>,
+}
+
+impl Render for IconTriggerRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        let events = Rc::clone(&self.events);
+        crate::TooltipLayer::new(
+            div()
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(40.0)).track_focus(&self.before_focus))
+                .child(
+                    ComboBox::new(
+                        "icon-combo",
+                        "Choose Workspace",
+                        None,
+                        "Choose Workspace",
+                        items(),
+                    )
+                    .icon_trigger(|foreground| {
+                        div()
+                            .debug_selector(|| "combo-box-trigger-icon".to_owned())
+                            .size(px(12.0))
+                            .bg(foreground)
+                            .into_any_element()
+                    })
+                    .full_width(true)
+                    .disabled(self.disabled)
+                    .debug_selector("combo-box-trigger")
+                    .tooltip(
+                        crate::Tooltip::new("icon-combo-tooltip", "Choose Workspace")
+                            .debug_selector("icon-combo-help"),
+                    )
+                    .on_lifecycle(move |event, _| events.borrow_mut().push(*event)),
+                )
+                .child(div().h(px(40.0)).track_focus(&self.after_focus)),
+        )
+    }
 }
 
 struct PlacementRoot {
@@ -563,6 +609,38 @@ fn trigger_center(cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
     cx.debug_bounds("combo-box-trigger")
         .expect("the ComboBox trigger should render")
         .center()
+}
+
+type IconTriggerWindow<'a> = (
+    Entity<IconTriggerRoot>,
+    Rc<RefCell<Vec<ComboBoxLifecycleEvent>>>,
+    &'a mut VisualTestContext,
+);
+
+fn icon_trigger_window(cx: &mut TestAppContext, disabled: bool) -> IconTriggerWindow<'_> {
+    install_themes(cx);
+    cx.set_global(crate::TooltipTheme::new(
+        crate::TooltipPaint::new(
+            rgba(0x141415ff),
+            rgba(0x252530ff),
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x878787ff),
+        ),
+        crate::TooltipMetrics::new(px(240.0)),
+    ));
+    cx.update(crate::tooltip::init);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let root_events = Rc::clone(&events);
+    let (root, cx) = cx.add_window_view(move |_, cx| IconTriggerRoot {
+        disabled,
+        before_focus: cx.focus_handle().tab_stop(true),
+        after_focus: cx.focus_handle().tab_stop(true),
+        events: root_events,
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    (root, events, cx)
 }
 
 fn placement_window(
@@ -1888,4 +1966,104 @@ fn repeated_end_should_reveal_the_active_last_result_after_manual_scrolling(
     );
     cx.run_until_parked();
     assert_eq!(accepted.borrow().as_slice(), [64]);
+}
+
+#[gpui::test]
+fn icon_trigger_should_remain_a_centered_square_without_the_prompt(cx: &mut TestAppContext) {
+    let (_, _, cx) = icon_trigger_window(cx, false);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("icon trigger");
+    let icon = cx
+        .debug_bounds("combo-box-trigger-icon")
+        .expect("trigger icon");
+    assert_eq!(trigger.size, gpui::size(px(28.0), px(28.0)));
+    assert_eq!(icon.center(), trigger.center());
+    assert!(cx.debug_bounds("combo-box-trigger-label").is_none());
+}
+
+#[gpui::test]
+fn icon_trigger_should_open_the_same_popup_on_pointer_press(cx: &mut TestAppContext) {
+    let (_, events, cx) = icon_trigger_window(cx, false);
+    open_by_pointer(cx);
+
+    let trigger = cx.debug_bounds("combo-box-trigger").expect("icon trigger");
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert_eq!(panel.size.width, px(240.0));
+    assert_eq!(panel.top(), trigger.bottom() + px(4.0));
+    assert_eq!(events.borrow().as_slice(), [ComboBoxLifecycleEvent::Opened]);
+}
+
+#[gpui::test]
+fn icon_trigger_should_open_with_keyboard_and_restore_focus_on_escape(cx: &mut TestAppContext) {
+    let (_, events, cx) = icon_trigger_window(cx, false);
+    focus_trigger(cx);
+    let trigger_focus = cx
+        .update(|window, cx| window.focused(cx))
+        .expect("trigger focus");
+
+    cx.simulate_keystrokes("space");
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    cx.simulate_keystrokes("escape");
+
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| trigger_focus.is_focused(window)));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [
+            ComboBoxLifecycleEvent::Opened,
+            ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::Escape),
+        ]
+    );
+}
+
+#[gpui::test]
+fn disabled_icon_trigger_should_ignore_pointer_and_be_skipped_by_keyboard(cx: &mut TestAppContext) {
+    let (root, events, cx) = icon_trigger_window(cx, true);
+    let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
+    cx.update(|window, _| before_focus.focus(window));
+    open_by_pointer(cx);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| before_focus.is_focused(window)));
+
+    cx.update(|window, _| window.focus_next());
+    let after_focus = root.read_with(cx, |root, _| root.after_focus.clone());
+    assert!(cx.update(|window, _| after_focus.is_focused(window)));
+    cx.simulate_keystrokes("space down");
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(events.borrow().is_empty());
+}
+
+#[gpui::test]
+fn icon_trigger_tooltip_should_show_help_when_closed(cx: &mut TestAppContext) {
+    let (_, _, cx) = icon_trigger_window(cx, false);
+    let center = trigger_center(cx);
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("icon-combo-help").is_some());
+}
+
+#[gpui::test]
+fn icon_trigger_tooltip_should_cancel_pending_help_when_popup_opens(cx: &mut TestAppContext) {
+    let (_, _, cx) = icon_trigger_window(cx, false);
+    let center = trigger_center(cx);
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    open_by_pointer(cx);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.debug_bounds("icon-combo-help").is_none());
+}
+
+#[gpui::test]
+fn disabled_icon_trigger_should_not_present_tooltip_help(cx: &mut TestAppContext) {
+    let (_, _, cx) = icon_trigger_window(cx, true);
+    let center = trigger_center(cx);
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("icon-combo-help").is_none());
 }
