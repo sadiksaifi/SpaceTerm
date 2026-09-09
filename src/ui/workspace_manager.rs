@@ -63,17 +63,16 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
-    AnchoredPlacementConfig, Button, ButtonShape, ButtonSize, ButtonVariant, ComboBox,
-    ComboBoxAccessory, ComboBoxCopy, ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ContextMenu,
-    CustomIconName, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize,
-    MiddleTruncatedText, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
-    ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision,
-    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle,
-    ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput,
-    TextInputEvent, TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility,
-    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
-    window_combo_box_is_open, window_modal_is_open,
+    AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
+    ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ContextMenu, CustomIconName, Icon, IconButton,
+    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction,
+    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
+    OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
+    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis,
+    ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
+    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -941,9 +940,14 @@ impl WorkspaceManager {
             .iter()
             .map(|workspace| {
                 let (tabs, panes) = workspace.payload().read(cx).aggregate_counts(cx);
-                let icon = match workspace.location() {
-                    WorkspaceLocation::Local => IconName::Terminal,
-                    WorkspaceLocation::Remote { .. } => IconName::Globe,
+                let active = workspace.id() == self.workspaces.active_workspace_id();
+                let icon = if active {
+                    IconName::Check
+                } else {
+                    match workspace.location() {
+                        WorkspaceLocation::Local => IconName::Terminal,
+                        WorkspaceLocation::Remote { .. } => IconName::Globe,
+                    }
                 };
                 ComboBoxItem::new(
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
@@ -956,7 +960,12 @@ impl WorkspaceManager {
                 )
                 .0])
                 .leading_icon(move |foreground| {
-                    Icon::new(icon, px(14.0), foreground).into_any_element()
+                    div()
+                        .when(active, |icon| {
+                            icon.debug_selector(|| "workspace-switcher-active-marker".to_owned())
+                        })
+                        .child(Icon::new(icon, px(14.0), foreground))
+                        .into_any_element()
                 })
                 .trailing(ComboBoxAccessory::Text(
                     super::workspace_count_summary(tabs, panes).into(),
@@ -1254,7 +1263,9 @@ impl WorkspaceManager {
             }
         };
         if let Some(name) = name
-            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
+            && let Err(error) = self
+                .workspaces
+                .name_workspace_for_creation(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }
@@ -1761,7 +1772,9 @@ impl WorkspaceManager {
             Err(_) => return Err(Box::new(completion)),
         };
         if let Some(name) = self.remote_workspace_name.take()
-            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
+            && let Err(error) = self
+                .workspaces
+                .name_workspace_for_creation(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }
@@ -3404,24 +3417,30 @@ impl WorkspaceManager {
         .handle(self.workspace_switcher.clone())
         .copy(ComboBoxCopy::new(
             "Workspace name",
-            "Find or create a Workspace…",
+            "Filter or create...",
             "No Workspaces",
             "No matching Workspaces",
         ))
-        .fallback(ComboBoxFallback::when_no_matches(move |query| {
+        .fallback(ComboBoxFallback::pinned_rows(move |query| {
             let name = query.trim().to_owned();
             let local = ComboBoxItem::new(
                 WorkspaceSwitcherChoice::Local(name.clone()),
                 "Local Workspace",
             )
             .leading_icon(|foreground| {
-                Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
+                Icon::custom(
+                    CustomIconName::RectangleStackBadgePlus,
+                    px(16.0),
+                    foreground,
+                )
+                .into_any_element()
             })
             .debug_selector("workspace-switcher-create-local");
             let mut remote =
                 ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
                     .leading_icon(|foreground| {
-                        Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
+                        Icon::custom(CustomIconName::GlobePlus, px(16.0), foreground)
+                            .into_any_element()
                     })
                     .debug_selector("workspace-switcher-create-remote");
             if let Some(reason) = &remote_unavailable_reason {
@@ -3871,7 +3890,7 @@ impl WorkspaceManager {
             .debug_selector(|| "workspace-list".to_owned())
             .w_full()
             .min_h_0()
-            .h(px(self.workspaces.len() as f32 * SIDEBAR_ROW_HEIGHT))
+            .flex_1()
             .flex()
             .flex_col()
             .overflow_y_scroll()
@@ -3920,8 +3939,11 @@ impl WorkspaceManager {
         }
 
         let scrollbar = self.sidebar.scrollbar.clone();
-        let panel_manager = manager.clone();
-        let new_workspace_shortcut = shortcuts.new_workspace_button;
+        let local_manager = manager.clone();
+        let remote_tooltip = self
+            .remote_workspace_unavailable_reason
+            .clone()
+            .unwrap_or_else(|| "New Remote Workspace".to_owned());
         div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
@@ -3940,37 +3962,67 @@ impl WorkspaceManager {
             .child(rows)
             .child(
                 div()
+                    .id("workspace-sidebar-footer")
+                    .debug_selector(|| "workspace-sidebar-footer".to_owned())
                     .relative()
                     .w_full()
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(SIDEBAR_TOGGLE_INSET))
                     .child(
-                        Button::new("new-workspace-button", "New Workspace")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Large)
-                            .shape(ButtonShape::Square)
-                            .full_width(true)
-                            .debug_selector("new-workspace-button")
-                            .leading(|foreground| {
-                                Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
-                            })
-                            .trailing(move |_| {
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(gpui_color(ACTIVE_THEME.icon))
-                                    .child(new_workspace_shortcut)
+                        IconButton::new(
+                            "new-remote-workspace-button",
+                            "New Remote Workspace",
+                            |foreground| {
+                                Icon::custom(CustomIconName::GlobePlus, px(20.0), foreground)
                                     .into_any_element()
-                            })
-                            .on_activate(move |_, window, cx| {
-                                let _ = panel_manager.update(cx, |manager, cx| {
-                                    manager.create_local_workspace(window, cx);
-                                });
-                            }),
+                            },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
+                        .disabled(self.remote_workspace_unavailable_reason.is_some())
+                        .debug_selector("new-remote-workspace-button")
+                        .tooltip(Tooltip::new("new-remote-workspace-tooltip", remote_tooltip))
+                        .on_activate(move |_, window, cx| {
+                            let _ = manager.update(cx, |manager, cx| {
+                                manager.sidebar.dismiss_editing(window);
+                                manager.present_remote_workspace_flow(String::new(), window, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        IconButton::new(
+                            "new-local-workspace-button",
+                            "New Local Workspace",
+                            |foreground| {
+                                Icon::custom(
+                                    CustomIconName::RectangleStackBadgePlus,
+                                    px(20.0),
+                                    foreground,
+                                )
+                                .into_any_element()
+                            },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
+                        .debug_selector("new-local-workspace-button")
+                        .tooltip(
+                            Tooltip::new("new-local-workspace-tooltip", "New Local Workspace")
+                                .keyboard_equivalent(shortcuts.new_workspace_button),
+                        )
+                        .on_activate(move |_, window, cx| {
+                            let _ = local_manager.update(cx, |manager, cx| {
+                                manager.create_local_workspace(window, cx)
+                            });
+                        }),
                     )
                     .child(
                         div()
-                            .id("new-workspace-button-top-divider")
-                            .debug_selector(|| "new-workspace-button-top-divider".to_owned())
+                            .id("workspace-sidebar-footer-divider")
+                            .debug_selector(|| "workspace-sidebar-footer-divider".to_owned())
                             .absolute()
                             .top_0()
                             .left_0()

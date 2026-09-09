@@ -506,3 +506,81 @@ fn command_n_should_keep_automatic_workspace_naming(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(identity(&manager, cx).0, "beta");
 }
+
+#[gpui::test]
+fn empty_switcher_creation_should_keep_automatic_local_naming(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+    click("workspace-switcher-create-local", cx);
+    report_directory(
+        &records,
+        2,
+        1,
+        "/projects/alpha",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "alpha");
+    report_directory(
+        &records,
+        2,
+        2,
+        "/projects/beta",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "beta");
+}
+
+#[gpui::test]
+fn empty_switcher_creation_should_keep_automatic_remote_naming(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+    click("workspace-switcher-create-remote", cx);
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    report_directory(&records, 2, 1, "/srv/alpha", true, MetadataFreshness::Live);
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "alpha · work");
+    report_directory(&records, 2, 2, "/srv/beta", true, MetadataFreshness::Live);
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "beta · work");
+}
+
+#[gpui::test]
+fn sidebar_remote_creation_should_keep_automatic_naming(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    click("new-remote-workspace-button", cx);
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    report_directory(&records, 2, 1, "/srv/alpha", true, MetadataFreshness::Live);
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "alpha · work");
+}
+
+#[gpui::test]
+fn numbered_creation_name_should_remain_frozen_after_directory_changes(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    for _ in 0..2 {
+        open_workspace_switcher_for_creation(cx);
+        click("workspace-switcher-create-local", cx);
+    }
+    report_directory(
+        &records,
+        3,
+        1,
+        "/projects/alpha",
+        false,
+        MetadataFreshness::Live,
+    );
+    cx.run_until_parked();
+    assert_eq!(identity(&manager, cx).0, "fresh workspace 1");
+}

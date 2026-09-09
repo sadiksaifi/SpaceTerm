@@ -1909,6 +1909,10 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
         }),
         (false, None, true)
     );
+    click("new-remote-workspace-button", cx);
+    assert_eq!(create_calls.load(Ordering::Acquire), 0);
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+    assert_eq!(records.starts().len(), 1);
 }
 
 #[gpui::test]
@@ -4019,20 +4023,24 @@ fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut 
 }
 
 #[gpui::test]
-fn sidebar_should_place_new_workspace_directly_after_rows_without_a_header(
-    cx: &mut TestAppContext,
-) {
+fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
     assert!(cx.debug_bounds("workspace-sidebar-header").is_none());
     assert!(cx.debug_bounds("search-workspaces-button").is_none());
     let sidebar = cx.debug_bounds("workspace-sidebar").unwrap();
     let row = cx.debug_bounds("workspace-row-1-active").unwrap();
     let list = cx.debug_bounds("workspace-list").unwrap();
-    let button = cx.debug_bounds("new-workspace-button").unwrap();
+    let button = cx.debug_bounds("workspace-sidebar-footer").unwrap();
     assert_eq!(row.top(), sidebar.top());
-    assert_eq!(row.bottom(), list.bottom());
+    assert!(row.bottom() < list.bottom());
     assert_eq!(button.top(), list.bottom());
-    assert!(button.bottom() < sidebar.bottom());
+    assert_eq!(button.bottom(), sidebar.bottom());
+    let remote = cx.debug_bounds("new-remote-workspace-button").unwrap();
+    let local = cx.debug_bounds("new-local-workspace-button").unwrap();
+    assert!(remote.left() < local.left());
+    assert_eq!(remote.center().y, local.center().y);
+    assert!(remote.left() >= button.left());
+    assert!(local.right() <= button.right());
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -5155,7 +5163,7 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 #[gpui::test]
 fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    click("new-workspace-button", cx);
+    click("new-local-workspace-button", cx);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         2
@@ -5546,13 +5554,13 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
+fn sidebar_footer_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     let button = cx
-        .debug_bounds("new-workspace-button")
+        .debug_bounds("workspace-sidebar-footer")
         .expect("the New Workspace button was not rendered");
     let divider = cx
-        .debug_bounds("new-workspace-button-top-divider")
+        .debug_bounds("workspace-sidebar-footer-divider")
         .expect("the New Workspace button divider was not rendered");
 
     assert_eq!(
@@ -5696,7 +5704,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 }
 
 #[gpui::test]
-fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut TestAppContext) {
+fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
         cx.simulate_keystrokes("cmd-n");
@@ -5709,7 +5717,7 @@ fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut
         .debug_bounds("workspace-list")
         .expect("the overflowing Workspace list was not rendered");
     let button = cx
-        .debug_bounds("new-workspace-button")
+        .debug_bounds("workspace-sidebar-footer")
         .expect("the New Workspace button was not rendered");
     assert_eq!(
         (
@@ -6798,7 +6806,7 @@ fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remot
 }
 
 #[gpui::test]
-fn workspace_switcher_should_not_offer_creation_for_an_empty_or_matching_query(
+fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_queries(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -6812,11 +6820,11 @@ fn workspace_switcher_should_not_offer_creation_for_an_empty_or_matching_query(
     for query in ["", "space", "a l p h a"] {
         cx.simulate_keystrokes(query);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("workspace-switcher-create-local").is_none());
-        assert!(
-            cx.debug_bounds("workspace-switcher-create-remote")
-                .is_none()
-        );
+        let matched = cx.debug_bounds("workspace-switcher-result-1").unwrap();
+        let local = cx.debug_bounds("workspace-switcher-create-local").unwrap();
+        let remote = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
+        assert!(matched.bottom() <= local.top());
+        assert!(local.bottom() <= remote.top());
     }
 }
 
@@ -6827,4 +6835,122 @@ fn command_p_should_no_longer_open_workspace_search(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert!(cx.debug_bounds("command-palette-panel").is_none());
+}
+
+#[gpui::test]
+fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cancel(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    click("new-remote-workspace-button", cx);
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    assert_eq!(
+        flow.read_with(cx, |flow, _| flow.stage()),
+        RemoteWorkspaceFlowStage::HostSelection
+    );
+    assert_eq!(records.starts().len(), 1);
+    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+}
+
+#[gpui::test]
+fn switcher_should_number_duplicate_local_names_without_switching_to_the_match(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    for expected in ["fresh workspace", "fresh workspace 1", "fresh workspace 2"] {
+        open_workspace_switcher_for_creation(cx);
+        click("workspace-switcher-create-local", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .active_workspace()
+                .name()
+                .to_owned()),
+            expected
+        );
+    }
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        4
+    );
+    assert_eq!(records.starts().len(), 4);
+}
+
+#[gpui::test]
+fn switcher_should_number_remote_names_only_within_the_same_ssh_destination(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-local", cx);
+    for (destination, expected) in [
+        ("work", "fresh workspace"),
+        ("work", "fresh workspace 1"),
+        ("other", "fresh workspace"),
+        ("work", "fresh workspace 2"),
+    ] {
+        open_workspace_switcher_for_creation(cx);
+        click("workspace-switcher-create-remote", cx);
+        let flow = manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_flow.clone().unwrap()
+        });
+        let (completion, _, _, _) = remote_completion(destination, "~", "/home/tester", true);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .active_workspace()
+                .name()
+                .to_owned()),
+            expected
+        );
+    }
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        6
+    );
+    assert_eq!(records.starts().len(), 6);
+}
+
+#[gpui::test]
+fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highlight(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n ctrl-1");
+    cx.run_until_parked();
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let first = cx.debug_bounds("workspace-switcher-result-1").unwrap();
+    assert!(first.contains(&marker.center()));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(1)
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    open_workspace_switcher(cx);
+    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let second = cx.debug_bounds("workspace-switcher-result-2").unwrap();
+    assert!(second.contains(&marker.center()));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
 }

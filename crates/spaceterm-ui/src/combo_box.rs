@@ -274,18 +274,22 @@ impl<I> ComboBoxItem<I> {
 #[derive(Clone)]
 pub struct ComboBoxFallback<I>(ComboBoxFallbackProvider<I>);
 
-type PinnedFallbackProvider<I> = Rc<dyn Fn(&str) -> ComboBoxItem<I>>;
-type NoMatchesFallbackProvider<I> = Rc<dyn Fn(&str) -> Vec<ComboBoxItem<I>>>;
+type FallbackRowsProvider<I> = Rc<dyn Fn(&str) -> Vec<ComboBoxItem<I>>>;
 
 #[derive(Clone)]
 enum ComboBoxFallbackProvider<I> {
-    Pinned(PinnedFallbackProvider<I>),
-    NoMatches(NoMatchesFallbackProvider<I>),
+    Pinned(FallbackRowsProvider<I>),
+    NoMatches(FallbackRowsProvider<I>),
 }
 
 impl<I> ComboBoxFallback<I> {
     /// Pins one row after ordinary matches, including when the query is empty.
     pub fn new(provider: impl Fn(&str) -> ComboBoxItem<I> + 'static) -> Self {
+        Self::pinned_rows(move |query| vec![provider(query)])
+    }
+
+    /// Pins rows in provider order after ordinary matches, including for an empty query.
+    pub fn pinned_rows(provider: impl Fn(&str) -> Vec<ComboBoxItem<I>> + 'static) -> Self {
         Self(ComboBoxFallbackProvider::Pinned(Rc::new(provider)))
     }
 
@@ -296,7 +300,7 @@ impl<I> ComboBoxFallback<I> {
 
     fn items(&self, query: &str, ordinary_match_count: usize) -> Vec<ComboBoxItem<I>> {
         match &self.0 {
-            ComboBoxFallbackProvider::Pinned(provider) => vec![provider(query)],
+            ComboBoxFallbackProvider::Pinned(provider) => provider(query),
             ComboBoxFallbackProvider::NoMatches(provider)
                 if ordinary_match_count == 0 && !query.trim().is_empty() =>
             {
@@ -841,7 +845,6 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     items: Rc<[ComboBoxItem<I>]>,
     presented_items: Rc<[ComboBoxItem<I>]>,
     fallback: Option<ComboBoxFallback<I>>,
-    fallback_item_ids: Vec<I>,
     ordinary_match_count: usize,
     matches: Rc<[usize]>,
     provisional: Option<I>,
@@ -980,7 +983,6 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             items: Vec::new().into(),
             presented_items: Vec::new().into(),
             fallback: None,
-            fallback_item_ids: Vec::new(),
             ordinary_match_count: 0,
             matches: Vec::new().into(),
             provisional: None,
@@ -1042,13 +1044,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
     ) {
         let items = unique_items(items);
         let model_changed = !same_model(&self.items, &items);
-        let provisional_was_fallback = self
-            .provisional
-            .as_ref()
-            .is_some_and(|id| self.fallback_item_ids.contains(id));
         self.items = items.into();
         self.fallback = fallback;
-        let results_changed = self.recompute_matches(provisional_was_fallback && model_changed);
+        let results_changed = self.recompute_matches(false);
         if model_changed || results_changed {
             self.model_generation = self.model_generation.wrapping_add(1);
             self.pointer_press = None;
@@ -1106,11 +1104,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         let mut presented = self.items.to_vec();
         let mut matches = filter_items(&self.items, &self.query);
         self.ordinary_match_count = matches.len();
-        self.fallback_item_ids.clear();
         if let Some(fallback) = &self.fallback {
             for item in fallback.items(&self.query, self.ordinary_match_count) {
                 if !presented.iter().any(|existing| existing.id == item.id) {
-                    self.fallback_item_ids.push(item.id.clone());
                     matches.push(presented.len());
                     presented.push(item);
                 }

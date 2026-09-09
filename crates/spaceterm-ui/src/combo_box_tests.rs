@@ -2218,3 +2218,89 @@ fn handle_should_not_open_its_control_in_another_window(cx: &mut TestAppContext)
     assert!(!second.update(|window, cx| handle.open(window, cx)));
     assert!(!first.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
+
+#[gpui::test]
+fn pinned_rows_should_follow_ordinary_matches_when_query_is_empty(cx: &mut TestAppContext) {
+    let fallback = ComboBoxFallback::pinned_rows(|_| {
+        vec![
+            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+        ]
+    });
+    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    let ordinary = cx.debug_bounds("combo-row-zellij").unwrap();
+    let local = cx.debug_bounds("create-local").unwrap();
+    let remote = cx.debug_bounds("create-remote").unwrap();
+    assert!(local.top() >= ordinary.bottom());
+    assert!(remote.top() >= local.bottom());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 1,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn pinned_rows_should_allow_keyboard_creation_with_a_matching_existing_name(
+    cx: &mut TestAppContext,
+) {
+    let queries = Rc::new(RefCell::new(Vec::new()));
+    let captured_queries = queries.clone();
+    let fallback = ComboBoxFallback::pinned_rows(move |query| {
+        captured_queries.borrow_mut().push(query.to_owned());
+        vec![
+            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+        ]
+    });
+    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("L o c a l space W o r k s p a c e");
+    cx.run_until_parked();
+    let existing = cx.debug_bounds("combo-row-local").unwrap();
+    let local = cx.debug_bounds("create-local").unwrap();
+    let remote = cx.debug_bounds("create-remote").unwrap();
+    assert!(local.top() >= existing.bottom());
+    assert!(remote.top() >= local.bottom());
+    assert_eq!(
+        queries.borrow().last().map(String::as_str),
+        Some("Local Workspace")
+    );
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 8,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
+fn pinned_selection_should_survive_ordinary_item_metadata_refresh(cx: &mut TestAppContext) {
+    let fallback = ComboBoxFallback::pinned_rows(|_| {
+        vec![
+            ComboBoxItem::new(8, "Local Workspace"),
+            ComboBoxItem::new(9, "Remote Workspace"),
+        ]
+    });
+    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("L o c a l down");
+    cx.run_until_parked();
+    root.update(cx, |root, cx| {
+        root.items[0] = ComboBoxItem::new(1, "Local Workspace")
+            .description("Directory changed while the selector was open");
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 8,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
