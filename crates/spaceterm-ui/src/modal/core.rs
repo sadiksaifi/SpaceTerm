@@ -2008,7 +2008,7 @@ pub(super) fn present<T: 'static>(
             .as_ref()
             .and_then(|replacement| replacement.restore_focus.clone());
         if let Some(combo_predecessor) = combo_predecessor {
-            combo_predecessor.finish(cx);
+            cx.defer(move |cx| combo_predecessor.finish(cx));
         }
         let menu_predecessor = crate::menu::dismiss_active_menu_for_replacement(window, cx)
             .and_then(|replacement| replacement.0);

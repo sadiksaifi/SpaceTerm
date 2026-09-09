@@ -25,6 +25,7 @@ use crate::{
 enum RecordedEvent {
     Lifecycle(ComboBoxLifecycleEvent),
     PaletteOpened,
+    ModalOpened,
     Accepted {
         item_id: u8,
         source: ComboBoxActivationSource,
@@ -132,6 +133,7 @@ struct ModalReplacementRoot {
     prior_focus: FocusHandle,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     modal: Option<crate::ModalPresentationHandle>,
+    reentries: usize,
 }
 
 struct ReentrantComboReplacementRoot {
@@ -196,6 +198,7 @@ impl Render for ReentrantComboReplacementRoot {
 
 impl ModalReplacementRoot {
     fn present_modal(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let events = Rc::clone(&self.events);
         self.modal = Some(
             crate::Alert::new(
                 crate::ModalId::new("combo-replacement-alert"),
@@ -212,15 +215,25 @@ impl ModalReplacementRoot {
                     .default_action(true),
                 ],
             )
-            .present(window, cx, |_, _| {})
+            .present_with_lifecycle(
+                window,
+                cx,
+                |_, _| {},
+                move |event, _| {
+                    if matches!(event, crate::ModalLifecycleEvent::Opened(_)) {
+                        events.borrow_mut().push(RecordedEvent::ModalOpened);
+                    }
+                },
+            )
             .expect("the replacement Alert should present"),
         );
     }
 }
 
 impl Render for ModalReplacementRoot {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let events = Rc::clone(&self.events);
+        let owner = cx.entity().downgrade();
         crate::ModalLayer::new(crate::TooltipLayer::new(
             div()
                 .size_full()
@@ -234,8 +247,12 @@ impl Render for ModalReplacementRoot {
                         items(),
                     )
                     .debug_selector("modal-replacement-combo-trigger")
-                    .on_lifecycle(move |event, _| {
+                    .on_lifecycle(move |event, cx| {
                         events.borrow_mut().push(RecordedEvent::Lifecycle(*event));
+                        let _ = owner.update(cx, |root, cx| {
+                            root.reentries += 1;
+                            cx.notify();
+                        });
                     }),
                 ),
         ))
@@ -733,6 +750,7 @@ fn modal_should_replace_an_open_combo_box_and_inherit_its_predecessor(cx: &mut T
         prior_focus: cx.focus_handle().tab_stop(true),
         events: root_events,
         modal: None,
+        reentries: 0,
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -745,6 +763,7 @@ fn modal_should_replace_an_open_combo_box_and_inherit_its_predecessor(cx: &mut T
     cx.simulate_click(trigger, Modifiers::none());
     cx.run_until_parked();
     events.borrow_mut().clear();
+    root.update(cx, |root, _| root.reentries = 0);
 
     cx.update(|window, cx| {
         root.update(cx, |root, cx| root.present_modal(window, cx));
@@ -753,10 +772,14 @@ fn modal_should_replace_an_open_combo_box_and_inherit_its_predecessor(cx: &mut T
 
     assert_eq!(
         events.borrow().as_slice(),
-        [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
-            ComboBoxCloseReason::Replaced,
-        ))]
+        [
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                ComboBoxCloseReason::Replaced,
+            )),
+            RecordedEvent::ModalOpened,
+        ]
     );
+    assert_eq!(root.read_with(cx, |root, _| root.reentries), 1);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
 
@@ -1412,7 +1435,9 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
         .iter()
         .find_map(|event| match event {
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_) | RecordedEvent::PaletteOpened => None,
+            RecordedEvent::Lifecycle(_)
+            | RecordedEvent::PaletteOpened
+            | RecordedEvent::ModalOpened => None,
         })
         .expect("Page Up should leave an acceptible provisional item");
     assert!(page_up_id < 30);
@@ -1426,7 +1451,9 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
         .iter()
         .find_map(|event| match event {
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_) | RecordedEvent::PaletteOpened => None,
+            RecordedEvent::Lifecycle(_)
+            | RecordedEvent::PaletteOpened
+            | RecordedEvent::ModalOpened => None,
         })
         .expect("Page Down should leave an acceptible provisional item");
     assert!(page_down_id > 30);
