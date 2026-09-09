@@ -12,9 +12,10 @@ pub(crate) use terminal_tab::{
     TabId, TerminalTab, ZoomState,
 };
 pub(crate) use workspace_collection::{
-    DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory, RemoteDirectory,
-    RemoteDirectoryIdentity, RemoteWorkspaceTarget, RemoteWorkspaceValueError, SshDestination,
-    ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError, WorkspaceId, WorkspaceLocation,
+    CurrentDirectory, DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory,
+    RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceTarget, RemoteWorkspaceValueError,
+    SshDestination, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError, WorkspaceId,
+    WorkspaceLocation,
 };
 
 pub(crate) use remote_workspace::{

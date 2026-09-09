@@ -2320,6 +2320,10 @@ impl TerminalEmulator {
     pub(crate) fn mark_metadata_stale(&mut self) {
         self.metadata.mark_stale();
     }
+
+    pub(crate) fn metadata(&self) -> Arc<TerminalMetadataSnapshot> {
+        self.metadata.snapshot()
+    }
 }
 
 impl Drop for TerminalEmulator {

@@ -5610,14 +5610,16 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
 }
 
 #[gpui::test]
-fn collapsed_top_chrome_should_fit_after_pinning_without_renaming(cx: &mut TestAppContext) {
+fn collapsed_top_chrome_should_fit_after_pinning_changes_identity(cx: &mut TestAppContext) {
     let directory = temporary_directory("pinned-directory-with-a-long-name");
     fs::create_dir_all(&directory).unwrap();
     let (manager, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
-    let name = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().name().to_owned()
-    });
+    let name = directory
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.pin_current_directory(
@@ -6918,3 +6920,6 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     assert_eq!(records.session_count(), 2);
     assert_eq!(records.dropped_session_ids(), vec![2]);
 }
+
+#[path = "tests/identity.rs"]
+mod identity;

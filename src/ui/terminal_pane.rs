@@ -110,7 +110,9 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     PinDirectoryRequested,
+    WorkspaceIdentityRequested,
     TitleChanged(SharedString),
+    DirectoryChanged,
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -120,7 +122,9 @@ impl std::fmt::Debug for TerminalPaneEvent {
         f.write_str(match self {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
             Self::PinDirectoryRequested => "TerminalPaneEvent::PinDirectoryRequested",
+            Self::WorkspaceIdentityRequested => "TerminalPaneEvent::WorkspaceIdentityRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
+            Self::DirectoryChanged => "TerminalPaneEvent::DirectoryChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
         })
@@ -208,12 +212,13 @@ impl PaneSessionStartFailure {
 struct PaneSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
-    starting_directory: Option<crate::terminal::metadata::CurrentDirectory>,
+    current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
     local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
+    accepted_directory_revision: Option<u64>,
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
     remote_restart_start_pending: bool,
@@ -228,7 +233,7 @@ impl PaneSessionLifecycle {
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     ) -> Self {
         Self {
-            starting_directory: prepared_launch
+            current_directory: prepared_launch
                 .as_ref()
                 .map(PreparedWorkspaceTerminalLaunch::starting_directory),
             local_file_capabilities: session_factory.local_file_capabilities(),
@@ -238,6 +243,7 @@ impl PaneSessionLifecycle {
             session_start_attempted: false,
             session_epoch: 0,
             accepted_screen_generation: None,
+            accepted_directory_revision: None,
             remote_connection_generation: None,
             remote_input_blocked: false,
             remote_restart_start_pending: false,
@@ -280,7 +286,7 @@ impl PaneSessionLifecycle {
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
         self.session_factory = prepared.session_factory;
-        self.starting_directory = Some(prepared.prepared_launch.starting_directory());
+        self.current_directory = Some(prepared.prepared_launch.starting_directory());
         self.prepared_launch = Some(prepared.prepared_launch);
         self.local_file_capabilities = self.session_factory.local_file_capabilities();
         self.session_start_attempted = false;
@@ -288,6 +294,7 @@ impl PaneSessionLifecycle {
         self.remote_input_blocked = false;
         self.remote_restart_start_pending = true;
         self.accepted_screen_generation = None;
+        self.accepted_directory_revision = None;
     }
 
     fn attach(
@@ -308,10 +315,12 @@ impl PaneSessionLifecycle {
                 }
                 if this
                     .update(cx, |this, cx| {
-                        let mut changed = false;
+                        // Capture retained metadata before a final event can retire this epoch.
+                        let mut changed = this.sync_directory_metadata(session_epoch, cx);
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
+                        changed |= this.sync_directory_metadata(session_epoch, cx);
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
@@ -383,6 +392,7 @@ pub(crate) struct TerminalPane {
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
+    identity_directory: Option<crate::domain::CurrentDirectory>,
     screen_session_epoch: u64,
     last_valid_screen: Arc<ScreenSnapshot>,
     last_valid_screen_session_epoch: u64,
@@ -616,6 +626,9 @@ impl TerminalPane {
         .detach();
 
         Self {
+            identity_directory: prepared_launch
+                .as_ref()
+                .map(PreparedWorkspaceTerminalLaunch::starting_directory),
             terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
@@ -1125,18 +1138,11 @@ impl TerminalPane {
     }
 
     pub(crate) fn current_directory(&self) -> Option<crate::terminal::metadata::CurrentDirectory> {
-        use crate::terminal::metadata::MetadataFreshness;
-        if self.terminal_session.accepted_screen_generation.is_none() {
-            return self.terminal_session.starting_directory.clone();
-        }
-        (self.screen.metadata.freshness == MetadataFreshness::Live)
-            .then(|| {
-                self.screen
-                    .metadata
-                    .context
-                    .current_directory(&self.screen.metadata.directory.path)
-            })
-            .flatten()
+        self.terminal_session.current_directory.clone()
+    }
+
+    pub(crate) fn identity_directory(&self) -> Option<crate::domain::CurrentDirectory> {
+        self.identity_directory.clone()
     }
 
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
@@ -1240,6 +1246,7 @@ impl TerminalPane {
     }
 
     fn suspend_remote_session(&mut self, cx: &mut Context<Self>) {
+        self.sync_directory_metadata(self.terminal_session.session_epoch, cx);
         self.terminal_session.suspend();
         self.reset_hidden_input();
         self.apply_terminal_input_focus(false);
@@ -1787,8 +1794,56 @@ impl TerminalPane {
         self.accessibility_needs_presentation = false;
     }
 
+    fn sync_directory_metadata(&mut self, session_epoch: u64, cx: &mut Context<Self>) -> bool {
+        if self.terminal_session.session_epoch != session_epoch {
+            return false;
+        }
+        let Some(snapshot) = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.directory_snapshot())
+        else {
+            return false;
+        };
+        self.accept_directory_metadata(snapshot, cx)
+    }
+
+    fn accept_directory_metadata(
+        &mut self,
+        snapshot: crate::terminal::SessionDirectorySnapshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .terminal_session
+            .accepted_directory_revision
+            .is_some_and(|revision| snapshot.revision < revision)
+        {
+            return false;
+        }
+        self.terminal_session.accepted_directory_revision = Some(snapshot.revision);
+        let changed = self.terminal_session.current_directory != snapshot.current;
+        self.terminal_session.current_directory = snapshot.current;
+        if let Some(directory) = snapshot.last_valid {
+            self.update_identity_directory(directory, cx);
+        }
+        changed
+    }
+
+    fn update_identity_directory(
+        &mut self,
+        directory: crate::domain::CurrentDirectory,
+        cx: &mut Context<Self>,
+    ) {
+        if self.identity_directory.as_ref() != Some(&directory) {
+            self.identity_directory = Some(directory);
+            cx.emit(TerminalPaneEvent::DirectoryChanged);
+        }
+    }
+
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
+            SessionEvent::CurrentDirectoryChanged => {}
             SessionEvent::Screen(screen) => {
                 if self
                     .terminal_session
@@ -1806,6 +1861,23 @@ impl TerminalPane {
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
+                let current = (self.screen.metadata.freshness
+                    == crate::terminal::metadata::MetadataFreshness::Live)
+                    .then(|| {
+                        self.screen
+                            .metadata
+                            .context
+                            .current_directory(&self.screen.metadata.directory.path)
+                    })
+                    .flatten();
+                self.accept_directory_metadata(
+                    crate::terminal::SessionDirectorySnapshot {
+                        revision: self.screen.metadata.revision,
+                        last_valid: current.clone(),
+                        current,
+                    },
+                    cx,
+                );
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
@@ -2649,6 +2721,9 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
 
         match command {
+            TerminalContextMenuCommand::UseForWorkspaceIdentity => {
+                cx.emit(TerminalPaneEvent::WorkspaceIdentityRequested);
+            }
             TerminalContextMenuCommand::PinDirectory if self.current_directory().is_some() => {
                 cx.emit(TerminalPaneEvent::PinDirectoryRequested);
             }

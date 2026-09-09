@@ -7,21 +7,7 @@ use crate::local_path::LocalPathSemantics;
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
 
-/// A Terminal Session's directory, retaining its machine boundary.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) enum CurrentDirectory {
-    Local(std::path::PathBuf),
-    Remote(RemoteDirectory),
-}
-
-impl std::fmt::Debug for CurrentDirectory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Local(_) => "CurrentDirectory::Local",
-            Self::Remote(_) => "CurrentDirectory::Remote",
-        })
-    }
-}
+pub(crate) use crate::domain::CurrentDirectory;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectoryProvenance {

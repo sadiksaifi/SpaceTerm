@@ -14,8 +14,8 @@ use std::mem;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,7 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    CurrentDirectoryChanged,
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Exited(SessionExit),
@@ -272,7 +273,46 @@ impl RecordingAccessibilitySelectionReceiver {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SessionDirectorySnapshot {
+    pub(crate) revision: u64,
+    pub(crate) current: Option<crate::domain::CurrentDirectory>,
+    pub(crate) last_valid: Option<crate::domain::CurrentDirectory>,
+}
+
+// Retained separately because presentation events may evict any earlier queue entry.
+#[derive(Clone, Default)]
+struct SessionDirectoryState(Arc<Mutex<Option<SessionDirectorySnapshot>>>);
+
+impl SessionDirectoryState {
+    fn snapshot(&self) -> Option<SessionDirectorySnapshot> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn publish(&self, metadata: &crate::terminal::metadata::TerminalMetadataSnapshot) {
+        let current = (metadata.freshness == crate::terminal::metadata::MetadataFreshness::Live)
+            .then(|| metadata.context.current_directory(&metadata.directory.path))
+            .flatten();
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let last_valid = current
+            .clone()
+            .or_else(|| state.as_ref().and_then(|state| state.last_valid.clone()));
+        *state = Some(SessionDirectorySnapshot {
+            revision: metadata.revision,
+            current,
+            last_valid,
+        });
+    }
+}
+
 pub(crate) trait TerminalSessionHandle {
+    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
+        None
+    }
+
     fn key(&self, input: KeyInput);
     fn focus(&self, focused: bool);
     fn resize(&self, geometry: TerminalGeometry);
@@ -327,6 +367,7 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 pub(crate) struct TerminalSession {
+    directory_state: SessionDirectoryState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -399,6 +440,10 @@ impl TerminalSession {
 }
 
 impl TerminalSessionHandle for TerminalSession {
+    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
+        self.directory_state.snapshot()
+    }
+
     fn key(&self, input: KeyInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Key(input)).is_err()
@@ -705,6 +750,7 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
+    directory_state: SessionDirectoryState,
     native_pty: NativePtyOwner,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
@@ -728,6 +774,7 @@ struct TerminalWorkerContext {
 }
 
 struct TerminalWorkerPublishers {
+    directory_state: SessionDirectoryState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -859,6 +906,7 @@ impl TerminalWorker {
             local_filesystem,
         } = context;
         let TerminalWorkerPublishers {
+            directory_state,
             events,
             accessibility,
         } = publishers;
@@ -890,6 +938,7 @@ impl TerminalWorker {
         });
 
         let mut worker = Self {
+            directory_state,
             native_pty,
             emulator,
             commands,
@@ -1378,6 +1427,7 @@ impl TerminalWorker {
     }
 
     fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
+        let previous_metadata = self.emulator.metadata();
         let received_output = !chunks.is_empty();
         let mut focus_reports = Vec::new();
         for bytes in chunks {
@@ -1399,6 +1449,13 @@ impl TerminalWorker {
         }
 
         if received_output {
+            let metadata = self.emulator.metadata();
+            if metadata.directory != previous_metadata.directory {
+                self.directory_state.publish(&metadata);
+                if !self.send_terminal_event(SessionEvent::CurrentDirectoryChanged) {
+                    return false;
+                }
+            }
             if !self.flush_ordered_terminal_replies(&mut focus_reports)
                 || !self.hidden_input_transition()
             {
@@ -1545,6 +1602,7 @@ impl TerminalWorker {
     }
 
     fn publish_screen(&mut self) -> bool {
+        self.directory_state.publish(&self.emulator.metadata());
         if self.events.is_closed() {
             return false;
         }
