@@ -42,20 +42,43 @@ fn register_font_with(
 pub enum CustomIconName {
     /// Stacked rectangular surfaces, using the supplied rectangle.stack artwork.
     RectangleStack,
+    /// Globe with an add badge, using the supplied globe.plus artwork.
+    GlobePlus,
+    /// Stacked surfaces with an add badge, using rectangle.stack.badge.plus artwork.
+    RectangleStackBadgePlus,
+    /// Decreasing horizontal lines in a circle, using supplied filter artwork.
+    FilterCircle,
 }
 
 impl CustomIconName {
     fn path(self) -> &'static str {
         match self {
             Self::RectangleStack => "spaceterm-ui/icons/rectangle-stack.svg",
+            Self::FilterCircle => "spaceterm-ui/icons/filter-circle.svg",
+            Self::GlobePlus => "spaceterm-ui/icons/globe-plus.svg",
+            Self::RectangleStackBadgePlus => "spaceterm-ui/icons/rectangle-stack-badge-plus.svg",
         }
     }
 }
 
-const EMBEDDED_ICONS: &[(&str, &[u8])] = &[(
-    "spaceterm-ui/icons/rectangle-stack.svg",
-    include_bytes!("../assets/icons/rectangle-stack.svg"),
-)];
+const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
+    (
+        "spaceterm-ui/icons/filter-circle.svg",
+        include_bytes!("../assets/icons/filter-circle.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/rectangle-stack.svg",
+        include_bytes!("../assets/icons/rectangle-stack.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/globe-plus.svg",
+        include_bytes!("../assets/icons/globe-plus.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/rectangle-stack-badge-plus.svg",
+        include_bytes!("../assets/icons/rectangle-stack-badge-plus.svg"),
+    ),
+];
 
 /// The reusable UI crate's bundled assets, registered with GPUI's
 /// `Application::with_assets` before rendering custom icons.
@@ -290,7 +313,12 @@ mod tests {
             EmbeddedAssets
                 .list("spaceterm-ui/icons")
                 .expect("owned directory"),
-            vec![SharedString::from(path)]
+            vec![
+                CustomIconName::FilterCircle.path().into(),
+                SharedString::from(path),
+                CustomIconName::GlobePlus.path().into(),
+                CustomIconName::RectangleStackBadgePlus.path().into()
+            ]
         );
         assert!(
             EmbeddedAssets
@@ -302,30 +330,37 @@ mod tests {
 
     #[gpui::test]
     fn custom_vector_should_rasterize_into_an_unclipped_square(cx: &mut TestAppContext) {
-        let bytes = EmbeddedAssets
-            .load(CustomIconName::RectangleStack.path())
-            .expect("asset lookup")
-            .expect("bundled rectangle.stack asset");
-        cx.update(|cx| {
-            let rendered = gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.into_owned())
-                .to_image_data(cx.svg_renderer())
-                .expect("bundled vector should parse and rasterize through GPUI");
-            assert_eq!(
-                rendered.size(0),
-                size(gpui::DevicePixels(24), gpui::DevicePixels(24))
-            );
-            let pixels = rendered.as_bytes(0).expect("rasterized SVG frame");
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
-            let width = 24;
-            assert!(
-                pixels.chunks_exact(4).enumerate().all(|(index, pixel)| {
-                    let x = index % width;
-                    let y = index / width;
-                    (x != 0 && y != 0 && x != width - 1 && y != width - 1) || pixel[3] == 0
-                }),
-                "artwork should not reach the square canvas edge"
-            );
-        });
+        for (icon, width) in [
+            (CustomIconName::RectangleStack, 24),
+            (CustomIconName::FilterCircle, 22),
+            (CustomIconName::GlobePlus, 33),
+            (CustomIconName::RectangleStackBadgePlus, 28),
+        ] {
+            let bytes = EmbeddedAssets
+                .load(icon.path())
+                .expect("asset lookup")
+                .expect("bundled rectangle.stack asset");
+            cx.update(|cx| {
+                let rendered = gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.into_owned())
+                    .to_image_data(cx.svg_renderer())
+                    .expect("bundled vector should parse and rasterize through GPUI");
+                assert_eq!(
+                    rendered.size(0),
+                    size(gpui::DevicePixels(width), gpui::DevicePixels(width))
+                );
+                let pixels = rendered.as_bytes(0).expect("rasterized SVG frame");
+                assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
+                let width = width as usize;
+                assert!(
+                    pixels.chunks_exact(4).enumerate().all(|(index, pixel)| {
+                        let x = index % width;
+                        let y = index / width;
+                        (x != 0 && y != 0 && x != width - 1 && y != width - 1) || pixel[3] == 0
+                    }),
+                    "artwork should not reach the square canvas edge"
+                );
+            });
+        }
     }
 
     #[gpui::test]

@@ -11,7 +11,6 @@ use spaceterm_ui::{
 pub(crate) struct DesktopWording {
     pub(crate) directory_selection: &'static str,
     pub(crate) file_preview: &'static str,
-    pub(crate) local_machine_label: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -156,16 +155,25 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 11] {
+fn required_presented_actions() -> [&'static str; 20] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
         TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
 
     [
-        SearchWorkspaces.name(),
+        crate::ui::ActivateWorkspace1.name(),
+        crate::ui::ActivateWorkspace2.name(),
+        crate::ui::ActivateWorkspace3.name(),
+        crate::ui::ActivateWorkspace4.name(),
+        crate::ui::ActivateWorkspace5.name(),
+        crate::ui::ActivateWorkspace6.name(),
+        crate::ui::ActivateWorkspace7.name(),
+        crate::ui::ActivateWorkspace8.name(),
+        crate::ui::ActivateWorkspace9.name(),
+        SwitchWorkspace.name(),
         NewWorkspace.name(),
         CreateTab.name(),
         EditCopy.name(),
@@ -183,7 +191,7 @@ fn required_presented_actions() -> [&'static str; 11] {
 pub(crate) fn testing_presentation() -> DesktopPresentation {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
         TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
@@ -192,11 +200,19 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         DesktopWording {
             directory_selection: "Choose Directory",
             file_preview: "Preview File",
-            local_machine_label: "This Computer",
         },
         "Primary+Enter",
         vec![
-            ActionShortcut::new(SearchWorkspaces, "Primary+P"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace1, "Ctrl+1"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace2, "Ctrl+2"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace3, "Ctrl+3"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace4, "Ctrl+4"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace5, "Ctrl+5"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace6, "Ctrl+6"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace7, "Ctrl+7"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace8, "Ctrl+8"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace9, "Ctrl+9"),
+            ActionShortcut::new(SwitchWorkspace, "Primary+K"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(CreateTab, "Primary+T"),
             ActionShortcut::new(EditCopy, "Primary+C"),
@@ -228,7 +244,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{NewWorkspace, SearchWorkspaces};
+    use crate::ui::{NewWorkspace, SwitchWorkspace};
     use gpui::Action;
 
     #[gpui::test]
@@ -275,8 +291,8 @@ mod tests {
             CommandPaletteKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
             vec![
-                KeyBinding::new("cmd-shift-p", SearchWorkspaces, None),
-                KeyBinding::new("shift-cmd-p", NewWorkspace, None),
+                KeyBinding::new("cmd-shift-k", SwitchWorkspace, None),
+                KeyBinding::new("shift-cmd-k", NewWorkspace, None),
             ],
             testing_presentation(),
             std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(

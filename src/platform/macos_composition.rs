@@ -62,7 +62,7 @@ fn desktop_profile(
 ) -> Result<DesktopProfile, DesktopProfileError> {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
         TogglePaneZoom,
     };
     use spaceterm_ui::{EditCopy, EditPaste};
@@ -77,11 +77,19 @@ fn desktop_profile(
             DesktopWording {
                 directory_selection: "Choose with Finder",
                 file_preview: "Quick Look",
-                local_machine_label: "This Mac",
             },
             "⌘↩",
             vec![
-                ActionShortcut::new(SearchWorkspaces, "⌘P"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace1, "⌃1"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace2, "⌃2"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace3, "⌃3"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace4, "⌃4"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace5, "⌃5"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace6, "⌃6"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace7, "⌃7"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace8, "⌃8"),
+                ActionShortcut::new(crate::ui::ActivateWorkspace9, "⌃9"),
+                ActionShortcut::new(SwitchWorkspace, "⌘K"),
                 ActionShortcut::new(NewWorkspace, "⌘N"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
@@ -356,7 +364,7 @@ mod tests {
     #[gpui::test]
     fn desktop_profile_should_preserve_macos_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
         use crate::ui::{
-            ClosePane, CloseTab, CreateTab, NewWorkspace, SearchWorkspaces, SplitDown, SplitRight,
+            ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
             TogglePaneZoom,
         };
 
@@ -368,7 +376,7 @@ mod tests {
             .unwrap()
             .install(cx);
             let presentation = DesktopPresentation::get(cx);
-            assert_eq!(presentation.shortcut(&SearchWorkspaces), "⌘P");
+            assert_eq!(presentation.shortcut(&SwitchWorkspace), "⌘K");
             assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
             assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
             assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");
@@ -383,7 +391,6 @@ mod tests {
                 "Choose with Finder"
             );
             assert_eq!(presentation.wording().file_preview, "Quick Look");
-            assert_eq!(presentation.wording().local_machine_label, "This Mac");
         });
     }
 }

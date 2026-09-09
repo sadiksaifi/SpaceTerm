@@ -5,10 +5,9 @@ use std::sync::{Arc, Mutex};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Render, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, CommandPaletteReplacementFocus, ModalAction,
-    ModalActionIntent, ModalActionRole, ModalId, ModalPresentationHandle, ProgressCancelDecision,
-    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent, ModalActionRole, ModalId,
+    ModalPresentationHandle, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
+    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState,
 };
 use thiserror::Error;
 
@@ -781,24 +780,6 @@ impl RemoteWorkspaceFlow {
     }
 
     pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.open_with_replacement(None, window, cx)
-    }
-
-    pub(crate) fn open_replacing(
-        &mut self,
-        replacement: CommandPaletteReplacementFocus,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.open_with_replacement(Some(replacement), window, cx)
-    }
-
-    fn open_with_replacement(
-        &mut self,
-        replacement: Option<CommandPaletteReplacementFocus>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
         if !matches!(
             self.stage(),
             RemoteWorkspaceFlowStage::Idle | RemoteWorkspaceFlowStage::Cancelled
@@ -808,10 +789,9 @@ impl RemoteWorkspaceFlow {
         self.cancelled_emitted = false;
         self.return_to_hosts();
         let blocked_by_modal = spaceterm_ui::window_modal_is_open(window, cx);
-        let opened = self.host_picker.update(cx, |picker, cx| match replacement {
-            Some(replacement) => picker.open_replacing(replacement, window, cx),
-            None => picker.open(window, cx),
-        });
+        let opened = self
+            .host_picker
+            .update(cx, |picker, cx| picker.open(window, cx));
         if !opened && !blocked_by_modal {
             self.state = RemoteWorkspaceFlowState::Idle;
             return false;
@@ -1805,12 +1785,9 @@ mod tests {
     use gpui::{
         FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext,
     };
-    use spaceterm_ui::ModalLayer;
+    use spaceterm_ui::{ComboBox, ComboBoxItem, ModalLayer};
 
     use super::*;
-    use crate::ui::new_workspace_panel::{
-        NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource,
-    };
     use crate::ui::remote_directory_picker::{
         RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProviderError,
     };
@@ -2097,37 +2074,55 @@ mod tests {
         }
     }
 
-    struct ReplacementHarness {
-        panel: Entity<NewWorkspacePanel>,
+    struct SourceHarness {
         flow: Entity<RemoteWorkspaceFlow>,
         prior_focus: FocusHandle,
         source_callbacks: usize,
-        successful_transfers: usize,
+        successful_opens: usize,
+        block_open: bool,
     }
 
-    impl ReplacementHarness {
-        fn transfer_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-            let Some(replacement) = self
-                .panel
-                .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
-            else {
-                return false;
-            };
-            let transferred = self
-                .flow
-                .update(cx, |flow, cx| flow.open_replacing(replacement, window, cx));
-            self.successful_transfers += usize::from(transferred);
-            transferred
-        }
-    }
-
-    impl Render for ReplacementHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    impl Render for SourceHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let harness = cx.entity().downgrade();
             ModalLayer::new(
                 div()
                     .size_full()
                     .track_focus(&self.prior_focus)
-                    .child(self.panel.clone())
+                    .child(
+                        ComboBox::new(
+                            "remote-source-chooser",
+                            "Workspace Switcher",
+                            None,
+                            "Workspace Switcher",
+                            vec![ComboBoxItem::new((), "Remote Workspace")],
+                        )
+                        .debug_selector("remote-source-chooser")
+                        .on_accept(move |_, window, cx| {
+                            let _ = harness.update(cx, |harness, cx| {
+                                harness.source_callbacks += 1;
+                                if harness.block_open {
+                                    Alert::new(
+                                        ModalId::new("remote-workspace-focus-blocker"),
+                                        "Focus blocker",
+                                        "Focus Blocker",
+                                        "Wait before opening the Host Picker.",
+                                        vec![ModalAction::new(
+                                            AcknowledgeAction::Acknowledge,
+                                            "OK",
+                                            ModalActionRole::Cancel,
+                                            "remote-workspace-focus-blocker-ok",
+                                        )],
+                                    )
+                                    .present(window, cx, |_, _| {})
+                                    .unwrap();
+                                }
+                                let opened =
+                                    harness.flow.update(cx, |flow, cx| flow.open(window, cx));
+                                harness.successful_opens += usize::from(opened);
+                            });
+                        }),
+                    )
                     .child(self.flow.clone()),
             )
         }
@@ -2176,12 +2171,12 @@ mod tests {
         (harness, flow, events, cx)
     }
 
-    fn replacement_window(
+    fn source_window(
         backend: Arc<FakeBackend>,
+        block_open: bool,
         cx: &mut TestAppContext,
     ) -> (
-        Entity<ReplacementHarness>,
-        Entity<NewWorkspacePanel>,
+        Entity<SourceHarness>,
         Entity<RemoteWorkspaceFlow>,
         &mut VisualTestContext,
     ) {
@@ -2189,44 +2184,23 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteWorkspaceFlowBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));
             let flow = cx.new(|cx| RemoteWorkspaceFlow::new(injected, window, cx));
-            cx.subscribe_in(
-                &panel,
-                window,
-                |harness: &mut ReplacementHarness,
-                 _,
-                 event: &NewWorkspacePanelEvent,
-                 window,
-                 cx| {
-                    if matches!(
-                        event,
-                        NewWorkspacePanelEvent::SourceSelected(NewWorkspaceSource::Remote)
-                    ) {
-                        harness.source_callbacks += 1;
-                        harness.transfer_remote(window, cx);
-                    }
-                },
-            )
-            .detach();
-            ReplacementHarness {
-                panel,
+            SourceHarness {
                 flow,
                 prior_focus: cx.focus_handle(),
                 source_callbacks: 0,
-                successful_transfers: 0,
+                successful_opens: 0,
+                block_open,
             }
         });
-        let (panel, flow): (Entity<NewWorkspacePanel>, Entity<RemoteWorkspaceFlow>) = harness
-            .read_with(cx, |harness, _| {
-                (harness.panel.clone(), harness.flow.clone())
-            });
+        let flow = harness.read_with(cx, |harness, _| harness.flow.clone());
         cx.update(|window, cx| {
+            window.activate_window();
             harness.read(cx).prior_focus.focus(window);
-            panel.update(cx, |panel, cx| panel.open(window, cx));
         });
         cx.run_until_parked();
-        (harness, panel, flow, cx)
+        click("remote-source-chooser", cx);
+        (harness, flow, cx)
     }
 
     fn remote_account() -> RemoteWorkspaceAccount {
@@ -2341,41 +2315,34 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_source_replacement_should_transfer_focus_escape_and_reopen_exactly_once(
+    fn remote_source_acceptance_should_transfer_focus_escape_and_reopen_exactly_once(
         cx: &mut TestAppContext,
     ) {
         let backend = FakeBackend::new([]);
-        let (harness, panel, flow, cx) = replacement_window(backend, cx);
-        assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
+        let (harness, flow, cx) = source_window(backend, false, cx);
+        assert!(cx.update(|window, cx| spaceterm_ui::window_combo_box_is_open(window, cx)));
 
-        cx.simulate_keystrokes("down enter");
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
         );
-        assert!(!panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_combo_box_is_open(window, cx)));
         assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
         assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
         assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
         assert_eq!(
             harness.read_with(cx, |harness, _| (
                 harness.source_callbacks,
-                harness.successful_transfers,
+                harness.successful_opens,
             )),
             (1, 1)
         );
-
         cx.update(|window, cx| {
-            harness.update(cx, |harness, cx| {
-                assert!(!harness.transfer_remote(window, cx));
-            });
+            flow.update(cx, |flow, cx| assert!(!flow.open(window, cx)));
         });
-        assert_eq!(
-            harness.read_with(cx, |harness, _| harness.successful_transfers),
-            1
-        );
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
@@ -2390,14 +2357,13 @@ mod tests {
         assert!(!flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
         assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
 
-        cx.update(|window, cx| panel.update(cx, |panel, cx| panel.open(window, cx)));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("down enter");
+        click("remote-source-chooser", cx);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
             harness.read_with(cx, |harness, _| (
                 harness.source_callbacks,
-                harness.successful_transfers,
+                harness.successful_opens,
             )),
             (2, 2)
         );
@@ -2405,37 +2371,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn modal_blocker_should_retain_replacement_until_host_picker_can_take_focus(
+    fn modal_blocker_should_defer_host_picker_focus_after_source_acceptance(
         cx: &mut TestAppContext,
     ) {
         let backend = FakeBackend::new([]);
-        let (harness, panel, flow, cx) = replacement_window(backend, cx);
+        let (harness, flow, cx) = source_window(backend, true, cx);
 
-        cx.update(|window, cx| {
-            harness.update(cx, |harness, cx| {
-                let replacement = harness
-                    .panel
-                    .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
-                    .unwrap();
-                Alert::new(
-                    ModalId::new("remote-workspace-focus-blocker"),
-                    "Focus blocker",
-                    "Focus Blocker",
-                    "Wait before opening the Host Picker.",
-                    vec![ModalAction::new(
-                        AcknowledgeAction::Acknowledge,
-                        "OK",
-                        ModalActionRole::Cancel,
-                        "remote-workspace-focus-blocker-ok",
-                    )],
-                )
-                .present(window, cx, |_, _| {})
-                .unwrap();
-                assert!(harness.flow.update(cx, |flow, cx| {
-                    flow.open_replacing(replacement, window, cx)
-                }));
-            });
-        });
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
@@ -2444,7 +2386,7 @@ mod tests {
             RemoteWorkspaceFlowStage::HostSelection
         );
         assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
-        assert!(!panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_combo_box_is_open(window, cx)));
         assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
 
         click("modal-action-remote-workspace-focus-blocker-ok", cx);

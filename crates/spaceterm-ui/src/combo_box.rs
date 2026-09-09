@@ -6,7 +6,7 @@
 //! relationships for ordinary elements, so this Module retains those facts without claiming native
 //! assistive-technology publication.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
@@ -192,6 +192,7 @@ pub struct ComboBoxItem<I> {
     disabled: bool,
     leading_icon: Option<IconBuilder>,
     trailing: Option<ComboBoxAccessory>,
+    shortcut: Option<SharedString>,
     debug_selector: Option<String>,
 }
 
@@ -206,6 +207,7 @@ impl<I> ComboBoxItem<I> {
             disabled: false,
             leading_icon: None,
             trailing: None,
+            shortcut: None,
             debug_selector: None,
         }
     }
@@ -240,6 +242,12 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
+    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
     /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
@@ -261,30 +269,91 @@ impl<I> ComboBoxItem<I> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
+    /// Returns the display-only keyboard equivalent, when present.
+    pub fn shortcut_text(&self) -> Option<&str> {
+        self.shortcut.as_ref().map(AsRef::as_ref)
+    }
+
     /// Returns whether the item is visible but inert.
     pub const fn is_disabled(&self) -> bool {
         self.disabled
     }
 }
 
-/// A query-aware provider for the pinned row at the end of a ComboBox.
+/// Query-aware rows accepted through the ordinary typed ComboBox callback.
 ///
-/// The provider receives the editor's exact text, including case and whitespace. Its typed item is
-/// never filtered. Ordinary matches retain initial-selection precedence; when none exist, an
-/// enabled fallback becomes provisional and can be accepted through the ordinary typed callback.
+/// Providers receive the editor's exact text, including case and whitespace. Fallback rows are
+/// never filtered and ordinary matches retain initial-selection precedence.
 #[derive(Clone)]
 pub struct ComboBoxFallback<I>(ComboBoxFallbackProvider<I>);
 
-type ComboBoxFallbackProvider<I> = Rc<dyn Fn(&str) -> ComboBoxItem<I>>;
+type FallbackRowsProvider<I> = Rc<dyn Fn(&str) -> Vec<ComboBoxItem<I>>>;
+
+#[derive(Clone)]
+enum ComboBoxFallbackProvider<I> {
+    Pinned(FallbackRowsProvider<I>),
+    NoMatches(FallbackRowsProvider<I>),
+}
 
 impl<I> ComboBoxFallback<I> {
-    /// Creates a provider whose row is rebuilt whenever the accepted query changes.
+    /// Pins one row after ordinary matches, including when the query is empty.
     pub fn new(provider: impl Fn(&str) -> ComboBoxItem<I> + 'static) -> Self {
-        Self(Rc::new(provider))
+        Self::pinned_rows(move |query| vec![provider(query)])
     }
 
-    fn item(&self, query: &str) -> ComboBoxItem<I> {
-        (self.0)(query)
+    /// Pins rows in provider order after ordinary matches, including for an empty query.
+    pub fn pinned_rows(provider: impl Fn(&str) -> Vec<ComboBoxItem<I>> + 'static) -> Self {
+        Self(ComboBoxFallbackProvider::Pinned(Rc::new(provider)))
+    }
+
+    /// Shows rows only when a non-whitespace query has no ordinary matches.
+    pub fn when_no_matches(provider: impl Fn(&str) -> Vec<ComboBoxItem<I>> + 'static) -> Self {
+        Self(ComboBoxFallbackProvider::NoMatches(Rc::new(provider)))
+    }
+
+    fn items(&self, query: &str, ordinary_match_count: usize) -> Vec<ComboBoxItem<I>> {
+        match &self.0 {
+            ComboBoxFallbackProvider::Pinned(provider) => provider(query),
+            ComboBoxFallbackProvider::NoMatches(provider)
+                if ordinary_match_count == 0 && !query.trim().is_empty() =>
+            {
+                provider(query)
+            }
+            ComboBoxFallbackProvider::NoMatches(_) => Vec::new(),
+        }
+    }
+}
+
+/// A weak handle for opening one rendered ComboBox from an application action.
+///
+/// Attach the same handle on every render. It neither retains a removed control nor opens a
+/// control in another Operating-System Window.
+#[derive(Clone)]
+pub struct ComboBoxHandle<I: Clone + Eq + 'static> {
+    state: Rc<RefCell<Option<WeakEntity<ComboBoxState<I>>>>>,
+}
+
+impl<I: Clone + Eq + 'static> Default for ComboBoxHandle<I> {
+    fn default() -> Self {
+        Self {
+            state: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
+    /// Opens the attached, enabled, rendered control using its ordinary popup lifecycle.
+    /// Returns false if it is unavailable, already open, or blocked by a modal.
+    pub fn open(&self, window: &mut Window, cx: &mut App) -> bool {
+        let state = self.state.borrow().clone();
+        state.is_some_and(|state| {
+            state
+                .update(cx, |state, cx| {
+                    state.window_id == window.window_handle().window_id()
+                        && state.open(None, false, window, cx)
+                })
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -475,6 +544,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     prompt: SharedString,
     items: Vec<ComboBoxItem<I>>,
     fallback: Option<ComboBoxFallback<I>>,
+    handle: Option<ComboBoxHandle<I>>,
     copy: ComboBoxCopy,
     disabled: bool,
     busy: bool,
@@ -482,6 +552,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     panel_width: Option<Pixels>,
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
+    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
     icon_trigger: bool,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
@@ -505,6 +576,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             prompt: prompt.into(),
             items,
             fallback: None,
+            handle: None,
             copy: ComboBoxCopy::default(),
             disabled: false,
             busy: false,
@@ -512,6 +584,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             panel_width: None,
             full_width: false,
             trigger_leading: None,
+            input_leading: None,
             icon_trigger: false,
             tooltip: None,
             debug_selector: None,
@@ -520,9 +593,15 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         }
     }
 
-    /// Pins one query-aware item after all ordinary matches.
+    /// Installs query-aware fallback rows.
     pub fn fallback(mut self, fallback: ComboBoxFallback<I>) -> Self {
         self.fallback = Some(fallback);
+        self
+    }
+
+    /// Attaches a weak handle for opening this control from an application action.
+    pub fn handle(mut self, handle: ComboBoxHandle<I>) -> Self {
+        self.handle = Some(handle);
         self
     }
 
@@ -573,6 +652,12 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Adds decorative content before the popup filter editor. The caller supplies its tint.
+    pub fn input_leading(mut self, build: impl Fn() -> AnyElement + 'static) -> Self {
+        self.input_leading = Some(Rc::new(build));
         self
     }
 
@@ -781,7 +866,6 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     items: Rc<[ComboBoxItem<I>]>,
     presented_items: Rc<[ComboBoxItem<I>]>,
     fallback: Option<ComboBoxFallback<I>>,
-    fallback_item_id: Option<I>,
     ordinary_match_count: usize,
     matches: Rc<[usize]>,
     provisional: Option<I>,
@@ -920,7 +1004,6 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             items: Vec::new().into(),
             presented_items: Vec::new().into(),
             fallback: None,
-            fallback_item_id: None,
             ordinary_match_count: 0,
             matches: Vec::new().into(),
             provisional: None,
@@ -982,13 +1065,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
     ) {
         let items = unique_items(items);
         let model_changed = !same_model(&self.items, &items);
-        let provisional_was_fallback = self
-            .fallback_item_id
-            .as_ref()
-            .is_some_and(|id| self.provisional.as_ref() == Some(id));
         self.items = items.into();
         self.fallback = fallback;
-        let results_changed = self.recompute_matches(provisional_was_fallback && model_changed);
+        let results_changed = self.recompute_matches(false);
         if model_changed || results_changed {
             self.model_generation = self.model_generation.wrapping_add(1);
             self.pointer_press = None;
@@ -1044,21 +1123,15 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
 
     fn recompute_matches(&mut self, reset_fallback_selection: bool) -> bool {
         let mut presented = self.items.to_vec();
-        if let Some(item) = self
-            .fallback
-            .as_ref()
-            .map(|fallback| fallback.item(&self.query))
-            && !presented.iter().any(|existing| existing.id == item.id)
-        {
-            self.fallback_item_id = Some(item.id.clone());
-            presented.push(item);
-        } else {
-            self.fallback_item_id = None;
-        }
         let mut matches = filter_items(&self.items, &self.query);
         self.ordinary_match_count = matches.len();
-        if presented.len() > self.items.len() {
-            matches.push(self.items.len());
+        if let Some(fallback) = &self.fallback {
+            for item in fallback.items(&self.query, self.ordinary_match_count) {
+                if !presented.iter().any(|existing| existing.id == item.id) {
+                    matches.push(presented.len());
+                    presented.push(item);
+                }
+            }
         }
         let changed = !same_model(&self.presented_items, &presented)
             || self.matches.as_ref() != matches.as_slice();
@@ -1420,6 +1493,9 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
 impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, ComboBoxState::new);
+        if let Some(handle) = self.handle {
+            *handle.state.borrow_mut() = Some(state.downgrade());
+        }
         state.update(cx, |state, cx| {
             state.synchronize(
                 self.accessibility_name.clone(),
@@ -1615,7 +1691,9 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 root.size(metrics.icon_trigger_size).flex_shrink_0()
             })
             .child(trigger)
-            .when(open, |root| root.child(render_overlay(state, window, cx)))
+            .when(open, |root| {
+                root.child(render_overlay(state, self.input_leading, window, cx))
+            })
             .into_any_element()
     }
 }
@@ -1655,6 +1733,7 @@ fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> b
                 && current.keywords == next.keywords
                 && current.disabled == next.disabled
                 && current.trailing == next.trailing
+                && current.shortcut == next.shortcut
         })
 }
 
@@ -1692,6 +1771,7 @@ fn filter_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<usize> {
 
 fn render_overlay<I: Clone + Eq + 'static>(
     state: Entity<ComboBoxState<I>>,
+    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1859,7 +1939,19 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 .px(theme.metrics.horizontal_padding)
                 .flex()
                 .items_center()
-                .child(input),
+                .when_some(input_leading, |row, leading| {
+                    row.gap(theme.metrics.gap).child(
+                        div()
+                            .debug_selector(|| "combo-box-input-leading".to_owned())
+                            .w(theme.metrics.leading_width)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(leading()),
+                    )
+                })
+                .child(div().flex_1().min_w_0().child(input)),
         )
         .child(
             div()
@@ -2045,10 +2137,21 @@ fn render_row<I: Clone + Eq + 'static>(
         };
         row = row.child(
             div()
+                .debug_selector(move || format!("combo-box-row-{position}-accessory"))
                 .flex_shrink_0()
                 .text_size(theme.metrics.secondary_size)
                 .text_color(secondary)
                 .child(text),
+        );
+    }
+    if let Some(shortcut) = item.shortcut.clone() {
+        row = row.child(
+            div()
+                .debug_selector(move || format!("combo-box-row-{position}-shortcut"))
+                .flex_shrink_0()
+                .text_size(theme.metrics.secondary_size)
+                .text_color(secondary)
+                .child(shortcut),
         );
     }
     if !item.disabled {
@@ -2155,6 +2258,28 @@ mod tests {
         let fallback =
             ComboBoxFallback::new(|query| ComboBoxItem::new(query.to_owned(), "Use exact query"));
 
-        assert_eq!(fallback.item(" Mixed Case ").id(), " Mixed Case ");
+        assert_eq!(fallback.items(" Mixed Case ", 0)[0].id(), " Mixed Case ");
+    }
+
+    #[test]
+    fn no_match_provider_should_preserve_exact_query_in_each_typed_identity() {
+        let fallback = ComboBoxFallback::when_no_matches(|query| {
+            vec![
+                ComboBoxItem::new((0, query.to_owned()), "Local Workspace"),
+                ComboBoxItem::new((1, query.to_owned()), "Remote Workspace"),
+            ]
+        });
+        let identities: Vec<_> = fallback
+            .items(" Mixed Case ", 0)
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                (0, " Mixed Case ".to_owned()),
+                (1, " Mixed Case ".to_owned())
+            ]
+        );
     }
 }

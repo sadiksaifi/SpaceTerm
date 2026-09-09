@@ -6,7 +6,6 @@ mod directory_picker;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
@@ -30,7 +29,6 @@ mod terminal_symbols;
 mod text_input_theme;
 mod tooltip_theme;
 mod workspace_manager;
-mod workspace_search;
 
 use gpui::{App, actions};
 
@@ -95,7 +93,7 @@ actions!(
         ClosePane,
         CloseTab,
         CloseWorkspace,
-        SearchWorkspaces,
+        SwitchWorkspace,
         NewWorkspace,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -114,12 +112,6 @@ pub(crate) const TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT: &str = "TerminalPasteC
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
-
-fn workspace_count_summary(tab_count: usize, pane_count: usize) -> String {
-    let tab_label = if tab_count == 1 { "tab" } else { "tabs" };
-    let pane_label = if pane_count == 1 { "pane" } else { "panes" };
-    format!("{tab_count} {tab_label} · {pane_count} {pane_label}")
-}
 
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     spaceterm_ui::init(cx, control_theme_catalog::catalog())
@@ -145,24 +137,6 @@ mod tests {
     use gpui::{Action, Keystroke, TestAppContext};
 
     use super::*;
-
-    #[test]
-    fn workspace_count_summary_should_pluralize_each_entity_independently() {
-        assert_eq!(
-            (
-                workspace_count_summary(1, 1),
-                workspace_count_summary(1, 2),
-                workspace_count_summary(2, 1),
-                workspace_count_summary(2, 3),
-            ),
-            (
-                "1 tab · 1 pane".to_owned(),
-                "1 tab · 2 panes".to_owned(),
-                "2 tabs · 1 pane".to_owned(),
-                "2 tabs · 3 panes".to_owned(),
-            )
-        );
-    }
 
     #[gpui::test]
     fn ui_init_should_install_control_themes(cx: &mut TestAppContext) {
@@ -263,7 +237,7 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-p", SearchWorkspaces.name()),
+            ("cmd-k", SwitchWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),

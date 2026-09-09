@@ -70,8 +70,7 @@ pub(crate) struct TerminalFocusCoordinator {
 pub(crate) struct WorkspaceFocusOwners {
     pub(crate) picker: bool,
     pub(crate) remote_flow: bool,
-    pub(crate) new_workspace: bool,
-    pub(crate) search: bool,
+    pub(crate) switcher: bool,
     pub(crate) window_drag: bool,
     pub(crate) sidebar_resize: bool,
     pub(crate) rename: bool,
@@ -93,7 +92,7 @@ impl TerminalFocusCoordinator {
         Self::first_owner(&[
             (owners.picker, TerminalFocusBlocker::Modal),
             (
-                owners.remote_flow || owners.new_workspace || owners.search,
+                owners.remote_flow || owners.switcher,
                 TerminalFocusBlocker::CommandPalette,
             ),
             (owners.window_drag, TerminalFocusBlocker::TopChrome),
@@ -178,7 +177,7 @@ mod tests {
     #[test]
     fn closing_a_workspace_menu_preserves_other_owners_and_does_not_invent_sidebar_focus() {
         let mut owners = WorkspaceFocusOwners {
-            search: true,
+            switcher: true,
             context_menu: true,
             ..Default::default()
         };
@@ -187,7 +186,7 @@ mod tests {
             Some(TerminalFocusBlocker::CommandPalette)
         );
         owners = WorkspaceFocusOwners {
-            search: true,
+            switcher: true,
             context_menu: false,
             ..Default::default()
         };
@@ -204,7 +203,7 @@ mod tests {
     #[test]
     fn nested_ownership_preserves_blocking_until_every_owner_releases() {
         let workspace = TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
-            search: true,
+            switcher: true,
             sidebar: true,
             ..Default::default()
         });

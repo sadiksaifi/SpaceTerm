@@ -618,6 +618,44 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
+    /// Freezes a creation name without colliding with another Workspace on the same machine.
+    pub(crate) fn name_workspace_for_creation(
+        &mut self,
+        workspace_id: WorkspaceId,
+        name: String,
+    ) -> Result<(), WorkspaceError> {
+        let workspace = self
+            .workspace(workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        let base = name.trim();
+        if base.is_empty() {
+            return self.rename_workspace(workspace_id, name);
+        }
+        let occupied: std::collections::HashSet<_> = self
+            .workspaces
+            .iter()
+            .filter(|other| {
+                other.id != workspace_id
+                    && match (&workspace.location, &other.location) {
+                        (WorkspaceLocation::Local, WorkspaceLocation::Local) => true,
+                        (
+                            WorkspaceLocation::Remote { key, .. },
+                            WorkspaceLocation::Remote { key: other_key, .. },
+                        ) => key.destination() == other_key.destination(),
+                        _ => false,
+                    }
+            })
+            .map(|workspace| workspace.name())
+            .collect();
+        let mut unique_name = base.to_owned();
+        let mut ordinal = 1;
+        while occupied.contains(unique_name.as_str()) {
+            unique_name = format!("{base} {ordinal}");
+            ordinal += 1;
+        }
+        self.rename_workspace(workspace_id, unique_name)
+    }
+
     pub(crate) fn set_directory_unavailable(
         &mut self,
         workspace_id: WorkspaceId,
@@ -1567,6 +1605,174 @@ mod tests {
                 Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
                 WorkspaceId::new(1),
             )
+        );
+    }
+
+    #[test]
+    fn creation_name_should_fill_suffix_gaps_without_renumbering_frozen_names() {
+        let mut workspaces = new_workspaces(());
+        let first = workspaces.active_workspace_id();
+        workspaces
+            .rename_workspace(first, "Project".to_owned())
+            .unwrap();
+        let second = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .unwrap();
+        workspaces
+            .rename_workspace(second, "Project 2".to_owned())
+            .unwrap();
+        for directory in ["/third", "/fourth"] {
+            let id = workspaces
+                .create_local_workspace_unchecked(PathBuf::from(directory), |_, _| ())
+                .unwrap();
+            workspaces
+                .name_workspace_for_creation(id, " Project ".to_owned())
+                .unwrap();
+        }
+
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(WorkspaceEntry::name)
+                .collect::<Vec<_>>(),
+            ["Project", "Project 2", "Project 1", "Project 3"]
+        );
+    }
+
+    #[test]
+    fn creation_name_should_avoid_automatic_names_and_remain_frozen_after_directory_changes() {
+        let mut workspaces = new_workspaces(());
+        let automatic_name = workspaces.active_workspace().name().to_owned();
+        let id = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .unwrap();
+        workspaces
+            .name_workspace_for_creation(id, automatic_name.clone())
+            .unwrap();
+        workspaces
+            .set_pinned_directory(
+                id,
+                Some(PinnedDirectory::Local(validated("/different/project", 90))),
+            )
+            .unwrap();
+
+        let workspace = workspaces.workspace(id).unwrap();
+        let expected = format!("{automatic_name} 1");
+        assert_eq!(
+            (workspace.name(), workspace.custom_name.as_deref()),
+            (expected.as_str(), Some(expected.as_str()))
+        );
+    }
+
+    #[test]
+    fn creation_name_should_exclude_its_own_displayed_name() {
+        let mut workspaces = new_workspaces(());
+        let id = workspaces.active_workspace_id();
+        let name = workspaces.active_workspace().name().to_owned();
+        workspaces
+            .name_workspace_for_creation(id, name.clone())
+            .unwrap();
+
+        assert_eq!(
+            workspaces.active_workspace().custom_name.as_deref(),
+            Some(name.as_str())
+        );
+    }
+
+    #[test]
+    fn creation_name_should_scope_remote_collisions_to_the_exact_destination() {
+        let mut workspaces = new_workspaces(());
+        let local = workspaces.active_workspace_id();
+        workspaces
+            .name_workspace_for_creation(local, "Project".to_owned())
+            .unwrap();
+        let mut assigned = Vec::new();
+        for (destination, directory) in [
+            ("orb", "/srv/first"),
+            ("orb", "/srv/second"),
+            ("orb-alias", "/srv/first"),
+        ] {
+            let id = workspaces
+                .create_remote_workspace(
+                    remote_key(destination, directory),
+                    remote_directory(directory),
+                    remote_identity("/home/test"),
+                    RemoteConnectionState::connected(1),
+                    |_| (),
+                )
+                .unwrap();
+            workspaces
+                .name_workspace_for_creation(id, "Project".to_owned())
+                .unwrap();
+            assigned.push(workspaces.workspace(id).unwrap().name().to_owned());
+        }
+        let local_second = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .unwrap();
+        workspaces
+            .name_workspace_for_creation(local_second, "Project".to_owned())
+            .unwrap();
+        assigned.push(
+            workspaces
+                .workspace(local_second)
+                .unwrap()
+                .name()
+                .to_owned(),
+        );
+
+        assert_eq!(assigned, ["Project", "Project 1", "Project", "Project 1"]);
+    }
+
+    #[test]
+    fn creation_name_should_keep_blank_names_automatic() {
+        let mut workspaces = new_workspaces(());
+        let id = workspaces.active_workspace_id();
+        workspaces
+            .name_workspace_for_creation(id, " \t ".to_owned())
+            .unwrap();
+
+        assert_eq!(workspaces.active_workspace().custom_name, None);
+    }
+
+    #[test]
+    fn creation_name_should_reject_an_unknown_workspace_without_mutation() {
+        let mut workspaces = new_workspaces(());
+        let name = workspaces.active_workspace().name().to_owned();
+        let result = workspaces.name_workspace_for_creation(WorkspaceId::new(99), name.clone());
+
+        assert_eq!(
+            (result, workspaces.active_workspace().name()),
+            (
+                Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
+                name.as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn creation_name_should_preserve_case_sensitive_matching_and_manual_rename_semantics() {
+        let mut workspaces = new_workspaces(());
+        let first = workspaces.active_workspace_id();
+        workspaces
+            .rename_workspace(first, "Project".to_owned())
+            .unwrap();
+        let second = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .unwrap();
+        workspaces
+            .name_workspace_for_creation(second, "project".to_owned())
+            .unwrap();
+        assert_eq!(workspaces.workspace(second).unwrap().name(), "project");
+
+        workspaces
+            .rename_workspace(second, "Project".to_owned())
+            .unwrap();
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(WorkspaceEntry::name)
+                .collect::<Vec<_>>(),
+            ["Project", "Project"]
         );
     }
 

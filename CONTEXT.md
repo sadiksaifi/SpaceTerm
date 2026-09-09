@@ -64,8 +64,8 @@ released input.
 **Zoomed Pane**:
 The Focused Pane presented alone while its Pane Layout remains intact.
 
-**New Workspace Panel**:
-The transient chooser for creating a Local Workspace or Remote Workspace.
+**Workspace Switcher**:
+The transient chooser for selecting an existing Workspace or naming a new Local Workspace or Remote Workspace.
 
 **Directory Picker**:
 The directory navigator used to select a Pinned Directory explicitly.
@@ -76,7 +76,7 @@ The system chooser available as an explicit fallback from the Directory Picker.
 ## Workspace sources and remote identity
 
 **Workspace Source**:
-A New Workspace Panel choice identifying where a Workspace runs.
+A choice identifying whether a Workspace runs locally or on a remote machine.
 
 **SSH Destination**:
 The exact validated OpenSSH destination token selected for a Remote Workspace; different

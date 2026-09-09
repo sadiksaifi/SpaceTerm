@@ -13,7 +13,7 @@ use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
     ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, NewWorkspace, OpenTerminalFind,
-    ResetTerminalFontSize, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
+    ResetTerminalFontSize, SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom, ToggleSidebar,
     ToggleSidebarFocus,
 };
 
@@ -69,7 +69,7 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Search Workspaces",
+        item: "Switch Workspace",
         symbol: "magnifyingglass",
     },
     MenuItemIcon {
@@ -316,7 +316,7 @@ fn file_menu() -> Menu {
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("Search Workspaces", SearchWorkspaces),
+            MenuItem::action("Switch Workspace", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
             MenuItem::separator(),
@@ -817,7 +817,7 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
-                SearchWorkspaces.name(),
+                SwitchWorkspace.name(),
                 CreateTab.name(),
                 ClosePane.name(),
                 CloseTab.name(),
