@@ -2002,6 +2002,14 @@ pub(super) fn present<T: 'static>(
         state.active.is_none() && state.settlement == SettlementState::Idle
     });
     if first_visible_request {
+        let combo_predecessor =
+            crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx);
+        let combo_focus = combo_predecessor
+            .as_ref()
+            .and_then(|replacement| replacement.restore_focus.clone());
+        if let Some(combo_predecessor) = combo_predecessor {
+            cx.defer(move |cx| combo_predecessor.finish(cx));
+        }
         let menu_predecessor = crate::menu::dismiss_active_menu_for_replacement(window, cx)
             .and_then(|replacement| replacement.0);
         let suspended = crate::command_palette::suspend_window_command_palette(window_id, cx);
@@ -2014,6 +2022,7 @@ pub(super) fn present<T: 'static>(
         let predecessor = suspended
             .predecessor
             .clone()
+            .or(combo_focus)
             .or(menu_predecessor)
             .or_else(|| window.focused(cx).map(|focus| focus.downgrade()));
         owner.update(cx, |state, _| {

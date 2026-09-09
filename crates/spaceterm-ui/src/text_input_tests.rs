@@ -148,6 +148,16 @@ fn input_with_events<'a>(
     (input, other_focus, events, cx)
 }
 
+#[gpui::test]
+fn default_home_and_end_should_continue_to_move_the_editor_caret(cx: &mut TestAppContext) {
+    let (input, cx) = input(cx, "abc");
+
+    cx.simulate_keystrokes("home X end Y");
+    cx.run_until_parked();
+
+    assert!(input.read_with(cx, |input, _| input.value() == "XabcY"));
+}
+
 fn mark_text(input: &Entity<TextInput>, cx: &mut VisualTestContext, text: &str) {
     cx.update(|window, cx| {
         input.update(cx, |input, cx| {

@@ -123,8 +123,16 @@ pub fn install_text_input_keybindings(cx: &mut App, profile: TextInputKeybinding
             KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-b", MoveLeft, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-f", MoveRight, Some(KEY_CONTEXT)),
-            KeyBinding::new("home", MoveToBeginning, Some(KEY_CONTEXT)),
-            KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new(
+                "home",
+                MoveToBeginning,
+                Some("SpaceTermTextInput && home_end == edit"),
+            ),
+            KeyBinding::new(
+                "end",
+                MoveToEnd,
+                Some("SpaceTermTextInput && home_end == edit"),
+            ),
             KeyBinding::new("cmd-left", MoveToBeginning, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-up", MoveToBeginning, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-right", MoveToEnd, Some(KEY_CONTEXT)),
@@ -313,6 +321,16 @@ pub enum TextInputTabBehavior {
     #[default]
     MoveFocus,
     /// Emit a typed traversal request for a containing composite control.
+    Propagate,
+}
+
+/// How unmodified Home and End behave while a [`TextInput`] owns focus.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputHomeEndBehavior {
+    /// Move the editor caret to the beginning or end.
+    #[default]
+    MoveCaret,
+    /// Leave the keys available to a containing composite control's key context.
     Propagate,
 }
 
@@ -877,6 +895,8 @@ pub struct TextInput {
     editable: bool,
     tab_stop: bool,
     tab_behavior: TextInputTabBehavior,
+    home_end_behavior: TextInputHomeEndBehavior,
+    context_menu_enabled: bool,
     return_behavior: TextInputReturnBehavior,
     escape_behavior: TextInputEscapeBehavior,
     input_length_limit: usize,
@@ -914,6 +934,10 @@ pub struct TextInput {
 impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
+    pub(crate) const fn owns_context_menu(&self) -> bool {
+        self.context_menu_open
+    }
+
     /// Creates an editor. The initial value is normalized and grapheme-safely truncated to the
     /// safe default 64 KiB limit. It begins at revision zero with a collapsed selection at the end.
     pub fn new(
@@ -947,6 +971,8 @@ impl TextInput {
             editable: true,
             tab_stop: true,
             tab_behavior: TextInputTabBehavior::default(),
+            home_end_behavior: TextInputHomeEndBehavior::default(),
+            context_menu_enabled: true,
             return_behavior: TextInputReturnBehavior::default(),
             escape_behavior: TextInputEscapeBehavior::default(),
             input_length_limit: DEFAULT_VALUE_LIMIT,
@@ -987,6 +1013,35 @@ impl TextInput {
         self.placeholder = placeholder.into();
         self.geometry = None;
         self
+    }
+
+    /// Replaces the logical accessibility name without changing focus or editor state.
+    pub fn set_accessibility_name(
+        &mut self,
+        accessibility_name: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let accessibility_name = accessibility_name.into();
+        if self.accessibility_name == accessibility_name {
+            return;
+        }
+        self.accessibility_name = accessibility_name;
+        cx.notify();
+    }
+
+    /// Replaces the placeholder without changing focus or editor state.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder == placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
+        self.geometry = None;
+        cx.notify();
     }
     /// Selects ordinary or obscured content handling.
     ///
@@ -1041,6 +1096,19 @@ impl TextInput {
     /// Selects whether the input or its containing composite handles Tab traversal.
     pub fn tab_behavior(mut self, behavior: TextInputTabBehavior) -> Self {
         self.tab_behavior = behavior;
+        self
+    }
+    /// Selects whether unmodified Home and End edit the caret or delegate to a composite.
+    pub fn home_end_behavior(mut self, behavior: TextInputHomeEndBehavior) -> Self {
+        self.home_end_behavior = behavior;
+        self
+    }
+    /// Controls whether secondary click presents the standard editor context menu.
+    ///
+    /// Composite controls rendered inside another deferred layer can disable the nested menu while
+    /// retaining every keyboard editing and clipboard command.
+    pub fn context_menu(mut self, enabled: bool) -> Self {
+        self.context_menu_enabled = enabled;
         self
     }
     /// Selects whether a non-composition Return is consumed or may bubble after submission.
@@ -2310,13 +2378,17 @@ impl Render for TextInput {
                 .disabled(!self.enabled || self.buffer.text.is_empty()),
         ];
         let selector = self.debug_selector.clone();
+        let key_context = match self.home_end_behavior {
+            TextInputHomeEndBehavior::MoveCaret => "SpaceTermTextInput home_end = edit",
+            TextInputHomeEndBehavior::Propagate => "SpaceTermTextInput home_end = propagate",
+        };
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&self.focus_handle);
         let editor = div()
             .id(self.id.clone())
             .debug_selector(move || selector.to_string())
             .size_full()
             .min_w_0()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .cursor(if self.enabled {
                 CursorStyle::IBeam
@@ -2365,52 +2437,59 @@ impl Render for TextInput {
         let menu_open = entity.downgrade();
         let menu_lifecycle = entity.downgrade();
         let menu_activate = entity.downgrade();
-        let control = ContextMenu::new(
-            ("text-input-context-menu", entity.entity_id()),
-            name,
-            editor,
-            entries,
-        )
-        .fill_parent_width()
-        .disabled(!self.enabled)
-        .on_open_request(move |_, _, cx| {
-            menu_open
-                .update(cx, |input, cx| {
-                    if !input.enabled {
-                        return false;
-                    }
-                    input.refresh_paste_availability(cx);
-                    input.context_menu_open = true;
-                    input.cancel_pointer_gesture();
-                    cx.emit(TextInputEvent::ContextMenuOpened);
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false)
-        })
-        .on_lifecycle(move |event, cx| {
-            if matches!(event, MenuLifecycleEvent::Closed(_)) {
-                let _ = menu_lifecycle.update(cx, |input, cx| {
-                    if input.context_menu_open {
-                        input.context_menu_open = false;
-                        cx.emit(TextInputEvent::ContextMenuClosed);
-                    }
-                });
-            }
-        })
-        .on_activate(
-            move |activation: &MenuActivation<TextInputMenuAction>, window, cx| {
-                let action = *activation.action();
-                let _ = menu_activate.update(cx, |input, cx| match action {
-                    TextInputMenuAction::Undo => input.undo(&Undo, window, cx),
-                    TextInputMenuAction::Redo => input.redo(&Redo, window, cx),
-                    TextInputMenuAction::Cut => input.cut(&Cut, window, cx),
-                    TextInputMenuAction::Copy => input.copy(&Copy, window, cx),
-                    TextInputMenuAction::Paste => input.paste(&Paste, window, cx),
-                    TextInputMenuAction::SelectAll => input.on_select_all(&SelectAll, window, cx),
-                });
-            },
-        );
+        let control = if self.context_menu_enabled {
+            ContextMenu::new(
+                ("text-input-context-menu", entity.entity_id()),
+                name,
+                editor,
+                entries,
+            )
+            .fill_parent_width()
+            .disabled(!self.enabled)
+            .on_open_request(move |_, _, cx| {
+                menu_open
+                    .update(cx, |input, cx| {
+                        if !input.enabled {
+                            return false;
+                        }
+                        input.refresh_paste_availability(cx);
+                        input.context_menu_open = true;
+                        input.cancel_pointer_gesture();
+                        cx.emit(TextInputEvent::ContextMenuOpened);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false)
+            })
+            .on_lifecycle(move |event, cx| {
+                if matches!(event, MenuLifecycleEvent::Closed(_)) {
+                    let _ = menu_lifecycle.update(cx, |input, cx| {
+                        if input.context_menu_open {
+                            input.context_menu_open = false;
+                            cx.emit(TextInputEvent::ContextMenuClosed);
+                        }
+                    });
+                }
+            })
+            .on_activate(
+                move |activation: &MenuActivation<TextInputMenuAction>, window, cx| {
+                    let action = *activation.action();
+                    let _ = menu_activate.update(cx, |input, cx| match action {
+                        TextInputMenuAction::Undo => input.undo(&Undo, window, cx),
+                        TextInputMenuAction::Redo => input.redo(&Redo, window, cx),
+                        TextInputMenuAction::Cut => input.cut(&Cut, window, cx),
+                        TextInputMenuAction::Copy => input.copy(&Copy, window, cx),
+                        TextInputMenuAction::Paste => input.paste(&Paste, window, cx),
+                        TextInputMenuAction::SelectAll => {
+                            input.on_select_all(&SelectAll, window, cx)
+                        }
+                    });
+                },
+            )
+            .into_any_element()
+        } else {
+            editor.into_any_element()
+        };
         if let Some(anchor) = focus_anchor {
             div()
                 .id(("modal-text-input-focus-anchor", entity.entity_id()))

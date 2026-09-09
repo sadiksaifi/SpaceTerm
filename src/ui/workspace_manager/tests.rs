@@ -1003,6 +1003,10 @@ fn open_new_workspace_panel(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+fn open_top_new_workspace_combo_box(cx: &mut VisualTestContext) {
+    click("new-workspace-chooser", cx);
+}
+
 fn open_remote_workspace_flow(
     manager: &Entity<WorkspaceManager>,
     cx: &mut VisualTestContext,
@@ -1661,16 +1665,14 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 }
 
 #[gpui::test]
-fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_input(
-    cx: &mut TestAppContext,
-) {
+fn top_combo_box_and_command_shortcut_should_each_block_terminal_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
-    click("new-workspace-button", cx);
+    click("new-workspace-chooser", cx);
     let sidebar_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.transient.new_workspace.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -1679,6 +1681,7 @@ fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_i
         let manager = manager.read(cx);
         (
             manager.transient.new_workspace.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -1687,8 +1690,273 @@ fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_i
         (sidebar_state, repeated_state),
         (
             (true, Some(TerminalFocusBlocker::CommandPalette)),
-            (true, Some(TerminalFocusBlocker::CommandPalette)),
+            (true, false, Some(TerminalFocusBlocker::CommandPalette)),
         )
+    );
+}
+
+#[gpui::test]
+fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    click("new-workspace-chooser", cx);
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            (
+                manager.read(cx).sidebar.visible,
+                window_combo_box_is_open(window, cx),
+                manager.read(cx).terminal_focus_blocker(window, cx),
+            )
+        }),
+        (false, true, Some(TerminalFocusBlocker::CommandPalette))
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+        None
+    );
+}
+
+#[gpui::test]
+fn top_combo_box_local_project_should_open_the_picker_and_restore_terminal_focus_on_escape(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_top_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-local-project", cx);
+
+    let opened = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            window_combo_box_is_open(window, cx),
+            manager.transient.picker.read(cx).is_open(),
+            manager.transient.new_workspace.read(cx).is_open(),
+            manager.terminal_focus_blocker(window, cx),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+            manager.workspaces.len(),
+            records.starts().len(),
+        )
+    });
+    assert_eq!(
+        opened,
+        (
+            false,
+            true,
+            false,
+            Some(TerminalFocusBlocker::Modal),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.transient.picker.read(cx).is_open(),
+                manager.transient.new_workspace.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (false, false, None, true)
+    );
+}
+
+#[gpui::test]
+fn top_combo_box_keyboard_acceptance_should_create_exactly_one_scratch_workspace(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_top_new_workspace_combo_box(cx);
+
+    cx.simulate_keystrokes("s c r a t c h enter");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.len(),
+                records.starts().len(),
+                window_combo_box_is_open(window, cx),
+                manager.transient.new_workspace.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (2, 2, false, false, None, true)
+    );
+}
+
+#[gpui::test]
+fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_blocked(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_top_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-remote-project", cx);
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            let flow = manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("the available Remote Project source should open its flow")
+                .read(cx);
+            (
+                window_combo_box_is_open(window, cx),
+                manager.transient.new_workspace.read(cx).is_open(),
+                flow.stage(),
+                flow.owns_first_responder(window, cx),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (
+            false,
+            false,
+            RemoteWorkspaceFlowStage::HostSelection,
+            true,
+            Some(TerminalFocusBlocker::CommandPalette),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.remote_workspace_flow.is_none(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (true, None, true, 1, 1)
+    );
+}
+
+#[gpui::test]
+fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked(
+    cx: &mut TestAppContext,
+) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+        Arc::new(UnavailableTestRemoteWorkspaceFlowBackendFactory {
+            create_calls: Arc::clone(&create_calls),
+        });
+    let (manager, cx) = cx.add_window_view(move |window, cx| {
+        WorkspaceManager::new_with_remote_workspace_backend_factory(
+            session_factory,
+            PathBuf::from("/Users/test"),
+            factory,
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.run_until_parked();
+    open_top_new_workspace_combo_box(cx);
+
+    click("new-workspace-source-remote-project", cx);
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                create_calls.load(Ordering::Acquire),
+                window_combo_box_is_open(window, cx),
+                manager.remote_workspace_flow.is_none(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+                manager.workspaces.len(),
+                records.starts().len(),
+            )
+        }),
+        (
+            0,
+            true,
+            true,
+            Some(TerminalFocusBlocker::CommandPalette),
+            false,
+            1,
+            1,
+        )
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                window_combo_box_is_open(window, cx),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        }),
+        (false, None, true)
     );
 }
 
@@ -4778,6 +5046,12 @@ fn double_clicking_sidebar_handle_should_request_default_width(cx: &mut TestAppC
 #[gpui::test]
 fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
+    let collapsed_width = cx.update(|window, cx| {
+        collapsed_top_chrome_width(
+            manager.read(cx).workspaces.active_workspace().name(),
+            window,
+        )
+    });
     let root = cx
         .debug_bounds("workspace-manager")
         .expect("the Workspace manager was not rendered");
@@ -4809,9 +5083,9 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
         ),
         (
             (false, px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH)),
-            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            collapsed_width,
             root.origin.x,
-            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            root.origin.x + collapsed_width,
         )
     );
 }
@@ -4864,6 +5138,13 @@ fn collapsed_handle_should_preserve_the_remembered_width_when_dragged_left(
         "workspace-sidebar-resize-handle",
         root.origin.x + chrome.size.width - px(20.0),
         cx,
+    );
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            (manager.sidebar.visible, manager.sidebar.width)
+        }),
+        (false, px(320.0)),
+        "dragging the collapsed edge inward must retain its remembered expanded width"
     );
     click("toggle-sidebar-button", cx);
 
@@ -4993,7 +5274,71 @@ fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
+fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
+    cx: &mut TestAppContext,
+) {
+    let (manager, platform, cx) = workspace_manager_with_operating_system_window_drag_platform(cx);
+    let chooser = cx
+        .debug_bounds("new-workspace-chooser")
+        .expect("the Workspace chooser should be in the top chrome");
+    let toggle = cx
+        .debug_bounds("toggle-sidebar-button")
+        .expect("sidebar toggle");
+    assert_eq!(chooser.size, toggle.size);
+    assert_eq!(chooser.right(), toggle.left());
+
+    click("new-workspace-chooser", cx);
+
+    let panel = cx
+        .debug_bounds("combo-box-panel")
+        .expect("Workspace chooser popup");
+    assert_eq!(panel.top(), chooser.bottom() + px(4.0));
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        1
+    );
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert_eq!(platform.counts(), (0, 0, 0, 0));
+}
+
+#[gpui::test]
+fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+    let chooser = cx
+        .debug_bounds("new-workspace-chooser")
+        .expect("top chooser");
+    let chip = cx
+        .debug_bounds("workspace-chip")
+        .expect("collapsed Workspace chip");
+    assert!(chip.right() <= chooser.left());
+
+    click("new-workspace-chooser", cx);
+
+    assert!(!manager.read_with(cx, |manager, _| manager.sidebar.visible));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    let panel = cx
+        .debug_bounds("combo-box-panel")
+        .expect("Workspace chooser popup");
+    assert_eq!(panel.top(), chooser.bottom() + px(4.0));
+}
+
+#[gpui::test]
+fn bottom_new_workspace_button_should_open_the_original_panel(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+
+    click("new-workspace-button", cx);
+
+    assert!(manager.read_with(cx, |manager, cx| {
+        manager.transient.new_workspace.read(cx).is_open()
+    }));
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_box(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -5003,17 +5348,54 @@ fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    click("new-workspace-button", cx);
+    click("new-workspace-chooser", cx);
 
     assert_eq!(
-        manager.read_with(cx, |manager, cx| {
+        cx.update(|window, cx| {
             (
-                manager.workspaces.len(),
-                manager.transient.new_workspace.read(cx).is_open(),
+                manager.read(cx).workspaces.len(),
+                window_combo_box_is_open(window, cx),
             )
         }),
         (1, true)
     );
+
+    let sidebar = cx
+        .debug_bounds("workspace-sidebar")
+        .expect("the Workspace sidebar should render");
+    let panel = cx
+        .debug_bounds("combo-box-panel")
+        .expect("the New Workspace ComboBox panel should render");
+    assert_eq!(
+        panel.size.width,
+        sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
+    );
+    let chooser = cx
+        .debug_bounds("new-workspace-chooser")
+        .expect("the top chooser should render");
+    assert_eq!(panel.top(), chooser.bottom() + px(4.0));
+    assert_eq!(
+        cx.debug_bounds("combo-box-input-row")
+            .expect("the compact ComboBox input row should render")
+            .size
+            .height,
+        px(28.0)
+    );
+    for selector in [
+        "new-workspace-source-local-project",
+        "new-workspace-source-scratch",
+        "new-workspace-source-remote-project",
+    ] {
+        let row = cx
+            .debug_bounds(selector)
+            .expect("the compact Workspace source row should render");
+        assert_eq!(row.size.height, px(30.0));
+        assert_eq!(
+            row.left() - panel.left(),
+            panel.right() - row.right(),
+            "{selector} should have equal left and right insets"
+        );
+    }
 }
 
 #[gpui::test]
@@ -5092,17 +5474,17 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let chip = cx
         .debug_bounds("workspace-chip")
         .expect("the chip was not rendered for the new Active Workspace");
-    let toggle = cx
-        .debug_bounds("toggle-sidebar-button")
-        .expect("the sidebar toggle was not rendered");
+    let chooser = cx
+        .debug_bounds("new-workspace-chooser")
+        .expect("the Workspace chooser was not rendered");
 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         2
     );
     assert!(
-        chip.origin.x + chip.size.width <= toggle.origin.x,
-        "the chip overlapped the sidebar toggle: {chip:?} {toggle:?}"
+        chip.right() <= chooser.left(),
+        "the chip overlapped the Workspace chooser: {chip:?} {chooser:?}"
     );
 }
 
@@ -5150,10 +5532,10 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             divider.center().x,
         ),
         (
-            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
-            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
-            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
-            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
+            px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
+            root.origin.x + px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
+            root.origin.x + px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
         )
     );
 }
@@ -5183,11 +5565,54 @@ fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContex
     let tab_bar = cx
         .debug_bounds("tab-bar")
         .expect("the Tab bar was not rendered");
-    assert!(chrome.size.width < px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+    assert!(chrome.size.width < px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH));
     assert_eq!(
         (spacer.size.width, tab_bar.origin.x),
         (chrome.size.width, root.origin.x + chrome.size.width)
     );
+}
+
+#[gpui::test]
+fn collapsed_top_chrome_should_preserve_the_default_label_beside_both_actions(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "Default".to_owned())
+            .expect("the Active Workspace should be renamed");
+        cx.notify();
+    });
+    let name_width = cx.update(|window, _| {
+        let run = window.text_style().to_run("Default".len());
+        window
+            .text_system()
+            .shape_line("Default".into(), px(WORKSPACE_CHIP_TEXT_SIZE), &[run], None)
+            .width
+    });
+
+    click("toggle-sidebar-button", cx);
+
+    let label = cx
+        .debug_bounds("workspace-chip-label")
+        .expect("collapsed Workspace label");
+    let chooser = cx
+        .debug_bounds("new-workspace-chooser")
+        .expect("Workspace chooser");
+    let toggle = cx
+        .debug_bounds("toggle-sidebar-button")
+        .expect("sidebar toggle");
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("collapsed top chrome");
+    assert!(
+        label.size.width >= name_width,
+        "Default needs {name_width:?}, but the collapsed label received {:?}",
+        label.size.width
+    );
+    assert!(label.right() <= chooser.left());
+    assert!(chooser.right() <= toggle.left() && toggle.right() <= chrome.right());
 }
 
 #[gpui::test]
@@ -5470,6 +5895,12 @@ fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(cx: &mut
 #[gpui::test]
 fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
+    let collapsed_width = cx.update(|window, cx| {
+        collapsed_top_chrome_width(
+            manager.read(cx).workspaces.active_workspace().name(),
+            window,
+        )
+    });
     let expanded_chrome = cx
         .debug_bounds("workspace-top-chrome")
         .expect("the fixed top-left chrome was not rendered");
@@ -5494,7 +5925,7 @@ fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut
         (
             false,
             px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            collapsed_width,
             px(0.0),
         )
     );

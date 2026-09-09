@@ -784,7 +784,6 @@ impl RemoteWorkspaceFlow {
         );
     }
 
-    #[cfg(test)]
     pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open_with_replacement(None, window, cx)
     }

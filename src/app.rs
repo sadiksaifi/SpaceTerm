@@ -605,7 +605,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let reported_failure = Rc::clone(&failure);
     let host = Rc::new(host);
     let reopened_host = Rc::clone(&host);
-    let application = gpui::Application::new();
+    let application = gpui::Application::new().with_assets(spaceterm_ui::EmbeddedAssets);
     application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
     application.run(move |cx| {
         if let Err(error) = start_application(cx, &host) {

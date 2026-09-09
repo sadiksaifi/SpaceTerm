@@ -3,7 +3,11 @@
 //! The crate owns interaction and editing behavior while the application supplies all product
 //! colors and surrounding chrome from its canonical theme.
 
+mod anchored_placement;
 mod button;
+mod combo_box;
+#[cfg(test)]
+mod combo_box_tests;
 mod command_palette;
 mod icon;
 mod menu;
@@ -17,20 +21,29 @@ mod window_drag_region;
 
 use gpui::App;
 
+pub use anchored_placement::{
+    AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
+};
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
     ButtonVariants, IconButton,
 };
+pub use combo_box::{
+    ComboBox, ComboBoxAcceptance, ComboBoxAccessory, ComboBoxActivationSource, ComboBoxCloseReason,
+    ComboBoxCopy, ComboBoxFallback, ComboBoxItem, ComboBoxLifecycleEvent, ComboBoxMetrics,
+    ComboBoxPaint, ComboBoxTheme, window_combo_box_is_open,
+};
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteGeneration, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteKeybindingProfile, CommandPaletteLifecycleEvent,
-    CommandPaletteMatching, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
-    CommandPaletteReplacementFocus, CommandPaletteTheme, install_command_palette_keybindings,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteFallback, CommandPaletteGeneration,
+    CommandPaletteHint, CommandPaletteItem, CommandPaletteKeybindingProfile,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteMetrics,
+    CommandPalettePaint, CommandPaletteQuery, CommandPaletteReplacementFocus, CommandPaletteTheme,
+    install_command_palette_keybindings,
 };
-pub use icon::{Icon, IconName};
+pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuPlacement,
@@ -65,10 +78,10 @@ pub use resize_handle::{
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
     SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
-    TextInputContentMode, TextInputEscapeBehavior, TextInputEvent, TextInputKeybindingProfile,
-    TextInputMetrics, TextInputPaint, TextInputReturnBehavior, TextInputSelection,
-    TextInputTabBehavior, TextInputTheme, TextInputValueChanged, TextInputVariant,
-    TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
+    TextInputContentMode, TextInputEscapeBehavior, TextInputEvent, TextInputHomeEndBehavior,
+    TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputReturnBehavior,
+    TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
+    TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
 pub use tooltip::{
     Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTargetVisibility,
@@ -89,6 +102,7 @@ pub struct ControlThemeCatalog {
     resize_handle: ResizeHandleTheme,
     menu: MenuTheme,
     command_palette: CommandPaletteTheme,
+    combo_box: ComboBoxTheme,
     text_input: TextInputTheme,
     tooltip: TooltipTheme,
     modal: ModalTheme,
@@ -106,6 +120,7 @@ impl ControlThemeCatalog {
         resize_handle: ResizeHandleTheme,
         menu: MenuTheme,
         command_palette: CommandPaletteTheme,
+        combo_box: ComboBoxTheme,
         text_input: TextInputTheme,
         tooltip: TooltipTheme,
         modal: ModalTheme,
@@ -116,6 +131,7 @@ impl ControlThemeCatalog {
             resize_handle,
             menu,
             command_palette,
+            combo_box,
             text_input,
             tooltip,
             modal,
@@ -137,6 +153,7 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     cx.set_global(catalog.resize_handle);
     cx.set_global(catalog.menu);
     cx.set_global(catalog.command_palette);
+    cx.set_global(catalog.combo_box);
     cx.set_global(catalog.text_input);
     cx.set_global(catalog.tooltip);
     cx.set_global(catalog.modal);
@@ -144,6 +161,7 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     text_input::init(cx);
     menu::init(cx);
     command_palette::init(cx);
+    combo_box::init(cx);
     tooltip::init(cx);
     modal::init_core(cx);
     Ok(())

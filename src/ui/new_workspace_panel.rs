@@ -3,9 +3,9 @@ use gpui::App;
 use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, Window, px};
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy, CommandPaletteEvent,
-    CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteReplacementFocus, Icon, IconName,
+    ComboBoxAccessory, ComboBoxItem, CommandPalette, CommandPaletteAccessory,
+    CommandPaletteActivationPolicy, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteLifecycleEvent, CommandPaletteReplacementFocus, Icon, IconName,
 };
 
 const SOURCE_ICON_SIZE: f32 = 14.0;
@@ -104,6 +104,49 @@ impl NewWorkspaceSource {
             }
             (None, None) => item,
         }
+    }
+
+    pub(super) fn into_combo_box_item(
+        self,
+        remote_unavailable_reason: Option<String>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
+    ) -> ComboBoxItem<Self> {
+        let icon_name = self.icon();
+        let unavailable = (self == Self::RemoteProject)
+            .then_some(remote_unavailable_reason)
+            .flatten();
+        let mut keywords = vec!["workspace".to_owned(), self.label().to_owned()];
+        keywords.push(
+            unavailable
+                .as_deref()
+                .unwrap_or_else(|| self.description(presentation))
+                .to_owned(),
+        );
+        let item = ComboBoxItem::new(self, self.label())
+            .keywords(keywords)
+            .disabled(unavailable.is_some())
+            .leading_icon(move |foreground| {
+                Icon::new(icon_name, px(SOURCE_ICON_SIZE), foreground).into_any_element()
+            })
+            .debug_selector(self.debug_selector());
+
+        match (self.accessory(presentation), unavailable.as_ref()) {
+            (_, Some(_)) => item.trailing(ComboBoxAccessory::Status("Unavailable".into())),
+            (Some(shortcut), None) => item.trailing(ComboBoxAccessory::Shortcut(shortcut.into())),
+            (None, None) => item,
+        }
+    }
+
+    pub(super) fn combo_box_items(
+        remote_unavailable_reason: Option<String>,
+        presentation: &crate::desktop_profile::DesktopPresentation,
+    ) -> Vec<ComboBoxItem<Self>> {
+        Self::ordered()
+            .into_iter()
+            .map(|source| {
+                source.into_combo_box_item(remote_unavailable_reason.clone(), presentation)
+            })
+            .collect()
     }
 }
 
@@ -452,6 +495,17 @@ mod tests {
 
         assert!(remote.is_disabled());
         assert_eq!(remote.description_text(), Some(reason));
+    }
+
+    #[test]
+    fn combo_box_sources_should_use_compact_single_line_rows() {
+        let presentation = crate::desktop_profile::testing_presentation();
+
+        for reason in [None, Some("OpenSSH 9.0 or later is required".to_owned())] {
+            for item in NewWorkspaceSource::combo_box_items(reason, &presentation) {
+                assert_eq!(item.description_text(), None);
+            }
+        }
     }
 
     #[gpui::test]

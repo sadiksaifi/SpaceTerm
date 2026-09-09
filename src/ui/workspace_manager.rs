@@ -65,18 +65,24 @@ use gpui::{
     SharedString, Task, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu,
-    Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
-    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
-    OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation,
-    ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate,
-    ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
-    ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
+    Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
+    AnchoredPlacementConfig, Button, ButtonShape, ButtonSize, ButtonVariant, ComboBox, ContextMenu,
+    CustomIconName, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize,
+    MiddleTruncatedText, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
+    ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle,
+    ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput,
+    TextInputEvent, TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility,
+    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    window_combo_box_is_open, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
+const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
+const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
+// Reserve enough label width beside both actions for Default across desktop fonts.
+const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 // Vertical breathing room above and below the header's 28px `ButtonSize::Regular` actions. The
 // header height is derived from it so the two cannot drift apart.
@@ -136,8 +142,10 @@ fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
     let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
         + WORKSPACE_CHIP_ICON_SIZE
         + WORKSPACE_CHIP_GAP
-        + TRAFFIC_LIGHT_CLEARANCE / 2.0);
-    (fixed_width + name_width).min(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+        + TOP_CHROME_ACTION_CLEARANCE);
+    (fixed_width + name_width)
+        .ceil()
+        .min(px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -442,6 +450,7 @@ pub(crate) struct WorkspaceManager {
     default_workspace_identity: WorkspaceDirectoryIdentity,
     directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
+    remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
@@ -663,7 +672,7 @@ impl WorkspaceManager {
         };
         let new_workspace_panel = cx.new(|cx| {
             NewWorkspacePanel::new_with_remote_unavailable_reason(
-                remote_unavailable_reason,
+                remote_unavailable_reason.clone(),
                 window,
                 cx,
             )
@@ -697,6 +706,7 @@ impl WorkspaceManager {
             default_workspace_identity,
             directory_selection_fallback,
             remote_workspace_backend,
+            remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
@@ -1093,7 +1103,8 @@ impl WorkspaceManager {
                 .transient
                 .new_workspace
                 .read(cx)
-                .blocks_terminal_input(),
+                .blocks_terminal_input()
+                || window_combo_box_is_open(window, cx),
             search: self.transient.search.read(cx).blocks_terminal_input(),
             window_drag: self.window_drag_status.is_active(),
             sidebar_resize: self.sidebar.resizing,
@@ -1328,7 +1339,14 @@ impl WorkspaceManager {
             ResizeHandleEvent::ResizeRequested {
                 requested_value, ..
             } => {
-                if self.sidebar.visible || requested_value >= WORKSPACE_SIDEBAR_MINIMUM_WIDTH {
+                let should_resize = self.sidebar.visible
+                    || px(requested_value)
+                        >= collapsed_top_chrome_width(
+                            self.workspaces.active_workspace().name(),
+                            window,
+                        )
+                        .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+                if should_resize {
                     self.resize_sidebar(px(requested_value), window, cx);
                 }
             }
@@ -1512,15 +1530,60 @@ impl WorkspaceManager {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
-            NewWorkspacePanelEvent::SourceSelected(source) => match source {
-                NewWorkspaceSource::LocalProject => {
-                    self.transient.picker_entered_from_panel = true;
-                    self.present_workspace_picker(window, cx);
-                }
-                NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
-                NewWorkspaceSource::RemoteProject => self.present_remote_workspace_flow(window, cx),
-            },
+            NewWorkspacePanelEvent::SourceSelected(source) => {
+                self.handle_new_workspace_source(*source, true, window, cx);
+            }
         }
+    }
+
+    fn handle_new_workspace_source(
+        &mut self,
+        source: NewWorkspaceSource,
+        entered_from_panel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match source {
+            NewWorkspaceSource::LocalProject => {
+                self.transient.picker_entered_from_panel = entered_from_panel;
+                self.present_workspace_picker(window, cx);
+            }
+            NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
+            NewWorkspaceSource::RemoteProject if entered_from_panel => {
+                self.present_remote_workspace_flow(window, cx);
+            }
+            NewWorkspaceSource::RemoteProject => {
+                self.present_remote_workspace_flow_from_combo_box(window, cx);
+            }
+        }
+    }
+
+    fn present_remote_workspace_flow_from_combo_box(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.remote_workspace_backend.as_ref().map(Arc::clone) else {
+            self.sync_terminal_focus_blocker(window, cx);
+            return;
+        };
+        let flow = self.remote_workspace_flow.get_or_insert_with(|| {
+            let flow = cx.new(|cx| RemoteWorkspaceFlow::new(backend, window, cx));
+            cx.subscribe_in(
+                &flow,
+                window,
+                |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
+                    manager.handle_remote_workspace_flow_event(flow, event, window, cx);
+                },
+            )
+            .detach();
+            flow
+        });
+        if !flow.update(cx, |flow, cx| flow.open(window, cx)) {
+            self.remote_workspace_flow = None;
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
     }
 
     fn present_remote_workspace_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3493,6 +3556,7 @@ impl WorkspaceManager {
             ))
             .child(
                 div()
+                    .debug_selector(|| "workspace-chip-label".to_owned())
                     .min_w_0()
                     .truncate()
                     .text_size(px(WORKSPACE_CHIP_TEXT_SIZE))
@@ -3507,7 +3571,12 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_top_left_chrome(&self, manager: WeakEntity<Self>, window: &Window) -> AnyElement {
+    fn render_top_left_chrome(
+        &self,
+        manager: WeakEntity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let width = if self.sidebar.visible {
             self.sidebar.width
         } else {
@@ -3515,7 +3584,49 @@ impl WorkspaceManager {
         };
         let (toggle_icon, toggle_label) = sidebar_toggle_presentation(self.sidebar.visible);
         let drag_manager = manager.clone();
-        let toggle_manager = manager;
+        let toggle_manager = manager.clone();
+        let combo_lifecycle_manager = manager.clone();
+        let combo_lifecycle_window = window.window_handle();
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let chooser = ComboBox::new(
+            "new-workspace-chooser",
+            "New Workspace",
+            None,
+            "New Workspace",
+            NewWorkspaceSource::combo_box_items(
+                self.remote_workspace_unavailable_reason.clone(),
+                presentation,
+            ),
+        )
+        .icon_trigger(|foreground| {
+            Icon::custom(CustomIconName::RectangleStack, px(14.0), foreground).into_any_element()
+        })
+        .placement(AnchoredPlacementConfig::new(
+            AnchoredPlacement::Bottom,
+            AnchoredAlignment::End,
+        ))
+        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
+        .debug_selector("new-workspace-chooser")
+        .tooltip(Tooltip::new(
+            "new-workspace-chooser-tooltip",
+            "New Workspace",
+        ))
+        .on_lifecycle(move |_, cx| {
+            let manager = combo_lifecycle_manager.clone();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(combo_lifecycle_window, |_, window, cx| {
+                    let _ = manager.update(cx, |manager, cx| {
+                        manager.sync_terminal_focus_blocker(window, cx);
+                        cx.notify();
+                    });
+                });
+            });
+        })
+        .on_accept(move |acceptance, window, cx| {
+            let _ = manager.update(cx, |manager, cx| {
+                manager.handle_new_workspace_source(*acceptance.item_id(), false, window, cx);
+            });
+        });
         let content = div()
             .relative()
             .size_full()
@@ -3526,7 +3637,7 @@ impl WorkspaceManager {
                         .top_0()
                         .bottom_0()
                         .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                        .right(px(TRAFFIC_LIGHT_CLEARANCE / 2.0))
+                        .right(px(TOP_CHROME_ACTION_CLEARANCE))
                         .flex()
                         .items_center()
                         .min_w_0()
@@ -3549,6 +3660,9 @@ impl WorkspaceManager {
                     .absolute()
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
+                    .flex()
+                    .items_center()
+                    .child(chooser)
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
                             Icon::new(toggle_icon, px(14.0), foreground).into_any_element()
@@ -4225,7 +4339,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
-            .child(self.render_top_left_chrome(manager.clone(), window))
+            .child(self.render_top_left_chrome(manager.clone(), window, cx))
             .when(self.sidebar.visible, |root| {
                 root.child(self.render_sidebar(manager.clone(), window, cx))
             })
