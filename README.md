@@ -24,7 +24,7 @@ Press Command-N and choose This Mac or Remote over SSH. A new Workspace starts i
 directory on that machine. New Tabs inherit the focused Pane's Current Directory, and new Panes
 inherit the directory of the Pane being split. Workspace names stay stable as you navigate.
 
-Choose Pin to Directory from the Workspace context menu to select a fixed Starting Directory,
+Choose PIN WORKSPACE TO A DIRECTORY from the Workspace context menu to select a fixed Starting Directory,
 or Pin Workspace to This Directory from a Pane's actions or terminal context menu to use its
 Current Directory.
 The Tab context menu offers the same action when the Workspace has exactly one Tab and one Pane.

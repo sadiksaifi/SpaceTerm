@@ -3913,7 +3913,7 @@ impl WorkspaceManager {
                     row,
                     workspace_menu_entries(pinned, remote_connection_phase, presentation),
                 )
-                .size(MenuSize::Small)
+                .size(MenuSize::Wide)
                 .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
                 .on_open_request(move |_, window, cx| {
                     open_manager
@@ -4317,10 +4317,11 @@ fn workspace_menu_entries(
             if pinned {
                 "Change Pinned Directory"
             } else {
-                "Pin to Directory"
+                "PIN WORKSPACE TO A DIRECTORY"
             },
             WorkspaceMenuCommand::PinDirectory,
         )
+        .icon(|foreground| Icon::new(IconName::Pin, px(14.0), foreground).into_any_element())
         .debug_selector("workspace-menu-row-pin-directory"),
     );
     if pinned {
