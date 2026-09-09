@@ -5212,7 +5212,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         .expect("the New Workspace ComboBox panel should render");
     assert_eq!(
         panel.size.width,
-        sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
+        (sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)).max(px(300.0))
     );
     let chooser = cx
         .debug_bounds("workspace-switcher")
@@ -6967,4 +6967,66 @@ fn workspace_filter_icon_should_precede_editable_input_without_affecting_creatio
         "filter"
     );
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    for _ in 0..9 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    cx.run_until_parked();
+    manager.read_with(cx, |manager, cx| {
+        let items = manager.workspace_switcher_items(cx);
+        for (index, item) in items.iter().take(9).enumerate() {
+            assert_eq!(
+                item.shortcut_text(),
+                Some(format!("Ctrl+{}", index + 1).as_str())
+            );
+        }
+        assert_eq!(items[9].shortcut_text(), None);
+    });
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.close_workspace(WorkspaceId::new(1), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    manager.read_with(cx, |manager, cx| {
+        let items = manager.workspace_switcher_items(cx);
+        assert_eq!(
+            items[0].id(),
+            &WorkspaceSwitcherChoice::Workspace(WorkspaceId::new(2))
+        );
+        assert_eq!(items[0].shortcut_text(), Some("Ctrl+1"));
+        assert_eq!(items[8].shortcut_text(), Some("Ctrl+9"));
+    });
+}
+
+#[gpui::test]
+fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    for (button, tooltip) in [
+        (
+            "new-remote-workspace-button",
+            "new-remote-workspace-tooltip",
+        ),
+        ("new-local-workspace-button", "new-local-workspace-tooltip"),
+        ("workspace-switcher", "workspace-switcher-tooltip"),
+    ] {
+        let center = cx.debug_bounds(button).unwrap().center();
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(tooltip).is_some(),
+            "missing tooltip: {tooltip}"
+        );
+        cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
+        cx.run_until_parked();
+    }
 }

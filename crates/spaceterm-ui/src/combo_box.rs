@@ -192,6 +192,7 @@ pub struct ComboBoxItem<I> {
     disabled: bool,
     leading_icon: Option<IconBuilder>,
     trailing: Option<ComboBoxAccessory>,
+    shortcut: Option<SharedString>,
     debug_selector: Option<String>,
 }
 
@@ -206,6 +207,7 @@ impl<I> ComboBoxItem<I> {
             disabled: false,
             leading_icon: None,
             trailing: None,
+            shortcut: None,
             debug_selector: None,
         }
     }
@@ -240,6 +242,12 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
+    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
     /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
@@ -259,6 +267,11 @@ impl<I> ComboBoxItem<I> {
     /// Returns the secondary description, when present.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_ref().map(AsRef::as_ref)
+    }
+
+    /// Returns the display-only keyboard equivalent, when present.
+    pub fn shortcut_text(&self) -> Option<&str> {
+        self.shortcut.as_ref().map(AsRef::as_ref)
     }
 
     /// Returns whether the item is visible but inert.
@@ -1720,6 +1733,7 @@ fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> b
                 && current.keywords == next.keywords
                 && current.disabled == next.disabled
                 && current.trailing == next.trailing
+                && current.shortcut == next.shortcut
         })
 }
 
@@ -2123,10 +2137,21 @@ fn render_row<I: Clone + Eq + 'static>(
         };
         row = row.child(
             div()
+                .debug_selector(move || format!("combo-box-row-{position}-accessory"))
                 .flex_shrink_0()
                 .text_size(theme.metrics.secondary_size)
                 .text_color(secondary)
                 .child(text),
+        );
+    }
+    if let Some(shortcut) = item.shortcut.clone() {
+        row = row.child(
+            div()
+                .debug_selector(move || format!("combo-box-row-{position}-shortcut"))
+                .flex_shrink_0()
+                .text_size(theme.metrics.secondary_size)
+                .text_color(secondary)
+                .child(shortcut),
         );
     }
     if !item.disabled {

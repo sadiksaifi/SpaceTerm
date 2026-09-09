@@ -155,7 +155,7 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 11] {
+fn required_presented_actions() -> [&'static str; 20] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
@@ -164,6 +164,15 @@ fn required_presented_actions() -> [&'static str; 11] {
     use spaceterm_ui::{EditCopy, EditPaste};
 
     [
+        crate::ui::ActivateWorkspace1.name(),
+        crate::ui::ActivateWorkspace2.name(),
+        crate::ui::ActivateWorkspace3.name(),
+        crate::ui::ActivateWorkspace4.name(),
+        crate::ui::ActivateWorkspace5.name(),
+        crate::ui::ActivateWorkspace6.name(),
+        crate::ui::ActivateWorkspace7.name(),
+        crate::ui::ActivateWorkspace8.name(),
+        crate::ui::ActivateWorkspace9.name(),
         SwitchWorkspace.name(),
         NewWorkspace.name(),
         CreateTab.name(),
@@ -194,6 +203,15 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         },
         "Primary+Enter",
         vec![
+            ActionShortcut::new(crate::ui::ActivateWorkspace1, "Ctrl+1"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace2, "Ctrl+2"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace3, "Ctrl+3"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace4, "Ctrl+4"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace5, "Ctrl+5"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace6, "Ctrl+6"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace7, "Ctrl+7"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace8, "Ctrl+8"),
+            ActionShortcut::new(crate::ui::ActivateWorkspace9, "Ctrl+9"),
             ActionShortcut::new(SwitchWorkspace, "Primary+K"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(CreateTab, "Primary+T"),

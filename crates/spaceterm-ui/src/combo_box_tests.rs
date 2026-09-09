@@ -2304,3 +2304,51 @@ fn pinned_selection_should_survive_ordinary_item_metadata_refresh(cx: &mut TestA
         window_was_open: false,
     }));
 }
+
+#[gpui::test]
+fn shortcut_should_render_after_the_existing_trailing_accessory(cx: &mut TestAppContext) {
+    let items = vec![
+        ComboBoxItem::new(1, "Local Workspace")
+            .trailing(crate::ComboBoxAccessory::Text("2T · 3P".into()))
+            .shortcut("⌘1"),
+    ];
+    let (_, _, _, cx) = combo_box_window(cx, None, items, false);
+    open_by_pointer(cx);
+    let accessory = cx.debug_bounds("combo-box-row-0-accessory").unwrap();
+    let shortcut = cx.debug_bounds("combo-box-row-0-shortcut").unwrap();
+    assert!(shortcut.left() > accessory.right());
+    assert_eq!(shortcut.top(), accessory.top());
+}
+
+#[gpui::test]
+fn shortcut_refresh_should_preserve_keyboard_selection_and_cancel_a_stale_pointer_press(
+    cx: &mut TestAppContext,
+) {
+    let (root, events, _, cx) = combo_box_window(cx, None, items(), false);
+    open_by_pointer(cx);
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    let remote = cx.debug_bounds("combo-row-remote").unwrap().center();
+    cx.simulate_mouse_down(remote, MouseButton::Left, Modifiers::none());
+    root.update(cx, |root, cx| {
+        root.items[2] = root.items[2].clone().shortcut("⌘3");
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-row-2-shortcut").is_some());
+    cx.simulate_mouse_up(remote, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 3,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}

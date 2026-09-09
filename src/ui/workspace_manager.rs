@@ -937,9 +937,11 @@ impl WorkspaceManager {
     }
 
     fn workspace_switcher_items(&self, cx: &App) -> Vec<ComboBoxItem<WorkspaceSwitcherChoice>> {
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         self.workspaces
             .iter()
-            .map(|workspace| {
+            .enumerate()
+            .map(|(index, workspace)| {
                 let (tabs, panes) = workspace.payload().read(cx).aggregate_counts(cx);
                 let active = workspace.id() == self.workspaces.active_workspace_id();
                 let icon = if active {
@@ -950,7 +952,7 @@ impl WorkspaceManager {
                         WorkspaceLocation::Remote { .. } => IconName::Globe,
                     }
                 };
-                ComboBoxItem::new(
+                let item = ComboBoxItem::new(
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
                     workspace.name().to_owned(),
                 )
@@ -974,7 +976,11 @@ impl WorkspaceManager {
                 .debug_selector(format!(
                     "workspace-switcher-result-{}",
                     workspace.id().get()
-                ))
+                ));
+                match workspace_activation_shortcut(index, presentation) {
+                    Some(shortcut) => item.shortcut(shortcut),
+                    None => item,
+                }
             })
             .collect()
     }
@@ -3406,6 +3412,7 @@ impl WorkspaceManager {
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
+        let new_workspace_shortcut = presentation.shortcut(&NewWorkspace);
         let chooser = ComboBox::new(
             "workspace-switcher",
             "Switch Workspace",
@@ -3444,6 +3451,7 @@ impl WorkspaceManager {
                 )
                 .into_any_element()
             })
+            .shortcut(new_workspace_shortcut)
             .debug_selector("workspace-switcher-create-local");
             let mut remote =
                 ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
@@ -3472,10 +3480,11 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
+        .panel_width((self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)).max(px(300.0)))
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
+                .debug_selector("workspace-switcher-tooltip")
                 .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
         )
         .on_lifecycle(move |_, cx| {
@@ -4003,8 +4012,12 @@ impl WorkspaceManager {
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
                         .disabled(self.remote_workspace_unavailable_reason.is_some())
+                        .preserve_ancestor_hover()
                         .debug_selector("new-remote-workspace-button")
-                        .tooltip(Tooltip::new("new-remote-workspace-tooltip", remote_tooltip))
+                        .tooltip(
+                            Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
+                                .debug_selector("new-remote-workspace-tooltip"),
+                        )
                         .on_activate(move |_, window, cx| {
                             let _ = manager.update(cx, |manager, cx| {
                                 manager.sidebar.dismiss_editing(window);
@@ -4027,9 +4040,11 @@ impl WorkspaceManager {
                         )
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
+                        .preserve_ancestor_hover()
                         .debug_selector("new-local-workspace-button")
                         .tooltip(
                             Tooltip::new("new-local-workspace-tooltip", "New Local Workspace")
+                                .debug_selector("new-local-workspace-tooltip")
                                 .keyboard_equivalent(shortcuts.new_workspace_button),
                         )
                         .on_activate(move |_, window, cx| {
@@ -4213,6 +4228,24 @@ impl Render for WorkspaceManager {
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))
     }
+}
+
+fn workspace_activation_shortcut(
+    index: usize,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> Option<&'static str> {
+    Some(match index {
+        0 => presentation.shortcut(&ActivateWorkspace1),
+        1 => presentation.shortcut(&ActivateWorkspace2),
+        2 => presentation.shortcut(&ActivateWorkspace3),
+        3 => presentation.shortcut(&ActivateWorkspace4),
+        4 => presentation.shortcut(&ActivateWorkspace5),
+        5 => presentation.shortcut(&ActivateWorkspace6),
+        6 => presentation.shortcut(&ActivateWorkspace7),
+        7 => presentation.shortcut(&ActivateWorkspace8),
+        8 => presentation.shortcut(&ActivateWorkspace9),
+        _ => return None,
+    })
 }
 
 fn workspace_menu_entries(
