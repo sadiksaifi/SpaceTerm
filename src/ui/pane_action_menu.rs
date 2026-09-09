@@ -87,10 +87,10 @@ pub(crate) fn pane_action_menu_entries(
         entries.insert(
             3,
             MenuEntry::action(
-                "Pin Workspace to This Directory",
+                "Pin workspace to this directory",
                 PaneActionMenuCommand::PinDirectory,
             )
-            .icon(menu_icon(IconName::MapPin))
+            .icon(menu_icon(IconName::Pin))
             .disabled(!enabled)
             .debug_selector(format!("{debug_prefix}-row-pin-directory")),
         );
@@ -105,7 +105,7 @@ fn pane_action_icon(command: PaneActionMenuCommand, zoomed: bool) -> IconName {
         PaneActionMenuCommand::ToggleZoom if zoomed => IconName::Minimize2,
         PaneActionMenuCommand::ToggleZoom => IconName::Maximize2,
         PaneActionMenuCommand::Close => IconName::X,
-        PaneActionMenuCommand::PinDirectory => IconName::MapPin,
+        PaneActionMenuCommand::PinDirectory => IconName::Pin,
     }
 }
 

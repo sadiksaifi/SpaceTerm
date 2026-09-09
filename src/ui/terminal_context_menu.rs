@@ -45,7 +45,7 @@ pub(crate) fn terminal_context_menu_entries(
         MenuEntry::separator(),
         menu_entry(
             TerminalContextMenuCommand::PinDirectory,
-            "Pin Workspace to This Directory",
+            "Pin workspace to this directory",
             pin_enabled,
         ),
         MenuEntry::separator(),
