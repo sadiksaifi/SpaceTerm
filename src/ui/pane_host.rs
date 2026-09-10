@@ -75,12 +75,12 @@ const PANE_CONTROL_ICON_SIZE: f32 = 13.8;
 ///
 /// The arrows reach into all four corners of their em box, so they read larger at the size the
 /// caption's other controls share. This applies to the Pane Caption's zoom control alone.
-const PANE_ZOOM_ICON_SIZE: f32 = 13.11;
+const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
 /// The close glyph's own size, drawn slightly larger than its neighbours.
 ///
 /// An X occupies less of its em box than the panel and zoom glyphs, so it reads smaller at the
 /// size they share. This applies to the Pane Caption's close control alone.
-const PANE_CLOSE_ICON_SIZE: f32 = 15.82;
+const PANE_CLOSE_ICON_SIZE: f32 = 16.45;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 const PANE_ATTENTION_WIDTH: f32 = 13.0;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
