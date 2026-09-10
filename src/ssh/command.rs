@@ -675,6 +675,11 @@ impl ValidatedRemoteLoginShell {
         &self.path
     }
 
+    /// The shell's basename, which names a Remote Pane the way a local shell names a Local one.
+    pub(crate) fn name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
     fn parse(path: String) -> Result<Self, RemoteShellCommandError> {
         if path.is_empty() {
             return Err(RemoteShellCommandError::MissingLoginShell);

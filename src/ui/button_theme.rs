@@ -176,13 +176,13 @@ fn bare() -> ButtonVariantStyle {
         paint(
             transparent(),
             ACTIVE_THEME.text_muted,
-            ACTIVE_THEME.icon_muted,
+            ACTIVE_THEME.text_muted,
             transparent(),
         ),
         paint(
             transparent(),
             ACTIVE_THEME.text,
-            ACTIVE_THEME.icon,
+            ACTIVE_THEME.text,
             transparent(),
         ),
         paint(

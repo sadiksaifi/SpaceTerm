@@ -93,7 +93,6 @@ impl RemoteWorkspaceAccount {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn user(&self) -> &str {
         &self.user
     }

@@ -1092,10 +1092,6 @@ fn install_remote_completion_directly(
 ) {
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let key = RemoteWorkspaceTarget::new(
-                completion.destination().clone(),
-                completion.physical_directory().clone(),
-            );
             let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
                 Rc::clone(&manager.session_factory),
                 ValidatedLocalDirectory::new(
@@ -1105,9 +1101,10 @@ fn install_remote_completion_directly(
                 RemoteTerminalMetadataContext::new(
                     completion.destination().clone(),
                     completion.directory().clone(),
-                ),
+                )
+                .with_machine(remote_machine(completion.account())),
                 completion.physical_directory().clone(),
-                remote_workspace_fallback_title(&key, completion.remote_home_identity()),
+                completion.account().login_shell().name().to_owned(),
                 completion.terminal_channels(),
             );
             let prepared = terminal_factory.prepare_child_launch().unwrap();

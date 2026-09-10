@@ -1627,7 +1627,7 @@ fn render_pane_caption_content(
         attention,
         has_multiple_panes,
     } = caption;
-    let ramp = CaptionRamp::resolve(focused, text.running, text.origin.remote);
+    let color = caption_color(focused);
     let focus_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
@@ -1737,7 +1737,7 @@ fn render_pane_caption_content(
         .pt(px(PANE_CAPTION_TOP_PADDING))
         // The caption paints no surface of its own: it reads as identity floating over the Pane.
         .text_size(px(PANE_CAPTION_TEXT_SIZE))
-        .text_color(gpui_color(ramp.name))
+        .text_color(gpui_color(color))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             let _ = focus_host.update(cx, |host, cx| {
@@ -1765,7 +1765,7 @@ fn render_pane_caption_content(
                 .items_center()
                 .overflow_hidden()
                 .when(layout.show_origin && !text.origin.is_empty(), |row| {
-                    row.child(render_pane_origin(pane_id, &text.origin, layout, &ramp))
+                    row.child(render_pane_origin(pane_id, &text.origin, layout, color))
                 })
                 .when(layout.show_directory && !text.directory.is_empty(), |row| {
                     row.child(
@@ -1774,7 +1774,7 @@ fn render_pane_caption_content(
                                 format!("pane-caption-directory-{}", pane_id.get())
                             })
                             .flex_shrink_0()
-                            .text_color(gpui_color(ramp.directory))
+                            .text_color(gpui_color(color))
                             .child(text.directory),
                     )
                 })
@@ -1790,7 +1790,7 @@ fn render_pane_caption_content(
                         div()
                             .flex_shrink_0()
                             .mx(px(5.0))
-                            .text_color(gpui_color(ramp.separator))
+                            .text_color(gpui_color(color))
                             .child("·"),
                     )
                     .child(
@@ -1798,7 +1798,7 @@ fn render_pane_caption_content(
                             .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
                             .min_w_0()
                             .truncate()
-                            .text_color(gpui_color(ramp.label))
+                            .text_color(gpui_color(color))
                             .child(text.label),
                     )
                 }),
@@ -1807,74 +1807,34 @@ fn render_pane_caption_content(
         .into_any_element()
 }
 
-/// The contrast tiers one caption paints, resolved once per frame.
+/// The single colour one caption paints every part of itself with.
 ///
-/// The focused Pane keeps the full ramp and every other Pane steps one tier down. Without a
-/// caption surface this ramp, and the origin icon it tints, carries the focused Pane's identity.
-#[derive(Clone, Copy)]
-struct CaptionRamp {
-    icon: Color,
-    account: Color,
-    host: Color,
-    separator: Color,
-    directory: Color,
-    name: Color,
-    label: Color,
-}
-
-impl CaptionRamp {
-    fn resolve(focused: bool, running: bool, remote: bool) -> Self {
-        if focused {
-            return Self {
-                icon: if remote {
-                    ACTIVE_THEME.text_accent
-                } else {
-                    ACTIVE_THEME.icon_muted
-                },
-                account: ACTIVE_THEME.text_placeholder,
-                host: ACTIVE_THEME.text_muted,
-                separator: ACTIVE_THEME.text_placeholder,
-                directory: ACTIVE_THEME.text_placeholder,
-                name: ACTIVE_THEME.text,
-                label: if running {
-                    ACTIVE_THEME.text_accent
-                } else {
-                    ACTIVE_THEME.text_muted
-                },
-            };
-        }
-        Self {
-            icon: if remote {
-                ACTIVE_THEME.text_accent
-            } else {
-                ACTIVE_THEME.icon_placeholder
-            },
-            account: ACTIVE_THEME.text_disabled,
-            host: ACTIVE_THEME.text_placeholder,
-            separator: ACTIVE_THEME.text_disabled,
-            directory: ACTIVE_THEME.text_disabled,
-            name: ACTIVE_THEME.text_muted,
-            label: ACTIVE_THEME.text_placeholder,
-        }
+/// The caption is one statement of identity, so its icon, account, machine, directory, label and
+/// controls all read at the same weight. Only focus changes the tier.
+fn caption_color(focused: bool) -> Color {
+    if focused {
+        ACTIVE_THEME.text_muted
+    } else {
+        ACTIVE_THEME.text_placeholder
     }
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
 ///
 /// The icon states Local or Remote from the Terminal's own classification, so a Remote Pane stays
-/// distinguishable at the width where its account and machine text no longer fit.
+/// distinguishable by shape at the width where its account and machine text no longer fit.
 fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
-    ramp: &CaptionRamp,
+    color: Color,
 ) -> AnyElement {
     let (icon, location) = if origin.remote {
         (IconName::Globe, "remote")
     } else {
         (IconName::Terminal, "local")
     };
-    let icon_tint = gpui_color(ramp.icon);
+    let icon_tint = gpui_color(color);
     div()
         .debug_selector(move || format!("pane-caption-origin-{}-{location}", pane_id.get()))
         .flex()
@@ -1891,7 +1851,7 @@ fn render_pane_origin(
             row.child(
                 div()
                     .debug_selector(move || format!("pane-caption-account-{}", pane_id.get()))
-                    .text_color(gpui_color(ramp.account))
+                    .text_color(gpui_color(color))
                     .child(origin_account(&origin.user)),
             )
         })
@@ -1899,14 +1859,14 @@ fn render_pane_origin(
             row.child(
                 div()
                     .debug_selector(move || format!("pane-caption-host-{}", pane_id.get()))
-                    .text_color(gpui_color(ramp.host))
+                    .text_color(gpui_color(color))
                     .child(origin.host.clone()),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .mx(px(5.0))
-                    .text_color(gpui_color(ramp.separator))
+                    .text_color(gpui_color(color))
                     .child("›"),
             )
         })
@@ -2763,10 +2723,33 @@ mod tests {
                         crate::domain::SshDestination::new("tester@build.example".to_owned())
                             .unwrap(),
                         crate::domain::RemoteDirectory::new("~/app".to_owned()).unwrap(),
+                    )
+                    .with_machine(
+                        crate::terminal::metadata::RemoteMachine::new(
+                            Some("tester"),
+                            Some("/Users/tester"),
+                        ),
                     ),
                 ),
                 "remote",
                 "build.example",
+            ),
+            // A host alias names no account, so the discovered account is what names the user.
+            (
+                crate::terminal::metadata::TerminalMetadataContext::Remote(
+                    crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                        crate::domain::SshDestination::new("build-box".to_owned()).unwrap(),
+                        crate::domain::RemoteDirectory::new("~/app".to_owned()).unwrap(),
+                    )
+                    .with_machine(
+                        crate::terminal::metadata::RemoteMachine::new(
+                            Some("tester"),
+                            Some("/Users/tester"),
+                        ),
+                    ),
+                ),
+                "remote",
+                "build-box",
             ),
         ] {
             let (_, host_entity, records, cx) = caption_host(cx);
@@ -2794,16 +2777,8 @@ mod tests {
             assert_eq!(caption.0.as_ref(), "tester", "{location}");
             assert_eq!(caption.1.as_ref(), host, "{location}");
             assert_eq!(caption.3.as_ref(), "app", "{location}");
-            // Only a Local Terminal has a local home to abbreviate its displayed directory with.
-            assert_eq!(
-                caption.2.as_ref(),
-                if location == "local" {
-                    "~/Projects/"
-                } else {
-                    "/Users/tester/Projects/"
-                },
-                "{location}"
-            );
+            // Each side abbreviates against its own home, so Local and Remote read identically.
+            assert_eq!(caption.2.as_ref(), "~/Projects/", "{location}");
             let origin_selector = if location == "local" {
                 "pane-caption-origin-1-local"
             } else {

@@ -1164,7 +1164,7 @@ impl TerminalPane {
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
-            directory: compact_home_directory(&directory, metadata.context.local_home()).into(),
+            directory: compact_home_directory(&directory, metadata.context.home()).into(),
             label: label.into(),
             running: running.is_some(),
         }
@@ -3994,17 +3994,11 @@ impl PaneOrigin {
                 host: sanitize_title(short_hostname(host.unwrap_or_default())).into(),
                 remote: false,
             },
-            TerminalOrigin::Remote { destination } => {
-                let (user, host) = match destination.rsplit_once('@') {
-                    Some((user, host)) => (user, host),
-                    None => ("", destination),
-                };
-                Self {
-                    user: sanitize_title(user).into(),
-                    host: sanitize_title(short_hostname(host)).into(),
-                    remote: true,
-                }
-            }
+            TerminalOrigin::Remote { user, host } => Self {
+                user: sanitize_title(user.unwrap_or_default()).into(),
+                host: sanitize_title(short_hostname(host)).into(),
+                remote: true,
+            },
         }
     }
 
@@ -4022,9 +4016,10 @@ fn short_hostname(host: &str) -> &str {
         .unwrap_or(host)
 }
 
-/// Abbreviates a displayed local directory against the local home spelling.
+/// Abbreviates a displayed directory against its own side's home spelling.
 ///
-/// Remote directories have no local home and are returned unchanged.
+/// The caller supplies the home belonging to the same Local or Remote context as the directory,
+/// so a path is never shortened against the other side's home.
 fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
     let Some(home) = home
         .map(|home| home.trim_end_matches('/'))

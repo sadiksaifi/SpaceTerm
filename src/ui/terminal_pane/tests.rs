@@ -5890,6 +5890,50 @@ fn remote_origin_should_split_its_destination_and_stay_classified_remote() {
 }
 
 #[test]
+fn a_discovered_account_should_name_the_user_a_host_alias_never_spells() {
+    for destination in ["build-box", "someone@build-box"] {
+        let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new(destination.to_owned()).unwrap(),
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+            )
+            .with_machine(crate::terminal::metadata::RemoteMachine::new(
+                Some("tester"),
+                Some("/home/tester"),
+            )),
+        );
+
+        let origin = PaneOrigin::from_context(&context);
+
+        assert_eq!(origin.user.as_ref(), "tester", "{destination}");
+        assert_eq!(origin.host.as_ref(), "build-box", "{destination}");
+    }
+}
+
+#[test]
+fn a_remote_directory_should_abbreviate_against_its_own_remote_home() {
+    let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+            crate::domain::SshDestination::new("build-box".to_owned()).unwrap(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+        )
+        .with_machine(crate::terminal::metadata::RemoteMachine::new(
+            Some("tester"),
+            Some("/home/tester"),
+        )),
+    );
+
+    let home = context.home();
+
+    assert_eq!(compact_home_directory("/home/tester", home), "~");
+    assert_eq!(
+        compact_home_directory("/home/tester/project", home),
+        "~/project"
+    );
+    assert_eq!(compact_home_directory("/srv/app", home), "/srv/app");
+}
+
+#[test]
 fn displayed_directories_should_abbreviate_only_a_local_home_prefix() {
     for (directory, home, expected) in [
         ("/Users/tester", Some("/Users/tester"), "~"),

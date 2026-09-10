@@ -416,6 +416,10 @@ impl RemoteWorkspaceFlowCompletion {
         self.account.home_identity()
     }
 
+    pub(crate) const fn account(&self) -> &RemoteWorkspaceAccount {
+        &self.account
+    }
+
     pub(crate) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
         Arc::clone(&self.terminal_channels)
     }
