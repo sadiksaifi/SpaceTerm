@@ -1,30 +1,6 @@
 use super::*;
 
 impl<T> WorkspaceCollection<T> {
-    pub(crate) fn update_identity_directory(
-        &mut self,
-        workspace_id: WorkspaceId,
-        directory: CurrentDirectory,
-    ) -> bool {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return false;
-        };
-        let same_machine = matches!(
-            (&workspace.location, &directory),
-            (WorkspaceLocation::Local, CurrentDirectory::Local(_))
-                | (
-                    WorkspaceLocation::Remote { .. },
-                    CurrentDirectory::Remote(_)
-                )
-        );
-        if !same_machine || workspace.identity_directory == directory {
-            return false;
-        }
-        workspace.identity_directory = directory;
-        self.recalculate_automatic_names();
-        true
-    }
-
     pub(super) fn recalculate_automatic_names(&mut self) {
         let mut occupied: std::collections::HashSet<String> = self
             .workspaces
@@ -93,54 +69,25 @@ impl<T> WorkspaceEntry<T> {
 mod tests {
     use super::*;
 
-    fn local_directory(path: &str) -> CurrentDirectory {
-        CurrentDirectory::Local(PathBuf::from(path))
-    }
-
-    #[test]
-    fn identity_name_and_path_should_follow_pin_and_resume_latest_primary_directory() {
-        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
-        let id = workspaces.active_workspace_id();
-        workspaces.update_identity_directory(id, local_directory("/projects/alpha"));
-        assert_eq!(workspaces.active_workspace().name(), "alpha");
-        workspaces
-            .set_pinned_directory(
-                id,
-                Some(PinnedDirectory::Local(ValidatedLocalDirectory::new(
-                    PathBuf::from("/projects/pinned"),
-                    LocalDirectoryIdentity::for_test(1),
-                ))),
-            )
-            .unwrap();
-        workspaces.update_identity_directory(id, local_directory("/projects/beta"));
-        assert_eq!(workspaces.active_workspace().name(), "pinned");
-        assert_eq!(
-            workspaces.active_workspace().local_display_directory(),
-            Some(Path::new("/projects/pinned"))
-        );
-        workspaces.rename_workspace(id, "Custom".into()).unwrap();
-        workspaces.set_pinned_directory(id, None).unwrap();
-        assert_eq!(workspaces.active_workspace().name(), "Custom");
-        assert_eq!(
-            workspaces.active_workspace().local_display_directory(),
-            Some(Path::new("/projects/beta"))
-        );
-        workspaces.rename_workspace(id, String::new()).unwrap();
-        assert_eq!(workspaces.active_workspace().name(), "beta");
-        assert_eq!(
-            workspaces.active_workspace().local_home_directory(),
-            Some(Path::new("/home/test"))
-        );
-    }
-
     #[test]
     fn automatic_names_should_avoid_generated_suffixes_and_custom_names() {
         let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
-        for directory in ["/one/project", "/two/project", "/three/project 2"] {
+        for (index, directory) in ["/one/project", "/two/project", "/three/project 2"]
+            .into_iter()
+            .enumerate()
+        {
             let id = workspaces
                 .create_local_workspace_unchecked(PathBuf::from("/home/test"), |_, _| ())
                 .unwrap();
-            workspaces.update_identity_directory(id, local_directory(directory));
+            workspaces
+                .set_pinned_directory(
+                    id,
+                    Some(PinnedDirectory::Local(ValidatedLocalDirectory::new(
+                        PathBuf::from(directory),
+                        LocalDirectoryIdentity::for_test(index as u64 + 1),
+                    ))),
+                )
+                .unwrap();
         }
         workspaces
             .rename_workspace(WorkspaceId::new(1), "project".into())
@@ -153,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_identity_should_preserve_destination_and_reject_local_reports() {
+    fn remote_name_should_preserve_destination_and_starting_directory() {
         let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/local"), |_, _| ());
         let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
         let id = workspaces
@@ -162,24 +109,13 @@ mod tests {
                     SshDestination::new("build".into()).unwrap(),
                     home.clone(),
                 ),
-                RemoteDirectory::new("~".into()).unwrap(),
+                RemoteDirectory::new("/srv/project".into()).unwrap(),
                 home,
                 RemoteConnectionState::connected(1),
                 |_| (),
             )
             .unwrap();
-        workspaces.update_identity_directory(
-            id,
-            CurrentDirectory::Remote(RemoteDirectory::new("/srv/project".into()).unwrap()),
-        );
-        assert_eq!(workspaces.active_workspace().name(), "project · build");
-        workspaces.update_identity_directory(id, local_directory("/wrong/machine"));
-        assert_eq!(workspaces.active_workspace().name(), "project · build");
-        assert!(
-            workspaces
-                .active_workspace()
-                .local_display_directory()
-                .is_none()
-        );
+
+        assert_eq!(workspaces.workspace(id).unwrap().name(), "project · build");
     }
 }

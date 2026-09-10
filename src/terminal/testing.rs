@@ -169,15 +169,6 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
-    pub(crate) fn retain_directory_snapshot(
-        &self,
-        session_id: usize,
-        snapshot: super::SessionDirectorySnapshot,
-    ) {
-        self.directory_snapshots
-            .borrow_mut()
-            .insert(session_id, snapshot);
-    }
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
         self.selection_copies.borrow_mut().push_back(copy);
     }

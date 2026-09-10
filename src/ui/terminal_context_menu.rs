@@ -11,8 +11,6 @@ pub(crate) enum TerminalContextMenuCommand {
     Find,
     OpenLink,
     FilePreview,
-    PinDirectory,
-    UseForWorkspaceIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +30,6 @@ fn terminal_context_presentation(
 
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
-    pin_enabled: bool,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
     let paste_shortcut = presentation.shortcut(&spaceterm_ui::EditPaste);
@@ -43,17 +40,6 @@ pub(crate) fn terminal_context_menu_entries(
             .shortcut(presentation.copy_shortcut),
         menu_entry(TerminalContextMenuCommand::Paste, "Paste", true).shortcut(paste_shortcut),
         menu_entry(TerminalContextMenuCommand::Find, "Find", true).shortcut(find_shortcut),
-        MenuEntry::separator(),
-        menu_entry(
-            TerminalContextMenuCommand::UseForWorkspaceIdentity,
-            "Use for Workspace identity",
-            true,
-        ),
-        menu_entry(
-            TerminalContextMenuCommand::PinDirectory,
-            "Pin workspace to this directory",
-            pin_enabled,
-        ),
         MenuEntry::separator(),
         menu_entry(
             TerminalContextMenuCommand::OpenLink,
@@ -75,8 +61,6 @@ fn command_icon(command: TerminalContextMenuCommand) -> IconName {
         TerminalContextMenuCommand::Find => IconName::Search,
         TerminalContextMenuCommand::OpenLink => IconName::ExternalLink,
         TerminalContextMenuCommand::FilePreview => IconName::Eye,
-        TerminalContextMenuCommand::PinDirectory => IconName::Pin,
-        TerminalContextMenuCommand::UseForWorkspaceIdentity => IconName::Terminal,
     }
 }
 
@@ -104,8 +88,6 @@ impl TerminalContextMenuCommand {
             Self::Find => "find",
             Self::OpenLink => "open-link",
             Self::FilePreview => "file-preview",
-            Self::PinDirectory => "pin-directory",
-            Self::UseForWorkspaceIdentity => "workspace-identity",
         }
     }
 }

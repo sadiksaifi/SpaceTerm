@@ -2140,7 +2140,6 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         assert!(worker.publish_screen());
         let retained = worker.directory_state.snapshot().unwrap();
         assert_eq!(retained.current, None);
-        assert_eq!(retained.last_valid, Some(expected));
         worker.finish();
     }
 }

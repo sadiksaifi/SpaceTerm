@@ -5468,7 +5468,7 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
 }
 
 #[gpui::test]
-fn collapsed_top_chrome_should_fit_after_pinning_changes_identity(cx: &mut TestAppContext) {
+fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppContext) {
     let directory = temporary_directory("pinned-directory-with-a-long-name");
     fs::create_dir_all(&directory).unwrap();
     let (manager, _, cx) = workspace_manager(cx);
@@ -5480,9 +5480,13 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_identity(cx: &mut TestA
         .into_owned();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.pin_current_directory(
+            let directory = manager
+                .local_filesystem
+                .validate_directory(&directory)
+                .unwrap();
+            manager.apply_directory_pin(
                 WorkspaceId::new(1),
-                crate::terminal::metadata::CurrentDirectory::Local(directory.clone()),
+                Some(PinnedDirectory::Local(directory)),
                 window,
                 cx,
             );
@@ -6435,7 +6439,6 @@ mod macos_adapter_tests {
 
 #[gpui::test]
 fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestAppContext) {
-    use crate::terminal::metadata::CurrentDirectory;
     let root = temporary_directory("pin-policy");
     let first = root.join("first");
     let second = root.join("second");
@@ -6445,9 +6448,13 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
     for (directory, existing_count) in [(&first, 1), (&second, 2)] {
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.pin_current_directory(
+                let directory = manager
+                    .local_filesystem
+                    .validate_directory(directory)
+                    .unwrap();
+                manager.apply_directory_pin(
                     WorkspaceId::new(1),
-                    CurrentDirectory::Local(directory.clone()),
+                    Some(PinnedDirectory::Local(directory)),
                     window,
                     cx,
                 );
@@ -6525,9 +6532,15 @@ fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
     for (directory, count) in [("/srv/frontend", 2), ("/srv/backend", 3)] {
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.pin_current_directory(
+                manager.apply_directory_pin(
                     WorkspaceId::new(2),
-                    CurrentDirectory::Remote(RemoteDirectory::new(directory.into()).unwrap()),
+                    Some(PinnedDirectory::Remote {
+                        directory: RemoteDirectory::new(directory.into()).unwrap(),
+                        identity: crate::domain::RemoteDirectoryIdentity::new(
+                            "/srv/physical".into(),
+                        )
+                        .unwrap(),
+                    }),
                     window,
                     cx,
                 )
@@ -6569,66 +6582,6 @@ fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
         "/srv/backend"
     );
     assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-}
-
-#[gpui::test]
-fn delayed_remote_pin_must_not_override_a_later_unpin(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let (sender, receiver) = async_channel::bounded(1);
-    let pending = cx.update(|_, cx| {
-        cx.background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() })
-    });
-    let provider = Arc::new(BlockingRemoteProvider {
-        account: Mutex::new(None),
-        identity: Mutex::new(Some(pending)),
-        account_calls: Arc::new(AtomicUsize::new(0)),
-        identity_calls: Arc::new(AtomicUsize::new(0)),
-    });
-    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
-        "work",
-        "~",
-        "/home/tester",
-        true,
-        gpui::Task::ready(Ok(())),
-        provider.clone(),
-    );
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.pin_current_directory(
-                WorkspaceId::new(2),
-                CurrentDirectory::Remote(RemoteDirectory::new("/srv/late".into()).unwrap()),
-                window,
-                cx,
-            )
-        })
-    });
-    cx.run_until_parked();
-    assert_eq!(provider.identity_calls.load(Ordering::Acquire), 1);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx);
-        })
-    });
-    sender
-        .try_send(Ok(crate::domain::RemoteDirectoryIdentity::new(
-            "/srv/late".into(),
-        )
-        .unwrap()))
-        .unwrap();
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .workspace(WorkspaceId::new(2))
-            .unwrap()
-            .pinned_directory()
-            .is_none()
-    }));
-    assert_eq!(records.starts().len(), 2);
     assert_eq!(closes.load(Ordering::Acquire), 0);
 }
 
@@ -6770,9 +6723,6 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     assert_eq!(records.session_count(), 2);
     assert_eq!(records.dropped_session_ids(), vec![2]);
 }
-
-#[path = "tests/identity.rs"]
-mod identity;
 
 #[gpui::test]
 fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remote(

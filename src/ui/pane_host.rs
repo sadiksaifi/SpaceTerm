@@ -77,8 +77,6 @@ pub(crate) enum PaneHostEvent {
     UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
     CloseTabRequested { tab_id: TabId },
     PresentationChanged { tab_id: TabId },
-    PinDirectoryRequested { directory: CurrentDirectory },
-    PrimaryPaneSelected { tab_id: TabId },
 }
 
 impl std::fmt::Debug for PaneHostEvent {
@@ -87,8 +85,6 @@ impl std::fmt::Debug for PaneHostEvent {
             Self::UserClosePaneRequested { .. } => "PaneHostEvent::UserClosePaneRequested",
             Self::CloseTabRequested { .. } => "PaneHostEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "PaneHostEvent::PresentationChanged",
-            Self::PinDirectoryRequested { .. } => "PaneHostEvent::PinDirectoryRequested",
-            Self::PrimaryPaneSelected { .. } => "PaneHostEvent::PrimaryPaneSelected",
         })
     }
 }
@@ -197,21 +193,12 @@ impl PaneHost {
             window,
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
-                TerminalPaneEvent::PinDirectoryRequested => host.request_pin_directory(pane_id, cx),
-                TerminalPaneEvent::WorkspaceIdentityRequested => {
-                    host.select_primary_pane(pane_id, cx)
-                }
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
                         tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
-                }
-                TerminalPaneEvent::DirectoryChanged => {
-                    cx.emit(PaneHostEvent::PresentationChanged {
-                        tab_id: host.terminal_tab.id(),
-                    });
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
@@ -289,26 +276,6 @@ impl PaneHost {
             .and_then(|terminal| terminal.read(cx).current_directory())
     }
 
-    pub(crate) fn identity_directory(&self, cx: &App) -> Option<CurrentDirectory> {
-        self.terminal_tab
-            .terminal(self.terminal_tab.primary_pane_id())
-            .and_then(|terminal| terminal.read(cx).identity_directory())
-    }
-
-    pub(crate) fn reset_primary_pane(&mut self) {
-        self.terminal_tab.reset_primary_pane();
-    }
-
-    pub(crate) fn select_primary_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.close_tab_requested || self.terminal_tab.select_primary_pane(pane_id).is_err() {
-            return;
-        }
-        cx.emit(PaneHostEvent::PrimaryPaneSelected {
-            tab_id: self.tab_id(),
-        });
-        cx.notify();
-    }
-
     pub(crate) fn terminal_panes<'a>(
         &'a self,
         cx: &'a App,
@@ -320,12 +287,6 @@ impl PaneHost {
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.session_factory.set_pinned_directory(directory);
-    }
-
-    pub(crate) fn request_pin_directory(&self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if let Some(directory) = self.current_directory(pane_id, cx) {
-            cx.emit(PaneHostEvent::PinDirectoryRequested { directory });
-        }
     }
 
     pub(crate) fn tab_title(&self) -> gpui::SharedString {
@@ -1125,8 +1086,6 @@ impl PaneHost {
                 self.split_pane(pane_id, SplitAxis::Vertical, window, cx)
             }
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
-            PaneActionMenuCommand::PinDirectory => self.request_pin_directory(pane_id, cx),
-            PaneActionMenuCommand::UseForWorkspaceIdentity => self.select_primary_pane(pane_id, cx),
             PaneActionMenuCommand::Close => self.request_close_pane(pane_id, cx),
         }
         if self.menu_pane_id.take().is_some() {
@@ -1214,7 +1173,7 @@ impl PaneHost {
         pane_id: PaneId,
         host: gpui::WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
-        cx: &App,
+        _cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
@@ -1290,7 +1249,6 @@ impl PaneHost {
             .when(has_multiple_panes, |pane| {
                 pane.child(render_pane_controls(
                     pane_id,
-                    self.current_directory(pane_id, cx).is_some(),
                     focused,
                     zoomed,
                     &pane_group,
@@ -1578,7 +1536,6 @@ fn render_divider(
 
 fn render_pane_controls(
     pane_id: PaneId,
-    pin_enabled: bool,
     focused: bool,
     zoomed: bool,
     pane_group: &str,
@@ -1604,7 +1561,6 @@ fn render_pane_controls(
                 "Pane Actions",
                 pane_action_menu_entries(
                     "pane-menu",
-                    Some(pin_enabled),
                     zoomed,
                     true,
                     CloseTarget::Pane,
@@ -3090,7 +3046,7 @@ mod tests {
             (
                 Some(px(26.0)),
                 Some(px(26.0)),
-                Some(size(px(240.0), px(173.0)))
+                Some(size(px(240.0), px(121.0)))
             )
         );
     }
@@ -3347,45 +3303,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn pane_pin_action_should_emit_clicked_panes_directory(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init).unwrap();
-        let records = TestTerminalSessionRecords::default();
-        let factory = remote_test_session_factory(records.clone());
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
-        cx.run_until_parked();
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
-        report_current_directory(&records, 1, 1, "/srv/first", true);
-        report_current_directory(&records, 2, 1, "/srv/second", true);
-        cx.run_until_parked();
-        let pins = Rc::new(RefCell::new(Vec::new()));
-        host.update(cx, |_, cx| {
-            let pins = pins.clone();
-            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
-                if let PaneHostEvent::PinDirectoryRequested { directory } = event {
-                    pins.borrow_mut().push(directory.clone());
-                }
-            })
-            .detach();
-        });
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.perform_menu_command(
-                    PaneActionMenuCommand::PinDirectory,
-                    PaneId::new(1),
-                    window,
-                    cx,
-                )
-            })
-        });
-        assert_eq!(
-            pins.borrow().as_slice(),
-            &[CurrentDirectory::Remote(
-                crate::domain::RemoteDirectory::new("/srv/first".into()).unwrap()
-            )]
-        );
-    }
     #[gpui::test]
     fn local_split_should_inherit_target_apply_pins_and_reject_unavailable_directories(
         cx: &mut TestAppContext,

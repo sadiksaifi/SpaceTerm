@@ -1,7 +1,6 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
-use crate::terminal::metadata::CurrentDirectory;
 use std::rc::Rc;
 
 use thiserror::Error;
@@ -151,7 +150,6 @@ pub(crate) enum TabManagerEvent {
     CloseTabRequested { tab_id: TabId },
     FinalTabCloseRequested { final_tab_id: TabId },
     PresentationChanged,
-    PinDirectoryRequested { directory: CurrentDirectory },
 }
 
 impl std::fmt::Debug for TabManagerEvent {
@@ -161,7 +159,6 @@ impl std::fmt::Debug for TabManagerEvent {
             Self::CloseTabRequested { .. } => "TabManagerEvent::CloseTabRequested",
             Self::FinalTabCloseRequested { .. } => "TabManagerEvent::FinalTabCloseRequested",
             Self::PresentationChanged => "TabManagerEvent::PresentationChanged",
-            Self::PinDirectoryRequested { .. } => "TabManagerEvent::PinDirectoryRequested",
         })
     }
 }
@@ -301,17 +298,6 @@ impl TabManager {
                     cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
-                PaneHostEvent::PrimaryPaneSelected { tab_id } => {
-                    if manager.tabs.select_primary_tab(*tab_id).is_ok() {
-                        cx.emit(TabManagerEvent::PresentationChanged);
-                        cx.notify();
-                    }
-                }
-                PaneHostEvent::PinDirectoryRequested { directory } => {
-                    cx.emit(TabManagerEvent::PinDirectoryRequested {
-                        directory: directory.clone(),
-                    });
-                }
             },
         )
         .detach();
@@ -329,10 +315,6 @@ impl TabManager {
         if self.active {
             self.tabs.active_tab().read(cx).focus(window, cx);
         }
-    }
-
-    pub(crate) fn identity_directory(&self, cx: &App) -> Option<CurrentDirectory> {
-        self.tabs.primary_tab().read(cx).identity_directory(cx)
     }
 
     pub(crate) fn native_service_status(
@@ -969,7 +951,6 @@ impl TabManager {
         }
 
         let was_active = self.tabs.active_tab_id() == tab_id;
-        let was_primary = self.tabs.primary_tab_id() == tab_id;
         match self.tabs.close_tab(tab_id) {
             Ok(CloseTabOutcome::TabClosed {
                 closed_tab_id,
@@ -978,11 +959,6 @@ impl TabManager {
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
                 payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
-                if was_primary {
-                    self.tabs
-                        .primary_tab()
-                        .update(cx, |host, _| host.reset_primary_pane());
-                }
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
                     if self.active {
@@ -1091,19 +1067,7 @@ impl TabManager {
             PaneActionMenuCommand::ToggleZoom => {
                 pane_host.update(cx, |pane_host, cx| pane_host.toggle_zoom(window, cx));
             }
-            PaneActionMenuCommand::PinDirectory => {
-                if self.tabs.len() == 1 && pane_host.read(cx).pane_count() == 1 {
-                    pane_host.update(cx, |host, cx| {
-                        host.request_pin_directory(host.focused_pane_id(), cx)
-                    });
-                }
-            }
             PaneActionMenuCommand::Close => self.request_close_tab(tab_id, cx),
-            PaneActionMenuCommand::UseForWorkspaceIdentity => {
-                pane_host.update(cx, |host, cx| {
-                    host.select_primary_pane(host.focused_pane_id(), cx);
-                });
-            }
         }
         if self.tab_menu.take().is_some() {
             self.sync_terminal_focus_blocker(cx);
@@ -1153,12 +1117,6 @@ impl TabManager {
 
     fn on_activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_tab_at(8, window, cx);
-    }
-
-    fn tab_pin_directory_availability(&self, tab_id: TabId, cx: &App) -> Option<bool> {
-        let host = self.tabs.tab(tab_id)?.read(cx);
-        (self.tabs.len() == 1 && host.pane_count() == 1)
-            .then(|| host.current_directory(host.focused_pane_id(), cx).is_some())
     }
 
     fn render_tab_item(
@@ -1325,7 +1283,6 @@ impl TabManager {
                 .child(item),
             pane_action_menu_entries(
                 "tab-menu",
-                self.tab_pin_directory_availability(tab_id, cx),
                 zoomed,
                 zoom_enabled,
                 CloseTarget::Tab,
@@ -1455,7 +1412,6 @@ impl TabManager {
                             "Tab Actions",
                             pane_action_menu_entries(
                                 "tab-menu",
-                                self.tab_pin_directory_availability(active_tab_id, cx),
                                 zoomed,
                                 zoom_enabled,
                                 CloseTarget::Tab,
@@ -3728,132 +3684,6 @@ mod tests {
             ]
         );
         assert_eq!(records.dropped_session_ids(), Vec::<usize>::new());
-    }
-
-    #[gpui::test]
-    fn tab_pin_proxy_should_exist_only_for_one_tab_and_one_pane(cx: &mut TestAppContext) {
-        let (manager, _, cx) = tab_manager(cx);
-        assert!(
-            manager
-                .read_with(cx, |manager, cx| manager
-                    .tab_pin_directory_availability(TabId::new(1), cx))
-                .is_some()
-        );
-        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
-        cx.run_until_parked();
-        assert_eq!(
-            manager.read_with(cx, |manager, cx| manager
-                .tab_pin_directory_availability(TabId::new(1), cx)),
-            None
-        );
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.close_tab(TabId::new(2), window, cx);
-                manager.tabs.active_tab().update(cx, |host, cx| {
-                    host.split_focused(SplitAxis::Horizontal, window, cx)
-                });
-            })
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            manager.read_with(cx, |manager, cx| manager
-                .tab_pin_directory_availability(TabId::new(1), cx)),
-            None
-        );
-    }
-    #[gpui::test]
-    fn terminal_context_pin_should_remain_available_in_multiple_single_pane_tabs(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = remote_tab_manager(cx);
-        report_current_directory(&records, 1, 1, "/srv/first", true);
-        cx.run_until_parked();
-        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
-        cx.run_until_parked();
-        report_current_directory(&records, 2, 1, "/srv/second", true);
-        cx.run_until_parked();
-        let pins = Rc::new(RefCell::new(Vec::new()));
-        manager.update(cx, |_, cx| {
-            let pins = Rc::clone(&pins);
-            cx.subscribe(&manager, move |_, _, event: &TabManagerEvent, _| {
-                if let TabManagerEvent::PinDirectoryRequested { directory } = event {
-                    pins.borrow_mut().push(directory.clone());
-                }
-            })
-            .detach();
-        });
-        for tab_id in [TabId::new(1), TabId::new(2)] {
-            cx.update(|window, cx| {
-                manager.update(cx, |manager, cx| manager.activate_tab(tab_id, window, cx));
-            });
-            cx.run_until_parked();
-            // A closed deferred menu remains in GPUI's visual-test hit map for one replacement
-            // frame. Paint the active Tab through that retirement before targeting its terminal.
-            for _ in 0..2 {
-                cx.update(|window, _| window.refresh());
-                cx.run_until_parked();
-            }
-            assert_eq!(
-                manager.read_with(cx, |manager, cx| manager
-                    .tab_pin_directory_availability(tab_id, cx)),
-                None
-            );
-            right_click(
-                "terminal-native-context-copy-false-open-false-file-preview-false-failure-false-last-frame-false",
-                cx,
-            );
-            click("terminal-context-menu-row-pin-directory-enabled", cx);
-            assert_eq!(
-                pins.borrow().len(),
-                tab_id.get() as usize,
-                "each targeted Tab must emit a pin"
-            );
-        }
-        assert_eq!(
-            *pins.borrow(),
-            ["/srv/first", "/srv/second"].map(|directory| CurrentDirectory::Remote(
-                crate::domain::RemoteDirectory::new(directory.into()).unwrap()
-            ))
-        );
-    }
-
-    #[gpui::test]
-    fn closing_primary_tab_should_promote_first_pane_instead_of_historical_selection(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = remote_tab_manager(cx);
-        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.create_tab(window, cx)));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-d");
-        cx.run_until_parked();
-        report_current_directory(&records, 2, 1, "/srv/first", true);
-        report_current_directory(&records, 3, 1, "/srv/historical", true);
-        cx.run_until_parked();
-        for (tab_id, pane_id) in [
-            (TabId::new(2), PaneId::new(2)),
-            (TabId::new(1), PaneId::new(1)),
-        ] {
-            manager.update(cx, |manager, cx| {
-                manager
-                    .tabs
-                    .tab(tab_id)
-                    .unwrap()
-                    .update(cx, |host, cx| host.select_primary_pane(pane_id, cx));
-            });
-            cx.run_until_parked();
-        }
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.close_tab(TabId::new(1), window, cx)
-            })
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            manager.read_with(cx, |manager, cx| manager.identity_directory(cx)),
-            Some(CurrentDirectory::Remote(
-                crate::domain::RemoteDirectory::new("/srv/first".into()).unwrap()
-            ))
-        );
     }
 
     #[gpui::test]
