@@ -440,11 +440,13 @@ impl WorkspaceSidebar {
         self.remote_unavailable = remote_unavailable;
         cx.notify();
     }
-    fn active_name(&self) -> &str {
-        self.rows
-            .iter()
-            .find(|row| row.active)
-            .map_or("", |row| row.name.as_ref())
+    fn collapsed_top_chrome_width(&self, window: &Window) -> Pixels {
+        let active = self.rows.iter().find(|row| row.active);
+        collapsed_top_chrome_width(
+            active.map_or("", |row| row.name.as_ref()),
+            active.is_some_and(|row| row.pinned),
+            window,
+        )
     }
 }
 impl Render for WorkspaceSidebar {
@@ -524,7 +526,8 @@ impl WorkspaceSidebar {
             } => {
                 let should_resize = self.layout.visible
                     || px(requested_value)
-                        >= collapsed_top_chrome_width(self.active_name(), window)
+                        >= self
+                            .collapsed_top_chrome_width(window)
                             .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
                 if should_resize {
                     self.resize(px(requested_value), window, cx);
@@ -602,14 +605,19 @@ fn secondary_text_color() -> Color {
 
 pub(super) const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 pub(super) const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
-pub(super) const TOP_CHROME_ACTION_CLEARANCE: f32 =
-    SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
+pub(super) const WORKSPACE_SWITCHER_PADDING: f32 = 4.0;
 pub(super) const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
 pub(super) const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
+pub(super) const WORKSPACE_CHIP_PIN_SIZE: f32 = 12.0;
 pub(super) const WORKSPACE_CHIP_GAP: f32 = 5.0;
 pub(super) const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
-pub(super) fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
+pub(super) fn top_chrome_trailing_inset() -> Pixels {
+    // Leave the trigger border outside the sidebar resize target as well.
+    super::resize_handle_theme::spacious_target_half_thickness() + px(1.0)
+}
+
+pub(super) fn collapsed_top_chrome_width(name: &str, pinned: bool, window: &Window) -> Pixels {
     let text_style = window.text_style();
     let run = TextRun {
         len: name.len(),
@@ -635,10 +643,18 @@ pub(super) fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels 
         )
         .width;
     let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
-        + WORKSPACE_CHIP_ICON_SIZE
-        + WORKSPACE_CHIP_GAP
-        + TOP_CHROME_ACTION_CLEARANCE);
-    (fixed_width + name_width)
+        + TOP_CHROME_ACTION_SIZE
+        + WORKSPACE_CHIP_ICON_SIZE * 2.0
+        + WORKSPACE_CHIP_GAP * 2.0
+        + WORKSPACE_SWITCHER_PADDING * 2.0
+        + 2.0)
+        + top_chrome_trailing_inset();
+    let pin_width = if pinned {
+        px(WORKSPACE_CHIP_PIN_SIZE + WORKSPACE_CHIP_GAP)
+    } else {
+        px(0.0)
+    };
+    (fixed_width + pin_width + name_width)
         .ceil()
         .min(px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH))
 }

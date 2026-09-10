@@ -5304,6 +5304,7 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
     let collapsed_width = cx.update(|window, cx| {
         collapsed_top_chrome_width(
             manager.read(cx).workspaces.active_workspace().name(),
+            false,
             window,
         )
     });
@@ -5556,7 +5557,13 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         .debug_bounds("toggle-sidebar-button")
         .expect("sidebar toggle");
     assert_eq!(chooser.size, toggle.size);
-    assert_eq!(chooser.right(), toggle.left());
+    let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    assert_eq!(toggle.left(), chrome.left() + px(TRAFFIC_LIGHT_CLEARANCE));
+    assert!(toggle.right() < chooser.left());
+    assert_eq!(
+        chooser.right(),
+        chrome.right() - top_chrome_trailing_inset()
+    );
 
     click("workspace-switcher", cx);
 
@@ -5582,7 +5589,7 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
     let chip = cx
         .debug_bounds("workspace-chip")
         .expect("collapsed Workspace chip");
-    assert!(chip.right() <= chooser.left());
+    assert!(chooser.left() <= chip.left() && chip.right() <= chooser.right());
 
     click("workspace-switcher", cx);
 
@@ -5750,8 +5757,8 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
         2
     );
     assert!(
-        chip.right() <= chooser.left(),
-        "the chip overlapped the Workspace chooser: {chip:?} {chooser:?}"
+        chooser.left() <= chip.left() && chip.right() <= chooser.right(),
+        "the chip escaped the Workspace chooser: {chip:?} {chooser:?}"
     );
 }
 
@@ -5840,6 +5847,56 @@ fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut TestAppContext) {
+    let directory = temporary_directory("collapsed-pin");
+    fs::create_dir_all(&directory).unwrap();
+    let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(directory.clone()))], cx);
+    choose_with_directory_selection_fallback(&manager, cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "A".into())
+            .unwrap();
+        cx.notify();
+    });
+    click("toggle-sidebar-button", cx);
+    let pinned_chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    let label = cx.debug_bounds("workspace-chip-label").unwrap();
+    let pin = cx.debug_bounds("workspace-chip-pin").unwrap();
+    let chooser = cx.debug_bounds("workspace-switcher").unwrap();
+    assert!(label.size.width > px(0.0));
+    assert!(pin.right() <= label.left() && label.right() <= chooser.right());
+    assert_eq!(
+        cx.debug_bounds("tab-manager-top-spacer")
+            .unwrap()
+            .size
+            .width,
+        pinned_chrome.size.width
+    );
+    assert_eq!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-divider")
+            .unwrap()
+            .center()
+            .x,
+        pinned_chrome.right()
+    );
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(1), None, window, cx);
+        });
+    });
+    redraw(cx);
+    let unpinned_chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    assert_eq!(
+        pinned_chrome.size.width - unpinned_chrome.size.width,
+        px(WORKSPACE_CHIP_PIN_SIZE + WORKSPACE_CHIP_GAP)
+    );
+    assert!(cx.debug_bounds("workspace-chip-label").unwrap().size.width >= label.size.width);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
 fn collapsed_top_chrome_should_preserve_the_default_label_beside_both_actions(
     cx: &mut TestAppContext,
 ) {
@@ -5878,8 +5935,95 @@ fn collapsed_top_chrome_should_preserve_the_default_label_beside_both_actions(
         "Default needs {name_width:?}, but the collapsed label received {:?}",
         label.size.width
     );
-    assert!(label.right() <= chooser.left());
-    assert!(chooser.right() <= toggle.left() && toggle.right() <= chrome.right());
+    assert!(chooser.left() <= label.left() && label.right() <= chooser.right());
+    assert!(toggle.right() <= chooser.left() && chooser.right() <= chrome.right());
+}
+
+#[gpui::test]
+fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
+    cx: &mut TestAppContext,
+) {
+    let (manager, platform, cx) = workspace_manager_with_operating_system_window_drag_platform(cx);
+    let expanded_toggle = cx.debug_bounds("toggle-sidebar-button").unwrap();
+    click("toggle-sidebar-button", cx);
+    assert_eq!(
+        cx.debug_bounds("toggle-sidebar-button").unwrap(),
+        expanded_toggle
+    );
+
+    let chooser = cx.debug_bounds("workspace-switcher").unwrap();
+    let switcher_icon = cx.debug_bounds("workspace-switcher-icon").unwrap();
+    let workspace_icon = cx.debug_bounds("workspace-chip-icon").unwrap();
+    let label = cx.debug_bounds("workspace-chip-label").unwrap();
+    let tabs = cx.debug_bounds("tab-bar").unwrap();
+    assert!(expanded_toggle.right() <= chooser.left());
+    assert!(switcher_icon.right() <= workspace_icon.left());
+    assert!(workspace_icon.right() <= label.left());
+    assert!(chooser.right() <= tabs.left());
+
+    for position in [
+        switcher_icon.center(),
+        workspace_icon.center(),
+        label.center(),
+        point(chooser.left() + px(2.0), chooser.center().y),
+        point(chooser.right() - px(2.0), chooser.center().y),
+        point(chooser.center().x, chooser.top() + px(2.0)),
+    ] {
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_click(position, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| window_combo_box_is_open(window, cx)),
+            "click at {position:?} did not open chooser {chooser:?}"
+        );
+        assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
+        assert!(
+            cx.debug_bounds("workspace-switcher-create-remote")
+                .is_some()
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        }));
+    }
+    assert_eq!(platform.counts(), (0, 0, 0, 0));
+}
+
+#[gpui::test]
+fn collapsed_workspace_name_should_open_filter_and_create_a_named_workspace(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+    click("workspace-chip-label", cx);
+    cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
+    cx.run_until_parked();
+    click("workspace-switcher-create-local", cx);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace().name().to_owned()
+        }),
+        "fresh workspace"
+    );
+    assert_eq!(records.starts().len(), 2);
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 }
 
 #[gpui::test]
@@ -6172,6 +6316,7 @@ fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut
     let collapsed_width = cx.update(|window, cx| {
         collapsed_top_chrome_width(
             manager.read(cx).workspaces.active_workspace().name(),
+            false,
             window,
         )
     });

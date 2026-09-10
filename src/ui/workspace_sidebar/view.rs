@@ -440,7 +440,7 @@ impl WorkspaceSidebar {
         let handle_width = if self.layout.visible {
             self.layout.width
         } else {
-            collapsed_top_chrome_width(self.active_name(), window)
+            self.collapsed_top_chrome_width(window)
         };
         let current_width = f32::from(handle_width);
         let handle = ResizeHandle::new(

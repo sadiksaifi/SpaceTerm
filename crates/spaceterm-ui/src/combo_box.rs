@@ -597,6 +597,12 @@ impl Global for ComboBoxTheme {}
 type AcceptanceHandler<I> = Rc<dyn Fn(&ComboBoxAcceptance<I>, &mut Window, &mut App)>;
 type LifecycleHandler = Rc<dyn Fn(&ComboBoxLifecycleEvent, &mut App)>;
 
+enum ComboBoxTrigger {
+    Text,
+    Icon,
+    Custom(AnyElement),
+}
+
 /// A reusable controlled ComboBox with a searchable anchored popup.
 ///
 /// The caller supplies `selected` on every render. Acceptance proposes a new identity but never
@@ -618,7 +624,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
-    icon_trigger: bool,
+    trigger: ComboBoxTrigger,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
     on_accept: Option<AcceptanceHandler<I>>,
@@ -650,7 +656,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             full_width: false,
             trigger_leading: None,
             input_leading: None,
-            icon_trigger: false,
+            trigger: ComboBoxTrigger::Text,
             tooltip: None,
             debug_selector: None,
             on_accept: None,
@@ -712,7 +718,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
-    /// Makes a text trigger fill the width allocated by its parent.
+    /// Makes a text or custom trigger fill the width allocated by its parent.
     ///
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
@@ -738,7 +744,17 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// target size comes from [`ComboBoxMetrics::icon_trigger_size`].
     pub fn icon_trigger(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.trigger_leading = Some(Rc::new(build));
-        self.icon_trigger = true;
+        self.trigger = ComboBoxTrigger::Icon;
+        self
+    }
+
+    /// Replaces the visible trigger content while retaining ComboBox interaction and focus.
+    ///
+    /// Content must be decorative, without nested controls. The trigger uses the compact icon
+    /// target height and the content's intrinsic width, or its parent's width with `full_width`.
+    /// Supply any desired padding inside the content; no label or chevron is added.
+    pub fn custom_trigger(mut self, content: impl IntoElement) -> Self {
+        self.trigger = ComboBoxTrigger::Custom(content.into_any_element());
         self
     }
 
@@ -1654,7 +1670,13 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let accessibility_name = self.accessibility_name;
         let paint = theme.paint;
         let metrics = theme.metrics;
-        let icon_trigger = self.icon_trigger;
+        let (icon_trigger, custom_content) = match self.trigger {
+            ComboBoxTrigger::Text => (false, None),
+            ComboBoxTrigger::Icon => (true, None),
+            ComboBoxTrigger::Custom(content) => (false, Some(content)),
+        };
+        let custom_trigger = custom_content.is_some();
+        let text_trigger = !icon_trigger && !custom_trigger;
         let fill_parent = self.full_width && !icon_trigger;
         let trigger = div()
             .id(self.id)
@@ -1668,7 +1690,13 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     .flex_shrink_0()
                     .justify_center()
             })
-            .when(!icon_trigger, |trigger| {
+            .when(custom_trigger, |trigger| {
+                trigger
+                    .h(metrics.icon_trigger_size)
+                    .min_w_0()
+                    .when(fill_parent, |trigger| trigger.w_full())
+            })
+            .when(text_trigger, |trigger| {
                 trigger
                     .h(metrics.trigger_height)
                     .when(fill_parent, |trigger| trigger.w_full())
@@ -1701,14 +1729,19 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .when(enabled && !open, |trigger| {
                 trigger.hover(move |style| style.bg(paint.trigger_hover_background))
             })
-            .children(self.trigger_leading.map(|leading| {
-                leading(if enabled {
-                    paint.foreground
-                } else {
-                    paint.disabled
-                })
-            }))
-            .when(!icon_trigger, |trigger| {
+            .children(
+                self.trigger_leading
+                    .filter(|_| !custom_trigger)
+                    .map(|leading| {
+                        leading(if enabled {
+                            paint.foreground
+                        } else {
+                            paint.disabled
+                        })
+                    }),
+            )
+            .children(custom_content)
+            .when(text_trigger, |trigger| {
                 trigger
                     .child(
                         div()
@@ -1753,6 +1786,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
 
         div()
             .relative()
+            .min_w_0()
             .when(fill_parent, |root| root.w_full())
             .when(icon_trigger, |root| {
                 root.size(metrics.icon_trigger_size).flex_shrink_0()
