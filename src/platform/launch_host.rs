@@ -23,6 +23,16 @@ pub(crate) fn user_shell() -> String {
         .unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
+/// The account name shown as the Local Terminal origin, from the login environment.
+pub(crate) fn local_user() -> Option<String> {
+    ["USER", "LOGNAME"].into_iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+    })
+}
+
 pub(crate) fn local_hostname() -> Option<String> {
     let mut buffer = [0_u8; 256];
     // SAFETY: `buffer` is writable for its complete length and gethostname writes at most that

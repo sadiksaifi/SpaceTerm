@@ -48,7 +48,8 @@ pub(crate) use terminal_focus::{
 #[cfg(test)]
 pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
-    PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
+    PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
+    TerminalPaneEvent,
 };
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 

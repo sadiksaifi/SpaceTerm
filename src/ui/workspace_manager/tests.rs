@@ -4233,7 +4233,7 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         crate::local_path::LocalPathSemantics::Posix,
         "/Users/test",
         "zsh",
-        None,
+        Default::default(),
         Instant::now(),
     );
     assert!(metadata.apply_semantic_prompt("A", Instant::now()));

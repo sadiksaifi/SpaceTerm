@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
 use super::{
-    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, PaneOrigin,
     PreparedRemotePaneRestart, RemoteChildLaunchUnavailable, RemotePaneLifecycleError, SplitDown,
     SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
@@ -56,15 +56,26 @@ use spaceterm_ui::{
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const PANE_CAPTION_HEIGHT: f32 = 26.0;
-const PANE_CAPTION_LEFT_PADDING: f32 = 11.0;
-const PANE_CAPTION_RIGHT_PADDING: f32 = 6.0;
+const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
+const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
+const PANE_CAPTION_TEXT_SIZE: f32 = 11.0;
+/// Width reserved by the middle dot that separates a directory from its Pane label.
+const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 15.0;
+const PANE_ORIGIN_ICON_SIZE: f32 = 12.0;
+const PANE_ORIGIN_ICON_GAP: f32 = 6.0;
+/// Width reserved by the chevron that separates a Pane's origin from its directory.
+const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 16.0;
 const PANE_CONTROL_SIZE: f32 = 20.0;
+const PANE_CONTROL_GAP: f32 = 2.0;
+const PANE_CONTROL_ICON_SIZE: f32 = 12.0;
+const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 const PANE_ATTENTION_WIDTH: f32 = 13.0;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CAPTION_RIGHT_PADDING
     + PANE_ATTENTION_WIDTH
+    + PANE_CONTROL_LEADING_GAP
     + PANE_CONTROL_SIZE * 2.0
-    + 1.0;
+    + PANE_CONTROL_GAP;
 const MINIMUM_PANE_HEIGHT: f32 = PANE_CAPTION_HEIGHT + 4.0;
 
 #[derive(Clone, Copy)]
@@ -75,57 +86,170 @@ enum PaneCaptionAction {
     Close,
 }
 
+/// Which caption segments this frame's Pane width can hold.
+///
+/// The Pane name is never dropped. Segments leave in order of how little they identify the Pane:
+/// the running label first, then the account, then the leading directory, then the machine, and
+/// last the origin icon, so the narrowest Pane still names the directory it sits in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaptionLayout {
-    show_process: bool,
+    show_origin: bool,
+    show_host: bool,
+    show_directory: bool,
+    show_user: bool,
+    show_label: bool,
     show_splits: bool,
+}
+
+/// How many caption segments beyond the Pane name a narrowing caption can give up.
+const CAPTION_LADDER: usize = 5;
+
+/// Rendered widths of the caption segments, each including the separator that precedes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CaptionMetrics {
+    origin_icon: Pixels,
+    user: Pixels,
+    host: Pixels,
+    directory: Pixels,
+    name: Pixels,
+    label: Pixels,
+}
+
+impl CaptionMetrics {
+    fn measure(text: &PaneCaptionText, window: &Window) -> Self {
+        let host = measure_caption_segment(&text.origin.host, window);
+        Self {
+            origin_icon: if text.origin.is_empty() {
+                px(0.0)
+            } else {
+                px(PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP)
+            },
+            user: if text.origin.user.is_empty() {
+                px(0.0)
+            } else {
+                measure_caption_segment(&origin_account(&text.origin.user), window)
+            },
+            host: if host > px(0.0) {
+                host + px(PANE_ORIGIN_SEPARATOR_WIDTH)
+            } else {
+                host
+            },
+            directory: measure_caption_segment(&text.directory, window),
+            name: measure_caption_segment(&text.name, window),
+            label: if text.label.is_empty() {
+                px(0.0)
+            } else {
+                measure_caption_segment(&text.label, window) + px(PANE_CAPTION_SEPARATOR_WIDTH)
+            },
+        }
+    }
+
+    /// The droppable segments in the order a narrowing caption gives them up, last one first.
+    const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
+        [
+            self.origin_icon,
+            self.host,
+            self.directory,
+            self.user,
+            self.label,
+        ]
+    }
 }
 
 impl CaptionLayout {
     fn resolve(caption: &PaneCaption, width: Pixels, window: &Window) -> Self {
-        let full_control_count = if caption.has_multiple_panes { 4 } else { 2 };
+        Self::from_metrics(
+            caption.attention,
+            caption.has_multiple_panes,
+            width,
+            CaptionMetrics::measure(&caption.text, window),
+        )
+    }
+
+    fn from_metrics(
+        attention: bool,
+        has_multiple_panes: bool,
+        width: Pixels,
+        metrics: CaptionMetrics,
+    ) -> Self {
+        let full_control_count = if has_multiple_panes { 4 } else { 2 };
         let fixed_width = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
-            + if caption.attention {
-                PANE_ATTENTION_WIDTH
-            } else {
-                0.0
-            };
+            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 };
         let show_splits = width
-            >= px(fixed_width
-                + full_control_count as f32 * PANE_CONTROL_SIZE
-                + (full_control_count - 1) as f32);
-        let control_count =
-            usize::from(show_splits) * 2 + usize::from(caption.has_multiple_panes) * 2;
-        let controls_width =
-            control_count as f32 * PANE_CONTROL_SIZE + control_count.saturating_sub(1) as f32;
-        let available = width - px(fixed_width + controls_width);
-        let text = caption.text.full.clone();
-        let style = window.text_style();
-        let run = gpui::TextRun {
-            len: text.len(),
-            font: gpui::Font {
-                family: style.font_family,
-                features: style.font_features,
-                fallbacks: style.font_fallbacks,
-                weight: style.font_weight,
-                style: style.font_style,
-            },
-            color: style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
+            >= px(fixed_width + PANE_CONTROL_LEADING_GAP + controls_width(full_control_count));
+        let control_count = usize::from(show_splits) * 2 + usize::from(has_multiple_panes) * 2;
+        let leading_gap = if control_count == 0 {
+            0.0
+        } else {
+            PANE_CONTROL_LEADING_GAP
         };
+        let available =
+            (width - px(fixed_width + leading_gap + controls_width(control_count))).max(px(0.0));
+        // The name is always kept. Every other segment is admitted in priority order and the
+        // first one that does not fit ends the ladder, so segments never reappear out of order.
+        let mut claimed = metrics.name;
+        let mut shown = [false; CAPTION_LADDER];
+        for (admitted, width) in shown.iter_mut().zip(metrics.ladder()) {
+            if claimed + width > available {
+                break;
+            }
+            claimed += width;
+            *admitted = true;
+        }
+        let [
+            show_origin,
+            show_host,
+            show_directory,
+            show_user,
+            show_label,
+        ] = shown;
         Self {
-            show_process: show_splits
-                && window
-                    .text_system()
-                    .shape_line(text, px(10.5), &[run], None)
-                    .width
-                    <= available,
+            show_origin,
+            show_host,
+            show_directory,
+            show_user,
+            show_label,
             show_splits,
         }
     }
+}
+
+/// The account half of an origin, spelled the way a shell prompt spells it.
+fn origin_account(user: &gpui::SharedString) -> gpui::SharedString {
+    format!("{user}@").into()
+}
+
+const fn controls_width(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    count as f32 * PANE_CONTROL_SIZE + (count - 1) as f32 * PANE_CONTROL_GAP
+}
+
+fn measure_caption_segment(text: &gpui::SharedString, window: &Window) -> Pixels {
+    if text.is_empty() {
+        return px(0.0);
+    }
+    let style = window.text_style();
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            family: style.font_family,
+            features: style.font_features,
+            fallbacks: style.font_fallbacks,
+            weight: style.font_weight,
+            style: style.font_style,
+        },
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text.clone(), px(PANE_CAPTION_TEXT_SIZE), &[run], None)
+        .width
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1393,23 +1517,55 @@ impl Render for PaneHost {
     }
 }
 
+/// One Pane caption split into the segments the header renders and drops independently.
+///
+/// `origin` is the account and machine the Terminal runs on, `directory` the leading path up to
+/// and including its last separator, `name` the directory leaf that identifies the Pane, and
+/// `label` the Terminal title or running command. `running` marks a label that is a live command.
 #[derive(Clone, Default, Eq, PartialEq)]
 struct PaneCaptionText {
+    origin: PaneOrigin,
     directory: gpui::SharedString,
-    full: gpui::SharedString,
+    name: gpui::SharedString,
+    label: gpui::SharedString,
+    running: bool,
 }
 
 impl PaneCaptionText {
     fn from_terminal(terminal: &TerminalPane) -> Self {
-        let (directory, label) = terminal.caption();
-        let full = if directory.is_empty() {
-            label
-        } else if label.is_empty() {
-            directory.clone()
-        } else {
-            format!("{directory} > {label}").into()
-        };
-        Self { directory, full }
+        let facts = terminal.caption();
+        if facts.directory.is_empty() {
+            return Self {
+                origin: facts.origin,
+                directory: gpui::SharedString::default(),
+                name: facts.label,
+                label: gpui::SharedString::default(),
+                running: facts.running,
+            };
+        }
+        let (leading, name) = split_directory_leaf(&facts.directory);
+        Self {
+            origin: facts.origin,
+            directory: leading,
+            name,
+            label: facts.label,
+            running: facts.running,
+        }
+    }
+}
+
+/// Splits one directory into its leading path and its leaf, keeping the separator on the lead.
+fn split_directory_leaf(directory: &str) -> (gpui::SharedString, gpui::SharedString) {
+    let trimmed = directory.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return (gpui::SharedString::default(), directory.to_owned().into());
+    }
+    match trimmed.rfind('/') {
+        Some(separator) => (
+            trimmed[..=separator].to_owned().into(),
+            trimmed[separator + 1..].to_owned().into(),
+        ),
+        None => (gpui::SharedString::default(), trimmed.to_owned().into()),
     }
 }
 
@@ -1468,6 +1624,7 @@ fn render_pane_caption_content(
         attention,
         has_multiple_panes,
     } = caption;
+    let ramp = CaptionRamp::resolve(focused, text.running, text.origin.remote);
     let focus_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
@@ -1480,7 +1637,8 @@ fn render_pane_caption_content(
         })
         .flex()
         .items_center()
-        .gap(px(1.0))
+        .gap(px(PANE_CONTROL_GAP))
+        .ml(px(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         .when(!focused, |controls| {
             controls
@@ -1535,7 +1693,9 @@ fn render_pane_caption_content(
             IconButton::new(
                 gpui::SharedString::from(id.clone()),
                 name,
-                move |foreground| Icon::new(icon, px(12.0), foreground).into_any_element(),
+                move |foreground| {
+                    Icon::new(icon, px(PANE_CONTROL_ICON_SIZE), foreground).into_any_element()
+                },
             )
             .variant(ButtonVariant::Ghost)
             .size(ButtonSize::Compact)
@@ -1570,13 +1730,9 @@ fn render_pane_caption_content(
         .overflow_hidden()
         .pl(px(PANE_CAPTION_LEFT_PADDING))
         .pr(px(PANE_CAPTION_RIGHT_PADDING))
-        .bg(gpui_color(ACTIVE_THEME.terminal_background))
-        .text_size(px(10.5))
-        .text_color(gpui_color(if focused {
-            ACTIVE_THEME.text
-        } else {
-            ACTIVE_THEME.text_muted
-        }))
+        // The caption paints no surface of its own: it reads as identity floating over the Pane.
+        .text_size(px(PANE_CAPTION_TEXT_SIZE))
+        .text_color(gpui_color(ramp.name))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             let _ = focus_host.update(cx, |host, cx| {
@@ -1596,14 +1752,159 @@ fn render_pane_caption_content(
                     .bg(gpui_color(ACTIVE_THEME.warning)),
             )
         })
-        .child(div().flex_1().min_w_0().truncate().child(
-            if text.directory.is_empty() || layout.show_process {
-                text.full
-            } else {
-                text.directory
-            },
-        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .when(layout.show_origin && !text.origin.is_empty(), |row| {
+                    row.child(render_pane_origin(pane_id, &text.origin, layout, &ramp))
+                })
+                .when(layout.show_directory && !text.directory.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .debug_selector(move || {
+                                format!("pane-caption-directory-{}", pane_id.get())
+                            })
+                            .flex_shrink_0()
+                            .text_color(gpui_color(ramp.directory))
+                            .child(text.directory),
+                    )
+                })
+                .child(
+                    div()
+                        .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
+                        .min_w_0()
+                        .truncate()
+                        .child(text.name),
+                )
+                .when(layout.show_label && !text.label.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .mx(px(5.0))
+                            .text_color(gpui_color(ramp.separator))
+                            .child("·"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
+                            .min_w_0()
+                            .truncate()
+                            .text_color(gpui_color(ramp.label))
+                            .child(text.label),
+                    )
+                }),
+        )
         .child(controls)
+        .into_any_element()
+}
+
+/// The contrast tiers one caption paints, resolved once per frame.
+///
+/// The focused Pane keeps the full ramp and every other Pane steps one tier down. Without a
+/// caption surface this ramp, and the origin icon it tints, carries the focused Pane's identity.
+#[derive(Clone, Copy)]
+struct CaptionRamp {
+    icon: Color,
+    account: Color,
+    host: Color,
+    separator: Color,
+    directory: Color,
+    name: Color,
+    label: Color,
+}
+
+impl CaptionRamp {
+    fn resolve(focused: bool, running: bool, remote: bool) -> Self {
+        if focused {
+            return Self {
+                icon: if remote {
+                    ACTIVE_THEME.text_accent
+                } else {
+                    ACTIVE_THEME.icon_muted
+                },
+                account: ACTIVE_THEME.text_placeholder,
+                host: ACTIVE_THEME.text_muted,
+                separator: ACTIVE_THEME.text_placeholder,
+                directory: ACTIVE_THEME.text_placeholder,
+                name: ACTIVE_THEME.text,
+                label: if running {
+                    ACTIVE_THEME.text_accent
+                } else {
+                    ACTIVE_THEME.text_muted
+                },
+            };
+        }
+        Self {
+            icon: if remote {
+                ACTIVE_THEME.text_accent
+            } else {
+                ACTIVE_THEME.icon_placeholder
+            },
+            account: ACTIVE_THEME.text_disabled,
+            host: ACTIVE_THEME.text_placeholder,
+            separator: ACTIVE_THEME.text_disabled,
+            directory: ACTIVE_THEME.text_disabled,
+            name: ACTIVE_THEME.text_muted,
+            label: ACTIVE_THEME.text_placeholder,
+        }
+    }
+}
+
+/// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
+///
+/// The icon states Local or Remote from the Terminal's own classification, so a Remote Pane stays
+/// distinguishable at the width where its account and machine text no longer fit.
+fn render_pane_origin(
+    pane_id: PaneId,
+    origin: &PaneOrigin,
+    layout: CaptionLayout,
+    ramp: &CaptionRamp,
+) -> AnyElement {
+    let (icon, location) = if origin.remote {
+        (IconName::Globe, "remote")
+    } else {
+        (IconName::Terminal, "local")
+    };
+    let icon_tint = gpui_color(ramp.icon);
+    div()
+        .debug_selector(move || format!("pane-caption-origin-{}-{location}", pane_id.get()))
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .child(
+            div()
+                .mr(px(PANE_ORIGIN_ICON_GAP))
+                .flex()
+                .items_center()
+                .child(Icon::new(icon, px(PANE_ORIGIN_ICON_SIZE), icon_tint)),
+        )
+        .when(layout.show_user && !origin.user.is_empty(), |row| {
+            row.child(
+                div()
+                    .debug_selector(move || format!("pane-caption-account-{}", pane_id.get()))
+                    .text_color(gpui_color(ramp.account))
+                    .child(origin_account(&origin.user)),
+            )
+        })
+        .when(layout.show_host && !origin.host.is_empty(), |row| {
+            row.child(
+                div()
+                    .debug_selector(move || format!("pane-caption-host-{}", pane_id.get()))
+                    .text_color(gpui_color(ramp.host))
+                    .child(origin.host.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .mx(px(5.0))
+                    .text_color(gpui_color(ramp.separator))
+                    .child("›"),
+            )
+        })
         .into_any_element()
 }
 
@@ -2395,13 +2696,18 @@ mod tests {
         cx.run_until_parked();
         let caption = host.read_with(cx, |host, _| {
             let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
-            (caption.directory.clone(), caption.full.clone())
+            (
+                caption.directory.clone(),
+                caption.name.clone(),
+                caption.label.clone(),
+            )
         });
         assert_eq!(
             caption,
             (
-                "/srv/new-place".into(),
-                "/srv/new-place > cargo build --release".into()
+                "/srv/".into(),
+                "new-place".into(),
+                "cargo build --release".into()
             )
         );
         let snapshot = Arc::make_mut(&mut screen);
@@ -2419,12 +2725,96 @@ mod tests {
         cx.run_until_parked();
         let caption = host.read_with(cx, |host, _| {
             let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
-            (caption.directory.clone(), caption.full.clone())
+            (
+                caption.directory.clone(),
+                caption.name.clone(),
+                caption.label.clone(),
+            )
         });
-        assert_eq!(
-            caption,
-            ("/srv/new-place".into(), "/srv/new-place > zsh".into())
-        );
+        assert_eq!(caption, ("/srv/".into(), "new-place".into(), "zsh".into()));
+    }
+
+    #[gpui::test]
+    fn captions_should_present_their_account_machine_and_directory_by_location(
+        cx: &mut TestAppContext,
+    ) {
+        for (context, location, host) in [
+            (
+                crate::terminal::metadata::TerminalMetadataContext::local(
+                    crate::local_path::LocalPathSemantics::Posix,
+                    "/Users/tester",
+                    crate::terminal::metadata::LocalMachine::new(
+                        Some("tester"),
+                        Some("Testers-Mac.local"),
+                        Some("/Users/tester"),
+                    ),
+                ),
+                "local",
+                "Testers-Mac",
+            ),
+            (
+                crate::terminal::metadata::TerminalMetadataContext::Remote(
+                    crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                        crate::domain::SshDestination::new("tester@build.example".to_owned())
+                            .unwrap(),
+                        crate::domain::RemoteDirectory::new("~/app".to_owned()).unwrap(),
+                    ),
+                ),
+                "remote",
+                "build.example",
+            ),
+        ] {
+            let (_, host_entity, records, cx) = caption_host(cx);
+            let mut screen =
+                ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+            let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+            metadata.context = context;
+            metadata.directory.path = Arc::from("/Users/tester/Projects/app");
+            records
+                .event_sender(1)
+                .unwrap()
+                .try_send(SessionEvent::Screen(screen))
+                .unwrap();
+            cx.run_until_parked();
+
+            let caption = host_entity.read_with(cx, |host, _| {
+                let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+                (
+                    caption.origin.user.clone(),
+                    caption.origin.host.clone(),
+                    caption.directory.clone(),
+                    caption.name.clone(),
+                )
+            });
+            assert_eq!(caption.0.as_ref(), "tester", "{location}");
+            assert_eq!(caption.1.as_ref(), host, "{location}");
+            assert_eq!(caption.3.as_ref(), "app", "{location}");
+            // Only a Local Terminal has a local home to abbreviate its displayed directory with.
+            assert_eq!(
+                caption.2.as_ref(),
+                if location == "local" {
+                    "~/Projects/"
+                } else {
+                    "/Users/tester/Projects/"
+                },
+                "{location}"
+            );
+            let origin_selector = if location == "local" {
+                "pane-caption-origin-1-local"
+            } else {
+                "pane-caption-origin-1-remote"
+            };
+            for selector in [
+                origin_selector,
+                "pane-caption-account-1",
+                "pane-caption-host-1",
+            ] {
+                assert!(
+                    cx.debug_bounds(selector).is_some(),
+                    "{location} caption must render {selector}"
+                );
+            }
+        }
     }
 
     #[gpui::test]
@@ -2477,6 +2867,91 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![home_directory.clone(), home_directory]
         );
+    }
+
+    #[test]
+    fn directory_captions_should_separate_their_leaf_from_the_leading_path() {
+        for (directory, expected) in [
+            (
+                "/Users/tester/Projects/micro",
+                ("/Users/tester/Projects/", "micro"),
+            ),
+            (
+                "/Users/tester/Projects/micro/",
+                ("/Users/tester/Projects/", "micro"),
+            ),
+            ("/srv", ("/", "srv")),
+            ("/", ("", "/")),
+            ("~", ("", "~")),
+            ("", ("", "")),
+        ] {
+            let (leading, name) = split_directory_leaf(directory);
+            assert_eq!((leading.as_ref(), name.as_ref()), expected, "{directory}");
+        }
+    }
+
+    #[test]
+    fn narrowing_a_caption_should_give_up_its_segments_in_identity_order() {
+        let metrics = CaptionMetrics {
+            origin_icon: px(18.0),
+            user: px(40.0),
+            host: px(60.0),
+            directory: px(120.0),
+            name: px(40.0),
+            label: px(30.0),
+        };
+        let resolve = |width: f32| CaptionLayout::from_metrics(false, false, px(width), metrics);
+        let controls = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(2);
+        let layout = |origin, host, directory, user, label| CaptionLayout {
+            show_origin: origin,
+            show_host: host,
+            show_directory: directory,
+            show_user: user,
+            show_label: label,
+            show_splits: true,
+        };
+
+        assert_eq!(
+            resolve(controls + 310.0),
+            layout(true, true, true, true, true)
+        );
+        assert_eq!(
+            resolve(controls + 280.0),
+            layout(true, true, true, true, false)
+        );
+        assert_eq!(
+            resolve(controls + 240.0),
+            layout(true, true, true, false, false)
+        );
+        assert_eq!(
+            resolve(controls + 120.0),
+            layout(true, true, false, false, false)
+        );
+        assert_eq!(
+            resolve(controls + 60.0),
+            layout(true, false, false, false, false)
+        );
+        assert_eq!(
+            resolve(controls + 50.0),
+            layout(false, false, false, false, false)
+        );
+        assert!(!resolve(controls - 1.0).show_splits);
+    }
+
+    #[gpui::test]
+    fn every_split_pane_caption_should_render_its_own_name_segment(cx: &mut TestAppContext) {
+        let (_, host, _, cx) = caption_host(cx);
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-caption-name-1").is_some());
+        assert!(cx.debug_bounds("pane-caption-name-2").is_some());
     }
 
     #[gpui::test]

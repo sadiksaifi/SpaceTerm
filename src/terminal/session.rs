@@ -43,7 +43,9 @@ use crate::terminal::key::InputModifiers;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{KeyInput, PhysicalKey};
-use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
+use crate::terminal::metadata::{
+    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext,
+};
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
 use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,

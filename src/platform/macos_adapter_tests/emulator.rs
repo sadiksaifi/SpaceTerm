@@ -22,7 +22,7 @@ fn osc8_relative_file_targets_bind_to_the_directory_at_emission() {
         TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
             directory.to_str().unwrap(),
-            Some("mac.local"),
+            crate::terminal::metadata::LocalMachine::new(None, Some("mac.local"), None),
         ),
         "zsh",
         identity::TERM_FALLBACK,

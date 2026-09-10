@@ -1137,7 +1137,7 @@ impl TerminalPane {
         self.terminal_session.current_directory.clone()
     }
 
-    pub(crate) fn caption(&self) -> (SharedString, SharedString) {
+    pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
         let metadata = &self.screen.metadata;
@@ -1148,18 +1148,23 @@ impl TerminalPane {
             Some(crate::domain::CurrentDirectory::Remote(path)) => sanitize_title(path.as_str()),
             None => sanitize_title(&metadata.directory.path),
         };
-        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
-            sanitize_title(&metadata.title.value)
-        } else if let Some(command) = metadata
+        let running = metadata
             .command
             .as_ref()
-            .filter(|command| command.state == CommandState::Running)
-        {
+            .filter(|command| command.state == CommandState::Running);
+        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            sanitize_title(&metadata.title.value)
+        } else if let Some(command) = running {
             sanitize_title(&command.line)
         } else {
             normalized_pane_title("", &self.fallback_title)
         };
-        (directory.into(), label.into())
+        PaneCaptionFacts {
+            origin: PaneOrigin::from_context(&metadata.context),
+            directory: compact_home_directory(&directory, metadata.context.local_home()).into(),
+            label: label.into(),
+            running: running.is_some(),
+        }
     }
 
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
@@ -3954,6 +3959,80 @@ fn ime_candidate_bounds(
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
+}
+
+/// The identity one Pane caption presents: where its Terminal runs, where it is, and what it runs.
+pub(crate) struct PaneCaptionFacts {
+    pub(crate) origin: PaneOrigin,
+    pub(crate) directory: SharedString,
+    pub(crate) label: SharedString,
+    pub(crate) running: bool,
+}
+
+/// The account and machine one Pane runs on, split so a caption can emphasize each part.
+///
+/// `remote` is the Local or Remote classification itself, never inferred from the spelling of
+/// `host`. A Remote destination that names no account leaves `user` empty.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(crate) struct PaneOrigin {
+    pub(crate) user: SharedString,
+    pub(crate) host: SharedString,
+    pub(crate) remote: bool,
+}
+
+impl PaneOrigin {
+    fn from_context(context: &crate::terminal::metadata::TerminalMetadataContext) -> Self {
+        use crate::terminal::metadata::{TerminalOrigin, sanitize_title};
+
+        match context.origin() {
+            TerminalOrigin::Local { user, host } => Self {
+                user: sanitize_title(user.unwrap_or_default()).into(),
+                host: sanitize_title(short_hostname(host.unwrap_or_default())).into(),
+                remote: false,
+            },
+            TerminalOrigin::Remote { destination } => {
+                let (user, host) = match destination.rsplit_once('@') {
+                    Some((user, host)) => (user, host),
+                    None => ("", destination),
+                };
+                Self {
+                    user: sanitize_title(user).into(),
+                    host: sanitize_title(short_hostname(host)).into(),
+                    remote: true,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.user.is_empty() && self.host.is_empty()
+    }
+}
+
+/// Drops the multicast DNS suffix a host may append to a machine name.
+///
+/// Every other spelling, including an address, is presented exactly as reported.
+fn short_hostname(host: &str) -> &str {
+    host.strip_suffix(".local")
+        .filter(|short| !short.is_empty())
+        .unwrap_or(host)
+}
+
+/// Abbreviates a displayed local directory against the local home spelling.
+///
+/// Remote directories have no local home and are returned unchanged.
+fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
+    let Some(home) = home
+        .map(|home| home.trim_end_matches('/'))
+        .filter(|home| !home.is_empty() && directory.starts_with(home))
+    else {
+        return directory.to_owned();
+    };
+    match &directory[home.len()..] {
+        "" | "/" => "~".to_owned(),
+        rest if rest.starts_with('/') => format!("~{rest}"),
+        _ => directory.to_owned(),
+    }
 }
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {

@@ -19,7 +19,7 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
         }),
         test_launch_planner(),
         LocalFilesystemAuthority::testing(),
-        Some("fixture.test".into()),
+        crate::terminal::metadata::LocalMachine::new(None, Some("fixture.test"), None),
     )
 }
 
@@ -520,7 +520,7 @@ fn recording_native_terminal_session_factory() -> (
             Arc::new(RecordingSessionAdapterFactory { constructions }),
             test_launch_planner(),
             LocalFilesystemAuthority::testing(),
-            Some("fixture.test".into()),
+            crate::terminal::metadata::LocalMachine::new(None, Some("fixture.test"), None),
         ),
         observed,
     )
@@ -2082,7 +2082,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             TerminalMetadataContext::local(
                 crate::local_path::LocalPathSemantics::Posix,
                 "/home/local",
-                None,
+                Default::default(),
             )
         };
         let mut worker = TerminalWorker {
