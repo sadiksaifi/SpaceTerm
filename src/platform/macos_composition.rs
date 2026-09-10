@@ -142,7 +142,11 @@ fn compose(
         Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
         super::launch_host::shell_launch_planner(),
         local_filesystem.clone(),
-        super::launch_host::local_hostname(),
+        crate::terminal::metadata::LocalMachine::new(
+            super::launch_host::local_user().as_deref(),
+            super::launch_host::local_hostname().as_deref(),
+            startup.home_directory.to_str(),
+        ),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
         super::macos_askpass_transport::AskPassWindowFactory,

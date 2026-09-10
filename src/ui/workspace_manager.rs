@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::directory_picker::{DirectoryPicker, DirectoryPickerEvent};
-use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
+use super::remote_directory_picker::{
+    RemoteDirectoryPicker, RemoteDirectoryPickerEvent, RemoteWorkspaceAccount,
+};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
@@ -1554,11 +1556,6 @@ impl WorkspaceManager {
         let Some(completion) = handle.take() else {
             return;
         };
-        let key = RemoteWorkspaceTarget::new(
-            completion.destination().clone(),
-            completion.physical_directory().clone(),
-        );
-
         let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
             Rc::clone(&self.session_factory),
             ValidatedLocalDirectory::new(
@@ -1568,9 +1565,12 @@ impl WorkspaceManager {
             RemoteTerminalMetadataContext::new(
                 completion.destination().clone(),
                 completion.directory().clone(),
-            ),
+            )
+            .with_machine(remote_machine(completion.account())),
             completion.physical_directory().clone(),
-            remote_workspace_fallback_title(&key, completion.remote_home_identity()),
+            // A Remote Pane falls back to its login shell, exactly as a Local Pane does. The
+            // Workspace name already names the destination in the sidebar.
+            completion.account().login_shell().name().to_owned(),
             completion.terminal_channels(),
         );
         let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
@@ -2000,9 +2000,10 @@ impl WorkspaceManager {
                 let mut factory = WorkspaceTerminalSessionFactory::new_remote(
                     session_factory,
                     local_root,
-                    RemoteTerminalMetadataContext::new(destination, directory),
+                    RemoteTerminalMetadataContext::new(destination, directory)
+                        .with_machine(remote_machine(&account)),
                     expected_identity.clone(),
-                    remote_workspace_fallback_title(&key, account.home_identity()),
+                    account.login_shell().name().to_owned(),
                     channels,
                 );
                 factory.set_pinned_directory(pinned_directory);
@@ -4350,24 +4351,12 @@ fn directory_labels(
     }
 }
 
-fn remote_workspace_fallback_title(
-    key: &RemoteWorkspaceTarget,
-    home_identity: &crate::domain::RemoteDirectoryIdentity,
-) -> String {
-    if key.physical_directory() == home_identity {
-        return key.destination().as_str().to_owned();
-    }
-    let physical = key.physical_directory().as_str();
-    let basename = if physical == "/" {
-        "/"
-    } else {
-        physical
-            .rsplit('/')
-            .next()
-            .filter(|component| !component.is_empty())
-            .unwrap_or(physical)
-    };
-    format!("{basename} · {}", key.destination().as_str())
+/// The account facts a Remote Pane presents: who is logged in, and the home its paths shorten to.
+fn remote_machine(account: &RemoteWorkspaceAccount) -> crate::terminal::metadata::RemoteMachine {
+    crate::terminal::metadata::RemoteMachine::new(
+        Some(account.user()),
+        Some(account.home_identity().as_str()),
+    )
 }
 
 fn initial_home_directory(

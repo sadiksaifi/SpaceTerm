@@ -318,7 +318,9 @@ fn install_control_themes(cx: &mut TestAppContext) {
     );
     let button_metrics = crate::button::ButtonMetrics::new(px(24.0));
     cx.set_global(crate::button::ButtonTheme::new(
-        crate::button::ButtonVariants::new(variant, variant, variant, variant, variant, variant),
+        crate::button::ButtonVariants::new(
+            variant, variant, variant, variant, variant, variant, variant,
+        ),
         crate::button::ButtonSizes::new(
             button_metrics,
             button_metrics,

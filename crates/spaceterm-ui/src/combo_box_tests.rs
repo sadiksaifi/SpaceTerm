@@ -521,7 +521,9 @@ fn install_modal_test_support(cx: &mut TestAppContext) {
     );
     let button_metrics = crate::ButtonMetrics::new(px(24.0));
     cx.set_global(crate::ButtonTheme::new(
-        crate::ButtonVariants::new(variant, variant, variant, variant, variant, variant),
+        crate::ButtonVariants::new(
+            variant, variant, variant, variant, variant, variant, variant,
+        ),
         crate::ButtonSizes::new(
             button_metrics,
             button_metrics,

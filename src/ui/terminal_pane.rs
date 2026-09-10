@@ -87,7 +87,10 @@ const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
 const HORIZONTAL_PADDING: f32 = 4.0;
-const VERTICAL_PADDING: f32 = 8.0;
+/// The gap above the first terminal row, kept tight so the Pane Caption reads as its header.
+const TOP_PADDING: f32 = 2.0;
+/// The gap below the last terminal row, which has no neighbouring chrome to close up against.
+const BOTTOM_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
@@ -110,6 +113,7 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
+    CaptionChanged,
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -119,6 +123,7 @@ impl std::fmt::Debug for TerminalPaneEvent {
         f.write_str(match self {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
+            Self::CaptionChanged => "TerminalPaneEvent::CaptionChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
         })
@@ -310,11 +315,15 @@ impl PaneSessionLifecycle {
                 if this
                     .update(cx, |this, cx| {
                         // Capture retained metadata before a final event can retire this epoch.
+                        let previous_directory = this.current_directory();
                         let mut changed = this.sync_directory_metadata(session_epoch);
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
                         changed |= this.sync_directory_metadata(session_epoch);
+                        if previous_directory != this.current_directory() {
+                            cx.emit(TerminalPaneEvent::CaptionChanged);
+                        }
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
@@ -1131,6 +1140,36 @@ impl TerminalPane {
         self.terminal_session.current_directory.clone()
     }
 
+    pub(crate) fn caption(&self) -> PaneCaptionFacts {
+        use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
+
+        let metadata = &self.screen.metadata;
+        let directory = match self.current_directory() {
+            Some(crate::domain::CurrentDirectory::Local(path)) => {
+                sanitize_title(&path.to_string_lossy())
+            }
+            Some(crate::domain::CurrentDirectory::Remote(path)) => sanitize_title(path.as_str()),
+            None => sanitize_title(&metadata.directory.path),
+        };
+        let running = metadata
+            .command
+            .as_ref()
+            .filter(|command| command.state == CommandState::Running);
+        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            sanitize_title(&metadata.title.value)
+        } else if let Some(command) = running {
+            sanitize_title(&command.line)
+        } else {
+            normalized_pane_title("", &self.fallback_title)
+        };
+        PaneCaptionFacts {
+            origin: PaneOrigin::from_context(&metadata.context),
+            directory: compact_home_directory(&directory, metadata.context.home()).into(),
+            label: label.into(),
+            running: running.is_some(),
+        }
+    }
+
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
         PaneCloseFacts {
             live_session: self.terminal_session.session.is_some(),
@@ -1383,7 +1422,7 @@ impl TerminalPane {
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
         let size = self.last_geometry?.grid();
         ScrollMetrics::for_rows(
-            VERTICAL_PADDING,
+            TOP_PADDING,
             f32::from(size.rows) * self.line_height,
             self.screen.scrollbar.total_rows,
             self.screen.scrollbar.visible_rows,
@@ -1823,6 +1862,9 @@ impl TerminalPane {
                 {
                     return false;
                 }
+                let caption_changed = self.screen.metadata.directory != screen.metadata.directory
+                    || self.screen.metadata.title != screen.metadata.title
+                    || self.screen.metadata.command != screen.metadata.command;
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
                 if self.title.as_ref() != title {
                     self.title = title.into();
@@ -1845,6 +1887,9 @@ impl TerminalPane {
                     revision: self.screen.metadata.revision,
                     current,
                 });
+                if caption_changed {
+                    cx.emit(TerminalPaneEvent::CaptionChanged);
+                }
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
@@ -3616,7 +3661,8 @@ impl Render for TerminalPane {
             .overflow_hidden()
             .bg(background)
             .px(px(HORIZONTAL_PADDING))
-            .py(px(VERTICAL_PADDING))
+            .pt(px(TOP_PADDING))
+            .pb(px(BOTTOM_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
@@ -3699,7 +3745,7 @@ impl Render for TerminalPane {
                             .debug_selector(|| "terminal-status".to_owned())
                             .absolute()
                             .right(px(HORIZONTAL_PADDING))
-                            .bottom(px(VERTICAL_PADDING))
+                            .bottom(px(BOTTOM_PADDING))
                             .max_w(relative(0.94))
                             .px(px(10.0))
                             .py(px(6.0))
@@ -3767,8 +3813,8 @@ impl Render for TerminalPane {
                     .absolute()
                     .left(px(HORIZONTAL_PADDING))
                     .right(px(HORIZONTAL_PADDING))
-                    .top(px(VERTICAL_PADDING))
-                    .bottom(px(VERTICAL_PADDING))
+                    .top(px(TOP_PADDING))
+                    .bottom(px(BOTTOM_PADDING))
                     .child(context_menu),
             )
             .into_any_element()
@@ -3917,6 +3963,75 @@ fn ime_candidate_bounds(
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
+}
+
+/// The identity one Pane caption presents: where its Terminal runs, where it is, and what it runs.
+pub(crate) struct PaneCaptionFacts {
+    pub(crate) origin: PaneOrigin,
+    pub(crate) directory: SharedString,
+    pub(crate) label: SharedString,
+    pub(crate) running: bool,
+}
+
+/// The account and machine one Pane runs on, split so a caption can emphasize each part.
+///
+/// `remote` is the Local or Remote classification itself, never inferred from the spelling of
+/// `host`. A Remote destination that names no account leaves `user` empty.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(crate) struct PaneOrigin {
+    pub(crate) user: SharedString,
+    pub(crate) host: SharedString,
+    pub(crate) remote: bool,
+}
+
+impl PaneOrigin {
+    fn from_context(context: &crate::terminal::metadata::TerminalMetadataContext) -> Self {
+        use crate::terminal::metadata::{TerminalOrigin, sanitize_title};
+
+        match context.origin() {
+            TerminalOrigin::Local { user, host } => Self {
+                user: sanitize_title(user.unwrap_or_default()).into(),
+                host: sanitize_title(short_hostname(host.unwrap_or_default())).into(),
+                remote: false,
+            },
+            TerminalOrigin::Remote { user, host } => Self {
+                user: sanitize_title(user.unwrap_or_default()).into(),
+                host: sanitize_title(short_hostname(host)).into(),
+                remote: true,
+            },
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.user.is_empty() && self.host.is_empty()
+    }
+}
+
+/// Drops the multicast DNS suffix a host may append to a machine name.
+///
+/// Every other spelling, including an address, is presented exactly as reported.
+fn short_hostname(host: &str) -> &str {
+    host.strip_suffix(".local")
+        .filter(|short| !short.is_empty())
+        .unwrap_or(host)
+}
+
+/// Abbreviates a displayed directory against its own side's home spelling.
+///
+/// The caller supplies the home belonging to the same Local or Remote context as the directory,
+/// so a path is never shortened against the other side's home.
+fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
+    let Some(home) = home
+        .map(|home| home.trim_end_matches('/'))
+        .filter(|home| !home.is_empty() && directory.starts_with(home))
+    else {
+        return directory.to_owned();
+    };
+    match &directory[home.len()..] {
+        "" | "/" => "~".to_owned(),
+        rest if rest.starts_with('/') => format!("~{rest}"),
+        _ => directory.to_owned(),
+    }
 }
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {

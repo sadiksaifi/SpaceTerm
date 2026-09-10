@@ -76,6 +76,94 @@ pub(crate) enum ProgressMetadata {
     Paused(u8),
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// The local account, machine, and home facts a Local Terminal presents as its origin.
+///
+/// Composition captures these once from the host. They are presentation identity only and carry
+/// no filesystem authority; `home` is a spelling used to abbreviate displayed directories.
+pub(crate) struct LocalMachine {
+    user: Option<Arc<str>>,
+    hostname: Option<Arc<str>>,
+    home: Option<Arc<str>>,
+}
+
+impl LocalMachine {
+    pub(crate) fn new(user: Option<&str>, hostname: Option<&str>, home: Option<&str>) -> Self {
+        Self {
+            user: Self::retain(user),
+            hostname: Self::retain(hostname),
+            home: Self::retain(home),
+        }
+    }
+
+    fn retain(value: Option<&str>) -> Option<Arc<str>> {
+        retain_machine_value(value)
+    }
+
+    pub(crate) fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    pub(crate) fn hostname(&self) -> Option<&str> {
+        self.hostname.as_deref()
+    }
+
+    pub(crate) fn home(&self) -> Option<&str> {
+        self.home.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// The remote account facts a Remote Terminal presents, captured when its account was discovered.
+///
+/// These are remote strings kept for presentation. They are never local filesystem authority, and
+/// `home` is used only to abbreviate a displayed remote directory.
+pub(crate) struct RemoteMachine {
+    user: Option<Arc<str>>,
+    home: Option<Arc<str>>,
+}
+
+impl RemoteMachine {
+    pub(crate) fn new(user: Option<&str>, home: Option<&str>) -> Self {
+        Self {
+            user: retain_machine_value(user),
+            home: retain_machine_value(home),
+        }
+    }
+
+    pub(crate) fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    pub(crate) fn home(&self) -> Option<&str> {
+        self.home.as_deref()
+    }
+}
+
+/// Keeps only a machine value that can be presented as written.
+fn retain_machine_value(value: Option<&str>) -> Option<Arc<str>> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+        .map(Arc::from)
+}
+
+/// The account and machine one Terminal Session runs on, as its Pane presents it.
+///
+/// Local and Remote are distinct so a caption can tell a local shell from a remote one without
+/// reinterpreting either side's strings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalOrigin<'a> {
+    Local {
+        user: Option<&'a str>,
+        host: Option<&'a str>,
+    },
+    Remote {
+        user: Option<&'a str>,
+        host: &'a str,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Immutable remote identity and startup-directory context for one Terminal Session.
 ///
@@ -84,6 +172,7 @@ pub(crate) enum ProgressMetadata {
 pub(crate) struct RemoteTerminalMetadataContext {
     destination: SshDestination,
     initial_directory: RemoteDirectory,
+    machine: RemoteMachine,
 }
 
 impl RemoteTerminalMetadataContext {
@@ -94,15 +183,42 @@ impl RemoteTerminalMetadataContext {
         Self {
             destination,
             initial_directory,
+            machine: RemoteMachine {
+                user: None,
+                home: None,
+            },
         }
     }
 
+    /// Attaches the discovered account, so the Pane can name its user and abbreviate its home.
+    pub(crate) fn with_machine(mut self, machine: RemoteMachine) -> Self {
+        self.machine = machine;
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
 
     pub(crate) const fn initial_directory(&self) -> &RemoteDirectory {
         &self.initial_directory
+    }
+
+    /// Changes the Starting Directory while retaining the discovered account and machine facts.
+    pub(crate) fn set_initial_directory(&mut self, directory: RemoteDirectory) {
+        self.initial_directory = directory;
+    }
+
+    /// Splits the destination into the account it names, if any, and the machine.
+    ///
+    /// A destination may be a host alias that names no account, in which case the discovered
+    /// account supplies the user instead.
+    fn destination_parts(&self) -> (Option<&str>, &str) {
+        match self.destination.as_str().rsplit_once('@') {
+            Some((user, host)) => (Some(user), host),
+            None => (None, self.destination.as_str()),
+        }
     }
 }
 
@@ -115,7 +231,7 @@ pub(crate) enum TerminalMetadataContext {
     Local {
         paths: LocalPathSemantics,
         initial_directory: Arc<str>,
-        local_hostname: Option<Arc<str>>,
+        machine: LocalMachine,
     },
     Remote(RemoteTerminalMetadataContext),
 }
@@ -139,12 +255,12 @@ impl TerminalMetadataContext {
     pub(crate) fn local(
         paths: LocalPathSemantics,
         initial_directory: &str,
-        local_hostname: Option<&str>,
+        machine: LocalMachine,
     ) -> Self {
         Self::Local {
             paths,
             initial_directory: Arc::from(initial_directory),
-            local_hostname: local_hostname.map(Arc::from),
+            machine,
         }
     }
 
@@ -214,8 +330,38 @@ impl TerminalMetadataContext {
 
     pub(crate) fn local_hostname(&self) -> Option<&str> {
         match self {
-            Self::Local { local_hostname, .. } => local_hostname.as_deref(),
+            Self::Local { machine, .. } => machine.hostname(),
             Self::Remote(_) => None,
+        }
+    }
+
+    /// This context's own home spelling, used to abbreviate the directories it displays.
+    ///
+    /// A Local context abbreviates against the local home and a Remote one against the remote
+    /// home, so neither side's home can ever shorten the other side's path.
+    pub(crate) fn home(&self) -> Option<&str> {
+        match self {
+            Self::Local { machine, .. } => machine.home(),
+            Self::Remote(context) => context.machine.home(),
+        }
+    }
+
+    /// The account and machine this Terminal runs on, for presentation only.
+    pub(crate) fn origin(&self) -> TerminalOrigin<'_> {
+        match self {
+            Self::Local { machine, .. } => TerminalOrigin::Local {
+                user: machine.user(),
+                host: machine.hostname(),
+            },
+            Self::Remote(context) => {
+                let (spelled_user, host) = context.destination_parts();
+                TerminalOrigin::Remote {
+                    // A destination that spells an account agrees with discovery; an alias does
+                    // not spell one, so discovery is what names the user at all.
+                    user: context.machine.user().or(spelled_user),
+                    host,
+                }
+            }
         }
     }
 }
@@ -243,11 +389,11 @@ impl MetadataTracker {
         paths: LocalPathSemantics,
         initial_directory: &str,
         fallback_title: &str,
-        local_hostname: Option<&str>,
+        machine: LocalMachine,
         epoch: Instant,
     ) -> Self {
         Self::new_with_context(
-            TerminalMetadataContext::local(paths, initial_directory, local_hostname),
+            TerminalMetadataContext::local(paths, initial_directory, machine),
             fallback_title,
             epoch,
         )
@@ -526,7 +672,7 @@ mod tests {
         let local = TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
             "/Users/test",
-            Some("mac.local"),
+            LocalMachine::new(Some("test"), Some("mac.local"), Some("/Users/test")),
         );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
@@ -545,7 +691,11 @@ mod tests {
 
     #[test]
     fn selected_local_paths_preserve_reported_spelling_without_granting_remote_authority() {
-        let local = TerminalMetadataContext::local(LocalPathSemantics::Posix, "/fixture", None);
+        let local = TerminalMetadataContext::local(
+            LocalPathSemantics::Posix,
+            "/fixture",
+            LocalMachine::default(),
+        );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
             RemoteDirectory::new("~/project".to_owned()).unwrap(),
@@ -588,7 +738,7 @@ mod tests {
         let context = TerminalMetadataContext::local(
             LocalPathSemantics::Posix,
             "/fixture",
-            Some("mac.local"),
+            LocalMachine::new(None, Some("mac.local"), None),
         );
         let local = parse_osc7_directory("FiLe://MAC.LOCAL/Users/me/My%20Project", &context)
             .expect("local OSC 7 should be accepted");
@@ -611,7 +761,7 @@ mod tests {
             crate::local_path::LocalPathSemantics::Posix,
             "/tmp",
             "zsh",
-            Some("mac.local"),
+            LocalMachine::new(None, Some("mac.local"), None),
             epoch,
         );
 
@@ -650,7 +800,7 @@ mod tests {
             crate::local_path::LocalPathSemantics::Posix,
             "/tmp",
             "zsh",
-            None,
+            LocalMachine::default(),
             epoch,
         );
         let live = tracker.snapshot();

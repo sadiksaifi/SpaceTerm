@@ -31,14 +31,14 @@ impl SessionLaunch {
     fn local(
         planner: ShellLaunchPlanner,
         directory: &Path,
-        hostname: Option<&str>,
+        machine: LocalMachine,
         filesystem: &LocalFilesystemAuthority,
     ) -> Self {
         Self {
             metadata: TerminalMetadataContext::local(
                 filesystem.path_semantics(),
                 &directory.to_string_lossy(),
-                hostname,
+                machine,
             ),
             fallback_title: planner.fallback_title(),
             process: SessionProcess::Local {
@@ -95,14 +95,13 @@ impl fmt::Debug for RemoteTerminalLaunchPlan {
 impl RemoteTerminalLaunchPlan {
     pub(crate) const fn new(
         local_home: crate::domain::ValidatedLocalDirectory,
-        destination: crate::domain::SshDestination,
-        remote_directory: crate::domain::RemoteDirectory,
+        metadata_context: RemoteTerminalMetadataContext,
         fallback_title: String,
         pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
     ) -> Self {
         Self {
             local_home,
-            metadata_context: RemoteTerminalMetadataContext::new(destination, remote_directory),
+            metadata_context,
             fallback_title,
             pane_channel,
         }
@@ -164,7 +163,7 @@ pub(crate) enum TerminalLaunchPlan {
 #[derive(Clone)]
 pub(crate) struct NativeTerminalSessionFactory {
     local_filesystem: LocalFilesystemAuthority,
-    local_hostname: Option<String>,
+    local_machine: LocalMachine,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
 }
@@ -174,11 +173,11 @@ impl NativeTerminalSessionFactory {
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         local_filesystem: LocalFilesystemAuthority,
-        local_hostname: Option<String>,
+        local_machine: LocalMachine,
     ) -> Self {
         Self {
             local_filesystem,
-            local_hostname,
+            local_machine,
             native_pty_adapter_factory,
             launch_planner,
         }
@@ -195,7 +194,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             TerminalLaunchPlan::Local(local) => SessionLaunch::local(
                 self.launch_planner.clone(),
                 local.working_directory().path(),
-                self.local_hostname.as_deref(),
+                self.local_machine.clone(),
                 &self.local_filesystem,
             ),
             TerminalLaunchPlan::Remote(remote) => SessionLaunch::remote(*remote)?,
@@ -231,7 +230,7 @@ impl TerminalSession {
         let launch = SessionLaunch::local(
             launch_planner,
             working_directory,
-            local_hostname,
+            LocalMachine::new(None, local_hostname, None),
             &local_filesystem,
         );
         Self::start_launch(
@@ -279,7 +278,7 @@ impl TerminalSession {
         let metadata_context = TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
             &initial_directory,
-            Some("fixture.test"),
+            LocalMachine::new(None, Some("fixture.test"), None),
         );
         Self::start_deferred_with_context(
             geometry,
@@ -396,7 +395,7 @@ impl TerminalSession {
         let metadata_context = TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
             &worker_directory.to_string_lossy(),
-            Some("fixture.test"),
+            LocalMachine::new(None, Some("fixture.test"), None),
         );
         let terminal_name = identity::TERM_FALLBACK;
         let (command_tx, command_rx) = mpsc::channel();

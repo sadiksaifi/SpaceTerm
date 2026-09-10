@@ -77,6 +77,8 @@ pub enum ButtonVariant {
     Outline,
     /// A low-emphasis action that appears primarily on interaction.
     Ghost,
+    /// An action that paints no surface in any state, carried by its glyph alone.
+    Bare,
     /// An action with destructive consequences.
     Destructive,
     /// A compact text-only command. Navigation remains a separate link control.
@@ -257,6 +259,7 @@ pub struct ButtonVariants {
     secondary: ButtonVariantStyle,
     outline: ButtonVariantStyle,
     ghost: ButtonVariantStyle,
+    bare: ButtonVariantStyle,
     destructive: ButtonVariantStyle,
     link: ButtonVariantStyle,
 }
@@ -268,6 +271,7 @@ impl ButtonVariants {
         secondary: ButtonVariantStyle,
         outline: ButtonVariantStyle,
         ghost: ButtonVariantStyle,
+        bare: ButtonVariantStyle,
         destructive: ButtonVariantStyle,
         link: ButtonVariantStyle,
     ) -> Self {
@@ -276,6 +280,7 @@ impl ButtonVariants {
             secondary,
             outline,
             ghost,
+            bare,
             destructive,
             link,
         }
@@ -287,6 +292,7 @@ impl ButtonVariants {
             ButtonVariant::Secondary => self.secondary,
             ButtonVariant::Outline => self.outline,
             ButtonVariant::Ghost => self.ghost,
+            ButtonVariant::Bare => self.bare,
             ButtonVariant::Destructive => self.destructive,
             ButtonVariant::Link => self.link,
         }
@@ -1522,7 +1528,9 @@ mod tests {
         let variant = test_variant_style();
         let metrics = ButtonMetrics::new(px(24.0));
         ButtonTheme::new(
-            ButtonVariants::new(variant, variant, variant, variant, variant, variant),
+            ButtonVariants::new(
+                variant, variant, variant, variant, variant, variant, variant,
+            ),
             ButtonSizes::new(metrics, metrics, metrics, metrics),
             focus_border,
         )
@@ -1558,7 +1566,7 @@ mod tests {
         let compact = ButtonMetrics::new(px(20.0)).corner_radius(px(4.0));
         let large = ButtonMetrics::new(px(40.0)).corner_radius(px(8.0));
         let theme = ButtonTheme::new(
-            ButtonVariants::new(base, base, base, base, destructive, base),
+            ButtonVariants::new(base, base, base, base, base, destructive, base),
             ButtonSizes::new(compact, compact, compact, large),
             rgba(0x00aaffff),
         );

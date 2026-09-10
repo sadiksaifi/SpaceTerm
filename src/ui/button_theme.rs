@@ -87,6 +87,7 @@ pub(super) fn theme() -> ButtonTheme {
                     ACTIVE_THEME.border_transparent,
                 ),
             ),
+            bare(),
             variant(
                 paint(
                     ACTIVE_THEME.error_background,
@@ -166,6 +167,47 @@ pub(super) fn theme() -> ButtonTheme {
     )
 }
 
+/// A control with no surface in any state, which brightens rather than fills on interaction.
+///
+/// Chrome that must read as floating uses this: nothing paints behind the glyph, so the control
+/// carries the same visual weight as the text beside it.
+fn bare() -> ButtonVariantStyle {
+    variant(
+        paint(
+            transparent(),
+            ACTIVE_THEME.text_muted,
+            ACTIVE_THEME.text_muted,
+            transparent(),
+        ),
+        paint(
+            transparent(),
+            ACTIVE_THEME.text,
+            ACTIVE_THEME.text,
+            transparent(),
+        ),
+        paint(
+            transparent(),
+            ACTIVE_THEME.text_accent,
+            ACTIVE_THEME.text_accent,
+            transparent(),
+        ),
+        paint(
+            transparent(),
+            ACTIVE_THEME.text_disabled,
+            ACTIVE_THEME.icon_disabled,
+            transparent(),
+        ),
+    )
+}
+
+/// A fully transparent paint value, so a state paints nothing rather than a themed surface.
+fn transparent() -> Color {
+    Color {
+        a: 0,
+        ..ACTIVE_THEME.background
+    }
+}
+
 fn outline() -> ButtonVariantStyle {
     variant(
         paint(
@@ -226,5 +268,20 @@ mod tests {
         let outline = outline();
 
         assert_eq!(outline.normal().border(), outline.pressed().border());
+    }
+
+    #[test]
+    fn bare_controls_should_paint_no_surface_in_any_state() {
+        let bare = bare();
+
+        for paint in [
+            bare.normal(),
+            bare.hovered(),
+            bare.pressed(),
+            bare.disabled(),
+        ] {
+            assert_eq!(paint.background().a, 0.0);
+            assert_eq!(paint.border().a, 0.0);
+        }
     }
 }

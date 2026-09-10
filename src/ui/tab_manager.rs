@@ -7,7 +7,6 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
-use super::pane_action_menu::{CloseTarget, PaneActionMenuCommand, pane_action_menu_entries};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
@@ -42,9 +41,7 @@ pub(crate) struct PreparedTabManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     tabs: RemoteRestartBatch<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
 }
-use crate::domain::{
-    CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, WorkspaceId, ZoomState,
-};
+use crate::domain::{CloseTabOutcome, PaneId, TabCollection, TabError, TabId, WorkspaceId};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
@@ -61,8 +58,7 @@ use gpui::{
     PromptLevel, Render, ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, ContextMenu, Icon, IconButton, IconName, Menu, MenuAlignment,
-    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize, Tooltip, WindowDragRegion,
+    ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, WindowDragRegion,
     WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
@@ -73,8 +69,6 @@ const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 6.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
-const TAB_CONTROL_SIZE: f32 = 28.0;
-const TAB_CONTROL_INSET: f32 = 4.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
@@ -132,18 +126,6 @@ impl TabChromePresentation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TabMenuInvocation {
-    Explicit,
-    Context,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TabMenuState {
-    tab_id: TabId,
-    invocation: TabMenuInvocation,
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabManagerEvent {
     ClosePaneRequested { tab_id: TabId, pane_id: PaneId },
@@ -171,7 +153,6 @@ pub(crate) struct TabManager {
     sidebar_visible: bool,
     sidebar_width: Pixels,
     top_chrome_width: Pixels,
-    tab_menu: Option<TabMenuState>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
@@ -249,7 +230,6 @@ impl TabManager {
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            tab_menu: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             operating_system_window_drag_platform,
@@ -365,7 +345,6 @@ impl TabManager {
         self.tabs
             .active_tab()
             .update(cx, |pane_host, cx| pane_host.deactivate(cx));
-        self.tab_menu = None;
         self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
     }
@@ -648,12 +627,6 @@ impl TabManager {
             parent: self.parent_focus_blocker,
             window_drag: self.window_drag_status.is_active(),
             selector: self.tab_selector_pressed.is_some(),
-            menu: self
-                .tab_menu
-                .is_some_and(|menu| matches!(menu.invocation, TabMenuInvocation::Explicit)),
-            context_menu: self
-                .tab_menu
-                .is_some_and(|menu| matches!(menu.invocation, TabMenuInvocation::Context)),
         })
     }
 
@@ -788,7 +761,6 @@ impl TabManager {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
-        self.tab_menu = None;
         self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         let session_factory = match self.session_factory.for_source_directory(
@@ -898,16 +870,6 @@ impl TabManager {
     }
 
     fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.tab_menu = None;
-        self.activate_tab_preserving_menu(tab_id, window, cx)
-    }
-
-    fn activate_tab_preserving_menu(
-        &mut self,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
         let Some(next_tab) = self.tabs.tab(tab_id).cloned() else {
             eprintln!("cannot activate unknown Tab {tab_id}");
             return false;
@@ -967,7 +929,6 @@ impl TabManager {
                         active_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
                     }
                 }
-                self.tab_menu = None;
                 self.tab_selector_pressed = None;
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
@@ -977,12 +938,10 @@ impl TabManager {
             }
             Ok(CloseTabOutcome::CloseWorkspace { final_tab_id }) => {
                 self.close_workspace_requested = true;
-                self.tab_menu = None;
                 self.tab_selector_pressed = None;
                 cx.emit(TabManagerEvent::FinalTabCloseRequested { final_tab_id });
             }
             Err(error) => {
-                self.tab_menu = None;
                 self.tab_selector_pressed = None;
                 self.sync_terminal_focus_blocker(cx);
                 Self::report_tab_error("close", error);
@@ -995,84 +954,6 @@ impl TabManager {
             return;
         }
         cx.emit(TabManagerEvent::CloseTabRequested { tab_id });
-    }
-
-    fn prepare_context_menu(
-        &mut self,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.tab_menu = Some(TabMenuState {
-            tab_id,
-            invocation: TabMenuInvocation::Context,
-        });
-        self.sync_terminal_focus_blocker(cx);
-        if !self.activate_tab_preserving_menu(tab_id, window, cx) {
-            self.tab_menu = None;
-            self.sync_terminal_focus_blocker(cx);
-            return false;
-        }
-        cx.notify();
-        true
-    }
-
-    fn handle_menu_lifecycle(
-        &mut self,
-        tab_id: TabId,
-        invocation: TabMenuInvocation,
-        event: MenuLifecycleEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let owner = TabMenuState { tab_id, invocation };
-        match event {
-            MenuLifecycleEvent::Opened => self.tab_menu = Some(owner),
-            MenuLifecycleEvent::Closed(_) => {
-                if self.tab_menu != Some(owner) {
-                    return;
-                }
-                self.tab_menu = None;
-            }
-        }
-        self.sync_terminal_focus_blocker(cx);
-        cx.notify();
-    }
-
-    fn perform_menu_command(
-        &mut self,
-        command: PaneActionMenuCommand,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let invocation = self
-            .tab_menu
-            .filter(|menu| menu.tab_id == tab_id)
-            .map_or(TabMenuInvocation::Explicit, |menu| menu.invocation);
-        self.tab_menu = Some(TabMenuState { tab_id, invocation });
-        self.sync_terminal_focus_blocker(cx);
-
-        let Some(pane_host) = self.tabs.tab(tab_id).cloned() else {
-            self.tab_menu = None;
-            self.sync_terminal_focus_blocker(cx);
-            return;
-        };
-        match command {
-            PaneActionMenuCommand::SplitRight => pane_host.update(cx, |pane_host, cx| {
-                pane_host.split_focused(SplitAxis::Horizontal, window, cx);
-            }),
-            PaneActionMenuCommand::SplitDown => pane_host.update(cx, |pane_host, cx| {
-                pane_host.split_focused(SplitAxis::Vertical, window, cx);
-            }),
-            PaneActionMenuCommand::ToggleZoom => {
-                pane_host.update(cx, |pane_host, cx| pane_host.toggle_zoom(window, cx));
-            }
-            PaneActionMenuCommand::Close => self.request_close_tab(tab_id, cx),
-        }
-        if self.tab_menu.take().is_some() {
-            self.sync_terminal_focus_blocker(cx);
-        }
-        cx.notify();
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1126,14 +1007,10 @@ impl TabManager {
         active: bool,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
-        cx: &App,
     ) -> AnyElement {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
-        let context_open_manager = manager.clone();
-        let context_activation_manager = manager.clone();
-        let context_lifecycle_manager = manager.clone();
         let close_manager = manager;
         let background = presentation.tab_background(active);
         let foreground = presentation.tab_foreground(active);
@@ -1141,17 +1018,6 @@ impl TabManager {
         let hover_background = presentation.hover_background;
         let active_tab_underline = presentation.active_tab_underline;
         let tab_group = format!("tab-item-{}", tab_id.get());
-        let (zoomed, zoom_enabled) = self
-            .tabs
-            .tab(tab_id)
-            .map(|pane_host| {
-                let pane_host = pane_host.read(cx);
-                (
-                    matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
-                    pane_host.pane_count() > 1,
-                )
-            })
-            .unwrap_or((false, false));
         let item = div()
             .id(("tab-item", tab_id.get()))
             .debug_selector(move || {
@@ -1273,46 +1139,7 @@ impl TabManager {
                 )
             });
 
-        ContextMenu::new(
-            ("tab-context-menu", tab_id.get()),
-            "Tab Actions",
-            div()
-                .w(px(TAB_ITEM_WIDTH))
-                .h(px(TAB_BAR_HEIGHT))
-                .flex_none()
-                .child(item),
-            pane_action_menu_entries(
-                "tab-menu",
-                zoomed,
-                zoom_enabled,
-                CloseTarget::Tab,
-                crate::desktop_profile::DesktopPresentation::get(cx),
-            ),
-        )
-        .size(MenuSize::Wide)
-        .placement(
-            MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::Start).offset(px(0.0)),
-        )
-        .on_open_request(move |_, window, cx| {
-            context_open_manager
-                .update(cx, |manager, cx| {
-                    manager.prepare_context_menu(tab_id, window, cx)
-                })
-                .unwrap_or(false)
-        })
-        .on_activate(move |activation, window, cx| {
-            let command = *activation.action();
-            let _ = context_activation_manager.update(cx, |manager, cx| {
-                manager.perform_menu_command(command, tab_id, window, cx);
-            });
-        })
-        .on_lifecycle(move |event, cx| {
-            let event = *event;
-            let _ = context_lifecycle_manager.update(cx, |manager, cx| {
-                manager.handle_menu_lifecycle(tab_id, TabMenuInvocation::Context, event, cx);
-            });
-        })
-        .into_any_element()
+        item.into_any_element()
     }
 
     fn render_tab_bar(
@@ -1341,25 +1168,11 @@ impl TabManager {
                 tab_id == active_tab_id,
                 presentation,
                 manager.clone(),
-                cx,
             ));
         }
 
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
-        let menu_activation_manager = manager.clone();
-        let menu_lifecycle_manager = manager;
-        let (zoomed, zoom_enabled) = self
-            .tabs
-            .tab(active_tab_id)
-            .map(|pane_host| {
-                let pane_host = pane_host.read(cx);
-                (
-                    matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
-                    pane_host.pane_count() > 1,
-                )
-            })
-            .unwrap_or((false, false));
         let content = div()
             .relative()
             .size_full()
@@ -1367,7 +1180,6 @@ impl TabManager {
             .flex()
             .flex_row()
             .items_center()
-            .pr(px(TAB_CONTROL_SIZE + TAB_CONTROL_INSET * 2.0))
             .bg(gpui_color(background))
             .child(
                 div()
@@ -1400,52 +1212,6 @@ impl TabManager {
                         manager.create_tab(window, cx);
                     });
                 }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(TAB_CONTROL_INSET))
-                    .right(px(TAB_CONTROL_INSET))
-                    .child(
-                        Menu::new(
-                            "tab-menu-button-control",
-                            "Tab Actions",
-                            pane_action_menu_entries(
-                                "tab-menu",
-                                zoomed,
-                                zoom_enabled,
-                                CloseTarget::Tab,
-                                crate::desktop_profile::DesktopPresentation::get(cx),
-                            ),
-                        )
-                        .icon_trigger(move |_| {
-                            Icon::new(IconName::Ellipsis, px(14.0), icon_foreground)
-                                .into_any_element()
-                        })
-                        .size(MenuSize::Wide)
-                        .placement(
-                            MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
-                                .offset(px(0.0)),
-                        )
-                        .debug_selector("tab-menu-button")
-                        .on_activate(move |activation, window, cx| {
-                            let command = *activation.action();
-                            let _ = menu_activation_manager.update(cx, |manager, cx| {
-                                manager.perform_menu_command(command, active_tab_id, window, cx);
-                            });
-                        })
-                        .on_lifecycle(move |event, cx| {
-                            let event = *event;
-                            let _ = menu_lifecycle_manager.update(cx, |manager, cx| {
-                                manager.handle_menu_lifecycle(
-                                    active_tab_id,
-                                    TabMenuInvocation::Explicit,
-                                    event,
-                                    cx,
-                                );
-                            });
-                        }),
-                    ),
             );
 
         let drag_region = WindowDragRegion::new(
@@ -1621,6 +1387,7 @@ mod tests {
         );
     }
     use crate::domain::PaneId;
+    use crate::domain::ZoomState;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
@@ -2031,6 +1798,28 @@ mod tests {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn right_clicking_a_tab_should_leave_the_active_tab_and_terminal_focus_unchanged(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let commands_before = records.commands().len();
+        right_click("tab-item-1-inactive", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+        assert!(cx.debug_bounds("tab-menu-button").is_none());
+        assert!(cx.debug_bounds("menu-panel-0").is_none());
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+        assert_eq!(records.commands().len(), commands_before);
     }
 
     #[gpui::test]
@@ -2528,212 +2317,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_should_activate_and_target_the_clicked_tab(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-
-        right_click("tab-item-1-inactive", cx);
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tabs.active_tab_id(),
-                manager.tab_menu.map(|menu| (menu.tab_id, menu.invocation)),
-            )
-        });
-        assert_eq!(
-            state,
-            (
-                TabId::new(1),
-                Some((TabId::new(1), TabMenuInvocation::Context))
-            )
-        );
-        let services_blocked = cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                !manager
-                    .native_service_status(WorkspaceId::new(1), window, cx)
-                    .capabilities
-                    .return_text
-            })
-        });
-        assert!(services_blocked);
-    }
-
-    #[gpui::test]
-    fn inactive_tab_context_menu_should_not_transiently_focus_its_terminal(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        let command_count = records.commands().len();
-
-        right_click("tab-item-1-inactive", cx);
-
-        let state = cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.tabs.active_tab_id(),
-                manager.focused_terminal_is_focused(window, cx),
-                manager.focused_terminal_has_input_focus(window, cx),
-            )
-        });
-        let focus_edges = records
-            .commands()
-            .into_iter()
-            .skip(command_count)
-            .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            (state, focus_edges),
-            ((TabId::new(1), false, false), vec![(2, false)])
-        );
-    }
-
-    #[gpui::test]
-    fn top_ellipsis_should_target_the_active_tab(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-
-        click("tab-menu-button", cx);
-
-        let menu = manager.read_with(cx, |manager, _| manager.tab_menu);
-        assert_eq!(
-            menu,
-            Some(TabMenuState {
-                tab_id: TabId::new(2),
-                invocation: TabMenuInvocation::Explicit,
-            })
-        );
-    }
-
-    #[gpui::test]
-    fn tab_menu_keeps_services_blocked_until_terminal_focus_is_restored(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        let before = cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.native_service_status(WorkspaceId::new(1), window, cx)
-            })
-        });
-
-        click("tab-menu-button", cx);
-        let blocked = cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.native_service_status(WorkspaceId::new(1), window, cx)
-            })
-        });
-        click("tab-menu-button", cx);
-        let trigger_focused = cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.native_service_status(WorkspaceId::new(1), window, cx)
-            })
-        });
-        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
-        cx.update(|window, cx| {
-            pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
-        });
-        let restored = cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.native_service_status(WorkspaceId::new(1), window, cx)
-            })
-        });
-
-        assert!(before.capabilities.return_text);
-        assert!(!blocked.capabilities.return_text);
-        assert!(!trigger_focused.capabilities.return_text);
-        assert!(restored.capabilities.return_text);
-        assert_ne!(before.origin, restored.origin);
-    }
-
-    #[gpui::test]
-    fn top_ellipsis_should_toggle_its_open_menu_closed(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("tab-menu-button", cx);
-
-        click("tab-menu-button", cx);
-
-        let menu = manager.read_with(cx, |manager, _| manager.tab_menu);
-        assert_eq!(menu, None);
-    }
-
-    #[gpui::test]
-    fn tab_menu_outside_press_should_preempt_the_background_drag_region(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("tab-menu-button", cx);
-        let chrome = cx
-            .debug_bounds("tab-bar")
-            .expect("Tab chrome was not rendered")
-            .center();
-
-        cx.simulate_click(chrome, Modifiers::none());
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tab_menu,
-                manager.window_drag_status.is_active(),
-                manager.terminal_focus_blocker(),
-            )
-        });
-        assert_eq!(state, (None, false, None));
-    }
-
-    #[gpui::test]
-    fn tab_menu_should_restore_its_trigger_without_changing_the_focused_pane(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        let command_count = records.commands().len();
-        let focused_pane_id = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).focused_pane_id()
-        });
-
-        click("tab-menu-button", cx);
-
-        let menu_open = cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.tabs.active_tab().read(cx).focused_pane_id(),
-                manager.focused_terminal_is_focused(window, cx),
-                manager.focused_terminal_has_input_focus(window, cx),
-            )
-        });
-        assert_eq!(menu_open, (focused_pane_id, false, false));
-
-        click("tab-menu-button", cx);
-        cx.simulate_keystrokes("a");
-
-        let trigger_commands = records
-            .commands()
-            .into_iter()
-            .skip(command_count)
-            .map(|call| (call.session_id, call.command))
-            .collect::<Vec<_>>();
-        assert!(matches!(
-            trigger_commands.as_slice(),
-            [(1, RecordedSessionCommand::Focus(false))]
-        ));
-
-        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
-        cx.update(|window, cx| {
-            pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
-        });
-        cx.simulate_keystrokes("a");
-        let commands = records
-            .commands()
-            .into_iter()
-            .skip(command_count)
-            .map(|call| (call.session_id, call.command))
-            .collect::<Vec<_>>();
-        assert!(matches!(
-            commands[1],
-            (1, RecordedSessionCommand::Focus(true))
-        ));
-        assert!(matches!(commands[2], (1, RecordedSessionCommand::Key(_))));
-    }
-
-    #[gpui::test]
     fn tab_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
         cx: &mut TestAppContext,
     ) {
@@ -2904,106 +2487,6 @@ mod tests {
             (selected, focus_edges),
             ((TabId::new(1), true, true), vec![(2, false), (1, true)])
         );
-    }
-
-    #[gpui::test]
-    fn tab_menu_split_should_target_the_selected_tab_without_terminal_pointer_input(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        right_click("tab-item-1-inactive", cx);
-
-        click("tab-menu-row-split-right", cx);
-
-        let pane_counts = manager.read_with(cx, |manager, cx| {
-            (
-                manager
-                    .tabs
-                    .tab(TabId::new(1))
-                    .expect("Tab 1 must remain owned")
-                    .read(cx)
-                    .pane_count(),
-                manager
-                    .tabs
-                    .tab(TabId::new(2))
-                    .expect("Tab 2 must remain owned")
-                    .read(cx)
-                    .pane_count(),
-                records.pointer_count(),
-            )
-        });
-        assert_eq!(pane_counts, (2, 1, 0));
-    }
-
-    #[gpui::test]
-    fn single_pane_tab_menu_should_disable_zoom_without_dismissing_the_menu(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("tab-menu-button", cx);
-
-        click("tab-menu-row-toggle-zoom", cx);
-
-        let state = manager.read_with(cx, |manager, cx| {
-            (
-                manager.tab_menu.is_some(),
-                manager.tabs.active_tab().read(cx).zoom_state(),
-            )
-        });
-        assert_eq!(state, (true, ZoomState::Restored));
-    }
-
-    #[gpui::test]
-    fn target_focus_change_should_dismiss_menu_and_refresh_zoom_when_reopened(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("tab-menu-button", cx);
-
-        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
-        cx.update(|window, cx| {
-            pane_host.update(cx, |pane_host, cx| {
-                pane_host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        assert!(manager.read_with(cx, |manager, _| manager.tab_menu.is_none()));
-
-        click("tab-menu-button", cx);
-        click("tab-menu-row-toggle-zoom", cx);
-
-        let state = manager.read_with(cx, |manager, cx| {
-            (
-                manager.tab_menu.is_none(),
-                manager.tabs.active_tab().read(cx).zoom_state(),
-                manager.tabs.active_tab().read(cx).pane_count(),
-            )
-        });
-        assert!(
-            matches!(state, (true, ZoomState::Zoomed(_), 2)),
-            "the open Tab menu did not use the target PaneHost's live zoom state: {state:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn close_tab_menu_should_focus_the_neighbor_and_drop_the_closed_session_once(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        click("tab-menu-button", cx);
-
-        click("tab-menu-row-close-tab", cx);
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, TabId::new(1), vec![2]));
     }
 
     #[gpui::test]
@@ -3571,23 +3054,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn tab_context_menu_should_stay_inside_the_operating_system_window(cx: &mut TestAppContext) {
-        let (_manager, _records, cx) = tab_manager(cx);
-        right_click("tab-item-1-active", cx);
-
-        let row = cx
-            .debug_bounds("tab-menu-row-split-right")
-            .expect("the Tab menu was not rendered");
-        let root = cx
-            .debug_bounds("tab-manager")
-            .expect("the Tab manager was not rendered");
-
-        assert!(row.origin.x >= root.origin.x);
-        assert!(row.origin.y >= root.origin.y);
-        assert!(row.right() <= root.right());
-        assert!(row.bottom() <= root.bottom());
-    }
     fn report_current_directory(
         records: &TestTerminalSessionRecords,
         session: usize,

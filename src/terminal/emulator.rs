@@ -470,7 +470,8 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             selection_present: false,
             title: Arc::from(""),
-            metadata: MetadataTracker::new(paths, "", "", None, Instant::now()).snapshot(),
+            metadata: MetadataTracker::new(paths, "", "", Default::default(), Instant::now())
+                .snapshot(),
             find: None,
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
@@ -538,7 +539,7 @@ impl ScreenSnapshot {
                 crate::local_path::LocalPathSemantics::Posix,
                 "",
                 "",
-                None,
+                Default::default(),
                 Instant::now(),
             )
             .snapshot(),
@@ -740,7 +741,7 @@ impl TerminalEmulator {
             TerminalMetadataContext::local(
                 crate::local_path::LocalPathSemantics::Posix,
                 initial_directory,
-                local_hostname,
+                crate::terminal::metadata::LocalMachine::new(None, local_hostname, None),
             ),
             fallback_title,
             terminal_name,

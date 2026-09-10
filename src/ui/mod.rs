@@ -6,7 +6,6 @@ mod directory_picker;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod pane_action_menu;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
 mod remote_child_launch;
@@ -49,7 +48,8 @@ pub(crate) use terminal_focus::{
 #[cfg(test)]
 pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
-    PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
+    PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
+    TerminalPaneEvent,
 };
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 

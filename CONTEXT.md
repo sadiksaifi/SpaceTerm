@@ -39,6 +39,14 @@ A Pane Layout node with exactly two child Pane Layouts and a constrained ratio.
 **Pane**:
 A terminal region that is one leaf of a Tab's Pane Layout and owns one Terminal Session.
 
+**Pane Caption**:
+The header a Pane presents above its terminal region, naming the Pane and carrying its direct
+controls.
+
+**Pane Origin**:
+The account and machine a Pane's Terminal Session runs on, classified Local or Remote by the
+Session itself rather than by the spelling of either value.
+
 **Operating-System Window**:
 A native window that presents SpaceTerm.
 

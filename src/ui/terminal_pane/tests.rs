@@ -5844,3 +5844,118 @@ fn graphics_without_presented_images_reserves_zero_bytes_and_releases_previous_i
     assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
     assert!(cache.read_with(cx, |cache, _| cache.cached_image_keys().is_empty()));
 }
+
+#[test]
+fn local_origin_should_present_the_account_and_machine_without_its_mdns_suffix() {
+    let context = crate::terminal::metadata::TerminalMetadataContext::local(
+        crate::local_path::LocalPathSemantics::Posix,
+        "/Users/tester",
+        crate::terminal::metadata::LocalMachine::new(
+            Some("tester"),
+            Some("Testers-Mac.local"),
+            Some("/Users/tester"),
+        ),
+    );
+
+    let origin = PaneOrigin::from_context(&context);
+
+    assert_eq!(origin.user.as_ref(), "tester");
+    assert_eq!(origin.host.as_ref(), "Testers-Mac");
+    assert!(!origin.remote);
+}
+
+#[test]
+fn remote_origin_should_split_its_destination_and_stay_classified_remote() {
+    for (destination, expected) in [
+        ("user@remote.example", ("user", "remote.example")),
+        ("build-box", ("", "build-box")),
+        ("user@10.0.0.4", ("user", "10.0.0.4")),
+    ] {
+        let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new(destination.to_owned()).unwrap(),
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+        );
+
+        let origin = PaneOrigin::from_context(&context);
+
+        assert_eq!(
+            (origin.user.as_ref(), origin.host.as_ref()),
+            expected,
+            "{destination}"
+        );
+        assert!(origin.remote, "{destination}");
+    }
+}
+
+#[test]
+fn a_discovered_account_should_name_the_user_a_host_alias_never_spells() {
+    for destination in ["build-box", "someone@build-box"] {
+        let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new(destination.to_owned()).unwrap(),
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+            )
+            .with_machine(crate::terminal::metadata::RemoteMachine::new(
+                Some("tester"),
+                Some("/home/tester"),
+            )),
+        );
+
+        let origin = PaneOrigin::from_context(&context);
+
+        assert_eq!(origin.user.as_ref(), "tester", "{destination}");
+        assert_eq!(origin.host.as_ref(), "build-box", "{destination}");
+    }
+}
+
+#[test]
+fn a_remote_directory_should_abbreviate_against_its_own_remote_home() {
+    let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+            crate::domain::SshDestination::new("build-box".to_owned()).unwrap(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+        )
+        .with_machine(crate::terminal::metadata::RemoteMachine::new(
+            Some("tester"),
+            Some("/home/tester"),
+        )),
+    );
+
+    let home = context.home();
+
+    assert_eq!(compact_home_directory("/home/tester", home), "~");
+    assert_eq!(
+        compact_home_directory("/home/tester/project", home),
+        "~/project"
+    );
+    assert_eq!(compact_home_directory("/srv/app", home), "/srv/app");
+}
+
+#[test]
+fn displayed_directories_should_abbreviate_only_a_local_home_prefix() {
+    for (directory, home, expected) in [
+        ("/Users/tester", Some("/Users/tester"), "~"),
+        ("/Users/tester/", Some("/Users/tester"), "~"),
+        (
+            "/Users/tester/Projects/app",
+            Some("/Users/tester"),
+            "~/Projects/app",
+        ),
+        (
+            "/Users/tester-two/Projects",
+            Some("/Users/tester"),
+            "/Users/tester-two/Projects",
+        ),
+        ("/srv/app", Some("/Users/tester"), "/srv/app"),
+        ("/Users/tester/app", None, "/Users/tester/app"),
+        ("~/project", None, "~/project"),
+    ] {
+        assert_eq!(
+            compact_home_directory(directory, home),
+            expected,
+            "{directory}"
+        );
+    }
+}

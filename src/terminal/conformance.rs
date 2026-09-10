@@ -1485,7 +1485,7 @@ fn check_metadata() -> Result<(), String> {
         &crate::terminal::metadata::TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
             "/fixture",
-            None,
+            Default::default(),
         ),
     )
     .ok_or_else(|| "local OSC 7 directory was rejected".to_owned())?;
@@ -1501,7 +1501,7 @@ fn check_metadata() -> Result<(), String> {
             &crate::terminal::metadata::TerminalMetadataContext::local(
                 crate::local_path::LocalPathSemantics::Posix,
                 "/fixture",
-                None,
+                Default::default(),
             ),
         )
         .is_none(),

@@ -880,7 +880,7 @@ mod runtime_tests {
             crate::local_path::LocalPathSemantics::Posix,
             "/tmp",
             "zsh",
-            None,
+            Default::default(),
             now,
         );
         assert!(metadata.apply_semantic_prompt("A", now));
