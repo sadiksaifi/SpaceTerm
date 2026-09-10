@@ -110,6 +110,7 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
+    CaptionChanged,
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -119,6 +120,7 @@ impl std::fmt::Debug for TerminalPaneEvent {
         f.write_str(match self {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
+            Self::CaptionChanged => "TerminalPaneEvent::CaptionChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
         })
@@ -310,11 +312,15 @@ impl PaneSessionLifecycle {
                 if this
                     .update(cx, |this, cx| {
                         // Capture retained metadata before a final event can retire this epoch.
+                        let previous_directory = this.current_directory();
                         let mut changed = this.sync_directory_metadata(session_epoch);
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
                         changed |= this.sync_directory_metadata(session_epoch);
+                        if previous_directory != this.current_directory() {
+                            cx.emit(TerminalPaneEvent::CaptionChanged);
+                        }
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
@@ -1131,6 +1137,31 @@ impl TerminalPane {
         self.terminal_session.current_directory.clone()
     }
 
+    pub(crate) fn caption(&self) -> (SharedString, SharedString) {
+        use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
+
+        let metadata = &self.screen.metadata;
+        let directory = match self.current_directory() {
+            Some(crate::domain::CurrentDirectory::Local(path)) => {
+                sanitize_title(&path.to_string_lossy())
+            }
+            Some(crate::domain::CurrentDirectory::Remote(path)) => sanitize_title(path.as_str()),
+            None => sanitize_title(&metadata.directory.path),
+        };
+        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            sanitize_title(&metadata.title.value)
+        } else if let Some(command) = metadata
+            .command
+            .as_ref()
+            .filter(|command| command.state == CommandState::Running)
+        {
+            sanitize_title(&command.line)
+        } else {
+            normalized_pane_title("", &self.fallback_title)
+        };
+        (directory.into(), label.into())
+    }
+
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
         PaneCloseFacts {
             live_session: self.terminal_session.session.is_some(),
@@ -1823,6 +1854,9 @@ impl TerminalPane {
                 {
                     return false;
                 }
+                let caption_changed = self.screen.metadata.directory != screen.metadata.directory
+                    || self.screen.metadata.title != screen.metadata.title
+                    || self.screen.metadata.command != screen.metadata.command;
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
                 if self.title.as_ref() != title {
                     self.title = title.into();
@@ -1845,6 +1879,9 @@ impl TerminalPane {
                     revision: self.screen.metadata.revision,
                     current,
                 });
+                if caption_changed {
+                    cx.emit(TerminalPaneEvent::CaptionChanged);
+                }
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }

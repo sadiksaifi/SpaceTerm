@@ -5,9 +5,7 @@ pub(crate) enum TerminalFocusBlocker {
     CommandPalette,
     RenameField,
     ContextMenu,
-    PaneMenu,
     PaneResize,
-    TabMenu,
     TopChrome,
     TabSelector,
     Modal,
@@ -83,8 +81,6 @@ pub(crate) struct TabFocusOwners {
     pub(crate) parent: Option<TerminalFocusBlocker>,
     pub(crate) window_drag: bool,
     pub(crate) selector: bool,
-    pub(crate) menu: bool,
-    pub(crate) context_menu: bool,
 }
 
 impl TerminalFocusCoordinator {
@@ -108,22 +104,15 @@ impl TerminalFocusCoordinator {
             Self::first_owner(&[
                 (owners.window_drag, TerminalFocusBlocker::TopChrome),
                 (owners.selector, TerminalFocusBlocker::TabSelector),
-                (owners.menu, TerminalFocusBlocker::TabMenu),
-                (owners.context_menu, TerminalFocusBlocker::ContextMenu),
             ])
         })
     }
 
     pub(crate) fn pane_layout_blocker(
         parent: Option<TerminalFocusBlocker>,
-        menu: bool,
         resizing: bool,
     ) -> Option<TerminalFocusBlocker> {
-        Self::first_owner(&[
-            (menu, TerminalFocusBlocker::PaneMenu),
-            (resizing, TerminalFocusBlocker::PaneResize),
-        ])
-        .or(parent)
+        Self::first_owner(&[(resizing, TerminalFocusBlocker::PaneResize)]).or(parent)
     }
 
     pub(crate) fn modal_blocker(
@@ -209,12 +198,12 @@ mod tests {
         });
         let tab = TerminalFocusCoordinator::tab_blocker(TabFocusOwners {
             parent: workspace,
-            menu: true,
+            selector: true,
             ..Default::default()
         });
         assert_eq!(tab, Some(TerminalFocusBlocker::CommandPalette));
-        let pane = TerminalFocusCoordinator::pane_layout_blocker(tab, true, true);
-        assert_eq!(pane, Some(TerminalFocusBlocker::PaneMenu));
+        let pane = TerminalFocusCoordinator::pane_layout_blocker(tab, true);
+        assert_eq!(pane, Some(TerminalFocusBlocker::PaneResize));
         let mut coordinator = TerminalFocusCoordinator::default();
         coordinator.set_native_dialog_open(true);
         assert_eq!(
@@ -224,11 +213,11 @@ mod tests {
         coordinator.set_native_dialog_open(false);
         assert_eq!(coordinator.pane_blocker(pane, false, false), pane);
         assert_eq!(
-            TerminalFocusCoordinator::pane_layout_blocker(tab, false, true),
+            TerminalFocusCoordinator::pane_layout_blocker(tab, true),
             Some(TerminalFocusBlocker::PaneResize)
         );
         assert_eq!(
-            TerminalFocusCoordinator::pane_layout_blocker(tab, false, false),
+            TerminalFocusCoordinator::pane_layout_blocker(tab, false),
             tab
         );
         assert_eq!(
@@ -269,7 +258,7 @@ mod tests {
                 ..focused
             },
             TerminalFocusFacts {
-                blocker: Some(TerminalFocusBlocker::PaneMenu),
+                blocker: Some(TerminalFocusBlocker::PaneResize),
                 ..focused
             },
         ];
@@ -287,9 +276,7 @@ mod tests {
             TerminalFocusBlocker::CommandPalette,
             TerminalFocusBlocker::RenameField,
             TerminalFocusBlocker::ContextMenu,
-            TerminalFocusBlocker::PaneMenu,
             TerminalFocusBlocker::PaneResize,
-            TerminalFocusBlocker::TabMenu,
             TerminalFocusBlocker::TopChrome,
             TerminalFocusBlocker::TabSelector,
             TerminalFocusBlocker::Modal,

@@ -6,7 +6,6 @@ mod directory_picker;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod pane_action_menu;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
 mod remote_child_launch;

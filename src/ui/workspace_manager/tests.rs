@@ -15,7 +15,7 @@ use spaceterm_ui::{
 };
 
 use super::*;
-use crate::domain::TabId;
+use crate::domain::{PaneId, TabId};
 
 #[test]
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
@@ -4077,6 +4077,62 @@ fn active_tab_manager(
         let workspace = manager.workspaces.active_workspace();
         (workspace.id(), workspace.payload().clone())
     })
+}
+
+#[gpui::test]
+fn caption_close_should_confirm_its_owning_pane_and_restore_focus_after_cancel(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-d");
+    redraw(cx);
+    let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
+    click("pane-close-1", cx);
+    redraw(cx);
+    let pending = manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().unwrap()
+    });
+    assert_eq!(
+        pending.target,
+        CloseTarget::Pane {
+            workspace_id,
+            tab_id: TabId::new(1),
+            pane_id: PaneId::new(1)
+        }
+    );
+    assert_eq!(
+        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+        (1, 2)
+    );
+    assert!(records.dropped_session_ids().is_empty());
+    assert!(
+        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
+            .is_some()
+    );
+    press_return(cx);
+    redraw(cx);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    cx.simulate_keystrokes("a");
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| call.session_id == 1
+                && matches!(call.command, RecordedSessionCommand::Key(_)))
+    );
+    click("pane-close-1", cx);
+    redraw(cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+        (1, 1)
+    );
+    assert_eq!(records.dropped_session_ids(), vec![1]);
 }
 
 #[gpui::test]

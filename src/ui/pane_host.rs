@@ -6,9 +6,6 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-use super::pane_action_menu::{
-    CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
-};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
 use super::{
     ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
@@ -53,24 +50,83 @@ use gpui::{
     PromptButton, PromptLevel, Render, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, Icon, IconButton, IconName, Menu, MenuAlignment, MenuLifecycleEvent,
-    MenuPlacement, MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent,
-    ResizeInputSource, Tooltip,
+    ButtonSize, ButtonVariant, Icon, IconButton, IconName, ResizeAxis, ResizeHandle,
+    ResizeHandleEvent, ResizeInputSource, Tooltip,
 };
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
-const PANE_HEADER_HEIGHT: f32 = 32.0;
-const PANE_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
-const PANE_CONTROL_INSET: f32 = 4.0;
-const PANE_CONTROL_TOP: f32 = 2.0;
-const PANE_CONTROL_SIZE: f32 = 28.0;
-const MINIMUM_PANE_WIDTH: f32 = PANE_HEADER_HORIZONTAL_PADDING * 2.0 + PANE_CONTROL_SIZE;
-const MINIMUM_PANE_HEIGHT: f32 = PANE_HEADER_HEIGHT + PANE_CONTROL_INSET;
+const PANE_CAPTION_HEIGHT: f32 = 26.0;
+const PANE_CAPTION_LEFT_PADDING: f32 = 11.0;
+const PANE_CAPTION_RIGHT_PADDING: f32 = 6.0;
+const PANE_CONTROL_SIZE: f32 = 20.0;
+const PANE_ATTENTION_WIDTH: f32 = 13.0;
+const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
+    + PANE_CAPTION_RIGHT_PADDING
+    + PANE_ATTENTION_WIDTH
+    + PANE_CONTROL_SIZE * 2.0
+    + 1.0;
+const MINIMUM_PANE_HEIGHT: f32 = PANE_CAPTION_HEIGHT + 4.0;
 
-const _: () = assert!(
-    MINIMUM_PANE_WIDTH >= PANE_CONTROL_SIZE + PANE_CONTROL_INSET * 2.0
-        && MINIMUM_PANE_HEIGHT >= PANE_CONTROL_TOP + PANE_CONTROL_SIZE + PANE_CONTROL_INSET
-);
+#[derive(Clone, Copy)]
+enum PaneCaptionAction {
+    SplitRight,
+    SplitDown,
+    ToggleZoom,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CaptionLayout {
+    show_process: bool,
+    show_splits: bool,
+}
+
+impl CaptionLayout {
+    fn resolve(caption: &PaneCaption, width: Pixels, window: &Window) -> Self {
+        let full_control_count = if caption.has_multiple_panes { 4 } else { 2 };
+        let fixed_width = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + if caption.attention {
+                PANE_ATTENTION_WIDTH
+            } else {
+                0.0
+            };
+        let show_splits = width
+            >= px(fixed_width
+                + full_control_count as f32 * PANE_CONTROL_SIZE
+                + (full_control_count - 1) as f32);
+        let control_count =
+            usize::from(show_splits) * 2 + usize::from(caption.has_multiple_panes) * 2;
+        let controls_width =
+            control_count as f32 * PANE_CONTROL_SIZE + control_count.saturating_sub(1) as f32;
+        let available = width - px(fixed_width + controls_width);
+        let text = caption.text.full.clone();
+        let style = window.text_style();
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::Font {
+                family: style.font_family,
+                features: style.font_features,
+                fallbacks: style.font_fallbacks,
+                weight: style.font_weight,
+                style: style.font_style,
+            },
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        Self {
+            show_process: show_splits
+                && window
+                    .text_system()
+                    .shape_line(text, px(10.5), &[run], None)
+                    .width
+                    <= available,
+            show_splits,
+        }
+    }
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
@@ -94,10 +150,11 @@ pub(crate) struct PaneHost {
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
+    pane_layout_size: Option<PaneSize>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
+    pane_captions: BTreeMap<PaneId, PaneCaptionText>,
     pane_attention: BTreeMap<PaneId, u32>,
-    menu_pane_id: Option<PaneId>,
     resizing_split_id: Option<SplitId>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
@@ -158,16 +215,18 @@ impl PaneHost {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
+        let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
 
         Self {
             terminal_tab,
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
+            pane_layout_size: None,
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
+            pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
-            menu_pane_id: None,
             resizing_split_id: None,
             active: true,
             focus_branch_blocker: None,
@@ -191,7 +250,7 @@ impl PaneHost {
         cx.subscribe_in(
             &terminal,
             window,
-            move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
+            move |host, terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
@@ -199,6 +258,13 @@ impl PaneHost {
                         tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
+                }
+                TerminalPaneEvent::CaptionChanged => {
+                    let caption = PaneCaptionText::from_terminal(terminal.read(cx));
+                    if host.pane_captions.get(&pane_id) != Some(&caption) {
+                        host.pane_captions.insert(pane_id, caption);
+                        cx.notify();
+                    }
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
@@ -309,6 +375,7 @@ impl PaneHost {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn zoom_state(&self) -> ZoomState {
         self.terminal_tab.zoom_state()
     }
@@ -319,7 +386,6 @@ impl PaneHost {
     }
 
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
-        self.menu_pane_id = None;
         self.set_focus_branch(true, None, cx);
         cx.notify();
     }
@@ -337,15 +403,11 @@ impl PaneHost {
     ) {
         self.active = active;
         self.focus_branch_blocker = blocker;
-        if !active {
-            self.menu_pane_id = None;
-        }
         self.sync_terminal_focus(cx);
     }
 
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
         self.active = false;
-        self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         for terminal in self.terminal_tab.terminals() {
             terminal.update(cx, |terminal, _| terminal.close());
@@ -607,7 +669,6 @@ impl PaneHost {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
-        self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         cx.notify();
     }
@@ -621,7 +682,6 @@ impl PaneHost {
         let Some(pane_id) = self.terminal_tab.focus_pane_in_direction(direction) else {
             return;
         };
-        self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         cx.notify();
         if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
@@ -650,12 +710,8 @@ impl PaneHost {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
-        let Some(target_bounds) = self.pane_bounds.get(&target_pane_id).copied() else {
-            eprintln!("cannot split Pane {target_pane_id} before its bounds are measured");
-            return;
-        };
-        let Ok(target_size) = pane_size(target_bounds) else {
-            eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
+        let Some(target_size) = self.split_target_size(target_pane_id) else {
+            eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
         let session_factory = match self
@@ -704,11 +760,7 @@ impl PaneHost {
                             return;
                         }
                     };
-                    let Some(current_bounds) = host.pane_bounds.get(&target_pane_id).copied()
-                    else {
-                        return;
-                    };
-                    let Ok(current_size) = pane_size(current_bounds) else {
+                    let Some(current_size) = host.split_target_size(target_pane_id) else {
                         return;
                     };
                     if current_size != target_size {
@@ -744,6 +796,18 @@ impl PaneHost {
         );
     }
 
+    fn split_target_size(&self, pane_id: PaneId) -> Option<PaneSize> {
+        match self.terminal_tab.zoom_state() {
+            ZoomState::Restored => self
+                .pane_bounds
+                .get(&pane_id)
+                .and_then(|bounds| pane_size(*bounds).ok()),
+            ZoomState::Zoomed(_) => {
+                restored_leaf_size(self.terminal_tab.root(), pane_id, self.pane_layout_size?)
+            }
+        }
+    }
+
     fn split_pane_with_prepared_launch(
         &mut self,
         target_pane_id: PaneId,
@@ -777,9 +841,10 @@ impl PaneHost {
                 self.advance_native_service_hierarchy_generation(cx);
                 if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
+                    self.pane_captions
+                        .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
                 }
                 self.pane_attention.insert(pane_id, 0);
-                self.menu_pane_id = None;
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
@@ -833,7 +898,6 @@ impl PaneHost {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.close_tab_requested = true;
                 self.active = false;
-                self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::CloseTabRequested { tab_id });
             }
@@ -850,8 +914,8 @@ impl PaneHost {
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
+                self.pane_captions.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
-                self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     tab_id: self.terminal_tab.id(),
@@ -872,7 +936,6 @@ impl PaneHost {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
-        self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
             tab_id: self.terminal_tab.id(),
@@ -961,41 +1024,7 @@ impl PaneHost {
         }
     }
 
-    fn handle_menu_lifecycle(
-        &mut self,
-        pane_id: PaneId,
-        event: MenuLifecycleEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            MenuLifecycleEvent::Opened => {
-                if let Err(error) = self.terminal_tab.focus_pane(pane_id) {
-                    eprintln!("failed to focus Pane: {error}");
-                    return;
-                }
-                self.menu_pane_id = Some(pane_id);
-                self.sync_terminal_focus(cx);
-            }
-            MenuLifecycleEvent::Closed(_) => {
-                if self.menu_pane_id != Some(pane_id) {
-                    return;
-                }
-                self.menu_pane_id = None;
-                self.sync_terminal_focus(cx);
-            }
-        }
-        cx.notify();
-    }
-
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
-        self.sync_terminal_focus_with_menu_blocker(self.menu_pane_id.is_some(), cx);
-    }
-
-    fn sync_terminal_focus_with_menu_blocker(
-        &mut self,
-        menu_blocked: bool,
-        cx: &mut Context<Self>,
-    ) {
         let focused_terminal_id = self
             .terminal_tab
             .terminal(self.terminal_tab.focused_pane_id())
@@ -1008,7 +1037,6 @@ impl PaneHost {
         };
         let blocker = TerminalFocusCoordinator::pane_layout_blocker(
             self.focus_branch_blocker,
-            menu_blocked,
             self.resizing_split_id.is_some(),
         );
         let signature = (self.active, self.terminal_tab.focused_pane_id(), blocker);
@@ -1068,29 +1096,36 @@ impl PaneHost {
         }
     }
 
-    fn perform_menu_command(
+    fn perform_caption_action(
         &mut self,
-        command: PaneActionMenuCommand,
+        action: PaneCaptionAction,
         pane_id: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.menu_pane_id = Some(pane_id);
-        self.sync_terminal_focus(cx);
-
-        match command {
-            PaneActionMenuCommand::SplitRight => {
+        if self.terminal_tab.terminal(pane_id).is_none() {
+            return;
+        }
+        self.focus_pane(pane_id, cx);
+        match action {
+            PaneCaptionAction::SplitRight => {
                 self.split_pane(pane_id, SplitAxis::Horizontal, window, cx)
             }
-            PaneActionMenuCommand::SplitDown => {
+            PaneCaptionAction::SplitDown => {
                 self.split_pane(pane_id, SplitAxis::Vertical, window, cx)
             }
-            PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
-            PaneActionMenuCommand::Close => self.request_close_pane(pane_id, cx),
+            PaneCaptionAction::ToggleZoom => self.toggle_zoom(window, cx),
+            PaneCaptionAction::Close => {
+                // Close Confirmation restores the responder it captures when presented.
+                if self.active && self.focus_branch_blocker.is_none() {
+                    self.focus(window, cx);
+                }
+                self.request_close_pane(pane_id, cx);
+                return;
+            }
         }
-        if self.menu_pane_id.take().is_some() {
-            self.sync_terminal_focus(cx);
-            cx.notify();
+        if self.active && self.focus_branch_blocker.is_none() {
+            self.focus(window, cx);
         }
     }
 
@@ -1141,40 +1176,20 @@ impl PaneHost {
         self.request_close_pane(self.terminal_tab.focused_pane_id(), cx);
     }
 
-    fn render_tree(
-        &self,
-        tree: PaneTreeRef<'_>,
-        host: gpui::WeakEntity<Self>,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-        cx: &App,
-    ) -> AnyElement {
+    fn render_tree(&self, tree: PaneTreeRef<'_>, host: gpui::WeakEntity<Self>) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, presentation, cx),
+            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host),
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(
-                split_id,
-                axis,
-                ratio,
-                (first, second),
-                host,
-                presentation,
-                cx,
-            ),
+            } => self.render_split(split_id, axis, ratio, (first, second), host),
         }
     }
 
-    fn render_leaf(
-        &self,
-        pane_id: PaneId,
-        host: gpui::WeakEntity<Self>,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-        _cx: &App,
-    ) -> AnyElement {
+    fn render_leaf(&self, pane_id: PaneId, host: gpui::WeakEntity<Self>) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
                 .size_full()
@@ -1184,22 +1199,11 @@ impl PaneHost {
         let focused = self.terminal_tab.focused_pane_id() == pane_id;
         let has_multiple_panes = self.terminal_tab.pane_count() > 1;
         let zoomed = matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_));
-        let title = self
-            .pane_titles
+        let text = self
+            .pane_captions
             .get(&pane_id)
             .cloned()
-            .unwrap_or_else(|| "Terminal".into());
-        let position = self
-            .terminal_tab
-            .terminals_with_ids()
-            .position(|(id, _)| id == pane_id)
-            .unwrap_or(0)
-            + 1;
-        let title = if has_multiple_panes {
-            format!("{position} · {title}").into()
-        } else {
-            title
-        };
+            .unwrap_or_default();
         let pane_group = format!("pane-group-{}", pane_id.get());
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let measure_host = host.clone();
@@ -1228,16 +1232,18 @@ impl PaneHost {
             .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
             })
-            .when(has_multiple_panes, |pane| {
-                pane.child(render_pane_header(
+            .child(render_pane_caption(
+                PaneCaption {
                     pane_id,
-                    title,
+                    text,
                     focused,
                     zoomed,
                     attention,
-                    host.clone(),
-                ))
-            })
+                    has_multiple_panes,
+                },
+                &pane_group,
+                host.clone(),
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1246,23 +1252,9 @@ impl PaneHost {
                     .overflow_hidden()
                     .child(terminal),
             )
-            .when(has_multiple_panes, |pane| {
-                pane.child(render_pane_controls(
-                    pane_id,
-                    focused,
-                    zoomed,
-                    &pane_group,
-                    host.clone(),
-                    presentation,
-                ))
-            })
             .into_any_element()
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Recursive split rendering keeps layout geometry and UI context explicit"
-    )]
     fn render_split(
         &self,
         split_id: SplitId,
@@ -1270,12 +1262,10 @@ impl PaneHost {
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-        cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone(), presentation, cx);
-        let second = self.render_tree(second, host.clone(), presentation, cx);
+        let first = self.render_tree(first, host.clone());
+        let second = self.render_tree(second, host.clone());
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1366,15 +1356,23 @@ impl Render for PaneHost {
                 }
             },
         };
-        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let content = match zoom_state {
-            ZoomState::Restored => {
-                self.render_tree(self.terminal_tab.root(), host.clone(), presentation, cx)
-            }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, presentation, cx),
+            ZoomState::Restored => self.render_tree(self.terminal_tab.root(), host.clone()),
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host),
         };
 
         div()
+            .on_children_prepainted({
+                let host = cx.entity().downgrade();
+                move |children, _, cx| {
+                    let Some(bounds) = children.first() else {
+                        return;
+                    };
+                    let _ = host.update(cx, |host, _| {
+                        host.pane_layout_size = pane_size(*bounds).ok();
+                    });
+                }
+            })
             .id(("pane-host", self.terminal_tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
@@ -1395,101 +1393,217 @@ impl Render for PaneHost {
     }
 }
 
-fn render_pane_header(
+#[derive(Clone, Default, Eq, PartialEq)]
+struct PaneCaptionText {
+    directory: gpui::SharedString,
+    full: gpui::SharedString,
+}
+
+impl PaneCaptionText {
+    fn from_terminal(terminal: &TerminalPane) -> Self {
+        let (directory, label) = terminal.caption();
+        let full = if directory.is_empty() {
+            label
+        } else if label.is_empty() {
+            directory.clone()
+        } else {
+            format!("{directory} > {label}").into()
+        };
+        Self { directory, full }
+    }
+}
+
+struct PaneCaption {
     pane_id: PaneId,
-    title: gpui::SharedString,
+    text: PaneCaptionText,
     focused: bool,
     zoomed: bool,
     attention: bool,
+    has_multiple_panes: bool,
+}
+
+fn render_pane_caption(
+    caption: PaneCaption,
+    pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
 ) -> AnyElement {
-    let divider_color = if focused {
-        ACTIVE_THEME.border_focused
-    } else {
-        ACTIVE_THEME.border
-    };
-    let title = if zoomed {
-        div()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(7.0))
-            .child(
-                IconButton::new(
-                    ("pane-zoom-restore", pane_id.get()),
-                    "Restore Panes",
-                    |foreground| {
-                        Icon::new(IconName::Minimize2, px(12.0), foreground).into_any_element()
-                    },
-                )
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Compact)
-                .debug_selector(format!("pane-zoom-restore-{}", pane_id.get()))
-                .tooltip(
-                    Tooltip::new(
-                        ("pane-zoom-restore-tooltip", pane_id.get()),
-                        "Restore Panes",
-                    )
-                    .debug_selector(format!("pane-zoom-restore-tooltip-{}", pane_id.get())),
-                )
-                .on_activate(move |_, window, cx| {
-                    let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
-                }),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("{title} · Zoomed")),
-            )
-            .into_any_element()
-    } else {
-        div().min_w_0().truncate().child(title).into_any_element()
-    };
+    let pane_group = pane_group.to_owned();
+    // Resolve controls from this frame's actual width, including during split resizing.
+    gpui::canvas(
+        move |bounds, window, cx| {
+            let mut content = render_pane_caption_content(
+                caption,
+                &pane_group,
+                host,
+                crate::desktop_profile::DesktopPresentation::get(cx),
+                bounds.size.width,
+                window,
+            );
+            content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
+            content.prepaint_at(bounds.origin, window, cx);
+            content
+        },
+        |_, mut content, window, cx| content.paint(window, cx),
+    )
+    .w_full()
+    .h(px(PANE_CAPTION_HEIGHT))
+    .flex_shrink_0()
+    .into_any_element()
+}
 
-    div()
-        .id(("pane-header", pane_id.get()))
+fn render_pane_caption_content(
+    caption: PaneCaption,
+    pane_group: &str,
+    host: gpui::WeakEntity<PaneHost>,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+    width: Pixels,
+    window: &Window,
+) -> AnyElement {
+    let layout = CaptionLayout::resolve(&caption, width, window);
+    let PaneCaption {
+        pane_id,
+        text,
+        focused,
+        zoomed,
+        attention,
+        has_multiple_panes,
+    } = caption;
+    let focus_host = host.clone();
+    let mut controls = div()
+        .id(("pane-controls", pane_id.get()))
         .debug_selector(move || {
             format!(
-                "pane-header-{}-{}",
+                "pane-controls-{}-{}",
+                pane_id.get(),
+                if layout.show_splits { "full" } else { "narrow" }
+            )
+        })
+        .flex()
+        .items_center()
+        .gap(px(1.0))
+        .flex_shrink_0()
+        .when(!focused, |controls| {
+            controls
+                .opacity(0.0)
+                .group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
+        });
+    let actions = [
+        (
+            PaneCaptionAction::SplitRight,
+            "split-right",
+            "Split Right",
+            IconName::Columns2,
+            presentation.shortcut(&SplitRight),
+            layout.show_splits,
+        ),
+        (
+            PaneCaptionAction::SplitDown,
+            "split-down",
+            "Split Down",
+            IconName::Rows2,
+            presentation.shortcut(&SplitDown),
+            layout.show_splits,
+        ),
+        (
+            PaneCaptionAction::ToggleZoom,
+            "toggle-zoom",
+            if zoomed { "Restore Panes" } else { "Zoom Pane" },
+            if zoomed {
+                IconName::Minimize2
+            } else {
+                IconName::Maximize2
+            },
+            presentation.shortcut(&TogglePaneZoom),
+            has_multiple_panes,
+        ),
+        (
+            PaneCaptionAction::Close,
+            "close",
+            "Close Pane",
+            IconName::X,
+            presentation.shortcut(&ClosePane),
+            has_multiple_panes,
+        ),
+    ];
+    for (action, selector, name, icon, shortcut, visible) in actions {
+        if !visible {
+            continue;
+        }
+        let host = host.clone();
+        let id = format!("pane-{selector}-{}", pane_id.get());
+        controls = controls.child(
+            IconButton::new(
+                gpui::SharedString::from(id.clone()),
+                name,
+                move |foreground| Icon::new(icon, px(12.0), foreground).into_any_element(),
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Compact)
+            .preserve_ancestor_hover()
+            .debug_selector(id.clone())
+            .tooltip(
+                Tooltip::new(gpui::SharedString::from(format!("{id}-tooltip")), name)
+                    .keyboard_equivalent(shortcut),
+            )
+            .on_activate(move |_, window, cx| {
+                let _ = host.update(cx, |host, cx| {
+                    host.perform_caption_action(action, pane_id, window, cx);
+                });
+            }),
+        );
+    }
+    div()
+        .id(("pane-caption", pane_id.get()))
+        .debug_selector(move || {
+            format!(
+                "pane-caption-{}-{}",
                 pane_id.get(),
                 if focused { "focused" } else { "unfocused" }
             )
         })
-        .relative()
-        .h(px(PANE_HEADER_HEIGHT))
+        .h(px(PANE_CAPTION_HEIGHT))
         .w_full()
         .flex_shrink_0()
         .flex()
-        .flex_row()
         .items_center()
         .min_w_0()
-        .pl(px(PANE_HEADER_HORIZONTAL_PADDING))
-        .pr(px(PANE_CONTROL_INSET + PANE_CONTROL_SIZE + 4.0))
-        .border_b(px(1.0))
-        .border_color(gpui_color(divider_color))
-        .bg(gpui_color(ACTIVE_THEME.toolbar_background))
-        .text_size(px(12.0))
+        .overflow_hidden()
+        .pl(px(PANE_CAPTION_LEFT_PADDING))
+        .pr(px(PANE_CAPTION_RIGHT_PADDING))
+        .bg(gpui_color(ACTIVE_THEME.terminal_background))
+        .text_size(px(10.5))
         .text_color(gpui_color(if focused {
             ACTIVE_THEME.text
         } else {
             ACTIVE_THEME.text_muted
         }))
-        .when(focused, |header| {
-            header.font_weight(gpui::FontWeight::MEDIUM)
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            let _ = focus_host.update(cx, |host, cx| {
+                host.focus_pane(pane_id, cx);
+                host.focus(window, cx);
+            });
+            cx.stop_propagation();
         })
-        .when(attention, |header| {
-            header.child(
+        .when(attention, |caption| {
+            caption.child(
                 div()
                     .debug_selector(move || format!("pane-attention-{}", pane_id.get()))
                     .mr(px(7.0))
-                    .size(px(7.0))
+                    .size(px(6.0))
+                    .flex_shrink_0()
                     .rounded_full()
                     .bg(gpui_color(ACTIVE_THEME.warning)),
             )
         })
-        .child(title)
+        .child(div().flex_1().min_w_0().truncate().child(
+            if text.directory.is_empty() || layout.show_process {
+                text.full
+            } else {
+                text.directory
+            },
+        ))
+        .child(controls)
         .into_any_element()
 }
 
@@ -1534,59 +1648,38 @@ fn render_divider(
     .into_any_element()
 }
 
-fn render_pane_controls(
-    pane_id: PaneId,
-    focused: bool,
-    zoomed: bool,
-    pane_group: &str,
-    host: gpui::WeakEntity<PaneHost>,
-    presentation: &crate::desktop_profile::DesktopPresentation,
-) -> AnyElement {
-    let activation_host = host.clone();
-    let lifecycle_host = host;
-
-    div()
-        .id(("pane-controls", pane_id.get()))
-        .absolute()
-        .top(px(PANE_CONTROL_TOP))
-        .right(px(PANE_CONTROL_INSET))
-        .when(!focused, |controls| {
-            controls
-                .opacity(0.0)
-                .group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
-        })
-        .child(
-            Menu::new(
-                ("pane-menu", pane_id.get()),
-                "Pane Actions",
-                pane_action_menu_entries(
-                    "pane-menu",
-                    zoomed,
-                    true,
-                    CloseTarget::Pane,
-                    presentation,
-                ),
-            )
-            .icon_trigger(menu_icon(IconName::Ellipsis))
-            .size(MenuSize::Wide)
-            .placement(
-                MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End).offset(px(0.0)),
-            )
-            .debug_selector(format!("pane-menu-button-{}", pane_id.get()))
-            .on_activate(move |activation, window, cx| {
-                let command = *activation.action();
-                let _ = activation_host.update(cx, |host, cx| {
-                    host.perform_menu_command(command, pane_id, window, cx);
-                });
-            })
-            .on_lifecycle(move |event, cx| {
-                let event = *event;
-                let _ = lifecycle_host.update(cx, |host, cx| {
-                    host.handle_menu_lifecycle(pane_id, event, cx);
-                });
-            }),
-        )
-        .into_any_element()
+// Splitting restores the grid, so a zoomed Pane must use its allocation in that grid.
+fn restored_leaf_size(
+    tree: PaneTreeRef<'_>,
+    target: PaneId,
+    available: PaneSize,
+) -> Option<PaneSize> {
+    match tree.node() {
+        PaneNodeRef::Leaf { pane_id } => (pane_id == target).then_some(available),
+        PaneNodeRef::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let child_size = |fraction| {
+                match axis {
+                    SplitAxis::Horizontal => PaneSize::new(
+                        (available.width() - DIVIDER_SIZE) * fraction,
+                        available.height(),
+                    ),
+                    SplitAxis::Vertical => PaneSize::new(
+                        available.width(),
+                        (available.height() - DIVIDER_SIZE) * fraction,
+                    ),
+                }
+                .ok()
+            };
+            restored_leaf_size(first, target, child_size(ratio)?)
+                .or_else(|| restored_leaf_size(second, target, child_size(1.0 - ratio)?))
+        }
+    }
 }
 
 fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSizeError> {
@@ -2090,8 +2183,252 @@ mod tests {
         })
     }
 
+    struct CaptionTestView {
+        host: Entity<PaneHost>,
+        width: Pixels,
+    }
+
+    impl Render for CaptionTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).h(px(600.0)).child(self.host.clone())
+        }
+    }
+
+    fn caption_host(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<CaptionTestView>,
+        Entity<PaneHost>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let factory = WorkspaceTerminalSessionFactory::new_local(
+            factory,
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx.add_window_view(|window, cx| CaptionTestView {
+            host: cx.new(|cx| PaneHost::new(TabId::new(1), factory, window, cx)),
+            width: px(1000.0),
+        });
+        let host = view.read_with(cx, |view, _| view.host.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| host.activate(window, cx));
+        });
+        cx.run_until_parked();
+        (view, host, records, cx)
+    }
+
+    fn click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
+        let control = cx
+            .debug_bounds(selector)
+            .expect("caption control must exist")
+            .center();
+        cx.simulate_mouse_move(control, None, Modifiers::none());
+        cx.simulate_click(control, Modifiers::none());
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
-    fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
+    fn caption_split_buttons_should_split_their_owner_and_restore_terminal_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, host, records, cx) = caption_host(cx);
+        assert!(cx.debug_bounds("pane-toggle-zoom-1").is_none());
+        assert!(cx.debug_bounds("pane-close-1").is_none());
+        click_caption_control("pane-split-right-1", cx);
+        click_caption_control("pane-split-down-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            (3, PaneId::new(3))
+        );
+        assert_eq!(records.pointer_count(), 0);
+        assert!(cx.update(|window, cx| host.read(cx).focused_terminal_has_input_focus(window, cx)));
+        cx.simulate_keystrokes("a");
+        assert!(
+            records.commands().iter().any(|call| call.session_id == 3
+                && matches!(&call.command, RecordedSessionCommand::Key(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn caption_zoom_should_target_hovered_pane_and_split_should_restore_the_layout(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, host, records, cx) = caption_host(cx);
+        click_caption_control("pane-split-right-1", cx);
+        click_caption_control("pane-toggle-zoom-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| host.zoom_state()),
+            ZoomState::Zoomed(PaneId::new(1))
+        );
+        assert!(cx.debug_bounds("pane-caption-2-unfocused").is_none());
+        click_caption_control("pane-split-down-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.zoom_state(), host.pane_count())),
+            (ZoomState::Restored, 3)
+        );
+        assert!(cx.debug_bounds("pane-caption-2-unfocused").is_some());
+        assert_eq!(records.pointer_count(), 0);
+    }
+
+    #[gpui::test]
+    fn zoom_then_split_before_repaint_should_use_the_retained_layout_size(cx: &mut TestAppContext) {
+        let (view, host, _, cx) = caption_host(cx);
+        click_caption_control("pane-split-right-1", cx);
+        view.update(cx, |view, cx| {
+            view.width = px(400.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.toggle_zoom(window, cx);
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.zoom_state())),
+            (3, ZoomState::Restored)
+        );
+    }
+
+    #[gpui::test]
+    fn zoomed_split_should_respect_the_restored_pane_allocation(cx: &mut TestAppContext) {
+        let (view, host, records, cx) = caption_host(cx);
+        click_caption_control("pane-split-right-1", cx);
+        view.update(cx, |view, cx| {
+            view.width = px(200.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_caption_control("pane-toggle-zoom-1", cx);
+        click_caption_control("pane-split-right-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.zoom_state())),
+            (2, ZoomState::Zoomed(PaneId::new(1)))
+        );
+        assert_eq!(records.starts().len(), 2);
+    }
+
+    #[gpui::test]
+    fn minimum_width_single_pane_should_keep_both_split_controls(cx: &mut TestAppContext) {
+        let (view, host, _, cx) = caption_host(cx);
+        view.update(cx, |view, cx| {
+            view.width = px(MINIMUM_PANE_WIDTH);
+            cx.notify();
+        });
+        host.update(cx, |host, cx| {
+            host.pane_attention.insert(PaneId::new(1), 1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+        for selector in ["pane-split-right-1", "pane-split-down-1"] {
+            let button = cx.debug_bounds(selector).unwrap();
+            assert!(caption.contains(&button.origin) && caption.contains(&button.bottom_right()));
+        }
+        assert!(cx.debug_bounds("pane-toggle-zoom-1").is_none());
+        assert!(cx.debug_bounds("pane-close-1").is_none());
+    }
+
+    #[gpui::test]
+    fn minimum_width_attention_captions_should_keep_zoom_and_close_inside_their_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, host, _, cx) = caption_host(cx);
+        click_caption_control("pane-split-down-1", cx);
+        view.update(cx, |view, cx| {
+            view.width = px(MINIMUM_PANE_WIDTH);
+            cx.notify();
+        });
+        host.update(cx, |host, cx| {
+            host.pane_attention.insert(PaneId::new(2), 1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-controls-2-narrow").is_some());
+        let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
+        for selector in ["pane-toggle-zoom-2", "pane-close-2"] {
+            let button = cx.debug_bounds(selector).unwrap();
+            assert_eq!(button.size, size(px(20.0), px(20.0)));
+            assert!(caption.contains(&button.origin) && caption.contains(&button.bottom_right()));
+        }
+        click_caption_control("pane-toggle-zoom-2", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| host.zoom_state()),
+            ZoomState::Zoomed(PaneId::new(2))
+        );
+        view.update(cx, |view, cx| {
+            view.width = px(1000.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-split-right-2").is_some());
+    }
+
+    #[gpui::test]
+    fn caption_directory_and_running_command_should_update_without_a_title_change(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
+        let (_, host, records, cx) = caption_host(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.title.provenance = TitleProvenance::Fallback;
+        metadata.directory.path = Arc::from("/srv/new-place");
+        metadata.command = Some(CommandMetadata {
+            line: Arc::from("cargo build --release"),
+            state: CommandState::Running,
+        });
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(SessionEvent::Screen(screen.clone()))
+            .unwrap();
+        cx.run_until_parked();
+        let caption = host.read_with(cx, |host, _| {
+            let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+            (caption.directory.clone(), caption.full.clone())
+        });
+        assert_eq!(
+            caption,
+            (
+                "/srv/new-place".into(),
+                "/srv/new-place > cargo build --release".into()
+            )
+        );
+        let snapshot = Arc::make_mut(&mut screen);
+        snapshot.generation = crate::terminal::PresentationGeneration::test(2);
+        let metadata = Arc::make_mut(&mut snapshot.metadata);
+        metadata.command.as_mut().unwrap().state = CommandState::Finished {
+            exit_status: Some(0),
+            duration: std::time::Duration::ZERO,
+        };
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(SessionEvent::Screen(screen))
+            .unwrap();
+        cx.run_until_parked();
+        let caption = host.read_with(cx, |host, _| {
+            let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+            (caption.directory.clone(), caption.full.clone())
+        });
+        assert_eq!(
+            caption,
+            ("/srv/new-place".into(), "/srv/new-place > zsh".into())
+        );
+    }
+
+    #[gpui::test]
+    fn single_pane_should_render_a_caption(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
@@ -2099,132 +2436,8 @@ mod tests {
             PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
-        assert!(cx.debug_bounds("pane-header-1-focused").is_none());
-    }
-
-    #[gpui::test]
-    fn pane_menu_restores_its_trigger_before_terminal_input_can_be_refocused(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-        cx.update(|window, app| {
-            window.activate_window();
-            host.update(app, |host, app| {
-                host.focus(window, app);
-                host.split_focused(SplitAxis::Horizontal, window, app);
-            });
-        });
         cx.run_until_parked();
-
-        let initial =
-            cx.update(|window, app| host.read(app).focused_terminal_has_input_focus(window, app));
-        assert!(initial);
-
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-2")
-            .expect("focused Pane menu button must be rendered")
-            .center();
-        cx.simulate_click(menu_button, Modifiers::none());
-        cx.run_until_parked();
-        let menu_open = cx.update(|window, app| {
-            (
-                host.read(app).focused_pane_id(),
-                host.read(app).menu_pane_id,
-                host.read(app).focused_terminal_has_input_focus(window, app),
-            )
-        });
-        assert_eq!(menu_open, (PaneId::new(2), Some(PaneId::new(2)), false));
-
-        cx.simulate_click(menu_button, Modifiers::none());
-        cx.run_until_parked();
-        assert!(!cx.update(|window, app| {
-            host.read(app).focused_terminal_has_input_focus(window, app)
-        }));
-
-        cx.update(|window, app| host.read(app).focus(window, app));
-        assert!(cx.update(|window, app| {
-            host.read(app).focused_terminal_has_input_focus(window, app)
-        }));
-
-        cx.deactivate_window();
-        assert!(!cx.update(|window, app| {
-            host.read(app).focused_terminal_has_input_focus(window, app)
-        }));
-    }
-
-    #[gpui::test]
-    fn pane_menu_activation_should_not_restore_terminal_before_command_completion(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        let command_count = records.commands().len();
-
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-1")
-            .expect("Pane menu button must be rendered")
-            .center();
-        cx.simulate_mouse_down(menu_button, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(menu_button, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-        let menu_row = cx
-            .debug_bounds("pane-menu-row-split-right")
-            .expect("Pane menu row must be rendered")
-            .center();
-        cx.simulate_mouse_down(menu_row, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-
-        let focus_edges_before_activation = records
-            .commands()
-            .into_iter()
-            .skip(command_count)
-            .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some(focused),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(focus_edges_before_activation, [false]);
-
-        cx.simulate_mouse_up(menu_row, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-
-        let focus_edges = records
-            .commands()
-            .into_iter()
-            .skip(command_count)
-            .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some(focused),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            focus_edges.iter().position(|focused| *focused),
-            focus_edges.len().checked_sub(1)
-        );
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 3);
+        assert!(cx.debug_bounds("pane-caption-1-focused").is_some());
     }
 
     #[gpui::test]
@@ -2267,7 +2480,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
+    fn split_panes_should_render_compact_focused_and_unfocused_captions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
@@ -2283,20 +2496,20 @@ mod tests {
         cx.run_until_parked();
 
         let unfocused_height = cx
-            .debug_bounds("pane-header-1-unfocused")
+            .debug_bounds("pane-caption-1-unfocused")
             .map(|bounds| bounds.size.height);
         let focused_height = cx
-            .debug_bounds("pane-header-2-focused")
+            .debug_bounds("pane-caption-2-focused")
             .map(|bounds| bounds.size.height);
 
         assert_eq!(
             (unfocused_height, focused_height),
-            (Some(px(PANE_HEADER_HEIGHT)), Some(px(PANE_HEADER_HEIGHT)))
+            (Some(px(PANE_CAPTION_HEIGHT)), Some(px(PANE_CAPTION_HEIGHT)))
         );
     }
 
     #[gpui::test]
-    fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
+    fn focusing_another_pane_should_move_the_focused_caption_state(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
@@ -2312,11 +2525,11 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let header_state = (
-            cx.debug_bounds("pane-header-1-focused").is_some(),
-            cx.debug_bounds("pane-header-2-unfocused").is_some(),
+        let caption_state = (
+            cx.debug_bounds("pane-caption-1-focused").is_some(),
+            cx.debug_bounds("pane-caption-2-unfocused").is_some(),
         );
-        assert_eq!(header_state, (true, true));
+        assert_eq!(caption_state, (true, true));
     }
 
     #[gpui::test]
@@ -2613,7 +2826,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_title_event_should_update_the_pane_header_snapshot(cx: &mut TestAppContext) {
+    fn terminal_title_event_should_update_the_tab_title_snapshot(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
@@ -2815,7 +3028,7 @@ mod tests {
         cx.run_until_parked();
 
         let restore_button = cx
-            .debug_bounds("pane-zoom-restore-2")
+            .debug_bounds("pane-toggle-zoom-2")
             .map(|bounds| bounds.center())
             .expect("the zoom restore button was not rendered");
         cx.simulate_mouse_move(restore_button, None, Modifiers::none());
@@ -2826,229 +3039,6 @@ mod tests {
             (host.terminal_tab.zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
-    }
-
-    #[gpui::test]
-    fn menu_click_should_execute_command_without_sending_terminal_pointer_input(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-2")
-            .map(|bounds| bounds.center());
-        assert!(
-            menu_button.is_some(),
-            "focused Pane menu button was not rendered"
-        );
-        if let Some(menu_button) = menu_button {
-            cx.simulate_mouse_move(menu_button, None, Modifiers::none());
-            cx.simulate_click(menu_button, Modifiers::none());
-        }
-        cx.run_until_parked();
-
-        let split_down = cx
-            .debug_bounds("pane-menu-row-split-down")
-            .map(|bounds| bounds.center());
-        assert!(split_down.is_some(), "Split Down menu row was not rendered");
-        if let Some(split_down) = split_down {
-            cx.simulate_mouse_move(split_down, None, Modifiers::none());
-            cx.simulate_click(split_down, Modifiers::none());
-        }
-        cx.run_until_parked();
-
-        let state = host.read_with(cx, |host, _| {
-            (
-                host.terminal_tab.pane_count(),
-                host.menu_pane_id,
-                records.pointer_count(),
-            )
-        });
-        assert_eq!(state, (3, None, 0));
-    }
-
-    #[gpui::test]
-    fn ellipsis_click_should_toggle_menu_without_sending_terminal_pointer_input(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-2")
-            .map(|bounds| bounds.center());
-        assert!(
-            menu_button.is_some(),
-            "focused Pane menu button was not rendered"
-        );
-        if let Some(menu_button) = menu_button {
-            cx.simulate_mouse_move(menu_button, None, Modifiers::none());
-            cx.simulate_click(menu_button, Modifiers::none());
-            cx.run_until_parked();
-            cx.simulate_mouse_move(menu_button, None, Modifiers::none());
-            cx.simulate_click(menu_button, Modifiers::none());
-            cx.run_until_parked();
-        }
-
-        let state = host.read_with(cx, |host, _| (host.menu_pane_id, records.pointer_count()));
-        assert_eq!(state, (None, 0));
-    }
-
-    #[gpui::test]
-    fn opening_nonfocused_pane_menu_should_focus_and_zoom_the_target_pane(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let first_pane_id = PaneId::new(1);
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-1")
-            .map(|bounds| bounds.center());
-        assert!(
-            menu_button.is_some(),
-            "nonfocused Pane menu button was not rendered"
-        );
-        if let Some(menu_button) = menu_button {
-            cx.simulate_mouse_move(menu_button, None, Modifiers::none());
-            cx.simulate_click(menu_button, Modifiers::none());
-        }
-        cx.run_until_parked();
-
-        let zoom_row = cx
-            .debug_bounds("pane-menu-row-toggle-zoom")
-            .map(|bounds| bounds.center());
-        assert!(zoom_row.is_some(), "Zoom Pane menu row was not rendered");
-        if let Some(zoom_row) = zoom_row {
-            cx.simulate_mouse_move(zoom_row, None, Modifiers::none());
-            cx.simulate_click(zoom_row, Modifiers::none());
-        }
-        cx.run_until_parked();
-
-        let terminal = host.read_with(cx, |host, _| {
-            host.terminal_tab.terminal(first_pane_id).cloned()
-        });
-        let terminal_is_focused = cx.update(|window, cx| {
-            terminal
-                .as_ref()
-                .is_some_and(|terminal| terminal.read(cx).is_focused(window))
-        });
-        let state = host.read_with(cx, |host, _| {
-            (
-                host.terminal_tab.focused_pane_id(),
-                host.terminal_tab.zoom_state(),
-                terminal_is_focused,
-                records.pointer_count(),
-            )
-        });
-
-        assert_eq!(
-            state,
-            (first_pane_id, ZoomState::Zoomed(first_pane_id), true, 0)
-        );
-    }
-
-    #[gpui::test]
-    fn pane_menu_should_render_wide_compact_menu(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-
-        cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let menu_button = cx
-            .debug_bounds("pane-menu-button-2")
-            .map(|bounds| bounds.center());
-        assert!(
-            menu_button.is_some(),
-            "focused Pane menu button was not rendered"
-        );
-        if let Some(menu_button) = menu_button {
-            cx.simulate_mouse_move(menu_button, None, Modifiers::none());
-            cx.simulate_click(menu_button, Modifiers::none());
-        }
-        cx.run_until_parked();
-
-        let first_row_height = cx
-            .debug_bounds("pane-menu-row-split-right")
-            .map(|bounds| bounds.size.height);
-        let last_row_height = cx
-            .debug_bounds("pane-menu-row-close-pane")
-            .map(|bounds| bounds.size.height);
-        let menu_size = cx.debug_bounds("menu-panel-0").map(|bounds| bounds.size);
-
-        assert_eq!(
-            (first_row_height, last_row_height, menu_size),
-            (
-                Some(px(26.0)),
-                Some(px(26.0)),
-                Some(size(px(240.0), px(121.0)))
-            )
-        );
     }
 
     #[gpui::test]
