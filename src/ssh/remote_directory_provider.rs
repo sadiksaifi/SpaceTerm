@@ -1,3 +1,4 @@
+use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use super::remote_utility::{
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
 use crate::ui::remote_directory_picker::{
     RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
-    RemoteDirectoryProviderError, RemoteDirectoryRow, RemoteWorkspaceAccount,
+    RemoteDirectoryProviderError, RemoteDirectoryRow,
 };
 
 const REMOTE_DIRECTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);

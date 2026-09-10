@@ -1,6 +1,8 @@
+use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -16,6 +18,332 @@ use spaceterm_ui::{
 
 use super::*;
 use crate::domain::{PaneId, TabId};
+
+#[gpui::test]
+fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
+    cx: &mut TestAppContext,
+) {
+    use crate::domain::CurrentDirectory;
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    assert_eq!(records.starts().len(), 2);
+    records.report_directory(
+        2,
+        Some(CurrentDirectory::Local(PathBuf::from("/other/child"))),
+    );
+    records.report_directory(
+        1,
+        Some(CurrentDirectory::Local(PathBuf::from("/projects/api"))),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "api"
+    );
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    records.report_directory(
+        1,
+        Some(CurrentDirectory::Local(PathBuf::from("/projects/server"))),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .workspace(WorkspaceId::new(1))
+            .unwrap()
+            .name()
+            .to_owned()),
+        "server"
+    );
+    records.report_directory(1, None);
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .workspace(WorkspaceId::new(1))
+            .unwrap()
+            .name()
+            .to_owned()),
+        "server"
+    );
+
+    records
+        .event_sender(1)
+        .unwrap()
+        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .unwrap();
+    cx.run_until_parked();
+    let identity = manager.read_with(cx, |manager, _| {
+        let workspace = manager.workspaces.workspace(WorkspaceId::new(1)).unwrap();
+        (
+            workspace.name().to_owned(),
+            workspace.local_display_directory().unwrap().to_path_buf(),
+        )
+    });
+    assert_eq!(
+        identity,
+        ("child".to_owned(), PathBuf::from("/other/child"))
+    );
+}
+
+#[gpui::test]
+fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut TestAppContext) {
+    use crate::domain::CurrentDirectory;
+    let (manager, records, cx) = workspace_manager(cx);
+    let (completion, _, _, _) = remote_completion("deploy@staging", "~/", "/home/tester", true);
+    click("new-remote-workspace-button", cx);
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    emit_remote_workspace_completion(&flow, completion, cx);
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+    assert_eq!(records.starts().len(), 3);
+    records.report_directory(
+        3,
+        Some(CurrentDirectory::Remote(
+            RemoteDirectory::new("/srv/other".into()).unwrap(),
+        )),
+    );
+    records.report_directory(
+        2,
+        Some(CurrentDirectory::Remote(
+            RemoteDirectory::new("/srv/api".into()).unwrap(),
+        )),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "api"
+    );
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(
+                WorkspaceId::new(2),
+                Some(PinnedDirectory::Remote {
+                    directory: RemoteDirectory::new("/srv/pinned".into()).unwrap(),
+                    identity: crate::domain::RemoteDirectoryIdentity::new("/srv/pinned".into())
+                        .unwrap(),
+                }),
+                window,
+                cx,
+            )
+        })
+    });
+    records.report_directory(
+        2,
+        Some(CurrentDirectory::Remote(
+            RemoteDirectory::new("/srv/latest".into()).unwrap(),
+        )),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "pinned"
+    );
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx)
+        })
+    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "latest"
+    );
+
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "Release".into())
+            .unwrap()
+    });
+    records
+        .event_sender(2)
+        .unwrap()
+        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .unwrap();
+    cx.run_until_parked();
+    let identity = manager.read_with(cx, |manager, _| {
+        let workspace = manager.workspaces.active_workspace();
+        (
+            workspace.name().to_owned(),
+            workspace
+                .remote_display_directory()
+                .unwrap()
+                .as_str()
+                .to_owned(),
+        )
+    });
+    assert_eq!(identity, ("Release".to_owned(), "/srv/other".to_owned()));
+}
+
+#[gpui::test]
+fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narrow(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    click("new-remote-workspace-button", cx);
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    let (completion, _, _, _) =
+        remote_completion("deploy@staging-production", "~/", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspaces
+                .rename_workspace(WorkspaceId::new(2), "Production".into())
+                .unwrap();
+            manager.apply_directory_pin(
+                WorkspaceId::new(2),
+                Some(PinnedDirectory::Remote {
+                    directory: RemoteDirectory::new("/srv/very/long/path/to/application".into())
+                        .unwrap(),
+                    identity: crate::domain::RemoteDirectoryIdentity::new(
+                        "/srv/very/long/path/to/application".into(),
+                    )
+                    .unwrap(),
+                }),
+                window,
+                cx,
+            );
+            manager.set_sidebar_layout(true, px(420.0), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let name = cx.debug_bounds("workspace-row-name-2").unwrap();
+    let machine = cx.debug_bounds("workspace-machine-2").unwrap();
+    let path = cx.debug_bounds("workspace-row-path-2").unwrap();
+    let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
+    let counts = cx.debug_bounds("workspace-counts-2").unwrap();
+    assert!(machine.left() - name.right() >= px(8.0));
+    assert!(counts.top() >= name.bottom());
+    assert!(path.right() + px(8.0) <= counts.left());
+    assert!(pin.right() <= path.left());
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspaces
+                .rename_workspace(
+                    WorkspaceId::new(2),
+                    "A very long production workspace name".into(),
+                )
+                .unwrap();
+            manager.set_sidebar_layout(true, px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let row = cx.debug_bounds("workspace-row-2-active").unwrap();
+    let name = cx.debug_bounds("workspace-row-name-2").unwrap();
+    // Canvas children removed this frame can leave historical GPUI debug bounds behind.
+    // The name occupying all available width verifies the machine and its gap are gone.
+    assert_eq!(
+        name.right(),
+        row.right() - px(SIDEBAR_ROW_HORIZONTAL_PADDING)
+    );
+    let counts = cx.debug_bounds("workspace-counts-2").unwrap();
+    let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
+    assert!(counts.right() <= row.right());
+    assert!(pin.right() <= counts.left());
+    assert_eq!(row.size.height, px(SIDEBAR_ROW_HEIGHT));
+}
+
+#[test]
+fn remote_home_labels_should_ignore_trailing_separators_without_changing_tooltip_paths() {
+    let location = WorkspaceLocation::Remote {
+        key: RemoteWorkspaceTarget::new(
+            crate::domain::SshDestination::new("build".into()).unwrap(),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
+        ),
+        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
+        remote_directory: RemoteDirectory::new("~/".into()).unwrap(),
+        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
+            .unwrap(),
+        connection_state: RemoteConnectionState::connected(1),
+    };
+    for (path, expected) in [
+        ("/home/tester/", "~"),
+        ("/home/tester///", "~"),
+        ("~///", "~"),
+        ("/home/tester/src/", "~/src/"),
+        ("/home/tester-other/", "/home/tester-other/"),
+        ("/", "/"),
+    ] {
+        let directory = RemoteDirectory::new(path.into()).unwrap();
+        assert_eq!(
+            directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
+            (expected.to_owned(), format!("tester@build:{path}")),
+        );
+    }
+}
+
+#[test]
+fn remote_directory_labels_should_include_account_destination_and_compact_home() {
+    let location = WorkspaceLocation::Remote {
+        key: RemoteWorkspaceTarget::new(
+            crate::domain::SshDestination::new("build-01".into()).unwrap(),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".into()).unwrap(),
+        ),
+        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
+        remote_directory: RemoteDirectory::new("/home/tester/src".into()).unwrap(),
+        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
+            .unwrap(),
+        connection_state: RemoteConnectionState::connected(1),
+    };
+    let directory = RemoteDirectory::new("/home/tester/src".into()).unwrap();
+
+    assert_eq!(
+        directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
+        (
+            "~/src".to_owned(),
+            "tester@build-01:/home/tester/src".to_owned(),
+        )
+    );
+}
+
+#[test]
+fn remote_directory_labels_should_preserve_an_explicit_destination_user() {
+    let location = WorkspaceLocation::Remote {
+        key: RemoteWorkspaceTarget::new(
+            crate::domain::SshDestination::new("admin@build-01".into()).unwrap(),
+            crate::domain::RemoteDirectoryIdentity::new("/srv/project".into()).unwrap(),
+        ),
+        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
+        remote_directory: RemoteDirectory::new("/srv/project".into()).unwrap(),
+        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
+            .unwrap(),
+        connection_state: RemoteConnectionState::connected(1),
+    };
+    let directory = RemoteDirectory::new("/srv/project".into()).unwrap();
+
+    assert_eq!(
+        directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
+        (
+            "/srv/project".to_owned(),
+            "admin@build-01:/srv/project".to_owned(),
+        )
+    );
+}
 
 #[test]
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
@@ -42,6 +370,30 @@ fn workspace_surfaces_should_use_host_neutral_profile_shortcuts() {
     );
 }
 
+#[test]
+fn remote_connection_status_should_only_replace_the_path_while_unhealthy() {
+    assert_eq!(
+        remote_connection_status(RemoteConnectionPhase::Connected),
+        None
+    );
+    assert_eq!(
+        remote_connection_status(RemoteConnectionPhase::Reconnecting),
+        Some("Reconnecting…")
+    );
+    assert_eq!(
+        remote_connection_status(RemoteConnectionPhase::Disconnected),
+        Some("Disconnected")
+    );
+    assert_eq!(
+        remote_connection_status(RemoteConnectionPhase::Failed),
+        Some("Connection failed")
+    );
+    assert_eq!(
+        remote_connection_status(RemoteConnectionPhase::Closing),
+        Some("Closing…")
+    );
+}
+
 type RemoteCompletionFixture = (
     RemoteWorkspaceFlowCompletion,
     Arc<AtomicUsize>,
@@ -63,7 +415,7 @@ use crate::terminal::testing::{
 use crate::terminal::{SessionEvent, SessionExit};
 use crate::ui::remote_directory_picker::{
     RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
-    RemoteDirectoryProviderError, RemoteWorkspaceAccount,
+    RemoteDirectoryProviderError,
 };
 use crate::ui::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
@@ -1100,7 +1452,7 @@ fn install_remote_completion_directly(
                 ),
                 RemoteTerminalMetadataContext::new(
                     completion.destination().clone(),
-                    completion.directory().clone(),
+                    completion.initial_directory().clone(),
                 )
                 .with_machine(remote_machine(completion.account())),
                 completion.physical_directory().clone(),
@@ -2314,13 +2666,13 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     );
     let status_selector: &'static str =
         Box::leak(format!("workspace-row-remote-status-{}", workspace_id.get()).into_boxed_str());
-    assert!(cx.debug_bounds(status_selector).is_none());
+    assert!(cx.debug_bounds(status_selector).is_some());
 
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
     assert!(
         cx.debug_bounds("workspace-chip-remote-status").is_none(),
-        "the globe conveys connection state without a separate status label"
+        "the collapsed chip conveys connection state through its globe and tooltip"
     );
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
@@ -2332,9 +2684,7 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
 }
 
 #[gpui::test]
-fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnect(
-    cx: &mut TestAppContext,
-) {
+fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &mut TestAppContext) {
     let backend = Arc::new(TestRemoteWorkspaceFlowBackend::default());
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
     let flow = open_remote_workspace_flow(&manager, cx);
@@ -2353,10 +2703,9 @@ fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnec
 
     right_click(row_selector, cx);
     assert!(
-        cx.debug_bounds("workspace-menu-row-reconnect").is_some(),
-        "Remote Workspace menu must contain exactly one stable Reconnect row"
+        cx.debug_bounds("workspace-menu-row-reconnect").is_none(),
+        "Connected Workspaces must not show an unavailable Reconnect action"
     );
-    click("workspace-menu-row-reconnect", cx);
     assert_eq!(backend.connect_calls.load(Ordering::Acquire), 0);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
@@ -2385,6 +2734,11 @@ fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnec
             .remote_connection_state()),
         Some(RemoteConnectionState::failed(2))
     );
+    click("modal-action-remote-workspace-reconnect-error-ok", cx);
+    redraw(cx);
+    right_click(row_selector, cx);
+    click("workspace-menu-row-reconnect", cx);
+    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 2);
 }
 
 #[gpui::test]
@@ -6295,7 +6649,7 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
     });
     assert_eq!(
         state_before_submit,
-        (true, true, "Workspace 1".to_owned()),
+        (true, true, "Default".to_owned()),
         "dismissing the owned menu must not commit or destroy the editor"
     );
 
@@ -6345,7 +6699,7 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
     });
     assert_eq!(
         state_before_submit,
-        (true, true, "Workspace 1".to_owned()),
+        (true, true, "Default".to_owned()),
         "activating the owned menu must not commit or destroy the editor"
     );
 
@@ -6428,7 +6782,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
         (
             WorkspaceId::new(2),
             true,
-            "Workspace 1".to_owned(),
+            "Default".to_owned(),
             "zsh",
             "zsh · 2 tabs",
             Vec::new(),
@@ -6559,7 +6913,7 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
             .active_workspace()
             .name()
             .to_owned()),
-        "Workspace 1"
+        "Default"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -6861,11 +7215,11 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
 }
 
 #[gpui::test]
-fn switcher_should_number_duplicate_local_names_without_switching_to_the_match(
+fn switcher_should_preserve_explicit_local_names_without_switching_to_the_match(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
-    for expected in ["fresh workspace", "fresh workspace 1", "fresh workspace 2"] {
+    for expected in ["fresh workspace"; 3] {
         open_workspace_switcher_for_creation(cx);
         click("workspace-switcher-create-local", cx);
         assert_eq!(
@@ -6885,17 +7239,15 @@ fn switcher_should_number_duplicate_local_names_without_switching_to_the_match(
 }
 
 #[gpui::test]
-fn switcher_should_number_remote_names_only_within_the_same_ssh_destination(
-    cx: &mut TestAppContext,
-) {
+fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     open_workspace_switcher_for_creation(cx);
     click("workspace-switcher-create-local", cx);
     for (destination, expected) in [
         ("work", "fresh workspace"),
-        ("work", "fresh workspace 1"),
+        ("work", "fresh workspace"),
         ("other", "fresh workspace"),
-        ("work", "fresh workspace 2"),
+        ("work", "fresh workspace"),
     ] {
         open_workspace_switcher_for_creation(cx);
         click("workspace-switcher-create-remote", cx);

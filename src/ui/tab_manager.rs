@@ -571,6 +571,10 @@ impl TabManager {
         (self.tabs.len(), panes)
     }
 
+    pub(crate) fn automatic_directory(&self, cx: &App) -> Option<crate::domain::CurrentDirectory> {
+        self.tabs.root_tab().read(cx).automatic_directory(cx)
+    }
+
     #[cfg(test)]
     pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {
         let tab_id = self.tabs.active_tab_id();

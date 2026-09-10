@@ -21,7 +21,7 @@ use super::{
 };
 
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceValueError};
-use crate::ssh::command::ValidatedRemoteLoginShell;
+use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
 const HOME_DISPLAY: &str = "~/";
 const ROW_ICON_SIZE: f32 = 14.0;
@@ -29,82 +29,6 @@ const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteWorkspaceAccountError {
-    InvalidUser,
-    #[cfg(test)]
-    InvalidLoginShell,
-}
-
-/// Account facts discovered from the connected destination before remote path navigation begins.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct RemoteWorkspaceAccount {
-    user: String,
-    home_identity: RemoteDirectoryIdentity,
-    login_shell: ValidatedRemoteLoginShell,
-}
-
-impl fmt::Debug for RemoteWorkspaceAccount {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteWorkspaceAccount(<redacted>)")
-    }
-}
-
-impl RemoteWorkspaceAccount {
-    #[cfg(test)]
-    pub(crate) fn new(
-        user: String,
-        home_identity: RemoteDirectoryIdentity,
-        login_shell: String,
-    ) -> Result<Self, RemoteWorkspaceAccountError> {
-        if user.is_empty()
-            || user
-                .chars()
-                .any(|character| character.is_whitespace() || character.is_control())
-        {
-            return Err(RemoteWorkspaceAccountError::InvalidUser);
-        }
-        let login_shell = ValidatedRemoteLoginShell::new(login_shell)
-            .map_err(|_| RemoteWorkspaceAccountError::InvalidLoginShell)?;
-        Ok(Self {
-            user,
-            home_identity,
-            login_shell,
-        })
-    }
-
-    pub(crate) fn from_validated_login_shell(
-        user: String,
-        home_identity: RemoteDirectoryIdentity,
-        login_shell: ValidatedRemoteLoginShell,
-    ) -> Result<Self, RemoteWorkspaceAccountError> {
-        if user.is_empty()
-            || user
-                .chars()
-                .any(|character| character.is_whitespace() || character.is_control())
-        {
-            return Err(RemoteWorkspaceAccountError::InvalidUser);
-        }
-        Ok(Self {
-            user,
-            home_identity,
-            login_shell,
-        })
-    }
-
-    pub(crate) fn user(&self) -> &str {
-        &self.user
-    }
-
-    pub(crate) const fn home_identity(&self) -> &RemoteDirectoryIdentity {
-        &self.home_identity
-    }
-
-    pub(crate) const fn login_shell(&self) -> &ValidatedRemoteLoginShell {
-        &self.login_shell
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteDirectoryProviderError {
@@ -352,7 +276,6 @@ pub(crate) enum RemoteDirectoryExactPathState {
 pub(super) struct RemoteDirectorySelection {
     directory: RemoteDirectory,
     physical_directory: RemoteDirectoryIdentity,
-    account: RemoteWorkspaceAccount,
 }
 
 impl fmt::Debug for RemoteDirectorySelection {
@@ -362,15 +285,14 @@ impl fmt::Debug for RemoteDirectorySelection {
 }
 
 impl RemoteDirectorySelection {
+    #[cfg(test)]
     pub(super) fn new(
         directory: RemoteDirectory,
         physical_directory: RemoteDirectoryIdentity,
-        account: RemoteWorkspaceAccount,
     ) -> Self {
         Self {
             directory,
             physical_directory,
-            account,
         }
     }
 
@@ -380,10 +302,6 @@ impl RemoteDirectorySelection {
 
     pub(super) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
         &self.physical_directory
-    }
-
-    pub(super) const fn account(&self) -> &RemoteWorkspaceAccount {
-        &self.account
     }
 }
 
@@ -1051,16 +969,15 @@ impl RemoteDirectoryPicker {
         }
         match completion.result {
             Ok(physical_directory) => {
-                let Some(account) = self.account.clone() else {
+                if self.account.is_none() {
                     return;
-                };
+                }
                 self.busy = Some(RemoteDirectoryPickerBusy::AwaitingActivation);
                 self.sync_palette(cx);
                 cx.emit(RemoteDirectoryPickerEvent::Confirmed(
                     RemoteDirectorySelection {
                         directory: completion.directory,
                         physical_directory,
-                        account,
                     },
                 ));
                 cx.notify();
@@ -1295,7 +1212,6 @@ mod tests {
         let selection = RemoteDirectorySelection::new(
             RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
             RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
-            account.clone(),
         );
         let event = RemoteDirectoryPickerEvent::Confirmed(selection);
 
@@ -1623,9 +1539,6 @@ mod tests {
         let selection = selection.expect("validated selection should be emitted");
         assert_eq!(selection.directory(), &expected);
         assert_eq!(selection.physical_directory(), &identity);
-        assert_eq!(selection.account().user(), "tester");
-        assert_eq!(selection.account().home_identity().as_str(), "/home/tester");
-        assert_eq!(selection.account().login_shell().as_str(), "/bin/zsh");
     }
 
     #[test]

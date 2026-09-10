@@ -408,6 +408,11 @@ impl PaneHost {
                     cx.notify();
                 }
                 TerminalPaneEvent::CaptionChanged => {
+                    if pane_id == host.terminal_tab.root_pane_id() {
+                        cx.emit(PaneHostEvent::PresentationChanged {
+                            tab_id: host.terminal_tab.id(),
+                        });
+                    }
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if host.pane_captions.get(&pane_id) != Some(&caption) {
                         host.pane_captions.insert(pane_id, caption);
@@ -482,6 +487,10 @@ impl PaneHost {
 
     pub(crate) fn pane_count(&self) -> usize {
         self.terminal_tab.pane_count()
+    }
+
+    pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
+        self.current_directory(self.terminal_tab.root_pane_id(), cx)
     }
 
     pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {

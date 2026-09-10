@@ -28,6 +28,7 @@ mod terminal_symbols;
 mod text_input_theme;
 mod tooltip_theme;
 mod workspace_manager;
+mod workspace_sidebar;
 
 use gpui::{App, actions};
 

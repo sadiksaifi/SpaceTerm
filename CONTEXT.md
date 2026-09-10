@@ -39,6 +39,12 @@ A Pane Layout node with exactly two child Pane Layouts and a constrained ratio.
 **Pane**:
 A terminal region that is one leaf of a Tab's Pane Layout and owns one Terminal Session.
 
+**Root Pane**:
+The stable Pane that supplies a Tab's automatic directory, independent of focus and layout order.
+
+**Root Tab**:
+The stable Tab whose Root Pane supplies a Workspace's unpinned sidebar directory and automatic name.
+
 **Pane Caption**:
 The header a Pane presents above its terminal region, naming the Pane and carrying its direct
 controls.

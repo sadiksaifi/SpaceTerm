@@ -2,6 +2,7 @@ use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -10,9 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::directory_picker::{DirectoryPicker, DirectoryPickerEvent};
-use super::remote_directory_picker::{
-    RemoteDirectoryPicker, RemoteDirectoryPickerEvent, RemoteWorkspaceAccount,
-};
+use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
@@ -67,8 +66,8 @@ use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
     AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
     ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ContextMenu, CustomIconName, Icon, IconButton,
-    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
+    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
     OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
     ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis,
     ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
@@ -92,7 +91,6 @@ const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
 const WORKSPACE_CHIP_GAP: f32 = 5.0;
 const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
-const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 12.0;
 const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
@@ -173,6 +171,7 @@ struct WorkspaceRowViewModel {
     workspace_id: WorkspaceId,
     name: SharedString,
     path: SharedString,
+    machine: Option<SharedString>,
     tooltip: SharedString,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
@@ -232,6 +231,7 @@ struct PreparedRemoteWorkspaceReconnect {
     session: RemoteWorkspaceConnectedSession,
     lifecycle: ControlConnectionObserver,
     restart: PreparedTabManagerRemoteRestart,
+    remote_user: crate::domain::RemoteUser,
 }
 
 struct TabManagerCreation {
@@ -733,8 +733,7 @@ impl WorkspaceManager {
         cx.subscribe_in(
             &manager,
             window,
-            move |workspace_manager, _tab_manager, event: &TabManagerEvent, window, cx| match event
-            {
+            move |workspace_manager, tab_manager, event: &TabManagerEvent, window, cx| match event {
                 TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
                     workspace_manager.request_close(
                         CloseTarget::Pane {
@@ -771,6 +770,11 @@ impl WorkspaceManager {
                     }
                 }
                 TabManagerEvent::PresentationChanged => {
+                    if let Some(directory) = tab_manager.read(cx).automatic_directory(cx) {
+                        let _ = workspace_manager
+                            .workspaces
+                            .update_automatic_directory(workspace_id, directory);
+                    }
                     cx.notify();
                 }
             },
@@ -939,16 +943,17 @@ impl WorkspaceManager {
                         WorkspaceLocation::Remote { .. } => IconName::Globe,
                     }
                 };
+                let (path, directory_identity) = directory_labels(
+                    workspace.location(),
+                    workspace.local_display_directory(),
+                    workspace.remote_display_directory(),
+                    &self.local_home_directory_path,
+                );
                 let item = ComboBoxItem::new(
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
                     workspace.name().to_owned(),
                 )
-                .keywords([directory_labels(
-                    workspace.local_display_directory(),
-                    workspace.remote_display_directory(),
-                    &self.local_home_directory_path,
-                )
-                .0])
+                .keywords([path, directory_identity])
                 .leading_icon(move |foreground| {
                     div()
                         .when(active, |icon| {
@@ -1564,12 +1569,12 @@ impl WorkspaceManager {
             ),
             RemoteTerminalMetadataContext::new(
                 completion.destination().clone(),
-                completion.directory().clone(),
+                completion.initial_directory().clone(),
             )
             .with_machine(remote_machine(completion.account())),
             completion.physical_directory().clone(),
             // A Remote Pane falls back to its login shell, exactly as a Local Pane does. The
-            // Workspace name already names the destination in the sidebar.
+            // The sidebar's machine label identifies the destination independently of its name.
             completion.account().login_shell().name().to_owned(),
             completion.terminal_channels(),
         );
@@ -1668,7 +1673,8 @@ impl WorkspaceManager {
         let pane_construction = self.pane_construction.clone();
         let result = self.workspaces.create_remote_workspace(
             key,
-            completion.directory().clone(),
+            completion.account().remote_user().clone(),
+            completion.initial_directory().clone(),
             completion.remote_home_identity().clone(),
             RemoteConnectionState::connected(1),
             |workspace_id| {
@@ -2021,6 +2027,7 @@ impl WorkspaceManager {
                     session,
                     lifecycle,
                     restart,
+                    remote_user: account.remote_user().clone(),
                 })
             }
             .await;
@@ -2244,6 +2251,12 @@ impl WorkspaceManager {
                     RemoteConnectionState::connected(generation),
                 );
                 debug_assert_eq!(reduction, Ok(RemoteConnectionReduction::Applied));
+                if let Err(error) = self
+                    .workspaces
+                    .set_remote_user(workspace_id, prepared.remote_user)
+                {
+                    Self::report_workspace_error("update remote account", error);
+                }
                 self.observe_remote_workspace_runtime(workspace_id, generation, cx);
                 if let Some(progress) = &attempt.progress {
                     let _ = progress.complete(window, cx);
@@ -3253,6 +3266,7 @@ impl WorkspaceManager {
         let remote_color = remote_connection_phase.map(remote_connection_color);
         let name = workspace.name().to_owned();
         let (path, _) = directory_labels(
+            workspace.location(),
             workspace.local_display_directory(),
             workspace.remote_display_directory(),
             &self.local_home_directory_path,
@@ -3532,6 +3546,7 @@ impl WorkspaceManager {
             workspace_id,
             name,
             path,
+            machine,
             tooltip,
             pinned,
             remote_connection_phase,
@@ -3543,6 +3558,27 @@ impl WorkspaceManager {
         let click_manager = manager.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color = remote_connection_phase.map(remote_connection_color);
+        let (detail, detail_warning, detail_selector) = if !available {
+            (
+                "Directory unavailable".into(),
+                true,
+                Some(format!(
+                    "workspace-row-directory-unavailable-{}",
+                    workspace_id.get()
+                )),
+            )
+        } else if let Some(status) = remote_status {
+            (
+                status.into(),
+                true,
+                Some(format!(
+                    "workspace-row-remote-status-{}",
+                    workspace_id.get()
+                )),
+            )
+        } else {
+            (path, false, None)
+        };
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -3579,6 +3615,8 @@ impl WorkspaceManager {
                 .into_any_element()
         } else {
             div()
+                .id(("workspace-row-name", workspace_id.get()))
+                .debug_selector(move || format!("workspace-row-name-{}", workspace_id.get()))
                 .w_full()
                 .truncate()
                 .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
@@ -3587,24 +3625,22 @@ impl WorkspaceManager {
                 } else {
                     ACTIVE_THEME.text
                 }))
-                .child(name)
+                .child(name.clone())
                 .into_any_element()
         };
 
-        let maximum_path_characters = ((f32::from(self.sidebar.width) - 64.0) / 6.0)
-            .floor()
-            .max(8.0) as usize;
         let tooltip_text = remote_status
             .map(|status| format!("{tooltip}: {status}"))
             .unwrap_or_else(|| tooltip.to_string());
-        let tooltip_label = if remote_status.is_some() {
+        let tooltip_text = format!("{name}\n{tooltip_text}");
+        let tooltip_label = if !available {
+            "Workspace unavailable"
+        } else if remote_status.is_some() {
             "Remote Workspace connection"
         } else if pinned {
             "Pinned Directory"
-        } else if available {
-            "Workspace Directory"
         } else {
-            "Workspace unavailable"
+            "Workspace Directory"
         };
 
         let row_content = div()
@@ -3685,59 +3721,20 @@ impl WorkspaceManager {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().min_w_0().flex_1().child(first_line))
-                            .when(pinned, |row| {
-                                row.child(
-                                    div()
-                                        .id(("workspace-row-pin", workspace_id.get()))
-                                        .debug_selector(move || {
-                                            format!("workspace-row-pin-{}", workspace_id.get())
-                                        })
-                                        .child(Icon::new(
-                                            IconName::Pin,
-                                            px(12.0),
-                                            gpui_color(ACTIVE_THEME.icon),
-                                        )),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
-                                    .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                                    .child(format!("{tab_count}T · {pane_count}P")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
-                                    .text_color(gpui_color(if !available {
-                                        ACTIVE_THEME.warning
-                                    } else {
-                                        ACTIVE_THEME.text_muted
-                                    }))
-                                    .child(MiddleTruncatedText::new(path, maximum_path_characters)),
-                            ),
-                    ),
+                    .child(super::workspace_sidebar::title(
+                        name,
+                        first_line,
+                        if renaming { None } else { machine },
+                        workspace_id.get(),
+                    ))
+                    .child(super::workspace_sidebar::detail(
+                        detail,
+                        format!("{tab_count}T · {pane_count}P").into(),
+                        pinned && !detail_warning,
+                        detail_warning,
+                        detail_selector,
+                        workspace_id.get(),
+                    )),
             )
             .child(
                 div()
@@ -3843,6 +3840,7 @@ impl WorkspaceManager {
         for workspace in self.workspaces.iter() {
             let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
             let (path, directory_tooltip) = directory_labels(
+                workspace.location(),
                 workspace.local_display_directory(),
                 workspace.remote_display_directory(),
                 &self.local_home_directory_path,
@@ -3859,6 +3857,17 @@ impl WorkspaceManager {
                         workspace_id: workspace.id(),
                         name: workspace.name().to_owned().into(),
                         path: path.into(),
+                        machine: match workspace.location() {
+                            WorkspaceLocation::Local => None,
+                            WorkspaceLocation::Remote { key, .. } => Some(
+                                key.destination()
+                                    .as_str()
+                                    .rsplit_once('@')
+                                    .map_or(key.destination().as_str(), |(_, host)| host)
+                                    .to_owned()
+                                    .into(),
+                            ),
+                        },
                         tooltip: tooltip.into(),
                         pinned: workspace.pinned_directory().is_some(),
                         remote_connection_phase: workspace
@@ -4197,13 +4206,12 @@ fn workspace_menu_entries(
                 .debug_selector("workspace-menu-row-unpin-directory"),
         );
     }
-    if let Some(phase) = remote_connection_phase {
+    if matches!(
+        remote_connection_phase,
+        Some(RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed)
+    ) {
         entries.push(
             MenuEntry::action("Reconnect", WorkspaceMenuCommand::Reconnect)
-                .disabled(!matches!(
-                    phase,
-                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
-                ))
                 .icon(|foreground| {
                     Icon::new(IconName::RotateCw, px(14.0), foreground).into_any_element()
                 })
@@ -4237,11 +4245,11 @@ fn workspace_surface_presentation(
 
 fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
     match phase {
-        RemoteConnectionPhase::Connected => Some("Connected"),
-        RemoteConnectionPhase::Reconnecting => Some("Reconnecting"),
+        RemoteConnectionPhase::Connected => None,
+        RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
         RemoteConnectionPhase::Disconnected => Some("Disconnected"),
         RemoteConnectionPhase::Failed => Some("Connection failed"),
-        RemoteConnectionPhase::Closing => Some("Closing"),
+        RemoteConnectionPhase::Closing => Some("Closing…"),
     }
 }
 
@@ -4317,7 +4325,7 @@ fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
     }
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
+pub(super) fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
@@ -4332,23 +4340,57 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
 }
 
 fn directory_labels(
+    location: &WorkspaceLocation,
     local_directory: Option<&std::path::Path>,
     remote_directory: Option<&RemoteDirectory>,
     local_home: &std::path::Path,
 ) -> (String, String) {
-    match (local_directory, remote_directory) {
-        (Some(directory), None) => (
+    match (location, local_directory, remote_directory) {
+        (WorkspaceLocation::Local, Some(directory), None) => (
             compact_home_path(directory, local_home),
             directory.display().to_string(),
         ),
-        (None, Some(directory)) => {
-            let directory = directory.as_str().to_owned();
-            (directory.clone(), directory)
+        (
+            WorkspaceLocation::Remote {
+                key,
+                remote_user,
+                remote_home_identity,
+                ..
+            },
+            None,
+            Some(directory),
+        ) => {
+            let destination = key.destination().as_str();
+            let origin = if destination.contains('@') {
+                destination.to_owned()
+            } else {
+                format!("{}@{destination}", remote_user.as_str())
+            };
+            let compact_directory = compact_remote_home_path(directory, remote_home_identity);
+            (
+                compact_directory,
+                format!("{origin}:{}", directory.as_str()),
+            )
         }
-        (Some(_), Some(_)) | (None, None) => {
+        _ => {
             unreachable!("a Workspace must own exactly one local or remote directory")
         }
     }
+}
+
+fn compact_remote_home_path(
+    directory: &RemoteDirectory,
+    home: &crate::domain::RemoteDirectoryIdentity,
+) -> String {
+    if directory.is_home_spelling(home) {
+        return "~".to_owned();
+    }
+    directory
+        .as_str()
+        .strip_prefix(home.as_str())
+        .filter(|relative| relative.starts_with('/'))
+        .map(|relative| format!("~{relative}"))
+        .unwrap_or_else(|| directory.as_str().to_owned())
 }
 
 /// The account facts a Remote Pane presents: who is logged in, and the home its paths shorten to.
