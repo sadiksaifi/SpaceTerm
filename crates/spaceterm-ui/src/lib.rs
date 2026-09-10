@@ -48,9 +48,10 @@ pub use command_palette::{
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
-    MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuPlacement,
-    MenuPlacementConfig, MenuRadioOption, MenuSize, MenuSizes, MenuTheme, Picker, PickerBuildError,
-    PickerChange, PickerOption, dismiss_active_menu, window_menu_is_open,
+    MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent, MenuMetrics, MenuPaint,
+    MenuPlacement, MenuPlacementConfig, MenuRadioOption, MenuSize, MenuSizes, MenuTheme, Picker,
+    PickerBuildError, PickerChange, PickerOption, dismiss_active_menu, install_menu_keybindings,
+    window_menu_is_open,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
 pub use modal::{
@@ -144,10 +145,12 @@ impl ControlThemeCatalog {
 /// Installs the shared control catalog and initializes control-owned state.
 ///
 /// Applications install desktop policy, portable modal behavior, modal key equivalents,
-/// Command Palette key equivalents, ComboBox key equivalents, and text-input keybindings
+/// Menu key equivalents, Command Palette key equivalents, ComboBox key equivalents, and
+/// text-input keybindings
 /// explicitly with
 /// [`install_modal_policy`], [`install_portable_modal_keybindings`],
-/// [`install_modal_keybindings`], [`install_command_palette_keybindings`],
+/// [`install_modal_keybindings`], [`install_menu_keybindings`],
+/// [`install_command_palette_keybindings`],
 /// [`install_portable_combo_box_keybindings`], [`install_combo_box_keybindings`], and
 /// [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {

@@ -34,6 +34,24 @@ actions!(
     ]
 );
 
+/// Platform-specific Menu key equivalents layered over the portable bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MenuKeybindingProfile {
+    /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
+    /// and performs no operating-system detection.
+    MacOs,
+}
+
+/// Installs the platform-specific key equivalents for `profile`.
+pub fn install_menu_keybindings(cx: &mut App, profile: MenuKeybindingProfile) {
+    match profile {
+        MenuKeybindingProfile::MacOs => cx.bind_keys([
+            KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+        ]),
+    }
+}
+
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
@@ -3480,6 +3498,8 @@ mod tests {
                                 .disabled(true)
                                 .debug_selector("disabled-entry"),
                             MenuEntry::action("Open", "open").debug_selector("open-entry"),
+                            MenuEntry::action("Close", "close"),
+                            MenuEntry::action("Inspect", "inspect"),
                         ],
                     )
                     .debug_selector("menu-trigger")
@@ -3804,6 +3824,37 @@ mod tests {
                 action: "open",
                 source: MenuActivationSource::Keyboard
             }]
+        );
+    }
+
+    #[gpui::test]
+    fn macos_control_navigation_should_move_selection_in_button_menu(cx: &mut TestAppContext) {
+        let (_, events, cx) = menu_window(cx);
+        cx.update(|_, cx| install_menu_keybindings(cx, MenuKeybindingProfile::MacOs));
+        let trigger = cx.debug_bounds("menu-trigger").expect("menu trigger");
+
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-n enter");
+        cx.run_until_parked();
+
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-p enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                MenuActivation::Action {
+                    action: "close",
+                    source: MenuActivationSource::Keyboard,
+                },
+                MenuActivation::Action {
+                    action: "inspect",
+                    source: MenuActivationSource::Keyboard,
+                },
+            ]
         );
     }
 
@@ -4606,6 +4657,75 @@ mod tests {
             })
             .on_activate(move |activation, _, _| activations.borrow_mut().push(activation.source()))
         }
+    }
+
+    struct NavigationContextRoot {
+        events: Rc<RefCell<Vec<MenuActivation<&'static str>>>>,
+    }
+
+    impl Render for NavigationContextRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let events = Rc::clone(&self.events);
+            ContextMenu::new(
+                "navigation-context",
+                "Workspace actions",
+                div()
+                    .debug_selector(|| "navigation-context-target".into())
+                    .w(px(100.0))
+                    .h(px(40.0)),
+                vec![
+                    MenuEntry::action("Open", "open"),
+                    MenuEntry::action("Close", "close"),
+                    MenuEntry::action("Inspect", "inspect"),
+                ],
+            )
+            .on_activate(move |activation, _, _| events.borrow_mut().push(activation.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn macos_control_navigation_should_move_selection_in_context_menu(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            super::init(cx);
+            install_menu_keybindings(cx, MenuKeybindingProfile::MacOs);
+        });
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| NavigationContextRoot {
+            events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("navigation-context-target")
+            .expect("context menu target");
+
+        cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-n enter");
+        cx.run_until_parked();
+
+        cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-p enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                MenuActivation::Action {
+                    action: "close",
+                    source: MenuActivationSource::Keyboard,
+                },
+                MenuActivation::Action {
+                    action: "inspect",
+                    source: MenuActivationSource::Keyboard,
+                },
+            ]
+        );
     }
 
     #[gpui::test]
