@@ -101,7 +101,7 @@ fn test_button_theme_scaled_with_focus(factor: f32, focus_border: Rgba) -> Butto
         .corner_radius(px(5.0 * factor))
         .font_size(px(12.0 * factor));
     ButtonTheme::new(
-        ButtonVariants::new(style, style, style, style, style, style),
+        ButtonVariants::new(style, style, style, style, style, style, style),
         ButtonSizes::new(metrics, metrics, metrics, metrics),
         focus_border,
     )

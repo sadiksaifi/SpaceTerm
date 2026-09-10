@@ -1697,7 +1697,8 @@ fn render_pane_caption_content(
                     Icon::new(icon, px(PANE_CONTROL_ICON_SIZE), foreground).into_any_element()
                 },
             )
-            .variant(ButtonVariant::Ghost)
+            // The caption paints no surface, so its controls must not paint one either.
+            .variant(ButtonVariant::Bare)
             .size(ButtonSize::Compact)
             .preserve_ancestor_hover()
             .debug_selector(id.clone())
