@@ -71,6 +71,11 @@ const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
 const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
 const PANE_CONTROL_ICON_SIZE: f32 = 13.8;
+/// The close glyph's own size, drawn slightly larger than its neighbours.
+///
+/// An X occupies less of its em box than the panel and zoom glyphs, so it reads smaller at the
+/// size they share. This applies to the Pane Caption's close control alone.
+const PANE_CLOSE_ICON_SIZE: f32 = 14.49;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 const PANE_ATTENTION_WIDTH: f32 = 13.0;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
@@ -87,6 +92,16 @@ enum PaneCaptionAction {
     SplitDown,
     ToggleZoom,
     Close,
+}
+
+impl PaneCaptionAction {
+    /// The glyph size this control paints at.
+    const fn icon_size(self) -> f32 {
+        match self {
+            Self::SplitRight | Self::SplitDown | Self::ToggleZoom => PANE_CONTROL_ICON_SIZE,
+            Self::Close => PANE_CLOSE_ICON_SIZE,
+        }
+    }
 }
 
 /// Which caption segments this frame's Pane width can hold.
@@ -1692,13 +1707,12 @@ fn render_pane_caption_content(
         }
         let host = host.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
+        let icon_size = action.icon_size();
         controls = controls.child(
             IconButton::new(
                 gpui::SharedString::from(id.clone()),
                 name,
-                move |foreground| {
-                    Icon::new(icon, px(PANE_CONTROL_ICON_SIZE), foreground).into_any_element()
-                },
+                move |foreground| Icon::new(icon, px(icon_size), foreground).into_any_element(),
             )
             // The caption paints no surface, so its controls must not paint one either.
             .variant(ButtonVariant::Bare)
