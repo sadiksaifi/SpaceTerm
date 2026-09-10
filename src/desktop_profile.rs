@@ -3,8 +3,8 @@ pub(crate) mod keybindings;
 
 use gpui::{Action, App, KeyBinding};
 use spaceterm_ui::{
-    ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, ModalDesktopPolicy,
-    ModalKeybindingProfile, TextInputKeybindingProfile,
+    ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, MenuKeybindingProfile,
+    ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile,
 };
 
 #[derive(Clone, Copy)]
@@ -81,6 +81,7 @@ pub(crate) struct DesktopProfile {
 #[derive(Clone, Copy)]
 pub(crate) struct ControlKeybindingProfiles {
     modal: ModalKeybindingProfile,
+    menu: MenuKeybindingProfile,
     command_palette: CommandPaletteKeybindingProfile,
     combo_box: ComboBoxKeybindingProfile,
     text_input: TextInputKeybindingProfile,
@@ -89,12 +90,14 @@ pub(crate) struct ControlKeybindingProfiles {
 impl ControlKeybindingProfiles {
     pub(crate) const fn new(
         modal: ModalKeybindingProfile,
+        menu: MenuKeybindingProfile,
         command_palette: CommandPaletteKeybindingProfile,
         combo_box: ComboBoxKeybindingProfile,
         text_input: TextInputKeybindingProfile,
     ) -> Self {
         Self {
             modal,
+            menu,
             command_palette,
             combo_box,
             text_input,
@@ -166,6 +169,7 @@ impl DesktopProfile {
             self.modal_policy
                 .with_text_direction(self.locale.text_direction()),
         );
+        spaceterm_ui::install_menu_keybindings(cx, self.control_keys.menu);
         spaceterm_ui::install_command_palette_keybindings(cx, self.control_keys.command_palette);
         spaceterm_ui::install_portable_combo_box_keybindings(cx);
         spaceterm_ui::install_combo_box_keybindings(cx, self.control_keys.combo_box);
@@ -256,6 +260,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
         ModalDesktopPolicy::mac_os(),
         ControlKeybindingProfiles::new(
             ModalKeybindingProfile::MacOs,
+            MenuKeybindingProfile::MacOs,
             CommandPaletteKeybindingProfile::MacOs,
             ComboBoxKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
@@ -315,6 +320,7 @@ mod tests {
             ModalDesktopPolicy::mac_os(),
             ControlKeybindingProfiles::new(
                 ModalKeybindingProfile::MacOs,
+                MenuKeybindingProfile::MacOs,
                 CommandPaletteKeybindingProfile::MacOs,
                 ComboBoxKeybindingProfile::MacOs,
                 TextInputKeybindingProfile::MacOs,
@@ -342,6 +348,7 @@ mod tests {
             ModalDesktopPolicy::mac_os(),
             ControlKeybindingProfiles::new(
                 ModalKeybindingProfile::MacOs,
+                MenuKeybindingProfile::MacOs,
                 CommandPaletteKeybindingProfile::MacOs,
                 ComboBoxKeybindingProfile::MacOs,
                 TextInputKeybindingProfile::MacOs,

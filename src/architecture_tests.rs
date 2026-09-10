@@ -296,6 +296,7 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
     // These enum values are supplied desktop policy facts, not Adapter selection.
     let source = source
         .replace("ModalKeybindingProfile::MacOs", "ExplicitModalProfile")
+        .replace("MenuKeybindingProfile::MacOs", "ExplicitMenuProfile")
         .replace(
             "CommandPaletteKeybindingProfile::MacOs",
             "ExplicitCommandPaletteProfile",

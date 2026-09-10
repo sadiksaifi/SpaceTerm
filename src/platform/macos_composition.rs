@@ -72,6 +72,7 @@ fn desktop_profile(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         ControlKeybindingProfiles::new(
             spaceterm_ui::ModalKeybindingProfile::MacOs,
+            spaceterm_ui::MenuKeybindingProfile::MacOs,
             spaceterm_ui::CommandPaletteKeybindingProfile::MacOs,
             spaceterm_ui::ComboBoxKeybindingProfile::MacOs,
             spaceterm_ui::TextInputKeybindingProfile::MacOs,
