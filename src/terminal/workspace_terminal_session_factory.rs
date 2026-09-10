@@ -225,8 +225,7 @@ impl WorkspaceTerminalSessionFactory {
                     .prepare(context.metadata_context.initial_directory())?;
                 TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     context.local_home.clone(),
-                    context.metadata_context.destination().clone(),
-                    context.metadata_context.initial_directory().clone(),
+                    context.metadata_context.clone(),
                     context.fallback_title.clone(),
                     pane_channel,
                 )))
@@ -375,10 +374,7 @@ impl WorkspaceTerminalSessionFactory {
                     }
                     (None, None) => context.metadata_context.initial_directory().clone(),
                 };
-                context.metadata_context = RemoteTerminalMetadataContext::new(
-                    context.metadata_context.destination().clone(),
-                    directory,
-                );
+                context.metadata_context.set_initial_directory(directory);
             }
         }
         selected.validate_starting_directory()?;
@@ -482,7 +478,9 @@ mod tests {
             crate::terminal::testing::test_local_directory(PathBuf::from(
                 "/local/home/used-only-as-process-cwd",
             )),
-            RemoteTerminalMetadataContext::new(destination, remote_directory),
+            RemoteTerminalMetadataContext::new(destination, remote_directory).with_machine(
+                crate::terminal::metadata::RemoteMachine::new(Some("tester"), Some("/home/tester")),
+            ),
             RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
             "project on remote".to_owned(),
             provider,
@@ -556,9 +554,63 @@ mod tests {
         assert_eq!(factory.fallback_title(), "project on remote");
         assert!(records.starts().iter().all(|start| {
             start.remote_launch_plan().is_some_and(|plan| {
-                plan.destination() == &destination && plan.remote_directory() == &remote_directory
+                plan.metadata_context()
+                    == &RemoteTerminalMetadataContext::new(
+                        destination.clone(),
+                        remote_directory.clone(),
+                    )
+                    .with_machine(
+                        crate::terminal::metadata::RemoteMachine::new(
+                            Some("tester"),
+                            Some("/home/tester"),
+                        ),
+                    )
             })
         }));
+    }
+
+    #[test]
+    fn remote_child_launches_should_preserve_machine_when_selecting_starting_directories() {
+        let records = TestTerminalSessionRecords::default();
+        let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(TestRemoteChannelProvider::new(
+            true,
+            (0..3).map(|_| Ok(prepared_channel(&destination, "exec /bin/zsh -l"))),
+        ));
+        let mut factory = remote_factory(records.clone(), provider);
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(8.0, 20.0),
+            BackingScale::ONE,
+        );
+        for (source, pin, expected_directory) in [
+            (None, None, "~/project"),
+            (Some("/srv/source"), None, "/srv/source"),
+            (Some("/srv/source"), Some("/srv/pin"), "/srv/pin"),
+        ] {
+            factory.set_pinned_directory(pin.map(|path| PinnedDirectory::Remote {
+                directory: RemoteDirectory::new(path.to_owned()).unwrap(),
+                identity: RemoteDirectoryIdentity::new(path.to_owned()).unwrap(),
+            }));
+            let selected = factory
+                .for_source_directory(source.map(|path| {
+                    CurrentDirectory::Remote(RemoteDirectory::new(path.to_owned()).unwrap())
+                }))
+                .unwrap();
+            let prepared = selected.prepare_child_launch().unwrap();
+            let _started = selected.start(geometry, prepared).unwrap();
+            let starts = records.starts();
+            let plan = starts.last().unwrap().remote_launch_plan().unwrap();
+            let expected = RemoteTerminalMetadataContext::new(
+                destination.clone(),
+                RemoteDirectory::new(expected_directory.to_owned()).unwrap(),
+            )
+            .with_machine(crate::terminal::metadata::RemoteMachine::new(
+                Some("tester"),
+                Some("/home/tester"),
+            ));
+            assert_eq!(plan.metadata_context(), &expected);
+        }
     }
 
     #[test]

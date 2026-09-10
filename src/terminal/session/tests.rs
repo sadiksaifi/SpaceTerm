@@ -48,8 +48,7 @@ fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels()
     .prepare_pane_channel(remote_pane_command(&remote_directory));
     let plan = RemoteTerminalLaunchPlan::new(
         local_home.clone(),
-        destination.clone(),
-        remote_directory.clone(),
+        RemoteTerminalMetadataContext::new(destination.clone(), remote_directory.clone()),
         "project on remote".to_owned(),
         prepared.clone(),
     );
@@ -138,8 +137,7 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
             local_home.clone(),
             LocalDirectoryIdentity::for_test(7011),
         ),
-        destination,
-        remote_directory.clone(),
+        RemoteTerminalMetadataContext::new(destination, remote_directory.clone()),
         "project on remote".to_owned(),
         context.prepare_pane_channel(remote_pane_command(&remote_directory)),
     )));
@@ -1065,8 +1063,7 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
             PathBuf::from("/private/tmp/spaceterm-missing-local-home"),
             LocalDirectoryIdentity::for_test(0),
         ),
-        destination,
-        remote_directory,
+        RemoteTerminalMetadataContext::new(destination, remote_directory),
         "project on remote".to_owned(),
         prepared,
     );

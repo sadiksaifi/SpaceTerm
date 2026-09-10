@@ -196,12 +196,18 @@ impl RemoteTerminalMetadataContext {
         self
     }
 
+    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
 
     pub(crate) const fn initial_directory(&self) -> &RemoteDirectory {
         &self.initial_directory
+    }
+
+    /// Changes the Starting Directory while retaining the discovered account and machine facts.
+    pub(crate) fn set_initial_directory(&mut self, directory: RemoteDirectory) {
+        self.initial_directory = directory;
     }
 
     /// Splits the destination into the account it names, if any, and the machine.

@@ -568,8 +568,10 @@ mod tests {
                 geometry,
                 TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     test_local_directory(PathBuf::from("/Users/local")),
-                    destination.clone(),
-                    directory.clone(),
+                    crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                        destination.clone(),
+                        directory.clone(),
+                    ),
                     "project on remote".to_owned(),
                     prepared,
                 ))),

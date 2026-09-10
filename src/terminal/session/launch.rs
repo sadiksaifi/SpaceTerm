@@ -95,14 +95,13 @@ impl fmt::Debug for RemoteTerminalLaunchPlan {
 impl RemoteTerminalLaunchPlan {
     pub(crate) const fn new(
         local_home: crate::domain::ValidatedLocalDirectory,
-        destination: crate::domain::SshDestination,
-        remote_directory: crate::domain::RemoteDirectory,
+        metadata_context: RemoteTerminalMetadataContext,
         fallback_title: String,
         pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
     ) -> Self {
         Self {
             local_home,
-            metadata_context: RemoteTerminalMetadataContext::new(destination, remote_directory),
+            metadata_context,
             fallback_title,
             pane_channel,
         }
