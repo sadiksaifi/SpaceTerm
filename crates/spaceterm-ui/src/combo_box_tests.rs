@@ -2338,6 +2338,52 @@ fn handle_should_not_open_a_removed_trigger(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn handle_accept_matching_should_use_normal_acceptance_without_highlight(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let handle = cx.update(|_, cx| root.read(cx).handle.clone());
+    cx.update(|window, cx| root.read(cx).before_focus.focus(window));
+    assert!(cx.update(|window, cx| handle.open(window, cx)));
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
+    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| root.read(cx).before_focus.is_focused(window)));
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Opened),
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                ComboBoxCloseReason::Accepted
+            )),
+            RecordedEvent::Accepted {
+                item_id: 3,
+                source: ComboBoxActivationSource::Keyboard,
+                window_was_open: false
+            },
+        ]
+    );
+}
+
+#[gpui::test]
+fn handle_accept_matching_should_reject_disabled_and_filtered_choices(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let handle = cx.update(|_, cx| root.read(cx).handle.clone());
+    assert!(cx.update(|window, cx| handle.open(window, cx)));
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 2, window, cx)));
+    cx.simulate_keystrokes("s s h");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 1, window, cx)));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 3,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+}
+
+#[gpui::test]
 fn handle_should_not_open_a_disabled_trigger(cx: &mut TestAppContext) {
     let (root, _, _, cx) = combo_box_window(cx, None, items(), true);
     let handle = cx.update(|_, cx| root.read(cx).handle.clone());

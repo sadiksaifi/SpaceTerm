@@ -7,6 +7,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("cmd-k", SwitchWorkspace, None),
         KeyBinding::new("cmd-n", NewWorkspace, None),
+        KeyBinding::new("cmd-shift-n", NewRemoteWorkspace, None),
         KeyBinding::new("cmd-t", CreateTab, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseTab, None),

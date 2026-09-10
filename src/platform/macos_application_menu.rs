@@ -69,6 +69,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "New Remote Workspace",
+        symbol: "globe",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Switch Workspace",
         symbol: "magnifyingglass",
     },
@@ -316,6 +322,7 @@ fn file_menu() -> Menu {
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
+            MenuItem::action("New Remote Workspace", crate::ui::NewRemoteWorkspace),
             MenuItem::action("Switch Workspace", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
@@ -817,6 +824,7 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
+                crate::ui::NewRemoteWorkspace.name(),
                 SwitchWorkspace.name(),
                 CreateTab.name(),
                 ClosePane.name(),
