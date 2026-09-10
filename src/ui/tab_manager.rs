@@ -720,15 +720,6 @@ impl TabManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
-        let title = self.tabs.active_tab().read(cx).tab_title();
-        if self.tabs.len() == 1 {
-            return title;
-        }
-        format!("{title} · {} tabs", self.tabs.len()).into()
-    }
-
-    #[cfg(test)]
     pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
         self.tabs.active_tab().clone()
     }

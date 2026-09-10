@@ -806,6 +806,15 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
         self
     }
 
+    /// Enables Shift+F10 and the Menu key while the supplied trigger focus is active.
+    ///
+    /// The caller owns navigation to this focus handle. Opening uses the same request gate,
+    /// menu entries, and lifecycle as a secondary click; dismissal restores displaced focus.
+    pub fn keyboard_trigger(mut self, focus: &FocusHandle) -> Self {
+        self.core.context_focus = Some(focus.clone());
+        self
+    }
+
     /// Makes the context-menu decorator fill the width allocated by its parent.
     ///
     /// Use this for children such as editors whose percentage width requires a definite
@@ -1093,6 +1102,7 @@ struct MenuControl<A> {
     on_activate: Option<TypedActivationHandler<A>>,
     on_lifecycle: Option<MenuLifecycleHandler>,
     on_context_open: Option<ContextOpenHandler>,
+    context_focus: Option<FocusHandle>,
 }
 
 impl<A> MenuControl<A> {
@@ -1117,6 +1127,7 @@ impl<A> MenuControl<A> {
             on_activate: None,
             on_lifecycle: None,
             on_context_open: None,
+            context_focus: None,
         }
     }
 
@@ -1132,6 +1143,9 @@ impl<A: Clone + 'static> MenuControl<A> {
         let handler = self.on_activate;
         let lifecycle = self.on_lifecycle;
         let context_open = self.on_context_open;
+        let key_context_open = context_open.clone();
+        let context_focus = self.context_focus;
+        let keyboard_context_enabled = context_focus.is_some();
         let entries = convert_entries(self.entries, &move |action: A, mark| {
             let handler = handler.clone();
             Rc::new(move |source, window: &mut Window, cx: &mut App| {
@@ -1264,13 +1278,51 @@ impl<A: Clone + 'static> MenuControl<A> {
             .when(!open && self.kind != TriggerKind::Context, |trigger| {
                 trigger.track_focus(&focus_handle)
             })
+            .when_some(context_focus.filter(|_| !open), |trigger, focus| {
+                trigger.track_focus(&focus)
+            })
             .child(content)
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if trigger_kind == TriggerKind::Context
-                    || !enabled
-                    || event.keystroke.modifiers.modified()
-                {
+                if !enabled {
+                    return;
+                }
+                if trigger_kind == TriggerKind::Context {
+                    if !keyboard_context_enabled {
+                        return;
+                    }
+                    let modifiers = &event.keystroke.modifiers;
+                    let requested = (event.keystroke.key == "f10"
+                        && modifiers.shift
+                        && !modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.platform)
+                        || (event.keystroke.key == "menu" && !modifiers.modified());
+                    if !requested {
+                        return;
+                    }
+                    let Some(position) = key_state
+                        .read_with(cx, |state, _| {
+                            state.trigger_bounds.map(|bounds| bounds.bottom_left())
+                        })
+                        .ok()
+                        .flatten()
+                    else {
+                        return;
+                    };
+                    let request = ContextMenuOpenRequest { position };
+                    if key_context_open
+                        .as_ref()
+                        .is_some_and(|handler| !handler(&request, window, cx))
+                    {
+                        return;
+                    }
+                    window.prevent_default();
+                    open_menu(&key_state, Some(position), OpenDirection::First, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if event.keystroke.modifiers.modified() {
                     return;
                 }
                 if matches!(event.keystroke.key.as_str(), "space" | "enter" | "down") {
@@ -4522,6 +4574,99 @@ mod tests {
         cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("Inspect").is_some());
+    }
+
+    struct KeyboardContextRoot {
+        focus: FocusHandle,
+        accept: Rc<Cell<bool>>,
+        requests: Rc<Cell<usize>>,
+        activations: Rc<RefCell<Vec<MenuActivationSource>>>,
+        disabled: bool,
+    }
+
+    impl Render for KeyboardContextRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let accept = self.accept.clone();
+            let requests = self.requests.clone();
+            let activations = self.activations.clone();
+            ContextMenu::new(
+                "keyboard-context",
+                "Workspace actions",
+                div().w(px(100.0)).h(px(40.0)),
+                vec![
+                    MenuEntry::action("Unavailable", ()).disabled(true),
+                    MenuEntry::action("Inspect", ()),
+                ],
+            )
+            .keyboard_trigger(&self.focus)
+            .disabled(self.disabled)
+            .on_open_request(move |_, _, _| {
+                requests.set(requests.get() + 1);
+                accept.get()
+            })
+            .on_activate(move |activation, _, _| activations.borrow_mut().push(activation.source()))
+        }
+    }
+
+    #[gpui::test]
+    fn keyboard_context_menu_should_share_request_gate_activation_and_focus_cleanup(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let accept = Rc::new(Cell::new(false));
+        let requests = Rc::new(Cell::new(0));
+        let activations = Rc::new(RefCell::new(Vec::new()));
+        let (root, cx) = cx.add_window_view(|_, cx| KeyboardContextRoot {
+            focus: cx.focus_handle(),
+            accept: accept.clone(),
+            requests: requests.clone(),
+            activations: activations.clone(),
+            disabled: false,
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.read(cx).focus.focus(window);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("shift-f10");
+        cx.run_until_parked();
+        assert_eq!(requests.get(), 1);
+        assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+        assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
+
+        accept.set(true);
+        cx.simulate_keystrokes("ctrl-shift-f10");
+        cx.run_until_parked();
+        assert_eq!(requests.get(), 1);
+        cx.simulate_keystrokes("fn-shift-f10");
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            activations.borrow().as_slice(),
+            [MenuActivationSource::Keyboard]
+        );
+        assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
+
+        cx.simulate_keystrokes("menu");
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+        assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
+
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("shift-f10");
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+        assert_eq!(requests.get(), 3);
     }
 
     struct ContextRoot;
