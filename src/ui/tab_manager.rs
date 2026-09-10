@@ -1197,24 +1197,33 @@ impl TabManager {
             )
             .child(items)
             .child(
-                IconButton::new("create-tab-button", "Create Tab", move |_| {
-                    Icon::new(IconName::Plus, px(14.0), icon_foreground).into_any_element()
-                })
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Regular)
-                .debug_selector("create-tab-button")
-                .tooltip(
-                    Tooltip::new("create-tab-tooltip", "Create Tab")
-                        .keyboard_equivalent(create_tab_shortcut(
-                            crate::desktop_profile::DesktopPresentation::get(cx),
-                        ))
-                        .debug_selector("create-tab-tooltip"),
-                )
-                .on_activate(move |_, window, cx| {
-                    let _ = create_manager.update(cx, |manager, cx| {
-                        manager.create_tab(window, cx);
-                    });
-                }),
+                div()
+                    .debug_selector(|| "create-tab-area".to_owned())
+                    .size(px(TAB_BAR_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        IconButton::new("create-tab-button", "Create Tab", move |_| {
+                            Icon::new(IconName::Plus, px(14.0), icon_foreground).into_any_element()
+                        })
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
+                        .debug_selector("create-tab-button")
+                        .tooltip(
+                            Tooltip::new("create-tab-tooltip", "Create Tab")
+                                .keyboard_equivalent(create_tab_shortcut(
+                                    crate::desktop_profile::DesktopPresentation::get(cx),
+                                ))
+                                .debug_selector("create-tab-tooltip"),
+                        )
+                        .on_activate(move |_, window, cx| {
+                            let _ = create_manager.update(cx, |manager, cx| {
+                                manager.create_tab(window, cx);
+                            });
+                        }),
+                    ),
             );
 
         let drag_region = WindowDragRegion::new(
@@ -2253,7 +2262,10 @@ mod tests {
         {
             let tab = cx.debug_bounds(selector).unwrap();
             let button = cx.debug_bounds("create-tab-button").unwrap();
-            assert_eq!(button.left(), tab.right());
+            let area = cx.debug_bounds("create-tab-area").unwrap();
+            assert_eq!(area.left(), tab.right());
+            assert_eq!(area.size, gpui::size(tab.size.height, tab.size.height));
+            assert_eq!(button.center(), area.center());
             assert_eq!(button.center().y, tab.center().y);
             if index < 2 {
                 click("create-tab-button", cx);
@@ -2266,7 +2278,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            cx.debug_bounds("create-tab-button").unwrap().left(),
+            cx.debug_bounds("create-tab-area").unwrap().left(),
             cx.debug_bounds("tab-item-2-active").unwrap().right(),
         );
     }
@@ -2293,13 +2305,16 @@ mod tests {
                 cx.run_until_parked();
                 let strip = cx.debug_bounds("tab-items").unwrap();
                 let button = cx.debug_bounds("create-tab-button").unwrap();
+                let area = cx.debug_bounds("create-tab-area").unwrap();
                 let bar = cx.debug_bounds("tab-bar").unwrap();
-                assert_eq!(button.left(), strip.right());
-                assert!(button.right() <= bar.right());
+                assert_eq!(area.left(), strip.right());
+                assert!(area.right() <= bar.right());
+                assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+                assert_eq!(button.center(), area.center());
                 assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
                 if width == 1200.0 {
                     assert_eq!(
-                        button.left(),
+                        area.left(),
                         cx.debug_bounds("tab-item-3-active").unwrap().right()
                     );
                 }
@@ -2332,9 +2347,12 @@ mod tests {
         );
         let strip = cx.debug_bounds("tab-items").unwrap();
         let button = cx.debug_bounds("create-tab-button").unwrap();
+        let area = cx.debug_bounds("create-tab-area").unwrap();
         let bar = cx.debug_bounds("tab-bar").unwrap();
-        assert_eq!(button.left(), strip.right());
-        assert!(button.right() <= bar.right());
+        assert_eq!(area.left(), strip.right());
+        assert!(area.right() <= bar.right());
+        assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+        assert_eq!(button.center(), area.center());
         let active = cx.debug_bounds("tab-item-21-active").unwrap();
         assert!(active.left() >= strip.left());
         assert!(active.right() <= strip.right());
