@@ -56,21 +56,21 @@ use spaceterm_ui::{
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 /// The Pane Caption's outer height, which its top padding sits inside.
-const PANE_CAPTION_HEIGHT: f32 = 36.0;
+const PANE_CAPTION_HEIGHT: f32 = 32.0;
 /// Space held above the caption row, so the header breathes away from the chrome above it.
 const PANE_CAPTION_TOP_PADDING: f32 = 8.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
-const PANE_CAPTION_TEXT_SIZE: f32 = 13.75;
+const PANE_CAPTION_TEXT_SIZE: f32 = 12.65;
 /// Width reserved by the middle dot that separates a directory from its Pane label.
-const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 18.75;
-const PANE_ORIGIN_ICON_SIZE: f32 = 15.0;
+const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 17.25;
+const PANE_ORIGIN_ICON_SIZE: f32 = 13.8;
 const PANE_ORIGIN_ICON_GAP: f32 = 6.0;
 /// Width reserved by the chevron that separates a Pane's origin from its directory.
-const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 20.0;
-const PANE_CONTROL_SIZE: f32 = 24.0;
+const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
+const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
-const PANE_CONTROL_ICON_SIZE: f32 = 15.0;
+const PANE_CONTROL_ICON_SIZE: f32 = 13.8;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 const PANE_ATTENTION_WIDTH: f32 = 13.0;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
@@ -1702,7 +1702,7 @@ fn render_pane_caption_content(
             )
             // The caption paints no surface, so its controls must not paint one either.
             .variant(ButtonVariant::Bare)
-            .size(ButtonSize::Small)
+            .size(ButtonSize::Compact)
             .preserve_ancestor_hover()
             .debug_selector(id.clone())
             .tooltip(
