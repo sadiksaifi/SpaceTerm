@@ -71,6 +71,11 @@ const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
 const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
 const PANE_CONTROL_ICON_SIZE: f32 = 13.8;
+/// The zoom glyphs' own size, drawn slightly smaller than their neighbours.
+///
+/// The arrows reach into all four corners of their em box, so they read larger at the size the
+/// caption's other controls share. This applies to the Pane Caption's zoom control alone.
+const PANE_ZOOM_ICON_SIZE: f32 = 13.11;
 /// The close glyph's own size, drawn slightly larger than its neighbours.
 ///
 /// An X occupies less of its em box than the panel and zoom glyphs, so it reads smaller at the
@@ -98,7 +103,8 @@ impl PaneCaptionAction {
     /// The glyph size this control paints at.
     const fn icon_size(self) -> f32 {
         match self {
-            Self::SplitRight | Self::SplitDown | Self::ToggleZoom => PANE_CONTROL_ICON_SIZE,
+            Self::SplitRight | Self::SplitDown => PANE_CONTROL_ICON_SIZE,
+            Self::ToggleZoom => PANE_ZOOM_ICON_SIZE,
             Self::Close => PANE_CLOSE_ICON_SIZE,
         }
     }
