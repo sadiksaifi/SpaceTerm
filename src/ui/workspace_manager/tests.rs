@@ -1,4 +1,9 @@
+use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::ui::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
+use crate::ui::workspace_sidebar::COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH;
+use gpui::MouseButton;
+use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
@@ -356,17 +361,6 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
     assert_eq!(
         (hidden_icon.unicode(), hidden_label),
         (IconName::PanelRight.unicode(), "Open Sidebar")
-    );
-}
-
-#[test]
-fn workspace_surfaces_should_use_host_neutral_profile_shortcuts() {
-    assert_eq!(
-        workspace_surface_presentation(&crate::desktop_profile::testing_presentation()),
-        WorkspaceSurfacePresentation {
-            new_workspace_button: "Primary+N",
-            new_tab_menu: "Primary+T",
-        }
     );
 }
 
@@ -2044,7 +2038,7 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
     assert_eq!(
         cx.update(|window, cx| {
             (
-                manager.read(cx).sidebar.visible,
+                manager.read(cx).sidebar.read(cx).layout().visible,
                 window_combo_box_is_open(window, cx),
                 manager.read(cx).terminal_focus_blocker(window, cx),
             )
@@ -4208,7 +4202,9 @@ fn workspace_switcher_should_replace_an_open_workspace_context_menu(cx: &mut Tes
     redraw(cx);
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     assert!(cx.debug_bounds("combo-box-panel").is_some());
-    assert!(manager.read_with(cx, |manager, _| manager.sidebar.menu.is_none()));
+    assert!(manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).menu_target().is_none()
+    }));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -4216,7 +4212,7 @@ fn workspace_switcher_should_replace_an_open_workspace_context_menu(cx: &mut Tes
     let restored = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -4232,7 +4228,7 @@ fn workspace_switcher_from_inline_rename_should_restore_sidebar_focus(cx: &mut T
     let (manager, _, cx) = workspace_manager(cx);
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
-    assert!(cx.update(|window, cx| manager.read(cx).sidebar.rename_is_focused(window)));
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).rename_is_focused(window)));
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -4246,8 +4242,8 @@ fn workspace_switcher_from_inline_rename_should_restore_sidebar_focus(cx: &mut T
     let restored = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.rename.is_none(),
-            manager.sidebar.focus.is_focused(window),
+            !manager.sidebar.read(cx).is_renaming(),
+            manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -5132,7 +5128,7 @@ fn dragging_sidebar_divider_at_top_chrome_edges_should_not_move_window(cx: &mut 
 
     assert_eq!(
         (
-            manager.read_with(cx, |manager, _| manager.sidebar.width),
+            manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width),
             platform.counts(),
         ),
         (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0, 0),)
@@ -5153,8 +5149,11 @@ fn dragging_sidebar_divider_should_resize_sidebar_chrome_and_content(cx: &mut Te
         cx,
     );
 
-    let layout = manager.read_with(cx, |manager, _| {
-        (manager.sidebar.visible, manager.sidebar.width)
+    let layout = manager.read_with(cx, |manager, cx| {
+        (
+            manager.sidebar.read(cx).layout().visible,
+            manager.sidebar.read(cx).layout().width,
+        )
     });
     let chrome = cx
         .debug_bounds("workspace-top-chrome")
@@ -5205,7 +5204,7 @@ fn shared_sidebar_handle_should_clamp_to_the_application_maximum(cx: &mut TestAp
     );
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.sidebar.width),
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width),
         maximum
     );
 }
@@ -5222,7 +5221,7 @@ fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(cx: &mut 
     let active = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.resizing,
+            manager.sidebar.read(cx).is_resizing(),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -5242,7 +5241,7 @@ fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(cx: &mut 
     let finished = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.resizing,
+            manager.sidebar.read(cx).is_resizing(),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -5287,7 +5286,7 @@ fn double_clicking_sidebar_handle_should_request_default_width(cx: &mut TestAppC
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.width,
+            manager.sidebar.read(cx).layout().width,
             manager
                 .workspaces
                 .active_workspace()
@@ -5318,8 +5317,11 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
         cx,
     );
 
-    let layout = manager.read_with(cx, |manager, _| {
-        (manager.sidebar.visible, manager.sidebar.width)
+    let layout = manager.read_with(cx, |manager, cx| {
+        (
+            manager.sidebar.read(cx).layout().visible,
+            manager.sidebar.read(cx).layout().width,
+        )
     });
     let chrome = cx
         .debug_bounds("workspace-top-chrome")
@@ -5365,8 +5367,11 @@ fn dragging_the_collapsed_handle_should_reopen_from_the_top_chrome_edge(cx: &mut
     );
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            (manager.sidebar.visible, manager.sidebar.width)
+        manager.read_with(cx, |manager, cx| {
+            (
+                manager.sidebar.read(cx).layout().visible,
+                manager.sidebar.read(cx).layout().width,
+            )
         }),
         (true, requested_width)
     );
@@ -5396,8 +5401,11 @@ fn collapsed_handle_should_preserve_the_remembered_width_when_dragged_left(
         cx,
     );
     assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            (manager.sidebar.visible, manager.sidebar.width)
+        manager.read_with(cx, |manager, cx| {
+            (
+                manager.sidebar.read(cx).layout().visible,
+                manager.sidebar.read(cx).layout().width,
+            )
         }),
         (false, px(320.0)),
         "dragging the collapsed edge inward must retain its remembered expanded width"
@@ -5405,8 +5413,11 @@ fn collapsed_handle_should_preserve_the_remembered_width_when_dragged_left(
     click("toggle-sidebar-button", cx);
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            (manager.sidebar.visible, manager.sidebar.width)
+        manager.read_with(cx, |manager, cx| {
+            (
+                manager.sidebar.read(cx).layout().visible,
+                manager.sidebar.read(cx).layout().width,
+            )
         }),
         (true, px(320.0))
     );
@@ -5439,8 +5450,11 @@ fn escape_should_restore_the_collapsed_sidebar_and_its_remembered_width(cx: &mut
     cx.run_until_parked();
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            (manager.sidebar.visible, manager.sidebar.width)
+        manager.read_with(cx, |manager, cx| {
+            (
+                manager.sidebar.read(cx).layout().visible,
+                manager.sidebar.read(cx).layout().width,
+            )
         }),
         (false, px(320.0))
     );
@@ -5473,7 +5487,8 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let sidebar_visible = manager.read_with(cx, |manager, _| manager.sidebar.visible);
+    let sidebar_visible =
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible);
     assert!(
         !sidebar_visible,
         "the sidebar resize did not collapse the body"
@@ -5571,7 +5586,7 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 
     click("workspace-switcher", cx);
 
-    assert!(!manager.read_with(cx, |manager, _| manager.sidebar.visible));
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     let panel = cx
         .debug_bounds("combo-box-panel")
@@ -5607,7 +5622,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     let (manager, _records, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    assert!(!manager.read_with(cx, |manager, _| manager.sidebar.visible));
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
@@ -5697,7 +5712,7 @@ fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut Te
 
     click("toggle-sidebar-button", cx);
 
-    assert!(!manager.read_with(cx, |manager, _| manager.sidebar.visible));
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(
         cx.debug_bounds("workspace-chip").is_some(),
         "nothing named the Active Workspace once the sidebar closed"
@@ -5993,10 +6008,11 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
         cx.simulate_keystrokes("cmd-n");
     }
 
-    manager.read_with(cx, |manager, _| {
+    manager.read_with(cx, |manager, cx| {
         manager
             .sidebar
-            .scroll_handle
+            .read(cx)
+            .scroll_handle()
             .set_offset(point(px(0.0), px(0.0)));
     });
     manager.update(cx, |_, cx| cx.notify());
@@ -6012,7 +6028,9 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
     });
     cx.run_until_parked();
 
-    let offset = manager.read_with(cx, |manager, _| manager.sidebar.scroll_handle.offset().y);
+    let offset = manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).scroll_handle().offset().y
+    });
     assert!(
         offset < px(0.0),
         "the Workspace list did not scroll; offset was {offset:?}"
@@ -6025,10 +6043,11 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
     for _ in 0..24 {
         cx.simulate_keystrokes("cmd-n");
     }
-    manager.read_with(cx, |manager, _| {
+    manager.read_with(cx, |manager, cx| {
         manager
             .sidebar
-            .scroll_handle
+            .read(cx)
+            .scroll_handle()
             .set_offset(point(px(0.0), px(0.0)));
     });
     manager.update(cx, |_, cx| cx.notify());
@@ -6065,9 +6084,12 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     manager.update(cx, |manager, cx| {
         manager
             .sidebar
-            .scroll_handle
+            .read(cx)
+            .scroll_handle()
             .set_offset(point(px(0.0), px(0.0)));
-        manager.sidebar.reveal_scrollbar(cx);
+        manager
+            .sidebar
+            .update(cx, |sidebar, cx| sidebar.reveal_scrollbar(cx));
     });
     cx.run_until_parked();
 
@@ -6090,7 +6112,9 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
-    let state = manager.read_with(cx, |manager, _| manager.sidebar.scroll_handle.offset().y);
+    let state = manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).scroll_handle().offset().y
+    });
     assert!(
         state < px(0.0),
         "the Workspace list did not finish a scrollbar drag: {state:?}"
@@ -6104,11 +6128,11 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
         cx.simulate_keystrokes("cmd-n");
     }
 
-    let state = manager.read_with(cx, |manager, _| {
+    let state = manager.read_with(cx, |manager, cx| {
         (
             manager.workspaces.len(),
             manager.workspaces.active_workspace_id(),
-            manager.sidebar.scroll_handle.offset().y,
+            manager.sidebar.read(cx).scroll_handle().offset().y,
         )
     });
     assert!(
@@ -6158,7 +6182,8 @@ fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
 
-    let hidden_state = manager.read_with(cx, |manager, _| manager.sidebar.visible);
+    let hidden_state =
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible);
     let collapsed_chrome = cx
         .debug_bounds("workspace-top-chrome")
         .expect("the fixed top-left chrome must remain rendered");
@@ -6187,15 +6212,16 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
 
     cx.simulate_keystrokes("cmd-shift-e");
     cx.run_until_parked();
-    let sidebar_focused = cx.update(|window, cx| manager.read(cx).sidebar.focus.is_focused(window));
+    let sidebar_focused =
+        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window));
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     let hidden_state = cx.update(|window, cx| {
         let workspace_manager = manager.read(cx);
         (
-            workspace_manager.sidebar.visible,
-            workspace_manager.sidebar.focus.is_focused(window),
+            workspace_manager.sidebar.read(cx).layout().visible,
+            workspace_manager.sidebar.read(cx).is_focused(window),
             workspace_manager
                 .workspaces
                 .active_workspace()
@@ -6210,8 +6236,8 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
     let revealed_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.visible,
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).layout().visible,
+            manager.sidebar.read(cx).is_focused(window),
         )
     });
 
@@ -6291,7 +6317,7 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
         let manager = manager.read(cx);
         (
             manager.workspaces.active_workspace_id(),
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
                 .active_workspace()
@@ -6324,22 +6350,13 @@ fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestA
         let active_workspace = manager.workspaces.active_workspace().payload().read(cx);
         (
             manager.workspaces.active_workspace_id(),
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
-            active_workspace.sidebar_detail(cx),
+            active_workspace.aggregate_counts(cx),
             active_workspace.focused_terminal_is_focused(window, cx),
         )
     });
-    assert_eq!(
-        state,
-        (
-            WorkspaceId::new(1),
-            false,
-            None,
-            SharedString::from("zsh · 2 Panes"),
-            true,
-        )
-    );
+    assert_eq!(state, (WorkspaceId::new(1), false, None, (1, 2), true,));
 }
 
 #[gpui::test]
@@ -6355,7 +6372,7 @@ fn clicking_the_active_workspace_should_restore_terminal_focus_from_the_sidebar(
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
@@ -6382,8 +6399,8 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
         let manager = manager.read(cx);
         (
             manager.workspaces.active_workspace_id(),
-            manager.sidebar.focus.is_focused(window),
-            manager.sidebar.menu.map(|menu| menu.workspace_id),
+            manager.sidebar.read(cx).is_focused(window),
+            manager.sidebar.read(cx).menu_target(),
             manager
                 .workspaces
                 .active_workspace()
@@ -6403,8 +6420,8 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
     let dismissed = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.menu,
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).menu_target(),
+            manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
         )
     });
@@ -6416,36 +6433,39 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            let workspace_id = manager.workspaces.active_workspace_id();
-            for resizing in [true, false] {
-                manager.sidebar.resizing = resizing;
-                manager.handle_workspace_menu_lifecycle(
-                    workspace_id,
-                    MenuLifecycleEvent::Opened,
-                    window,
-                    cx,
-                );
-                manager.handle_workspace_menu_lifecycle(
-                    workspace_id,
-                    MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
-                    window,
-                    cx,
-                );
-                assert_eq!(
-                    manager
-                        .workspaces
-                        .active_workspace()
-                        .payload()
-                        .read(cx)
-                        .focused_terminal_has_input_focus(window, cx),
-                    !resizing,
-                    "menu closure must immediately preserve only remaining owners"
-                );
-            }
+    for resizing in [true, false] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let workspace_id = manager.workspaces.active_workspace_id();
+                manager.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_resizing_for_test(resizing);
+                    sidebar.handle_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Opened,
+                        window,
+                        cx,
+                    );
+                    sidebar.handle_menu_lifecycle(
+                        workspace_id,
+                        MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
+                        window,
+                        cx,
+                    );
+                });
+            });
         });
-    });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)),
+            !resizing
+        );
+    }
 }
 
 #[gpui::test]
@@ -6460,13 +6480,13 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
     let created_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .sidebar_detail(cx),
+                .aggregate_counts(cx),
         )
     });
 
@@ -6475,10 +6495,7 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
     cx.simulate_keystrokes("cmd-1");
     cx.run_until_parked();
 
-    assert_eq!(
-        (created_state.0, created_state.1.as_ref()),
-        (false, "zsh · 2 tabs")
-    );
+    assert_eq!((created_state.0, created_state.1), (false, (2, 2)));
     assert!(cx.debug_bounds("tab-item-1-active").is_some());
     assert!(cx.debug_bounds("tab-item-2-inactive").is_some());
 }
@@ -6544,20 +6561,17 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.focus.is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .sidebar_detail(cx),
+                .aggregate_counts(cx),
             records.dropped_session_ids(),
         )
     });
-    assert_eq!(
-        (state.0, state.1.as_ref(), state.2),
-        (false, "zsh · 2 Panes", Vec::new())
-    );
+    assert_eq!((state.0, state.1, state.2), (false, (1, 2), Vec::new()));
 }
 
 #[gpui::test]
@@ -6572,7 +6586,7 @@ fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut Tes
             .active_workspace()
             .payload()
             .read(cx)
-            .sidebar_detail(cx)
+            .aggregate_counts(cx)
     });
 
     right_click("workspace-row-1-active", cx);
@@ -6583,10 +6597,7 @@ fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut Tes
         manager.workspaces.active_workspace().name().to_owned()
     });
 
-    assert_eq!(
-        (workspace_detail.as_ref(), name),
-        ("zsh · 2 tabs", "Dev".to_owned())
-    );
+    assert_eq!((workspace_detail, name), ((2, 2), "Dev".to_owned()));
 }
 
 #[gpui::test]
@@ -6606,19 +6617,19 @@ fn clicking_the_active_inline_rename_should_keep_it_editable(cx: &mut TestAppCon
     let focus_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.rename_is_focused(window),
-            manager.sidebar.focus.is_focused(window),
-            manager.sidebar.rename.is_some(),
+            manager.sidebar.read(cx).rename_is_focused(window),
+            manager.sidebar.read(cx).is_focused(window),
+            manager.sidebar.read(cx).is_renaming(),
         )
     });
     cx.simulate_keystrokes("cmd-a D e v enter");
     cx.run_until_parked();
 
-    let rename_state = manager.read_with(cx, |manager, _| {
+    let rename_state = manager.read_with(cx, |manager, cx| {
         (
             manager.workspaces.active_workspace_id(),
             manager.workspaces.active_workspace().name().to_owned(),
-            manager.sidebar.rename.is_none(),
+            !manager.sidebar.read(cx).is_renaming(),
         )
     });
     assert_eq!(focus_state, (true, false, true));
@@ -6637,25 +6648,24 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
     assert_eq!(
         manager.read_with(cx, |manager, cx| manager
             .sidebar
-            .rename
-            .as_ref()
+            .read(cx)
+            .rename_input()
             .expect("rename editor should remain active")
-            .input
             .read(cx)
             .value()
             .to_owned()),
         "Dev"
     );
     right_click("workspace-rename-input", cx);
-    assert!(manager.read_with(cx, |manager, _| manager.sidebar.rename.is_some()));
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
     let state_before_submit = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.rename.is_some(),
-            manager.sidebar.rename_is_focused(window),
+            manager.sidebar.read(cx).is_renaming(),
+            manager.sidebar.read(cx).rename_is_focused(window),
             manager.workspaces.active_workspace().name().to_owned(),
         )
     });
@@ -6667,9 +6677,9 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let state_after_submit = manager.read_with(cx, |manager, _| {
+    let state_after_submit = manager.read_with(cx, |manager, cx| {
         (
-            manager.sidebar.rename.is_none(),
+            !manager.sidebar.read(cx).is_renaming(),
             manager.workspaces.active_workspace().name().to_owned(),
         )
     });
@@ -6688,10 +6698,9 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
     assert_eq!(
         manager.read_with(cx, |manager, cx| manager
             .sidebar
-            .rename
-            .as_ref()
+            .read(cx)
+            .rename_input()
             .expect("rename editor should remain active")
-            .input
             .read(cx)
             .value()
             .to_owned()),
@@ -6704,8 +6713,8 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
     let state_before_submit = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.rename.is_some(),
-            manager.sidebar.rename_is_focused(window),
+            manager.sidebar.read(cx).is_renaming(),
+            manager.sidebar.read(cx).rename_is_focused(window),
             manager.workspaces.active_workspace().name().to_owned(),
         )
     });
@@ -6717,9 +6726,9 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
 
     cx.simulate_keystrokes("O p s enter");
     cx.run_until_parked();
-    let state_after_submit = manager.read_with(cx, |manager, _| {
+    let state_after_submit = manager.read_with(cx, |manager, cx| {
         (
-            manager.sidebar.rename.is_none(),
+            !manager.sidebar.read(cx).is_renaming(),
             manager.workspaces.active_workspace().name().to_owned(),
         )
     });
@@ -6735,14 +6744,15 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
     click("workspace-menu-row-rename", cx);
     cx.simulate_keystrokes("cmd-a D e v");
 
-    let sidebar_focus = manager.read_with(cx, |manager, _| manager.sidebar.focus.clone());
+    let sidebar_focus =
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
     cx.update(|window, _| sidebar_focus.focus(window));
     cx.run_until_parked();
 
-    let rename_state = manager.read_with(cx, |manager, _| {
+    let rename_state = manager.read_with(cx, |manager, cx| {
         (
             manager.workspaces.active_workspace().name().to_owned(),
-            manager.sidebar.rename.is_none(),
+            !manager.sidebar.read(cx).is_renaming(),
         )
     });
     assert_eq!(rename_state, ("Dev".to_owned(), true));
@@ -6757,7 +6767,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
 
-    assert!(manager.read_with(cx, |manager, _| manager.sidebar.rename.is_some()));
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
     click("workspace-row-2-inactive", cx);
     cx.simulate_keystrokes("x enter");
     cx.run_until_parked();
@@ -6775,28 +6785,21 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
             .expect("Workspace 2 must remain owned");
         (
             manager.workspaces.active_workspace_id(),
-            manager.sidebar.rename.is_none(),
+            !manager.sidebar.read(cx).is_renaming(),
             first.name().to_owned(),
-            first.payload().read(cx).sidebar_detail(cx),
-            second.payload().read(cx).sidebar_detail(cx),
+            first.payload().read(cx).aggregate_counts(cx),
+            second.payload().read(cx).aggregate_counts(cx),
             records.dropped_session_ids(),
         )
     });
     assert_eq!(
-        (
-            state.0,
-            state.1,
-            state.2,
-            state.3.as_ref(),
-            state.4.as_ref(),
-            state.5,
-        ),
+        (state.0, state.1, state.2, state.3, state.4, state.5,),
         (
             WorkspaceId::new(2),
             true,
             "Default".to_owned(),
-            "zsh",
-            "zsh · 2 tabs",
+            (1, 1),
+            (2, 2),
             Vec::new(),
         )
     );
@@ -7647,4 +7650,169 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
         cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
         cx.run_until_parked();
     }
+}
+
+#[gpui::test]
+fn sidebar_should_constrain_width_after_window_shrink_and_reopen(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.resize_sidebar(px(420.0), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(px(480.0), px(600.0)));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("workspace-sidebar").unwrap().size.width,
+        px(240.0)
+    );
+    assert!(cx.debug_bounds("tab-manager-content").unwrap().size.width >= px(240.0));
+
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.resize_sidebar(px(420.0), window, cx)
+        })
+    });
+    cx.simulate_keystrokes("cmd-b");
+    cx.simulate_resize(gpui::size(px(480.0), px(600.0)));
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("workspace-sidebar").unwrap().size.width,
+        px(240.0)
+    );
+    assert!(cx.debug_bounds("tab-manager-content").unwrap().size.width >= px(240.0));
+}
+
+#[gpui::test]
+fn sidebar_resize_cancel_should_respect_the_current_window_width(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.resize_sidebar(px(420.0), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let start = cx
+        .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+        .unwrap()
+        .center();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(start.x - px(50.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_resize(gpui::size(px(480.0), px(600.0)));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tab-manager-content").unwrap().size.width >= px(240.0));
+}
+
+#[gpui::test]
+fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    cx.simulate_keystrokes("cmd-shift-e home up");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(1)
+    );
+    let first = cx.debug_bounds("workspace-row-1-active").unwrap();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    assert!(first.top() >= list.top());
+    assert!(
+        cx.debug_bounds("workspace-sidebar-focus-indicator")
+            .is_some()
+    );
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    cx.simulate_keystrokes("end down");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(25)
+    );
+    let last = cx.debug_bounds("workspace-row-25-active").unwrap();
+    assert!(last.bottom() <= list.bottom());
+    assert!(cx.update(|window, cx| {
+        !manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+    assert!(cx.update(|window, cx| !manager.read(cx).sidebar.read(cx).is_focused(window)));
+}
+
+#[gpui::test]
+fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-shift-e shift-f10");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("workspace-menu-row-rename").is_some());
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("workspace-rename-input").is_some());
+    cx.simulate_keystrokes("cmd-a D e v enter");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "Dev"
+    );
+    assert!(
+        cx.debug_bounds("workspace-sidebar-focus-indicator")
+            .is_some()
+    );
+    cx.simulate_keystrokes("shift-f10");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 }

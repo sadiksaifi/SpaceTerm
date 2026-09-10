@@ -1,4 +1,16 @@
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
+#[cfg(test)]
+use super::workspace_sidebar::{
+    SIDEBAR_MAXIMUM_WIDTH, SIDEBAR_ROW_HEIGHT, TERMINAL_CONTENT_MINIMUM_WIDTH,
+};
+use super::workspace_sidebar::{
+    SIDEBAR_ROW_HORIZONTAL_PADDING, SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel,
+    WorkspaceSidebar, remote_connection_color, remote_connection_status,
+};
+use super::workspace_sidebar::{
+    SIDEBAR_TOGGLE_INSET, TOP_CHROME_ACTION_CLEARANCE, TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP,
+    WORKSPACE_CHIP_ICON_SIZE, WORKSPACE_CHIP_TEXT_SIZE, collapsed_top_chrome_width,
+};
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -30,7 +42,6 @@ use super::{
     OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace,
     TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent, TogglePaneZoom,
     ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
 use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
 #[cfg(test)]
@@ -38,9 +49,9 @@ use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
-    PinnedDirectory, RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
-    RemoteDirectory, RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection,
-    WorkspaceError, WorkspaceId, WorkspaceLocation,
+    PinnedDirectory, RemoteConnectionReduction, RemoteConnectionState, RemoteDirectory,
+    RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError,
+    WorkspaceId, WorkspaceLocation,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
@@ -59,44 +70,22 @@ use crate::terminal::{
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, Edges, Entity, EntityId, FocusHandle, Font,
-    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent,
-    SharedString, Task, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
+    Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
+    px, rgba,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
     AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
-    ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ContextMenu, CustomIconName, Icon, IconButton,
-    IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
-    OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
-    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis,
-    ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
+    ComboBoxFallback, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
+    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
+    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, Tooltip, TooltipLayer,
     TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
     WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
 };
 
-const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
-const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
 const WORKSPACE_CHROME_ICON_SIZE: f32 = 14.0;
-const WORKSPACE_CREATION_ICON_SIZE: f32 = 18.0;
-const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
-// Reserve enough label width beside both actions for Workspace names across desktop fonts.
-const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
-const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
-const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
-const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
-/// Clearance for the native traffic lights that share the top-left chrome strip.
-const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
-const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
-const WORKSPACE_CHIP_GAP: f32 = 5.0;
-const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
-const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
-const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
-const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
-const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str) {
     if sidebar_visible {
@@ -106,81 +95,10 @@ fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str
     }
 }
 
-fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
-    let text_style = window.text_style();
-    let run = TextRun {
-        len: name.len(),
-        font: Font {
-            family: text_style.font_family,
-            features: text_style.font_features,
-            fallbacks: text_style.font_fallbacks,
-            weight: text_style.font_weight,
-            style: text_style.font_style,
-        },
-        color: text_style.color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let name_width = window
-        .text_system()
-        .shape_line(
-            name.to_owned().into(),
-            px(WORKSPACE_CHIP_TEXT_SIZE),
-            &[run],
-            None,
-        )
-        .width;
-    let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
-        + WORKSPACE_CHIP_ICON_SIZE
-        + WORKSPACE_CHIP_GAP
-        + TOP_CHROME_ACTION_CLEARANCE);
-    (fixed_width + name_width)
-        .ceil()
-        .min(px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkspaceMenuCommand {
-    NewTab,
-    PinDirectory,
-    UnpinDirectory,
-    Rename,
-    Reconnect,
-    Close,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CloseConfirmationAction {
     Confirm,
     Cancel,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WorkspaceMenuState {
-    workspace_id: WorkspaceId,
-}
-
-struct WorkspaceRenameState {
-    workspace_id: WorkspaceId,
-    initial_value: String,
-    input: Entity<TextInput>,
-    focus_handle: FocusHandle,
-    context_menu_open: bool,
-}
-
-struct WorkspaceRowViewModel {
-    workspace_id: WorkspaceId,
-    name: SharedString,
-    path: SharedString,
-    machine: Option<SharedString>,
-    tooltip: SharedString,
-    pinned: bool,
-    remote_connection_phase: Option<RemoteConnectionPhase>,
-    available: bool,
-    tab_count: usize,
-    pane_count: usize,
-    active: bool,
 }
 
 struct RemoteWorkspaceRuntime {
@@ -286,118 +204,6 @@ impl Drop for RemoteWorkspaceRuntime {
     }
 }
 
-/// Owns sidebar layout, scrolling and transient interaction cleanup.
-struct WorkspaceSidebar {
-    visible: bool,
-    width: Pixels,
-    scroll_handle: ScrollHandle,
-    scrollbar: Entity<OverlayScrollbar<f32>>,
-    focus: FocusHandle,
-    menu: Option<WorkspaceMenuState>,
-    rename: Option<WorkspaceRenameState>,
-    resizing: bool,
-    resize_origin: Option<WorkspaceSidebarResizeOrigin>,
-    suppress_pointer_until_release: bool,
-}
-
-#[derive(Clone, Copy)]
-struct WorkspaceSidebarResizeOrigin {
-    visible: bool,
-    width: Pixels,
-}
-
-impl WorkspaceSidebar {
-    fn new(scrollbar: Entity<OverlayScrollbar<f32>>, focus: FocusHandle) -> Self {
-        Self {
-            visible: true,
-            width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            scroll_handle: ScrollHandle::new(),
-            scrollbar,
-            focus,
-            menu: None,
-            rename: None,
-            resizing: false,
-            resize_origin: None,
-            suppress_pointer_until_release: false,
-        }
-    }
-
-    fn set_layout(&mut self, visible: bool, width: Pixels, cx: &mut App) -> bool {
-        if self.visible == visible && self.width == width {
-            return false;
-        }
-        self.visible = visible;
-        self.width = width;
-        if !visible {
-            self.scrollbar
-                .update(cx, |scrollbar, cx| scrollbar.reset(cx));
-        }
-        true
-    }
-
-    fn dismiss_editing(&mut self, window: &mut Window) {
-        if self.rename_is_focused(window) {
-            self.focus.focus(window);
-        }
-        self.rename = None;
-        self.menu = None;
-    }
-
-    fn begin_resize(&mut self, source: ResizeInputSource) {
-        self.resize_origin = Some(WorkspaceSidebarResizeOrigin {
-            visible: self.visible,
-            width: self.width,
-        });
-        self.resizing = true;
-        if source == ResizeInputSource::Pointer {
-            self.suppress_pointer_until_release = false;
-        }
-    }
-
-    fn finish_resize(
-        &mut self,
-        source: ResizeInputSource,
-        reason: ResizeFinishReason,
-    ) -> (bool, Option<WorkspaceSidebarResizeOrigin>) {
-        if source == ResizeInputSource::Pointer {
-            self.suppress_pointer_until_release = !matches!(
-                reason,
-                ResizeFinishReason::Completed | ResizeFinishReason::PointerButtonLost
-            );
-        }
-        let restore = (reason == ResizeFinishReason::Escape)
-            .then(|| self.resize_origin.take())
-            .flatten();
-        self.resize_origin = None;
-        (std::mem::take(&mut self.resizing), restore)
-    }
-
-    fn rename_is_focused(&self, window: &Window) -> bool {
-        self.rename
-            .as_ref()
-            .is_some_and(|rename| rename.focus_handle.is_focused(window))
-    }
-
-    fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
-        let track_height_px = f32::from(self.scroll_handle.bounds().size.height);
-        let maximum_offset_px = f32::from(self.scroll_handle.max_offset().height);
-        let offset_px = -f32::from(self.scroll_handle.offset().y);
-        ScrollMetrics::for_pixels(0.0, track_height_px, maximum_offset_px, offset_px)
-    }
-
-    fn sync_scrollbar(&self, cx: &mut App) {
-        let metrics = self.scrollbar_metrics();
-        self.scrollbar
-            .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
-    }
-
-    fn reveal_scrollbar(&self, cx: &mut App) {
-        let metrics = self.scrollbar_metrics();
-        self.scrollbar
-            .update(cx, |scrollbar, cx| scrollbar.reveal(metrics, cx));
-    }
-}
-
 /// Owns directory selection and its Workspace target.
 struct WorkspaceTransientUi {
     picker: Entity<DirectoryPicker>,
@@ -421,7 +227,7 @@ pub(crate) struct WorkspaceManager {
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<WorkspaceSwitcherChoice>,
     remote_workspace_name: Option<String>,
-    sidebar: WorkspaceSidebar,
+    sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
@@ -586,23 +392,12 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workspace-scrollbar"));
+        let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         cx.subscribe_in(
-            &scrollbar,
+            &sidebar,
             window,
-            |manager, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
-                OverlayScrollbarEvent::InteractionStarted => {
-                    manager.sidebar.focus.focus(window);
-                    manager.sync_terminal_focus_blocker(window, cx);
-                }
-                OverlayScrollbarEvent::OffsetRequested(offset) => {
-                    let current_offset = manager.sidebar.scroll_handle.offset();
-                    manager
-                        .sidebar
-                        .scroll_handle
-                        .set_offset(point(current_offset.x, px(-*offset)));
-                    cx.notify();
-                }
+            |manager, _, event: &SidebarEvent, window, cx| {
+                manager.handle_sidebar_event(event.clone(), window, cx);
             },
         )
         .detach();
@@ -652,7 +447,7 @@ impl WorkspaceManager {
             },
             workspace_switcher: ComboBoxHandle::default(),
             remote_workspace_name: None,
-            sidebar: WorkspaceSidebar::new(scrollbar, cx.focus_handle()),
+            sidebar,
             workspaces,
             local_filesystem,
             session_factory,
@@ -923,10 +718,10 @@ impl WorkspaceManager {
                 .is_some_and(|flow| flow.read(cx).blocks_terminal_input()),
             switcher: window_combo_box_is_open(window, cx),
             window_drag: self.window_drag_status.is_active(),
-            sidebar_resize: self.sidebar.resizing,
-            rename: self.sidebar.rename.is_some(),
-            context_menu: self.sidebar.menu.is_some(),
-            sidebar: self.sidebar.focus.is_focused(window),
+            sidebar_resize: self.sidebar.read(cx).is_resizing(),
+            rename: self.sidebar.read(cx).is_renaming(),
+            context_menu: self.sidebar.read(cx).menu_target().is_some(),
+            sidebar: self.sidebar.read(cx).is_focused(window),
         })
     }
 
@@ -980,7 +775,9 @@ impl WorkspaceManager {
         if window_modal_is_open(window, cx) {
             return;
         }
-        self.sidebar.dismiss_editing(window);
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.dismiss_editing(window, cx);
+        });
         self.workspace_switcher.open(window, cx);
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -1071,15 +868,15 @@ impl WorkspaceManager {
         let Some(workspace) = self.workspaces.workspace(workspace_id) else {
             return;
         };
-        let top_chrome_width = if self.sidebar.visible {
-            self.sidebar.width
+        let top_chrome_width = if self.sidebar.read(cx).layout().visible {
+            self.sidebar.read(cx).layout().width
         } else {
             collapsed_top_chrome_width(workspace.name(), window)
         };
         workspace.payload().update(cx, |manager, cx| {
             manager.set_sidebar_layout(
-                self.sidebar.visible,
-                self.sidebar.width,
+                self.sidebar.read(cx).layout().visible,
+                self.sidebar.read(cx).layout().width,
                 top_chrome_width,
                 cx,
             );
@@ -1092,6 +889,7 @@ impl WorkspaceManager {
         }
     }
 
+    #[cfg(test)]
     fn set_sidebar_layout(
         &mut self,
         visible: bool,
@@ -1099,110 +897,29 @@ impl WorkspaceManager {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.sidebar.set_layout(visible, width, cx) {
-            return;
-        }
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_layout(visible, width, window, cx);
+        });
         self.synchronize_tab_manager_layouts(window, cx);
         cx.notify();
     }
 
-    fn resize_sidebar(
-        &mut self,
-        requested_width: Pixels,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let minimum_width = px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH);
-        if requested_width < minimum_width {
-            let was_sidebar_focused =
-                self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
-            self.sidebar.rename = None;
-            self.set_sidebar_layout(false, minimum_width, window, cx);
-            if was_sidebar_focused {
-                self.focus(window, cx);
-            }
-            self.sync_terminal_focus_blocker(window, cx);
-            return;
-        }
-
-        let maximum_width = (window.bounds().size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
-            .min(px(SIDEBAR_MAXIMUM_WIDTH))
-            .max(minimum_width);
-        self.set_sidebar_layout(
-            true,
-            requested_width.clamp(minimum_width, maximum_width),
-            window,
-            cx,
-        );
+    #[cfg(test)]
+    fn resize_sidebar(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.resize(width, window, cx));
     }
 
-    fn handle_sidebar_resize_event(
-        &mut self,
-        event: ResizeHandleEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            ResizeHandleEvent::InteractionStarted { source, .. } => {
-                self.sidebar.begin_resize(source);
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-            }
-            ResizeHandleEvent::ResizeRequested {
-                requested_value, ..
-            } => {
-                let should_resize = self.sidebar.visible
-                    || px(requested_value)
-                        >= collapsed_top_chrome_width(
-                            self.workspaces.active_workspace().name(),
-                            window,
-                        )
-                        .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
-                if should_resize {
-                    self.resize_sidebar(px(requested_value), window, cx);
-                }
-            }
-            ResizeHandleEvent::ResetRequested { source } => {
-                self.resize_sidebar(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), window, cx);
-                if source == ResizeInputSource::Pointer {
-                    self.focus(window, cx);
-                }
-            }
-            ResizeHandleEvent::InteractionFinished { source, reason, .. } => {
-                let (finished, restore) = self.sidebar.finish_resize(source, reason);
-                if let Some(origin) = restore {
-                    self.set_sidebar_layout(origin.visible, origin.width, window, cx);
-                }
-                if !finished {
-                    return;
-                }
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-                if source == ResizeInputSource::Pointer {
-                    self.focus(window, cx);
-                }
-            }
-        }
-    }
-
-    fn scroll_active_workspace_into_view(&self) {
-        let active_workspace_id = self.workspaces.active_workspace_id();
+    fn scroll_active_workspace_into_view(&self, cx: &mut App) {
+        let id = self.workspaces.active_workspace_id();
         if let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| workspace.id() == active_workspace_id)
+            .position(|workspace| workspace.id() == id)
         {
-            self.sidebar.scroll_handle.scroll_to_item(index);
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.reveal_row(index, cx));
         }
-    }
-
-    fn on_workspace_list_scroll_wheel(
-        &mut self,
-        _: &ScrollWheelEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar.reveal_scrollbar(cx);
     }
 
     fn create_local_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1220,8 +937,8 @@ impl WorkspaceManager {
         let session_factory = Rc::clone(&self.session_factory);
         let pane_construction = self.pane_construction.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let sidebar_visible = self.sidebar.visible;
-        let sidebar_width = self.sidebar.width;
+        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_width = self.sidebar.read(cx).layout().width;
         let directory = match self.local_home_directory() {
             Ok(directory) => directory,
             Err(_) => {
@@ -1278,9 +995,11 @@ impl WorkspaceManager {
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
-        self.sidebar.rename = None;
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.cancel_rename(cx);
+        });
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view();
+        self.scroll_active_workspace_into_view(cx);
 
         cx.notify();
     }
@@ -1480,7 +1199,9 @@ impl WorkspaceManager {
                 .update(cx, |picker, cx| picker.refocus_path(window, cx));
             return;
         }
-        self.sidebar.dismiss_editing(window);
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.dismiss_editing(window, cx);
+        });
         self.transient.show_picker(window, cx);
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -1669,8 +1390,8 @@ impl WorkspaceManager {
         );
         let previous_workspace_id = self.workspaces.active_workspace_id();
         let previous_manager = self.workspaces.active_workspace().payload().clone();
-        let sidebar_visible = self.sidebar.visible;
-        let sidebar_width = self.sidebar.width;
+        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_width = self.sidebar.read(cx).layout().width;
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let pane_construction = self.pane_construction.clone();
         let result = self.workspaces.create_remote_workspace(
@@ -1761,7 +1482,7 @@ impl WorkspaceManager {
         self.remote_workspace_flow = None;
         self.remote_workspace_name = None;
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view();
+        self.scroll_active_workspace_into_view(cx);
 
         cx.notify();
     }
@@ -2470,11 +2191,14 @@ impl WorkspaceManager {
         }
 
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        let preserve_sidebar_focus =
-            self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
+        let preserve_sidebar_focus = self.sidebar.read(cx).is_focused(window)
+            || self.sidebar.read(cx).rename_is_focused(window)
+            || self.sidebar.read(cx).menu_target().is_some();
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
-            self.sidebar.rename = None;
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.cancel_rename(cx);
+            });
         }
         if preserve_sidebar_focus {
             next_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
@@ -2482,7 +2206,7 @@ impl WorkspaceManager {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view();
+        self.scroll_active_workspace_into_view(cx);
 
         cx.notify();
         true
@@ -2704,8 +2428,8 @@ impl WorkspaceManager {
         let session_factory = Rc::clone(&self.session_factory);
         let pane_construction = self.pane_construction.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let sidebar_visible = self.sidebar.visible;
-        let sidebar_width = self.sidebar.width;
+        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_width = self.sidebar.read(cx).layout().width;
         let replacement_identity = replacement.identity();
         let outcome = self.workspaces.close_workspace_with_local_replacement(
             workspace_id,
@@ -2750,22 +2474,19 @@ impl WorkspaceManager {
 
         if was_active {
             let active_manager = self.workspaces.active_workspace().payload().clone();
-            if self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window) {
+            if self.sidebar.read(cx).is_focused(window)
+                || self.sidebar.read(cx).rename_is_focused(window)
+            {
                 active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
             } else {
                 active_manager.update(cx, |manager, cx| manager.activate(window, cx));
             }
         }
-        if self
-            .sidebar
-            .rename
-            .as_ref()
-            .is_some_and(|rename| rename.workspace_id == workspace_id)
-        {
-            self.sidebar.rename = None;
-        }
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.cancel_rename_for(workspace_id, cx)
+        });
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view();
+        self.scroll_active_workspace_into_view(cx);
 
         cx.notify();
     }
@@ -2805,8 +2526,8 @@ impl WorkspaceManager {
 
                 if was_active {
                     let active_manager = self.workspaces.active_workspace().payload().clone();
-                    if self.sidebar.focus.is_focused(window)
-                        || self.sidebar.rename_is_focused(window)
+                    if self.sidebar.read(cx).is_focused(window)
+                        || self.sidebar.read(cx).rename_is_focused(window)
                     {
                         active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
                     } else {
@@ -2815,16 +2536,11 @@ impl WorkspaceManager {
                 }
                 debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
                 self.pending_final_tab_closes.remove(&workspace_id);
-                if self
-                    .sidebar
-                    .rename
-                    .as_ref()
-                    .is_some_and(|rename| rename.workspace_id == workspace_id)
-                {
-                    self.sidebar.rename = None;
-                }
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.cancel_rename_for(workspace_id, cx)
+                });
                 self.sync_terminal_focus_blocker(window, cx);
-                self.scroll_active_workspace_into_view();
+                self.scroll_active_workspace_into_view(cx);
 
                 cx.notify();
             }
@@ -2883,83 +2599,51 @@ impl WorkspaceManager {
         }
     }
 
-    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let was_sidebar_focused =
-            self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window);
-        let sidebar_visible = !self.sidebar.visible;
-        self.sidebar.rename = None;
-        self.set_sidebar_layout(sidebar_visible, self.sidebar.width, window, cx);
-        if !sidebar_visible && was_sidebar_focused {
-            self.focus(window, cx);
-        }
-        self.sync_terminal_focus_blocker(window, cx);
-    }
-
-    fn toggle_sidebar_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar.focus.is_focused(window) || self.sidebar.rename_is_focused(window) {
-            self.sidebar.rename = None;
-            self.focus(window, cx);
-            self.sync_terminal_focus_blocker(window, cx);
-            cx.notify();
-            return;
-        }
-
-        if !self.sidebar.visible {
-            self.set_sidebar_layout(true, self.sidebar.width, window, cx);
-            cx.defer_in(window, |manager, window, cx| {
-                manager.sidebar.focus.focus(window);
-                manager.sync_terminal_focus_blocker(window, cx);
-            });
-            return;
-        }
-
-        self.sidebar.focus.focus(window);
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
-    }
-
-    fn request_workspace_menu(
+    fn handle_sidebar_event(
         &mut self,
-        workspace_id: WorkspaceId,
+        event: SidebarEvent,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.sidebar.focus.focus(window);
-        self.sidebar.rename = None;
-        self.sync_terminal_focus_blocker(window, cx);
-        let activated = self.activate_workspace(workspace_id, window, cx);
-        if !activated {
-            self.sync_terminal_focus_blocker(window, cx);
-            cx.notify();
-        }
-        activated
-    }
-
-    fn handle_workspace_menu_lifecycle(
-        &mut self,
-        workspace_id: WorkspaceId,
-        event: MenuLifecycleEvent,
-        window: &Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            MenuLifecycleEvent::Opened => {
-                self.sidebar.menu = Some(WorkspaceMenuState { workspace_id });
+            SidebarEvent::Activate {
+                workspace_id,
+                focus_pane,
+            } => {
+                if self.activate_workspace(workspace_id, window, cx) && focus_pane {
+                    self.focus(window, cx);
+                }
             }
-            MenuLifecycleEvent::Closed(_)
-                if self
-                    .sidebar
-                    .menu
-                    .is_some_and(|menu| menu.workspace_id == workspace_id) =>
-            {
-                self.sidebar.menu = None;
+            SidebarEvent::Command {
+                workspace_id,
+                command,
+            } => self.perform_workspace_menu_command(workspace_id, command, window, cx),
+            SidebarEvent::Rename { workspace_id, name } => {
+                if let Err(error) = self.workspaces.rename_workspace(workspace_id, name) {
+                    Self::report_workspace_error("rename", error);
+                }
+                self.synchronize_tab_manager_layouts(window, cx);
             }
-            MenuLifecycleEvent::Closed(_) => return,
+            SidebarEvent::NewLocalWorkspace => self.create_local_workspace(window, cx),
+            SidebarEvent::NewRemoteWorkspace => {
+                self.present_remote_workspace_flow(String::new(), window, cx)
+            }
+            SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
+            SidebarEvent::FocusPane => self.focus(window, cx),
+            SidebarEvent::FocusChanged => {}
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.toggle(window, cx));
+    }
+    fn toggle_sidebar_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.toggle_focus(window, cx));
+    }
     fn perform_workspace_menu_command(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2983,100 +2667,6 @@ impl WorkspaceManager {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
-            WorkspaceMenuCommand::Rename => {
-                let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-                    self.sync_terminal_focus_blocker(window, cx);
-                    return;
-                };
-                let input = cx.new(|cx| {
-                    TextInput::new(
-                        "workspace-rename-input",
-                        "Workspace name",
-                        workspace.name(),
-                        window,
-                        cx,
-                    )
-                    .variant(TextInputVariant::Bare)
-                    .debug_selector("workspace-rename-input")
-                });
-                let input_id = input.entity_id();
-                cx.subscribe_in(
-                    &input,
-                    window,
-                    move |manager, input, event: &TextInputEvent, window, cx| match event {
-                        TextInputEvent::Submitted => {
-                            let value = input.read(cx).value().to_owned();
-                            cx.defer_in(window, move |manager, window, cx| {
-                                manager.finish_rename(input_id, Some(value), true, window, cx);
-                            });
-                        }
-                        TextInputEvent::Cancelled => {
-                            cx.defer_in(window, move |manager, window, cx| {
-                                manager.finish_rename(input_id, None, true, window, cx);
-                            });
-                        }
-                        TextInputEvent::FocusLost => {
-                            let menu_open = manager
-                                .sidebar
-                                .rename
-                                .as_ref()
-                                .filter(|rename| rename.input.entity_id() == input_id)
-                                .is_some_and(|rename| rename.context_menu_open);
-                            if !menu_open {
-                                let value = input.read(cx).value().to_owned();
-                                cx.defer_in(window, move |manager, window, cx| {
-                                    manager.finish_rename(input_id, Some(value), false, window, cx);
-                                });
-                            }
-                        }
-                        TextInputEvent::ContextMenuOpened => {
-                            if let Some(rename) = &mut manager.sidebar.rename
-                                && rename.input.entity_id() == input_id
-                            {
-                                rename.context_menu_open = true;
-                            }
-                        }
-                        TextInputEvent::ContextMenuClosed => {
-                            let should_finish = manager
-                                .sidebar
-                                .rename
-                                .as_mut()
-                                .filter(|rename| rename.input.entity_id() == input_id)
-                                .is_some_and(|rename| {
-                                    rename.context_menu_open = false;
-                                    !rename.focus_handle.is_focused(window)
-                                });
-                            if should_finish {
-                                let value = input.read(cx).value().to_owned();
-                                cx.defer_in(window, move |manager, window, cx| {
-                                    manager.finish_rename(input_id, Some(value), false, window, cx);
-                                });
-                            }
-                        }
-                        _ => {}
-                    },
-                )
-                .detach();
-                self.sidebar.rename = Some(WorkspaceRenameState {
-                    workspace_id,
-                    initial_value: input.read(cx).value().to_owned(),
-                    focus_handle: input.read(cx).focus_handle(),
-                    input,
-                    context_menu_open: false,
-                });
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-                cx.defer_in(window, |manager, window, cx| {
-                    let Some(rename) = &manager.sidebar.rename else {
-                        return;
-                    };
-                    let input = rename.input.clone();
-                    let focus_handle = rename.focus_handle.clone();
-                    input.update(cx, |input, cx| input.select_all(cx));
-                    focus_handle.focus(window);
-                    manager.sync_terminal_focus_blocker(window, cx);
-                });
-            }
             WorkspaceMenuCommand::Reconnect => {
                 self.start_remote_workspace_reconnect(workspace_id, window, cx)
             }
@@ -3084,37 +2674,6 @@ impl WorkspaceManager {
                 self.request_close(CloseTarget::Workspace(workspace_id), window, cx)
             }
         }
-    }
-
-    fn finish_rename(
-        &mut self,
-        input_id: EntityId,
-        value: Option<String>,
-        restore_sidebar_focus: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(rename) = self.sidebar.rename.as_ref() else {
-            return;
-        };
-        if rename.input.entity_id() != input_id {
-            return;
-        }
-        let workspace_id = rename.workspace_id;
-        if let Some(value) = value
-            && value.trim() != rename.initial_value
-            && let Err(error) = self.workspaces.rename_workspace(workspace_id, value)
-        {
-            Self::report_workspace_error("rename", error);
-        }
-        self.synchronize_tab_manager_layouts(window, cx);
-        self.sidebar.rename = None;
-        if restore_sidebar_focus {
-            self.sidebar.focus.focus(window);
-        }
-        self.sync_terminal_focus_blocker(window, cx);
-
-        cx.notify();
     }
 
     fn on_switch_workspace(
@@ -3152,7 +2711,9 @@ impl WorkspaceManager {
             );
             return;
         }
-        self.sidebar.dismiss_editing(window);
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.dismiss_editing(window, cx);
+        });
         self.present_remote_workspace_flow(String::new(), window, cx);
     }
 
@@ -3356,12 +2917,13 @@ impl WorkspaceManager {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let width = if self.sidebar.visible {
-            self.sidebar.width
+        let width = if self.sidebar.read(cx).layout().visible {
+            self.sidebar.read(cx).layout().width
         } else {
             collapsed_top_chrome_width(self.workspaces.active_workspace().name(), window)
         };
-        let (toggle_icon, toggle_label) = sidebar_toggle_presentation(self.sidebar.visible);
+        let (toggle_icon, toggle_label) =
+            sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
         let toggle_manager = manager.clone();
         let combo_lifecycle_manager = manager.clone();
@@ -3438,7 +3000,9 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        .panel_width(self.sidebar.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0))
+        .panel_width(
+            self.sidebar.read(cx).layout().width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0),
+        )
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
@@ -3475,7 +3039,7 @@ impl WorkspaceManager {
         let content = div()
             .relative()
             .size_full()
-            .when(!self.sidebar.visible, |chrome| {
+            .when(!self.sidebar.read(cx).layout().visible, |chrome| {
                 chrome.child(
                     div()
                         .absolute()
@@ -3565,500 +3129,51 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_workspace_row(
-        &self,
-        row: WorkspaceRowViewModel,
-        manager: WeakEntity<Self>,
-        presentation: &crate::desktop_profile::DesktopPresentation,
-        window: &Window,
-    ) -> AnyElement {
-        let WorkspaceRowViewModel {
-            workspace_id,
-            name,
-            path,
-            machine,
-            tooltip,
-            pinned,
-            remote_connection_phase,
-            available,
-            tab_count,
-            pane_count,
-            active,
-        } = row;
-        let click_manager = manager.clone();
-        let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let remote_color = remote_connection_phase.map(remote_connection_color);
-        let (detail, detail_warning, detail_selector) = if !available {
-            (
-                "Directory unavailable".into(),
-                true,
-                Some(format!(
-                    "workspace-row-directory-unavailable-{}",
-                    workspace_id.get()
-                )),
-            )
-        } else if let Some(status) = remote_status {
-            (
-                status.into(),
-                true,
-                Some(format!(
-                    "workspace-row-remote-status-{}",
-                    workspace_id.get()
-                )),
-            )
-        } else {
-            (path, false, None)
-        };
-        let accessibility_name = remote_status.map_or_else(
-            || format!("Workspace actions for {name}"),
-            |status| format!("Workspace actions for {name}, connection {status}"),
-        );
-        let rename = self
-            .sidebar
-            .rename
-            .as_ref()
-            .filter(|rename| rename.workspace_id == workspace_id);
-        let renaming = rename.is_some();
-        let first_line = if let Some(rename) = rename {
-            let input = rename.input.clone();
-            let focus_handle = rename.focus_handle.clone();
-            div()
-                .id(("workspace-rename-input", workspace_id.get()))
-                .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-                .h(px(22.0))
-                .w_full()
-                .px(px(5.0))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(px(4.0))
-                .border(px(1.0))
-                .border_color(gpui_color(ACTIVE_THEME.border_focused))
-                .bg(gpui_color(ACTIVE_THEME.element_background))
-                .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(ACTIVE_THEME.text))
-                .on_click(move |_, window, cx| {
-                    focus_handle.focus(window);
-                    cx.stop_propagation();
-                })
-                .child(input)
-                .into_any_element()
-        } else {
-            div()
-                .id(("workspace-row-name", workspace_id.get()))
-                .debug_selector(move || format!("workspace-row-name-{}", workspace_id.get()))
-                .w_full()
-                .truncate()
-                .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(if active {
-                    ACTIVE_THEME.text_accent
-                } else {
-                    ACTIVE_THEME.text
-                }))
-                .child(name.clone())
-                .into_any_element()
-        };
-
-        let tooltip_text = remote_status
-            .map(|status| format!("{tooltip}: {status}"))
-            .unwrap_or_else(|| tooltip.to_string());
-        let tooltip_text = format!("{name}\n{tooltip_text}");
-        let tooltip_label = if !available {
-            "Workspace unavailable"
-        } else if remote_status.is_some() {
-            "Remote Workspace connection"
-        } else if pinned {
-            "Pinned Directory"
-        } else {
-            "Workspace Directory"
-        };
-
-        let row_content = div()
-            .id(("workspace-row", workspace_id.get()))
-            .debug_selector(move || {
-                format!(
-                    "workspace-row-{}-{}",
-                    workspace_id.get(),
-                    if active { "active" } else { "inactive" }
-                )
-            })
-            .relative()
-            .w_full()
-            .h(px(SIDEBAR_ROW_HEIGHT))
-            .flex_shrink_0()
-            .px(px(SIDEBAR_ROW_HORIZONTAL_PADDING))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .block_mouse_except_scroll()
-            .when(active, |row| {
-                row.bg(gpui_color(ACTIVE_THEME.element_selected))
-            })
-            .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
-            .on_click(move |_, window, cx| {
-                let _ = click_manager.update(cx, |manager, cx| {
-                    if manager.activate_workspace(workspace_id, window, cx) {
-                        manager.focus(window, cx);
-                    }
-                });
-                cx.stop_propagation();
-            })
-            .child(
-                div()
-                    .w(px(18.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .relative()
-                            .child(Icon::new(
-                                if remote_connection_phase.is_some() {
-                                    IconName::Globe
-                                } else {
-                                    IconName::Terminal
-                                },
-                                px(SIDEBAR_ROW_ICON_SIZE),
-                                gpui_color(if let Some(color) = remote_color {
-                                    color
-                                } else if available {
-                                    if active {
-                                        ACTIVE_THEME.icon_accent
-                                    } else {
-                                        ACTIVE_THEME.icon
-                                    }
-                                } else {
-                                    ACTIVE_THEME.warning
-                                }),
-                            ))
-                            .when(!available, |icon| {
-                                icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
-                                    Icon::new(
-                                        IconName::TriangleAlert,
-                                        px(10.0),
-                                        gpui_color(ACTIVE_THEME.warning),
-                                    ),
-                                ))
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(super::workspace_sidebar::title(
-                        name,
-                        first_line,
-                        if renaming { None } else { machine },
-                        workspace_id.get(),
-                    ))
-                    .child(super::workspace_sidebar::detail(
-                        detail,
-                        format!("{tab_count}T · {pane_count}P").into(),
-                        pinned && !detail_warning,
-                        detail_warning,
-                        detail_selector,
-                        workspace_id.get(),
-                    )),
-            )
-            .child(
-                div()
-                    .id(("workspace-row-divider", workspace_id.get()))
-                    .debug_selector(move || format!("workspace-row-divider-{}", workspace_id.get()))
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border_variant)),
-            );
-        let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
-            .detail(tooltip_text)
-            .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))
-            .attach(row_content, TooltipTargetVisibility::Visible)
-            .into_any_element();
-
-        if renaming {
-            return div()
-                .id(("workspace-menu", workspace_id.get()))
-                .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
-                .w_full()
-                .flex_shrink_0()
-                .child(row)
-                .into_any_element();
-        }
-
-        let open_manager = manager.clone();
-        let lifecycle_manager = manager.clone();
-        let lifecycle_window = window.window_handle();
-        let activate_manager = manager;
-        div()
-            .id(("workspace-menu", workspace_id.get()))
-            .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
-            .w_full()
-            .flex_shrink_0()
-            .child(
-                ContextMenu::new(
-                    ("workspace-menu-controls", workspace_id.get()),
-                    accessibility_name,
-                    row,
-                    workspace_menu_entries(pinned, remote_connection_phase, presentation),
-                )
-                .size(MenuSize::Wide)
-                .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
-                .on_open_request(move |_, window, cx| {
-                    open_manager
-                        .update(cx, |manager, cx| {
-                            manager.request_workspace_menu(workspace_id, window, cx)
-                        })
-                        .unwrap_or(false)
-                })
-                .on_lifecycle(move |event, cx| {
-                    let manager = lifecycle_manager.clone();
-                    let event = *event;
-                    // Menu lifecycle delivery can occur while its Window is borrowed.
-                    // Resolve ownership after that delivery, using the current Window facts.
-                    cx.defer(move |cx| {
-                        let _ = lifecycle_window.update(cx, |_, window, cx| {
-                            let _ = manager.update(cx, |manager, cx| {
-                                manager.handle_workspace_menu_lifecycle(
-                                    workspace_id,
-                                    event,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        });
-                    });
-                })
-                .on_activate(move |activation, window, cx| {
-                    let command = *activation.action();
-                    let _ = activate_manager.update(cx, |manager, cx| {
-                        manager.perform_workspace_menu_command(workspace_id, command, window, cx);
-                    });
-                }),
-            )
-            .into_any_element()
-    }
-
-    fn render_sidebar(&self, manager: WeakEntity<Self>, window: &Window, cx: &App) -> AnyElement {
-        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let shortcuts = workspace_surface_presentation(presentation);
-        let scroll_manager = manager.clone();
-        let mut rows = div()
-            .id("workspace-list")
-            .debug_selector(|| "workspace-list".to_owned())
-            .w_full()
-            .min_h_0()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .track_scroll(&self.sidebar.scroll_handle)
-            .on_scroll_wheel(move |event, window, cx| {
-                let _ = scroll_manager.update(cx, |manager, cx| {
-                    manager.on_workspace_list_scroll_wheel(event, window, cx);
-                });
-            })
-            .occlude();
+    fn sidebar_rows(&self, cx: &App) -> Vec<WorkspaceRowViewModel> {
         let active_workspace_id = self.workspaces.active_workspace_id();
-        for workspace in self.workspaces.iter() {
-            let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
-            let (path, directory_tooltip) = directory_labels(
-                workspace.location(),
-                workspace.local_display_directory(),
-                workspace.remote_display_directory(),
-                &self.local_home_directory_path,
-            );
-            let (available, tooltip) = match workspace.availability() {
-                DirectoryAvailability::Available => (true, directory_tooltip),
-                DirectoryAvailability::Unavailable { reason } => {
-                    (false, format!("{directory_tooltip}: {reason}"))
-                }
-            };
-            rows = rows.child(
-                self.render_workspace_row(
-                    WorkspaceRowViewModel {
-                        workspace_id: workspace.id(),
-                        name: workspace.name().to_owned().into(),
-                        path: path.into(),
-                        machine: match workspace.location() {
-                            WorkspaceLocation::Local => None,
-                            WorkspaceLocation::Remote { key, .. } => Some(
-                                key.destination()
-                                    .as_str()
-                                    .rsplit_once('@')
-                                    .map_or(key.destination().as_str(), |(_, host)| host)
-                                    .to_owned()
-                                    .into(),
-                            ),
-                        },
-                        tooltip: tooltip.into(),
-                        pinned: workspace.pinned_directory().is_some(),
-                        remote_connection_phase: workspace
-                            .remote_connection_state()
-                            .map(RemoteConnectionState::phase),
-                        available,
-                        tab_count,
-                        pane_count,
-                        active: workspace.id() == active_workspace_id,
+        self.workspaces
+            .iter()
+            .map(|workspace| {
+                let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
+                let (path, directory_tooltip) = directory_labels(
+                    workspace.location(),
+                    workspace.local_display_directory(),
+                    workspace.remote_display_directory(),
+                    &self.local_home_directory_path,
+                );
+                let (available, tooltip) = match workspace.availability() {
+                    DirectoryAvailability::Available => (true, directory_tooltip),
+                    DirectoryAvailability::Unavailable { reason } => {
+                        (false, format!("{directory_tooltip}: {reason}"))
+                    }
+                };
+                WorkspaceRowViewModel {
+                    workspace_id: workspace.id(),
+                    name: workspace.name().to_owned().into(),
+                    path: path.into(),
+                    machine: match workspace.location() {
+                        WorkspaceLocation::Local => None,
+                        WorkspaceLocation::Remote { key, .. } => Some(
+                            key.destination()
+                                .as_str()
+                                .rsplit_once('@')
+                                .map_or(key.destination().as_str(), |(_, host)| host)
+                                .to_owned()
+                                .into(),
+                        ),
                     },
-                    manager.clone(),
-                    presentation,
-                    window,
-                ),
-            );
-        }
-
-        let scrollbar = self.sidebar.scrollbar.clone();
-        let local_manager = manager.clone();
-        let remote_tooltip = self
-            .remote_workspace_unavailable_reason
-            .clone()
-            .unwrap_or_else(|| "New Remote Workspace".to_owned());
-        div()
-            .id("workspace-sidebar")
-            .debug_selector(|| "workspace-sidebar".to_owned())
-            .absolute()
-            .top(px(TOP_CHROME_HEIGHT))
-            .bottom_0()
-            .left_0()
-            .w(self.sidebar.width)
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .track_focus(&self.sidebar.focus)
-            .bg(gpui_color(ACTIVE_THEME.panel_background))
-            .occlude()
-            .child(rows)
-            .child(
-                div()
-                    .id("workspace-sidebar-footer")
-                    .debug_selector(|| "workspace-sidebar-footer".to_owned())
-                    .relative()
-                    .w_full()
-                    .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(SIDEBAR_TOGGLE_INSET))
-                    .child(
-                        IconButton::new(
-                            "new-remote-workspace-button",
-                            "New Remote Workspace",
-                            |foreground| {
-                                div()
-                                    .debug_selector(|| "new-remote-workspace-icon".to_owned())
-                                    .flex()
-                                    .child(Icon::custom(
-                                        CustomIconName::GlobePlus,
-                                        px(WORKSPACE_CREATION_ICON_SIZE),
-                                        foreground,
-                                    ))
-                                    .into_any_element()
-                            },
-                        )
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Regular)
-                        .disabled(self.remote_workspace_unavailable_reason.is_some())
-                        .preserve_ancestor_hover()
-                        .debug_selector("new-remote-workspace-button")
-                        .tooltip(
-                            Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
-                                .keyboard_equivalent(presentation.shortcut(&NewRemoteWorkspace))
-                                .debug_selector("new-remote-workspace-tooltip"),
-                        )
-                        .on_activate(move |_, window, cx| {
-                            let _ = manager.update(cx, |manager, cx| {
-                                manager.sidebar.dismiss_editing(window);
-                                manager.present_remote_workspace_flow(String::new(), window, cx);
-                            });
-                        }),
-                    )
-                    .child(
-                        IconButton::new(
-                            "new-local-workspace-button",
-                            "New Local Workspace",
-                            |foreground| {
-                                div()
-                                    .debug_selector(|| "new-local-workspace-icon".to_owned())
-                                    .flex()
-                                    .child(Icon::custom(
-                                        CustomIconName::RectangleStackBadgePlus,
-                                        px(WORKSPACE_CREATION_ICON_SIZE),
-                                        foreground,
-                                    ))
-                                    .into_any_element()
-                            },
-                        )
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Regular)
-                        .preserve_ancestor_hover()
-                        .debug_selector("new-local-workspace-button")
-                        .tooltip(
-                            Tooltip::new("new-local-workspace-tooltip", "New Local Workspace")
-                                .debug_selector("new-local-workspace-tooltip")
-                                .keyboard_equivalent(shortcuts.new_workspace_button),
-                        )
-                        .on_activate(move |_, window, cx| {
-                            let _ = local_manager.update(cx, |manager, cx| {
-                                manager.create_local_workspace(window, cx)
-                            });
-                        }),
-                    ),
-            )
-            .child(scrollbar)
-            .into_any_element()
-    }
-
-    fn render_sidebar_resize_handle(
-        &self,
-        manager: WeakEntity<Self>,
-        window: &Window,
-    ) -> AnyElement {
-        let selector = "workspace-sidebar-resize-handle";
-        let handle_width = if self.sidebar.visible {
-            self.sidebar.width
-        } else {
-            collapsed_top_chrome_width(self.workspaces.active_workspace().name(), window)
-        };
-        let current_width = f32::from(handle_width);
-        let handle = ResizeHandle::new(
-            selector,
-            "Resize Workspace sidebar",
-            ResizeAxis::Horizontal,
-            current_width,
-        )
-        .tab_stop(true)
-        .reset_on_double_click(true)
-        .target(ResizeHandleTarget::SpaciousLeading(px(TOP_CHROME_HEIGHT)))
-        .debug_selector(selector)
-        .on_event(move |event, window, cx| {
-            let event = *event;
-            let _ = manager.update(cx, |manager, cx| {
-                manager.handle_sidebar_resize_event(event, window, cx);
-            });
-        });
-        let wrapper = div()
-            .absolute()
-            .top_0()
-            .left(handle_width - px(CHROME_DIVIDER_SIZE / 2.0))
-            .w(px(CHROME_DIVIDER_SIZE));
-        if self.sidebar.visible {
-            wrapper.bottom_0().child(handle).into_any_element()
-        } else {
-            wrapper
-                .h(px(TOP_CHROME_HEIGHT))
-                .child(handle)
-                .into_any_element()
-        }
+                    tooltip: tooltip.into(),
+                    pinned: workspace.pinned_directory().is_some(),
+                    remote_connection_phase: workspace
+                        .remote_connection_state()
+                        .map(RemoteConnectionState::phase),
+                    available,
+                    tab_count,
+                    pane_count,
+                    active: workspace.id() == active_workspace_id,
+                }
+            })
+            .collect()
     }
 }
 
@@ -4073,12 +3188,12 @@ impl Render for WorkspaceManager {
         debug_assert!(self.workspaces.len() > 0);
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
-        let suppressed_move_manager = manager.clone();
-        let suppressed_up_manager = manager.clone();
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
-        if self.sidebar.visible {
-            self.sidebar.sync_scrollbar(cx);
-        }
+        let rows = self.sidebar_rows(cx);
+        let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_rows(rows, remote_unavailable, cx)
+        });
         let content = div()
             .id("workspace-manager")
             .debug_selector(|| "workspace-manager".to_owned())
@@ -4089,56 +3204,6 @@ impl Render for WorkspaceManager {
             .min_h_0()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, _| {
-                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                            if phase != DispatchPhase::Capture {
-                                return;
-                            }
-                            let suppressed = suppressed_move_manager
-                                .update(cx, |manager, cx| {
-                                    if !manager.sidebar.suppress_pointer_until_release {
-                                        return false;
-                                    }
-                                    if event.pressed_button != Some(MouseButton::Left) {
-                                        manager.sidebar.suppress_pointer_until_release = false;
-                                        cx.notify();
-                                    }
-                                    true
-                                })
-                                .unwrap_or(false);
-                            if suppressed {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            }
-                        });
-                        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                            if phase != DispatchPhase::Capture || event.button != MouseButton::Left
-                            {
-                                return;
-                            }
-                            let suppressed = suppressed_up_manager
-                                .update(cx, |manager, cx| {
-                                    if !manager.sidebar.suppress_pointer_until_release {
-                                        return false;
-                                    }
-                                    manager.sidebar.suppress_pointer_until_release = false;
-                                    cx.notify();
-                                    true
-                                })
-                                .unwrap_or(false);
-                            if suppressed {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))
@@ -4182,10 +3247,14 @@ impl Render for WorkspaceManager {
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.remote_pin_picker.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone(), window, cx))
-            .when(self.sidebar.visible, |root| {
-                root.child(self.render_sidebar(manager.clone(), window, cx))
+            .when(self.sidebar.read(cx).layout().visible, |root| {
+                root.child(self.sidebar.clone())
             })
-            .child(self.render_sidebar_resize_handle(manager, window));
+            .child(
+                self.sidebar
+                    .read(cx)
+                    .render_resize_handle(self.sidebar.downgrade(), window),
+            );
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))
     }
@@ -4207,88 +3276,6 @@ fn workspace_activation_shortcut(
         8 => presentation.shortcut(&ActivateWorkspace9),
         _ => return None,
     })
-}
-
-fn workspace_menu_entries(
-    pinned: bool,
-    remote_connection_phase: Option<RemoteConnectionPhase>,
-    presentation: &crate::desktop_profile::DesktopPresentation,
-) -> Vec<MenuEntry<WorkspaceMenuCommand>> {
-    let shortcuts = workspace_surface_presentation(presentation);
-    let mut entries = vec![
-        MenuEntry::action("New Tab", WorkspaceMenuCommand::NewTab)
-            .shortcut(shortcuts.new_tab_menu)
-            .icon(|foreground| {
-                Icon::new(IconName::SquarePlus, px(14.0), foreground).into_any_element()
-            })
-            .debug_selector("workspace-menu-row-new-tab"),
-        MenuEntry::action("Rename Workspace", WorkspaceMenuCommand::Rename)
-            .icon(|foreground| Icon::new(IconName::Pencil, px(14.0), foreground).into_any_element())
-            .debug_selector("workspace-menu-row-rename"),
-    ];
-    entries.push(
-        MenuEntry::action(
-            if pinned {
-                "Change Pinned Directory"
-            } else {
-                "Pin workspace to a directory"
-            },
-            WorkspaceMenuCommand::PinDirectory,
-        )
-        .icon(|foreground| Icon::new(IconName::Pin, px(14.0), foreground).into_any_element())
-        .debug_selector("workspace-menu-row-pin-directory"),
-    );
-    if pinned {
-        entries.push(
-            MenuEntry::action("Unpin Directory", WorkspaceMenuCommand::UnpinDirectory)
-                .debug_selector("workspace-menu-row-unpin-directory"),
-        );
-    }
-    if matches!(
-        remote_connection_phase,
-        Some(RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed)
-    ) {
-        entries.push(
-            MenuEntry::action("Reconnect", WorkspaceMenuCommand::Reconnect)
-                .icon(|foreground| {
-                    Icon::new(IconName::RotateCw, px(14.0), foreground).into_any_element()
-                })
-                .debug_selector("workspace-menu-row-reconnect"),
-        );
-    }
-    entries.extend([
-        MenuEntry::separator(),
-        MenuEntry::action("Close Workspace", WorkspaceMenuCommand::Close)
-            .destructive(true)
-            .icon(|foreground| Icon::new(IconName::X, px(14.0), foreground).into_any_element())
-            .debug_selector("workspace-menu-row-close"),
-    ]);
-    entries
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WorkspaceSurfacePresentation {
-    new_workspace_button: &'static str,
-    new_tab_menu: &'static str,
-}
-
-fn workspace_surface_presentation(
-    presentation: &crate::desktop_profile::DesktopPresentation,
-) -> WorkspaceSurfacePresentation {
-    WorkspaceSurfacePresentation {
-        new_workspace_button: presentation.shortcut(&NewWorkspace),
-        new_tab_menu: presentation.shortcut(&CreateTab),
-    }
-}
-
-fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
-    match phase {
-        RemoteConnectionPhase::Connected => None,
-        RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
-        RemoteConnectionPhase::Disconnected => Some("Disconnected"),
-        RemoteConnectionPhase::Failed => Some("Connection failed"),
-        RemoteConnectionPhase::Closing => Some("Closing…"),
-    }
 }
 
 fn classify_remote_workspace_restart_failure(
@@ -4351,15 +3338,6 @@ fn remote_workspace_reconnect_error_content(
             "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it."
                 .to_owned(),
         )),
-    }
-}
-
-fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
-    match phase {
-        RemoteConnectionPhase::Reconnecting => ACTIVE_THEME.info,
-        RemoteConnectionPhase::Connected => ACTIVE_THEME.success,
-        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => ACTIVE_THEME.icon,
-        RemoteConnectionPhase::Failed => ACTIVE_THEME.error,
     }
 }
 
