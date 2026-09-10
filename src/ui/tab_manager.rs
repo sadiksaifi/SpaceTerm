@@ -1160,7 +1160,6 @@ impl TabManager {
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
-            .flex_1()
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -2240,6 +2239,77 @@ mod tests {
     }
 
     #[gpui::test]
+    fn create_button_should_follow_fitting_tabs_and_move_back_after_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = tab_manager(cx);
+        for (index, selector) in [
+            "tab-item-1-active",
+            "tab-item-2-active",
+            "tab-item-3-active",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tab = cx.debug_bounds(selector).unwrap();
+            let button = cx.debug_bounds("create-tab-button").unwrap();
+            assert_eq!(button.left(), tab.right());
+            assert_eq!(button.center().y, tab.center().y);
+            if index < 2 {
+                click("create-tab-button", cx);
+            }
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_tab(TabId::new(3), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("create-tab-button").unwrap().left(),
+            cx.debug_bounds("tab-item-2-active").unwrap().right(),
+        );
+    }
+
+    #[gpui::test]
+    fn create_button_should_stay_reachable_across_resize_and_sidebar_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            cx.run_until_parked();
+            for visible in [false, true] {
+                manager.update(cx, |manager, cx| {
+                    manager.set_sidebar_layout(
+                        visible,
+                        px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                        px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+                        cx,
+                    )
+                });
+                cx.run_until_parked();
+                let strip = cx.debug_bounds("tab-items").unwrap();
+                let button = cx.debug_bounds("create-tab-button").unwrap();
+                let bar = cx.debug_bounds("tab-bar").unwrap();
+                assert_eq!(button.left(), strip.right());
+                assert!(button.right() <= bar.right());
+                assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
+                if width == 1200.0 {
+                    assert_eq!(
+                        button.left(),
+                        cx.debug_bounds("tab-item-3-active").unwrap().right()
+                    );
+                }
+            }
+        }
+        click("create-tab-button", cx);
+        assert_eq!(manager.read_with(cx, |manager, _| manager.tabs.len()), 4);
+    }
+
+    #[gpui::test]
     fn creating_tabs_should_scroll_the_active_tab_into_view(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
 
@@ -2260,6 +2330,14 @@ mod tests {
             "the Tab bar did not scroll; offset was {:?}",
             state.2
         );
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let button = cx.debug_bounds("create-tab-button").unwrap();
+        let bar = cx.debug_bounds("tab-bar").unwrap();
+        assert_eq!(button.left(), strip.right());
+        assert!(button.right() <= bar.right());
+        let active = cx.debug_bounds("tab-item-21-active").unwrap();
+        assert!(active.left() >= strip.left());
+        assert!(active.right() <= strip.right());
     }
 
     #[gpui::test]

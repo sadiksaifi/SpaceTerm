@@ -80,6 +80,7 @@ use spaceterm_ui::{
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
 const WORKSPACE_CHROME_ICON_SIZE: f32 = 14.0;
+const WORKSPACE_CREATION_ICON_SIZE: f32 = 18.0;
 const TOP_CHROME_ACTION_CLEARANCE: f32 = SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
 // Reserve enough label width beside both actions for Workspace names across desktop fonts.
 const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
@@ -3953,12 +3954,15 @@ impl WorkspaceManager {
                             "new-remote-workspace-button",
                             "New Remote Workspace",
                             |foreground| {
-                                Icon::custom(
-                                    CustomIconName::GlobePlus,
-                                    px(WORKSPACE_CHROME_ICON_SIZE),
-                                    foreground,
-                                )
-                                .into_any_element()
+                                div()
+                                    .debug_selector(|| "new-remote-workspace-icon".to_owned())
+                                    .flex()
+                                    .child(Icon::custom(
+                                        CustomIconName::GlobePlus,
+                                        px(WORKSPACE_CREATION_ICON_SIZE),
+                                        foreground,
+                                    ))
+                                    .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
@@ -3983,12 +3987,15 @@ impl WorkspaceManager {
                             "new-local-workspace-button",
                             "New Local Workspace",
                             |foreground| {
-                                Icon::custom(
-                                    CustomIconName::RectangleStackBadgePlus,
-                                    px(WORKSPACE_CHROME_ICON_SIZE),
-                                    foreground,
-                                )
-                                .into_any_element()
+                                div()
+                                    .debug_selector(|| "new-local-workspace-icon".to_owned())
+                                    .flex()
+                                    .child(Icon::custom(
+                                        CustomIconName::RectangleStackBadgePlus,
+                                        px(WORKSPACE_CREATION_ICON_SIZE),
+                                        foreground,
+                                    ))
+                                    .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
