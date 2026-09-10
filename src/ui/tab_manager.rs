@@ -1160,7 +1160,6 @@ impl TabManager {
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
-            .flex_1()
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -1198,24 +1197,33 @@ impl TabManager {
             )
             .child(items)
             .child(
-                IconButton::new("create-tab-button", "Create Tab", move |_| {
-                    Icon::new(IconName::Plus, px(14.0), icon_foreground).into_any_element()
-                })
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Regular)
-                .debug_selector("create-tab-button")
-                .tooltip(
-                    Tooltip::new("create-tab-tooltip", "Create Tab")
-                        .keyboard_equivalent(create_tab_shortcut(
-                            crate::desktop_profile::DesktopPresentation::get(cx),
-                        ))
-                        .debug_selector("create-tab-tooltip"),
-                )
-                .on_activate(move |_, window, cx| {
-                    let _ = create_manager.update(cx, |manager, cx| {
-                        manager.create_tab(window, cx);
-                    });
-                }),
+                div()
+                    .debug_selector(|| "create-tab-area".to_owned())
+                    .size(px(TAB_BAR_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        IconButton::new("create-tab-button", "Create Tab", move |_| {
+                            Icon::new(IconName::Plus, px(14.0), icon_foreground).into_any_element()
+                        })
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
+                        .debug_selector("create-tab-button")
+                        .tooltip(
+                            Tooltip::new("create-tab-tooltip", "Create Tab")
+                                .keyboard_equivalent(create_tab_shortcut(
+                                    crate::desktop_profile::DesktopPresentation::get(cx),
+                                ))
+                                .debug_selector("create-tab-tooltip"),
+                        )
+                        .on_activate(move |_, window, cx| {
+                            let _ = create_manager.update(cx, |manager, cx| {
+                                manager.create_tab(window, cx);
+                            });
+                        }),
+                    ),
             );
 
         let drag_region = WindowDragRegion::new(
@@ -2240,6 +2248,83 @@ mod tests {
     }
 
     #[gpui::test]
+    fn create_button_should_follow_fitting_tabs_and_move_back_after_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = tab_manager(cx);
+        for (index, selector) in [
+            "tab-item-1-active",
+            "tab-item-2-active",
+            "tab-item-3-active",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tab = cx.debug_bounds(selector).unwrap();
+            let button = cx.debug_bounds("create-tab-button").unwrap();
+            let area = cx.debug_bounds("create-tab-area").unwrap();
+            assert_eq!(area.left(), tab.right());
+            assert_eq!(area.size, gpui::size(tab.size.height, tab.size.height));
+            assert_eq!(button.center(), area.center());
+            assert_eq!(button.center().y, tab.center().y);
+            if index < 2 {
+                click("create-tab-button", cx);
+            }
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_tab(TabId::new(3), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("create-tab-area").unwrap().left(),
+            cx.debug_bounds("tab-item-2-active").unwrap().right(),
+        );
+    }
+
+    #[gpui::test]
+    fn create_button_should_stay_reachable_across_resize_and_sidebar_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            cx.run_until_parked();
+            for visible in [false, true] {
+                manager.update(cx, |manager, cx| {
+                    manager.set_sidebar_layout(
+                        visible,
+                        px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                        px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+                        cx,
+                    )
+                });
+                cx.run_until_parked();
+                let strip = cx.debug_bounds("tab-items").unwrap();
+                let button = cx.debug_bounds("create-tab-button").unwrap();
+                let area = cx.debug_bounds("create-tab-area").unwrap();
+                let bar = cx.debug_bounds("tab-bar").unwrap();
+                assert_eq!(area.left(), strip.right());
+                assert!(area.right() <= bar.right());
+                assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+                assert_eq!(button.center(), area.center());
+                assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
+                if width == 1200.0 {
+                    assert_eq!(
+                        area.left(),
+                        cx.debug_bounds("tab-item-3-active").unwrap().right()
+                    );
+                }
+            }
+        }
+        click("create-tab-button", cx);
+        assert_eq!(manager.read_with(cx, |manager, _| manager.tabs.len()), 4);
+    }
+
+    #[gpui::test]
     fn creating_tabs_should_scroll_the_active_tab_into_view(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
 
@@ -2260,6 +2345,17 @@ mod tests {
             "the Tab bar did not scroll; offset was {:?}",
             state.2
         );
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let button = cx.debug_bounds("create-tab-button").unwrap();
+        let area = cx.debug_bounds("create-tab-area").unwrap();
+        let bar = cx.debug_bounds("tab-bar").unwrap();
+        assert_eq!(area.left(), strip.right());
+        assert!(area.right() <= bar.right());
+        assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+        assert_eq!(button.center(), area.center());
+        let active = cx.debug_bounds("tab-item-21-active").unwrap();
+        assert!(active.left() >= strip.left());
+        assert!(active.right() <= strip.right());
     }
 
     #[gpui::test]

@@ -4395,6 +4395,15 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     assert_eq!(remote.center().y, local.center().y);
     assert!(remote.left() >= button.left());
     assert!(local.right() <= button.right());
+    for (icon_selector, target) in [
+        ("new-remote-workspace-icon", remote),
+        ("new-local-workspace-icon", local),
+    ] {
+        let icon = cx.debug_bounds(icon_selector).unwrap();
+        assert_eq!(icon.size, gpui::size(px(18.0), px(18.0)));
+        assert_eq!(target.size, gpui::size(px(28.0), px(28.0)));
+        assert_eq!(icon.center(), target.center());
+    }
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
