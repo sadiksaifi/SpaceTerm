@@ -349,7 +349,7 @@ impl<I> ComboBoxFallback<I> {
     }
 }
 
-/// A weak handle for opening one rendered ComboBox from an application action.
+/// A weak handle for opening or accepting one rendered ComboBox from an application action.
 ///
 /// Attach the same handle on every render. It neither retains a removed control nor opens a
 /// control in another Operating-System Window.
@@ -367,6 +367,46 @@ impl<I: Clone + Eq + 'static> Default for ComboBoxHandle<I> {
 }
 
 impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
+    /// Accepts the first enabled, visible item matching an application choice, independent of
+    /// the highlighted row. Uses the ordinary keyboard acceptance and focus lifecycle.
+    /// Returns false without changing selection if the popup or choice is unavailable.
+    pub fn accept_matching(
+        &self,
+        matches: impl Fn(&I) -> bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let state = self.state.borrow().clone();
+        state.is_some_and(|state| {
+            state
+                .update(cx, |state, cx| {
+                    if state.window_id != window.window_handle().window_id()
+                        || !state.open
+                        || state.disabled
+                        || state.busy
+                        || !state.popup_focus.contains_focused(window, cx)
+                        || crate::modal::window_modal_is_open(window, cx)
+                        || crate::menu::window_menu_is_open(window, cx)
+                    {
+                        return false;
+                    }
+                    let item_id = state
+                        .matches
+                        .iter()
+                        .filter_map(|index| state.presented_items.get(*index))
+                        .find(|item| !item.disabled && matches(&item.id))
+                        .map(|item| item.id.clone());
+                    let Some(item_id) = item_id else {
+                        return false;
+                    };
+                    state.provisional = Some(item_id);
+                    state.accept(ComboBoxActivationSource::Keyboard, window, cx);
+                    true
+                })
+                .unwrap_or(false)
+        })
+    }
+
     /// Opens the attached, enabled, rendered control using its ordinary popup lifecycle.
     /// Returns false if it is unavailable, already open, or blocked by a modal.
     pub fn open(&self, window: &mut Window, cx: &mut App) -> bool {

@@ -95,6 +95,7 @@ fn desktop_profile(
                 ActionShortcut::new(crate::ui::ActivateWorkspace9, "⌃9"),
                 ActionShortcut::new(SwitchWorkspace, "⌘K"),
                 ActionShortcut::new(NewWorkspace, "⌘N"),
+                ActionShortcut::new(crate::ui::NewRemoteWorkspace, "⇧⌘N"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
                 ActionShortcut::new(EditPaste, "⌘V"),
@@ -386,6 +387,7 @@ mod tests {
             let presentation = DesktopPresentation::get(cx);
             assert_eq!(presentation.shortcut(&SwitchWorkspace), "⌘K");
             assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
+            assert_eq!(presentation.shortcut(&crate::ui::NewRemoteWorkspace), "⇧⌘N");
             assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
             assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");
             assert_eq!(presentation.shortcut(&SplitRight), "⌘D");

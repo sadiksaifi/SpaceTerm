@@ -90,6 +90,7 @@ shift-tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusPrev
 ctrl-cmd-space	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::ShowCharacterPalette
 cmd-k	None	terminal::SwitchWorkspace
 cmd-n	None	terminal::NewWorkspace
+cmd-shift-n	None	terminal::NewRemoteWorkspace
 cmd-t	None	terminal::CreateTab
 cmd-w	None	terminal::ClosePane
 cmd-shift-w	None	terminal::CloseTab

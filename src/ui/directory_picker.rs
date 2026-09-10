@@ -839,6 +839,7 @@ impl Render for DirectoryPicker {
             .when(self.open, |picker| {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
+                    .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
                     .capture_action(block_parent_action::<SwitchWorkspace>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)

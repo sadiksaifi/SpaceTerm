@@ -2209,6 +2209,8 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     open_workspace_switcher_for_creation(cx);
 
     click("workspace-switcher-create-remote", cx);
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
 
     assert_eq!(
         cx.update(|window, cx| {
@@ -4065,7 +4067,8 @@ fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         )
     });
 
-    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         baseline.0
@@ -7014,6 +7017,9 @@ fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mu
         })
     });
     cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     click("remote-directory-picker-confirm", cx);
     assert!(manager.read_with(cx, |manager, _| {
         manager
@@ -7239,6 +7245,59 @@ fn switcher_should_preserve_explicit_local_names_without_switching_to_the_match(
 }
 
 #[gpui::test]
+fn creation_shortcut_should_accept_local_switcher_name_instead_of_highlight(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("down cmd-n");
+    cx.run_until_parked();
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.workspaces.active_workspace().name(),
+            "fresh workspace"
+        );
+        assert_eq!(manager.workspaces.len(), 2);
+        assert!(manager.remote_workspace_flow.is_none());
+    });
+    assert_eq!(records.starts().len(), 2);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+}
+
+#[gpui::test]
+fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    let flow = manager
+        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
+        .expect("remote shortcut should open setup");
+    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.workspaces.active_workspace().name(),
+            "fresh workspace"
+        );
+        assert_eq!(manager.workspaces.len(), 2);
+    });
+    assert_eq!(records.starts().len(), 2);
+}
+
+#[gpui::test]
 fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     open_workspace_switcher_for_creation(cx);
@@ -7270,6 +7329,201 @@ fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut T
         6
     );
     assert_eq!(records.starts().len(), 6);
+}
+
+#[gpui::test]
+fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("escape cmd-shift-n");
+    cx.run_until_parked();
+    let flow = manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.remote_workspace_name.as_deref(), Some(""));
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    assert_eq!(
+        flow.read_with(cx, |flow, _| flow.stage()),
+        RemoteWorkspaceFlowStage::HostSelection
+    );
+    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.remote_workspace_flow.clone()),
+        Some(flow)
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+    assert_eq!(records.starts().len(), 1);
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+}
+
+#[gpui::test]
+fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_input(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("escape cmd-n");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "Default (2)"
+    );
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("space space cmd-n");
+    cx.run_until_parked();
+    let id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .update_automatic_directory(
+                id,
+                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
+                    "/project/automatic",
+                )),
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "automatic"
+    );
+}
+
+#[gpui::test]
+fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("space cmd-shift-n");
+    cx.run_until_parked();
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
+    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
+    emit_remote_workspace_completion(&flow, completion, cx);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "Default (2)"
+    );
+}
+
+#[gpui::test]
+fn creation_shortcut_should_create_named_local_even_with_existing_match(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "Alpha".into())
+            .unwrap()
+    });
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("space A l p h a space cmd-n");
+    cx.run_until_parked();
+    let id = manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        manager.workspaces.active_workspace_id()
+    });
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .update_automatic_directory(
+                id,
+                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
+                    "/project/changed",
+                )),
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "Alpha"
+    );
+}
+
+#[gpui::test]
+fn creation_shortcuts_should_not_escape_a_modal(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |_, cx| {
+            Alert::new(
+                ModalId::new("creation-shortcut-blocker"),
+                "Shortcut blocker",
+                "Blocking dialog",
+                "Finish this dialog first.",
+                vec![
+                    ModalAction::new(
+                        (),
+                        "OK",
+                        ModalActionRole::Affirmative,
+                        "creation-shortcut-blocker-ok",
+                    )
+                    .default_action(true),
+                ],
+            )
+            .present(window, cx, |_, _| {})
+            .unwrap();
+        });
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+    assert_eq!(records.starts().len(), 1);
+}
+
+#[gpui::test]
+fn creation_shortcuts_should_not_escape_switcher_input_context_menu(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    let input = cx.debug_bounds("combo-box-input").unwrap().center();
+    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+    assert_eq!(records.starts().len(), 1);
+    cx.simulate_keystrokes("escape cmd-n");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "fresh workspace"
+    );
 }
 
 #[gpui::test]

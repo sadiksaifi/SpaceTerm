@@ -26,10 +26,11 @@ use super::{
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace, OpenTerminalFind,
-    RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT,
-    TOP_CHROME_HEIGHT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewRemoteWorkspace, NewWorkspace,
+    OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace,
+    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
 use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
 #[cfg(test)]
@@ -3125,7 +3126,33 @@ impl WorkspaceManager {
     }
 
     fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        if window_combo_box_is_open(window, cx) {
+            self.workspace_switcher.accept_matching(
+                |choice| matches!(choice, WorkspaceSwitcherChoice::Local(_)),
+                window,
+                cx,
+            );
+            return;
+        }
         self.create_local_workspace(window, cx);
+    }
+
+    fn on_new_remote_workspace(
+        &mut self,
+        _: &NewRemoteWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window_combo_box_is_open(window, cx) {
+            self.workspace_switcher.accept_matching(
+                |choice| matches!(choice, WorkspaceSwitcherChoice::Remote(_)),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.sidebar.dismiss_editing(window);
+        self.present_remote_workspace_flow(String::new(), window, cx);
     }
 
     fn on_close_workspace(
@@ -3341,6 +3368,7 @@ impl WorkspaceManager {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
         let new_workspace_shortcut = presentation.shortcut(&NewWorkspace);
+        let new_remote_workspace_shortcut = presentation.shortcut(&NewRemoteWorkspace);
         let chooser = ComboBox::new(
             "workspace-switcher",
             "Switch Workspace",
@@ -3383,6 +3411,7 @@ impl WorkspaceManager {
             .debug_selector("workspace-switcher-create-local");
             let mut remote =
                 ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
+                    .shortcut(new_remote_workspace_shortcut)
                     .leading_icon(|foreground| {
                         Icon::custom(CustomIconName::GlobePlus, px(16.0), foreground)
                             .into_any_element()
@@ -3939,6 +3968,7 @@ impl WorkspaceManager {
                         .debug_selector("new-remote-workspace-button")
                         .tooltip(
                             Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
+                                .keyboard_equivalent(presentation.shortcut(&NewRemoteWorkspace))
                                 .debug_selector("new-remote-workspace-tooltip"),
                         )
                         .on_activate(move |_, window, cx| {
@@ -4104,6 +4134,7 @@ impl Render for WorkspaceManager {
             )
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
+            .on_action(cx.listener(Self::on_new_remote_workspace))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
             .on_action(cx.listener(Self::on_activate_workspace_2))

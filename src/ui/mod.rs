@@ -96,6 +96,7 @@ actions!(
         CloseWorkspace,
         SwitchWorkspace,
         NewWorkspace,
+        NewRemoteWorkspace,
         ToggleSidebar,
         ToggleSidebarFocus,
         OpenTerminalFind,
@@ -240,6 +241,7 @@ mod tests {
         let expected = [
             ("cmd-k", SwitchWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
+            ("cmd-shift-n", NewRemoteWorkspace.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),
