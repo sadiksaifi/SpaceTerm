@@ -7776,6 +7776,92 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-e shift-f10");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+    cx.simulate_keystrokes("x");
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+    );
+}
+
+#[gpui::test]
+fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let original_name = manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace().name().to_owned()
+    });
+    cx.simulate_keystrokes("cmd-shift-e shift-f10 down enter");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).rename_is_focused(window)));
+
+    cx.simulate_keystrokes("cmd-a D e v escape");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        original_name
+    );
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    assert!(cx.update(|window, cx| {
+        !manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+}
+
+#[gpui::test]
 fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-shift-e shift-f10");

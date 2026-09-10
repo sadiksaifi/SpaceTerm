@@ -202,16 +202,6 @@ impl WorkspaceSidebar {
                         workspace_id.get(),
                     )),
             )
-            .when(active && self.focus.is_focused(window), |row| {
-                row.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .border(px(1.0))
-                        .border_color(gpui_color(ACTIVE_THEME.border_focused))
-                        .debug_selector(|| "workspace-sidebar-focus-indicator".to_owned()),
-                )
-            })
             .child(
                 div()
                     .id(("workspace-row-divider", workspace_id.get()))
@@ -222,7 +212,17 @@ impl WorkspaceSidebar {
                     .w_full()
                     .h(px(CHROME_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border_variant)),
-            );
+            )
+            .when(active && self.focus.is_focused(window), |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border(px(1.0))
+                        .border_color(gpui_color(ACTIVE_THEME.border_focused))
+                        .debug_selector(|| "workspace-sidebar-focus-indicator".to_owned()),
+                )
+            });
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
             .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))

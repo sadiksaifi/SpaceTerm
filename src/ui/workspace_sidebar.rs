@@ -20,6 +20,7 @@ use spaceterm_ui::{
     MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ResizeAxis,
     ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
     ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility,
+    dismiss_active_menu,
 };
 
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
@@ -678,7 +679,11 @@ impl WorkspaceSidebar {
         cx.notify();
     }
     pub(super) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let restore = self.is_focused(window) || self.rename_is_focused(window);
+        let restore =
+            self.is_focused(window) || self.rename_is_focused(window) || self.menu.is_some();
+        if self.layout.visible && self.menu.take().is_some() {
+            dismiss_active_menu(window, cx);
+        }
         self.cancel_rename(cx);
         self.set_layout(!self.layout.visible, self.layout.width, window, cx);
         if !self.layout.visible && restore {
