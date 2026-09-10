@@ -5164,6 +5164,7 @@ dependencies = [
  "spaceterm-ui",
  "thiserror 2.0.19",
  "unicode-bidi",
+ "unicode-segmentation",
  "zeroize",
 ]
 

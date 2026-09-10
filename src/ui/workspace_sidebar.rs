@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Font, Pixels, SharedString, TextRun, Window, canvas, div, px};
 use spaceterm_ui::{Icon, IconName};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::workspace_manager::gpui_color;
 use crate::theme::ACTIVE_THEME;
@@ -176,7 +177,7 @@ fn fit_trailing_path(text: &str, available: Pixels, measure: impl Fn(&str) -> Pi
         return String::new();
     }
     let boundaries: Vec<_> = text
-        .char_indices()
+        .grapheme_indices(true)
         .map(|(index, _)| index)
         .chain(std::iter::once(text.len()))
         .collect();
@@ -211,6 +212,26 @@ mod tests {
             Some(px(20.0))
         );
         assert_eq!(machine_width(px(177.0), px(150.0), px(20.0)), None);
+    }
+
+    #[test]
+    fn path_truncation_should_keep_combining_accents_with_their_base() {
+        let measure = |text: &str| px(text.chars().count() as f32);
+        let path = "/projects/e\u{301}x";
+        assert_eq!(
+            [3.0, 4.0].map(|width| fit_trailing_path(path, px(width), measure)),
+            ["…x", "…e\u{301}x"]
+        );
+    }
+
+    #[test]
+    fn path_truncation_should_keep_joined_emoji_whole() {
+        let measure = |text: &str| px(text.chars().count() as f32);
+        let path = "/projects/👩‍💻x";
+        assert_eq!(
+            [4.0, 5.0].map(|width| fit_trailing_path(path, px(width), measure)),
+            ["…x", "…👩‍💻x"]
+        );
     }
 
     #[test]
