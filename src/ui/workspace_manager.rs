@@ -4367,8 +4367,7 @@ fn directory_labels(
             } else {
                 format!("{}@{destination}", remote_user.as_str())
             };
-            let compact_directory =
-                compact_remote_home_path(directory.as_str(), remote_home_identity.as_str());
+            let compact_directory = compact_remote_home_path(directory, remote_home_identity);
             (
                 compact_directory,
                 format!("{origin}:{}", directory.as_str()),
@@ -4380,15 +4379,19 @@ fn directory_labels(
     }
 }
 
-fn compact_remote_home_path(directory: &str, home: &str) -> String {
-    if matches!(directory, "~" | "~/") || directory == home {
+fn compact_remote_home_path(
+    directory: &RemoteDirectory,
+    home: &crate::domain::RemoteDirectoryIdentity,
+) -> String {
+    if directory.is_home_spelling(home) {
         return "~".to_owned();
     }
     directory
-        .strip_prefix(home)
+        .as_str()
+        .strip_prefix(home.as_str())
         .filter(|relative| relative.starts_with('/'))
         .map(|relative| format!("~{relative}"))
-        .unwrap_or_else(|| directory.to_owned())
+        .unwrap_or_else(|| directory.as_str().to_owned())
 }
 
 /// The account facts a Remote Pane presents: who is logged in, and the home its paths shorten to.

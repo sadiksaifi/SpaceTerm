@@ -144,6 +144,11 @@ impl RemoteDirectory {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn is_home_spelling(&self, home: &RemoteDirectoryIdentity) -> bool {
+        let directory = self.0.trim_end_matches('/');
+        directory == "~" || directory == home.as_str().trim_end_matches('/')
+    }
 }
 
 /// The physical absolute directory returned by the remote `pwd -P` validation protocol.

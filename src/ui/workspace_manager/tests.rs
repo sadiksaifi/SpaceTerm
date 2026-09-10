@@ -269,6 +269,35 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
 }
 
 #[test]
+fn remote_home_labels_should_ignore_trailing_separators_without_changing_tooltip_paths() {
+    let location = WorkspaceLocation::Remote {
+        key: RemoteWorkspaceTarget::new(
+            crate::domain::SshDestination::new("build".into()).unwrap(),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
+        ),
+        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
+        remote_directory: RemoteDirectory::new("~/".into()).unwrap(),
+        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
+            .unwrap(),
+        connection_state: RemoteConnectionState::connected(1),
+    };
+    for (path, expected) in [
+        ("/home/tester/", "~"),
+        ("/home/tester///", "~"),
+        ("~///", "~"),
+        ("/home/tester/src/", "~/src/"),
+        ("/home/tester-other/", "/home/tester-other/"),
+        ("/", "/"),
+    ] {
+        let directory = RemoteDirectory::new(path.into()).unwrap();
+        assert_eq!(
+            directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
+            (expected.to_owned(), format!("tester@build:{path}")),
+        );
+    }
+}
+
+#[test]
 fn remote_directory_labels_should_include_account_destination_and_compact_home() {
     let location = WorkspaceLocation::Remote {
         key: RemoteWorkspaceTarget::new(

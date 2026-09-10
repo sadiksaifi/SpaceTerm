@@ -55,12 +55,12 @@ impl<T> WorkspaceEntry<T> {
             } => {
                 let directory = self
                     .remote_display_directory()
-                    .expect("Remote Workspace has a remote directory")
-                    .as_str();
-                if matches!(directory, "~" | "~/") || directory == remote_home_identity.as_str() {
+                    .expect("Remote Workspace has a remote directory");
+                if directory.is_home_spelling(remote_home_identity) {
                     return "Default".to_owned();
                 }
                 let basename = directory
+                    .as_str()
                     .trim_end_matches('/')
                     .rsplit('/')
                     .next()
@@ -75,6 +75,54 @@ impl<T> WorkspaceEntry<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_home_names_should_ignore_trailing_separators_in_live_and_pinned_directories() {
+        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/local"), |_, _| ());
+        let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
+        let id = workspaces
+            .create_remote_workspace(
+                RemoteWorkspaceTarget::new(
+                    SshDestination::new("build".into()).unwrap(),
+                    home.clone(),
+                ),
+                RemoteUser::new("remote".into()).unwrap(),
+                RemoteDirectory::new("~/".into()).unwrap(),
+                home.clone(),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap();
+        let live = RemoteDirectory::new("/home/remote/".into()).unwrap();
+        workspaces
+            .update_automatic_directory(id, CurrentDirectory::Remote(live.clone()))
+            .unwrap();
+        let live_name = workspaces.workspace(id).unwrap().name().to_owned();
+        let pin = RemoteDirectory::new("/home/remote///".into()).unwrap();
+        workspaces
+            .set_pinned_directory(
+                id,
+                Some(PinnedDirectory::Remote {
+                    directory: pin.clone(),
+                    identity: home,
+                }),
+            )
+            .unwrap();
+        let workspace = workspaces.workspace(id).unwrap();
+        assert_eq!(
+            (
+                live_name.as_str(),
+                workspace.name(),
+                workspace.remote_display_directory()
+            ),
+            ("Default (2)", "Default (2)", Some(&pin))
+        );
+        workspaces.set_pinned_directory(id, None).unwrap();
+        assert_eq!(
+            workspaces.workspace(id).unwrap().remote_display_directory(),
+            Some(&live)
+        );
+    }
 
     #[test]
     fn default_should_be_reused_without_renumbering_survivors() {
