@@ -2684,9 +2684,7 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
 }
 
 #[gpui::test]
-fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnect(
-    cx: &mut TestAppContext,
-) {
+fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &mut TestAppContext) {
     let backend = Arc::new(TestRemoteWorkspaceFlowBackend::default());
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
     let flow = open_remote_workspace_flow(&manager, cx);
@@ -2705,10 +2703,9 @@ fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnec
 
     right_click(row_selector, cx);
     assert!(
-        cx.debug_bounds("workspace-menu-row-reconnect").is_some(),
-        "Remote Workspace menu must contain exactly one stable Reconnect row"
+        cx.debug_bounds("workspace-menu-row-reconnect").is_none(),
+        "Connected Workspaces must not show an unavailable Reconnect action"
     );
-    click("workspace-menu-row-reconnect", cx);
     assert_eq!(backend.connect_calls.load(Ordering::Acquire), 0);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
@@ -2737,6 +2734,11 @@ fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnec
             .remote_connection_state()),
         Some(RemoteConnectionState::failed(2))
     );
+    click("modal-action-remote-workspace-reconnect-error-ok", cx);
+    redraw(cx);
+    right_click(row_selector, cx);
+    click("workspace-menu-row-reconnect", cx);
+    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 2);
 }
 
 #[gpui::test]

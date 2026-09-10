@@ -4206,13 +4206,12 @@ fn workspace_menu_entries(
                 .debug_selector("workspace-menu-row-unpin-directory"),
         );
     }
-    if let Some(phase) = remote_connection_phase {
+    if matches!(
+        remote_connection_phase,
+        Some(RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed)
+    ) {
         entries.push(
             MenuEntry::action("Reconnect", WorkspaceMenuCommand::Reconnect)
-                .disabled(!matches!(
-                    phase,
-                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
-                ))
                 .icon(|foreground| {
                     Icon::new(IconName::RotateCw, px(14.0), foreground).into_any_element()
                 })
