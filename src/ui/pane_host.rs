@@ -55,7 +55,10 @@ use spaceterm_ui::{
 };
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
-const PANE_CAPTION_HEIGHT: f32 = 26.0;
+/// The Pane Caption's outer height, which its top padding sits inside.
+const PANE_CAPTION_HEIGHT: f32 = 32.0;
+/// Space held above the caption row, so the header breathes away from the chrome above it.
+const PANE_CAPTION_TOP_PADDING: f32 = 8.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
 const PANE_CAPTION_TEXT_SIZE: f32 = 11.0;
@@ -1731,6 +1734,7 @@ fn render_pane_caption_content(
         .overflow_hidden()
         .pl(px(PANE_CAPTION_LEFT_PADDING))
         .pr(px(PANE_CAPTION_RIGHT_PADDING))
+        .pt(px(PANE_CAPTION_TOP_PADDING))
         // The caption paints no surface of its own: it reads as identity floating over the Pane.
         .text_size(px(PANE_CAPTION_TEXT_SIZE))
         .text_color(gpui_color(ramp.name))
@@ -2816,6 +2820,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[gpui::test]
+    fn caption_top_padding_should_sit_inside_the_declared_caption_height(cx: &mut TestAppContext) {
+        let (_, _, _, cx) = caption_host(cx);
+
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+
+        // The header holds its own top space, so reserving it never pushes the terminal down.
+        assert_eq!(caption.size.height, px(PANE_CAPTION_HEIGHT));
+        let controls = cx.debug_bounds("pane-split-right-1").unwrap();
+        assert!(
+            controls.origin.y >= caption.origin.y + px(PANE_CAPTION_TOP_PADDING),
+            "caption content must start below its top padding"
+        );
     }
 
     #[gpui::test]

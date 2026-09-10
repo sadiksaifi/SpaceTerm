@@ -87,7 +87,10 @@ const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
 const HORIZONTAL_PADDING: f32 = 4.0;
-const VERTICAL_PADDING: f32 = 8.0;
+/// The gap above the first terminal row, kept tight so the Pane Caption reads as its header.
+const TOP_PADDING: f32 = 2.0;
+/// The gap below the last terminal row, which has no neighbouring chrome to close up against.
+const BOTTOM_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
@@ -1419,7 +1422,7 @@ impl TerminalPane {
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
         let size = self.last_geometry?.grid();
         ScrollMetrics::for_rows(
-            VERTICAL_PADDING,
+            TOP_PADDING,
             f32::from(size.rows) * self.line_height,
             self.screen.scrollbar.total_rows,
             self.screen.scrollbar.visible_rows,
@@ -3658,7 +3661,8 @@ impl Render for TerminalPane {
             .overflow_hidden()
             .bg(background)
             .px(px(HORIZONTAL_PADDING))
-            .py(px(VERTICAL_PADDING))
+            .pt(px(TOP_PADDING))
+            .pb(px(BOTTOM_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
@@ -3741,7 +3745,7 @@ impl Render for TerminalPane {
                             .debug_selector(|| "terminal-status".to_owned())
                             .absolute()
                             .right(px(HORIZONTAL_PADDING))
-                            .bottom(px(VERTICAL_PADDING))
+                            .bottom(px(BOTTOM_PADDING))
                             .max_w(relative(0.94))
                             .px(px(10.0))
                             .py(px(6.0))
@@ -3809,8 +3813,8 @@ impl Render for TerminalPane {
                     .absolute()
                     .left(px(HORIZONTAL_PADDING))
                     .right(px(HORIZONTAL_PADDING))
-                    .top(px(VERTICAL_PADDING))
-                    .bottom(px(VERTICAL_PADDING))
+                    .top(px(TOP_PADDING))
+                    .bottom(px(BOTTOM_PADDING))
                     .child(context_menu),
             )
             .into_any_element()
