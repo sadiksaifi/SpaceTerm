@@ -277,7 +277,6 @@ impl RecordingAccessibilitySelectionReceiver {
 pub(crate) struct SessionDirectorySnapshot {
     pub(crate) revision: u64,
     pub(crate) current: Option<crate::domain::CurrentDirectory>,
-    pub(crate) last_valid: Option<crate::domain::CurrentDirectory>,
 }
 
 // Retained separately because presentation events may evict any earlier queue entry.
@@ -297,13 +296,9 @@ impl SessionDirectoryState {
             .then(|| metadata.context.current_directory(&metadata.directory.path))
             .flatten();
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        let last_valid = current
-            .clone()
-            .or_else(|| state.as_ref().and_then(|state| state.last_valid.clone()));
         *state = Some(SessionDirectorySnapshot {
             revision: metadata.revision,
             current,
-            last_valid,
         });
     }
 }

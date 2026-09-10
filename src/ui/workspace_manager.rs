@@ -49,7 +49,7 @@ use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTe
 use crate::ssh::process::TransientSshErrorOutput;
 #[cfg(test)]
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
-use crate::terminal::metadata::{CurrentDirectory, RemoteTerminalMetadataContext};
+use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
     TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
@@ -731,7 +731,8 @@ impl WorkspaceManager {
         cx.subscribe_in(
             &manager,
             window,
-            move |workspace_manager, tab_manager, event: &TabManagerEvent, window, cx| match event {
+            move |workspace_manager, _tab_manager, event: &TabManagerEvent, window, cx| match event
+            {
                 TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
                     workspace_manager.request_close(
                         CloseTarget::Pane {
@@ -768,22 +769,7 @@ impl WorkspaceManager {
                     }
                 }
                 TabManagerEvent::PresentationChanged => {
-                    if let Some(directory) = tab_manager.read(cx).identity_directory(cx)
-                        && workspace_manager
-                            .workspaces
-                            .update_identity_directory(workspace_id, directory)
-                    {
-                        workspace_manager.synchronize_tab_manager_layouts(window, cx);
-                    }
                     cx.notify();
-                }
-                TabManagerEvent::PinDirectoryRequested { directory } => {
-                    workspace_manager.pin_current_directory(
-                        workspace_id,
-                        directory.clone(),
-                        window,
-                        cx,
-                    );
                 }
             },
         )
@@ -1338,75 +1324,6 @@ impl WorkspaceManager {
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
         true
-    }
-
-    fn pin_current_directory(
-        &mut self,
-        workspace_id: WorkspaceId,
-        directory: CurrentDirectory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.pin_operation = self.pin_operation.wrapping_add(1);
-        let operation = self.pin_operation;
-        match directory {
-            CurrentDirectory::Local(path) => {
-                match self.local_filesystem.validate_directory(&path) {
-                    Ok(directory) => {
-                        self.apply_directory_pin(
-                            workspace_id,
-                            Some(PinnedDirectory::Local(directory)),
-                            window,
-                            cx,
-                        );
-                    }
-                    Err(_) => Self::show_pin_error(window, cx),
-                }
-            }
-            CurrentDirectory::Remote(directory) => {
-                let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
-                    return;
-                };
-                let Some(session) = runtime.session.as_ref() else {
-                    Self::show_pin_error(window, cx);
-                    return;
-                };
-                let generation = runtime.generation;
-                let validation = session
-                    .provider()
-                    .validate_physical_identity(directory.clone());
-                cx.spawn_in(window, async move |manager, cx| {
-                    let identity = validation.await;
-                    let _ = manager.update_in(cx, |manager, window, cx| {
-                        if manager.pin_operation != operation
-                            || manager
-                                .remote_workspace_runtimes
-                                .get(&workspace_id)
-                                .is_none_or(|runtime| {
-                                    runtime.generation != generation || runtime.session.is_none()
-                                })
-                        {
-                            return;
-                        }
-                        match identity {
-                            Ok(identity) => {
-                                manager.apply_directory_pin(
-                                    workspace_id,
-                                    Some(PinnedDirectory::Remote {
-                                        directory,
-                                        identity,
-                                    }),
-                                    window,
-                                    cx,
-                                );
-                            }
-                            Err(_) => Self::show_pin_error(window, cx),
-                        }
-                    });
-                })
-                .detach();
-            }
-        }
     }
 
     fn show_pin_error(window: &mut Window, cx: &mut Context<Self>) {

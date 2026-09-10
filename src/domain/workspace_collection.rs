@@ -1,4 +1,4 @@
-mod identity;
+mod naming;
 
 use super::remote_workspace::{RemoteConnectionReduction, RemoteConnectionState};
 use crate::close_confirmation::{
@@ -286,7 +286,6 @@ pub(crate) struct WorkspaceEntry<T> {
     name: String,
     custom_name: Option<String>,
     fallback_name: String,
-    identity_directory: CurrentDirectory,
     location: WorkspaceLocation,
     pinned_directory: Option<PinnedDirectory>,
     directory_location: HomeDirectoryLocation,
@@ -350,19 +349,14 @@ impl<T> WorkspaceEntry<T> {
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
-            _ => match &self.identity_directory {
-                CurrentDirectory::Local(directory) => Some(directory),
-                CurrentDirectory::Remote(_) => None,
-            },
+            _ => self.local_home_directory(),
         }
     }
+
     pub(crate) fn remote_display_directory(&self) -> Option<&RemoteDirectory> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Remote { directory, .. }) => Some(directory),
-            _ => match &self.identity_directory {
-                CurrentDirectory::Remote(directory) => Some(directory),
-                CurrentDirectory::Local(_) => None,
-            },
+            _ => self.remote_starting_directory(),
         }
     }
 
@@ -408,7 +402,6 @@ impl<T> WorkspaceCollection<T> {
                 name: default_workspace_name(1),
                 custom_name: None,
                 fallback_name: default_workspace_name(1),
-                identity_directory: CurrentDirectory::Local(directory.path().to_owned()),
                 location: WorkspaceLocation::Local,
                 pinned_directory: None,
                 directory_location: HomeDirectoryLocation::Local(directory),
@@ -510,7 +503,6 @@ impl<T> WorkspaceCollection<T> {
             fallback_name: name.clone(),
             name,
             custom_name: None,
-            identity_directory: CurrentDirectory::Local(directory.path().to_owned()),
             location: WorkspaceLocation::Local,
             pinned_directory: None,
             directory_location: HomeDirectoryLocation::Local(directory),
@@ -549,7 +541,6 @@ impl<T> WorkspaceCollection<T> {
             fallback_name: name.clone(),
             name,
             custom_name: None,
-            identity_directory: CurrentDirectory::Remote(remote_directory.clone()),
             location: WorkspaceLocation::Remote {
                 key,
                 remote_directory,
@@ -715,7 +706,6 @@ impl<T> WorkspaceCollection<T> {
                 WorkspaceEntry {
                     id: replacement_workspace_id,
                     fallback_name: replacement_name.clone(),
-                    identity_directory: CurrentDirectory::Local(replacement.path().to_owned()),
                     name: replacement_name,
                     custom_name: None,
                     location: WorkspaceLocation::Local,

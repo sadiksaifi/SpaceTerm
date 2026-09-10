@@ -501,36 +501,26 @@ fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
 }
 
 #[gpui::test]
-fn retained_directory_metadata_should_reject_older_screens_and_preserve_stale_identity(
+fn retained_directory_metadata_should_reject_older_screens_and_clear_stale_directory(
     cx: &mut TestAppContext,
 ) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
     let (pane, cx) = terminal_pane(cx);
     let latest = CurrentDirectory::Local(PathBuf::from("/projects/latest"));
     pane.update(cx, |pane, cx| {
-        pane.accept_directory_metadata(
-            crate::terminal::SessionDirectorySnapshot {
-                revision: 20,
-                current: Some(latest.clone()),
-                last_valid: Some(latest.clone()),
-            },
-            cx,
-        );
+        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
+            revision: 20,
+            current: Some(latest.clone()),
+        });
         let mut old_screen = directory_screen(1, "/projects/old", MetadataFreshness::Live);
         Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata).revision = 10;
         pane.handle_event(SessionEvent::Screen(old_screen), cx);
         assert_eq!(pane.current_directory(), Some(latest.clone()));
-        assert_eq!(pane.identity_directory(), Some(latest.clone()));
-        pane.accept_directory_metadata(
-            crate::terminal::SessionDirectorySnapshot {
-                revision: 21,
-                current: None,
-                last_valid: Some(latest.clone()),
-            },
-            cx,
-        );
+        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
+            revision: 21,
+            current: None,
+        });
         assert_eq!(pane.current_directory(), None);
-        assert_eq!(pane.identity_directory(), Some(latest));
     });
 }
 
@@ -5853,28 +5843,4 @@ fn graphics_without_presented_images_reserves_zero_bytes_and_releases_previous_i
     cx.run_until_parked();
     assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
     assert!(cache.read_with(cx, |cache, _| cache.cached_image_keys().is_empty()));
-}
-
-#[gpui::test]
-fn authoritative_disconnect_should_capture_retained_directory_before_retiring_events(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let directory = crate::domain::CurrentDirectory::Remote(
-        crate::domain::RemoteDirectory::new("/srv/queued".into()).unwrap(),
-    );
-    records.retain_directory_snapshot(
-        1,
-        crate::terminal::SessionDirectorySnapshot {
-            revision: 5,
-            current: Some(directory.clone()),
-            last_valid: Some(directory.clone()),
-        },
-    );
-    // The Control Connection callback wins the race with the queued wake.
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.identity_directory()),
-        Some(directory)
-    );
 }

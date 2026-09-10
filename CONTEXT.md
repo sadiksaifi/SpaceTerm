@@ -20,9 +20,6 @@ A Workspace whose Terminal Sessions run on a machine identified by an SSH Destin
 **Current Directory**:
 An individual Terminal Session's current working directory on its machine.
 
-**Primary Pane**:
-The designated Pane supplying an unpinned Workspace's automatic name and displayed directory.
-
 **Starting Directory**:
 The directory selected when creating one Terminal Session.
 
