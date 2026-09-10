@@ -876,7 +876,7 @@ mod tests {
             &self,
         ) -> Task<
             Result<
-                super::super::remote_directory_picker::RemoteWorkspaceAccount,
+                crate::ssh::remote_account::RemoteWorkspaceAccount,
                 super::super::remote_directory_picker::RemoteDirectoryProviderError,
             >,
         > {

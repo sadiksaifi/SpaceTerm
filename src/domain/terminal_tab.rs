@@ -183,6 +183,7 @@ pub(crate) struct TerminalTab<T> {
     root: PaneNode,
     terminals: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
+    root_pane_id: PaneId,
     zoom_state: ZoomState,
     minimum_pane_size: PaneSize,
     next_pane_id: u64,
@@ -204,6 +205,7 @@ impl<T> TerminalTab<T> {
                 create_initial_terminal(initial_pane_id),
             )]),
             focused_pane_id: initial_pane_id,
+            root_pane_id: initial_pane_id,
             zoom_state: ZoomState::Restored,
             minimum_pane_size,
             next_pane_id: 2,
@@ -217,6 +219,10 @@ impl<T> TerminalTab<T> {
 
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.focused_pane_id
+    }
+
+    pub(crate) const fn root_pane_id(&self) -> PaneId {
+        self.root_pane_id
     }
 
     pub(crate) const fn zoom_state(&self) -> ZoomState {
@@ -325,6 +331,9 @@ impl<T> TerminalTab<T> {
             .ok_or(PaneError::MissingTerminal(pane_id))?;
 
         self.root = new_root;
+        if self.root_pane_id == pane_id {
+            self.root_pane_id = self.root.first_pane_id();
+        }
         if self.focused_pane_id == pane_id {
             self.focused_pane_id = removal.focus_fallback;
         }
@@ -901,6 +910,35 @@ mod tests {
             (tab.pane_count(), tab.focused_pane_id(), created_id.get()),
             (1, PaneId::new(1), Some(PaneId::new(1)))
         );
+    }
+
+    #[test]
+    fn root_pane_should_ignore_focus_and_promote_in_layout_order() {
+        let mut tab = tab(());
+        let second = tab
+            .split_pane(
+                PaneId::new(1),
+                SplitAxis::Horizontal,
+                size(800.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+        let third = tab
+            .split_pane(
+                PaneId::new(1),
+                SplitAxis::Vertical,
+                size(400.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+        assert_eq!(tab.root_pane_id(), PaneId::new(1));
+        assert_eq!(tab.focused_pane_id(), third);
+        tab.close_pane(PaneId::new(1)).unwrap();
+        assert_eq!(tab.root_pane_id(), third);
+        tab.close_pane(third).unwrap();
+        assert_eq!(tab.root_pane_id(), second);
     }
 
     #[test]

@@ -169,6 +169,25 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn report_directory(
+        &self,
+        session_id: usize,
+        current: Option<crate::domain::CurrentDirectory>,
+    ) {
+        let mut snapshots = self.directory_snapshots.borrow_mut();
+        let revision = snapshots
+            .get(&session_id)
+            .map_or(1, |snapshot| snapshot.revision + 1);
+        snapshots.insert(
+            session_id,
+            super::SessionDirectorySnapshot { revision, current },
+        );
+        self.event_sender(session_id)
+            .expect("session must be live")
+            .try_send(SessionEvent::CurrentDirectoryChanged)
+            .expect("directory event must fit");
+    }
+
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
         self.selection_copies.borrow_mut().push_back(copy);
     }

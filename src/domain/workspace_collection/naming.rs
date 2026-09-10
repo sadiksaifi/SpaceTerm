@@ -7,19 +7,28 @@ impl<T> WorkspaceCollection<T> {
             .iter()
             .filter_map(|workspace| workspace.custom_name.clone())
             .collect();
+        let mut pending = Vec::new();
         for workspace in &mut self.workspaces {
             if let Some(custom_name) = &workspace.custom_name {
                 workspace.name.clone_from(custom_name);
                 continue;
             }
             let base = workspace.automatic_name();
+            // Reserve unchanged identities before allocating names for moving Workspaces.
+            if workspace.automatic_name_base == base && occupied.insert(workspace.name.clone()) {
+                continue;
+            }
+            pending.push((workspace, base));
+        }
+        for (workspace, base) in pending {
             let mut name = base.clone();
             let mut ordinal = 2;
             while !occupied.insert(name.clone()) {
-                name = format!("{base} {ordinal}");
+                name = format!("{base} ({ordinal})");
                 ordinal += 1;
             }
             workspace.name = name;
+            workspace.automatic_name_base = base;
         }
     }
 }
@@ -32,7 +41,7 @@ impl<T> WorkspaceEntry<T> {
                     .local_display_directory()
                     .expect("Local Workspace has a local directory");
                 if Some(directory) == self.local_home_directory() {
-                    return self.fallback_name.clone();
+                    return "Default".to_owned();
                 }
                 directory
                     .file_name()
@@ -41,7 +50,6 @@ impl<T> WorkspaceEntry<T> {
                     .unwrap_or_else(|| "/".into())
             }
             WorkspaceLocation::Remote {
-                key,
                 remote_home_identity,
                 ..
             } => {
@@ -49,9 +57,8 @@ impl<T> WorkspaceEntry<T> {
                     .remote_display_directory()
                     .expect("Remote Workspace has a remote directory")
                     .as_str();
-                let destination = key.destination().as_str();
                 if matches!(directory, "~" | "~/") || directory == remote_home_identity.as_str() {
-                    return destination.to_owned();
+                    return "Default".to_owned();
                 }
                 let basename = directory
                     .trim_end_matches('/')
@@ -59,7 +66,7 @@ impl<T> WorkspaceEntry<T> {
                     .next()
                     .filter(|name| !name.is_empty())
                     .unwrap_or("/");
-                format!("{basename} · {destination}")
+                basename.to_owned()
             }
         }
     }
@@ -70,9 +77,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_should_be_reused_without_renumbering_survivors() {
+        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
+        let second = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/home/test"), |_, _| ())
+            .unwrap();
+        workspaces
+            .close_workspace(WorkspaceId::new(1), PathBuf::from("/home/test"), |_, _| ())
+            .unwrap();
+        let third = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/home/test"), |_, _| ())
+            .unwrap();
+        assert_eq!(
+            (
+                workspaces.workspace(second).unwrap().name(),
+                workspaces.workspace(third).unwrap().name()
+            ),
+            ("Default (2)", "Default")
+        );
+    }
+
+    #[test]
+    fn automatic_name_should_follow_directory_and_return_to_an_available_default() {
+        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
+        let first = workspaces.active_workspace_id();
+        workspaces
+            .update_automatic_directory(
+                first,
+                CurrentDirectory::Local(PathBuf::from("/projects/api")),
+            )
+            .unwrap();
+        assert_eq!(workspaces.workspace(first).unwrap().name(), "api");
+        let second = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/home/test"), |_, _| ())
+            .unwrap();
+        workspaces
+            .name_workspace_for_creation(second, "Default".into())
+            .unwrap();
+        workspaces
+            .update_automatic_directory(first, CurrentDirectory::Local(PathBuf::from("/home/test")))
+            .unwrap();
+        assert_eq!(workspaces.workspace(first).unwrap().name(), "Default (2)");
+        workspaces
+            .update_automatic_directory(
+                second,
+                CurrentDirectory::Local(PathBuf::from("/projects/other")),
+            )
+            .unwrap();
+        assert_eq!(workspaces.workspace(second).unwrap().name(), "Default");
+    }
+
+    #[test]
+    fn automatic_directory_should_reject_cross_machine_values_without_mutation() {
+        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
+        let id = workspaces.active_workspace_id();
+        assert_eq!(
+            workspaces.update_automatic_directory(
+                id,
+                CurrentDirectory::Remote(RemoteDirectory::new("/srv/api".into()).unwrap())
+            ),
+            Err(WorkspaceError::DirectoryLocationMismatch(id))
+        );
+        assert_eq!(
+            workspaces.active_workspace().local_display_directory(),
+            Some(Path::new("/home/test"))
+        );
+    }
+
+    #[test]
     fn automatic_names_should_avoid_generated_suffixes_and_custom_names() {
         let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/test"), |_, _| ());
-        for (index, directory) in ["/one/project", "/two/project", "/three/project 2"]
+        for (index, directory) in ["/one/project", "/two/project", "/three/project (2)"]
             .into_iter()
             .enumerate()
         {
@@ -96,11 +171,14 @@ mod tests {
             .iter()
             .map(|workspace| workspace.name())
             .collect();
-        assert_eq!(names, ["project", "project 2", "project 3", "project 2 2"]);
+        assert_eq!(
+            names,
+            ["project", "project (3)", "project (2)", "project (2) (2)"]
+        );
     }
 
     #[test]
-    fn remote_name_should_preserve_destination_and_starting_directory() {
+    fn remote_name_should_match_local_basename_behavior() {
         let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/local"), |_, _| ());
         let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
         let id = workspaces
@@ -109,6 +187,7 @@ mod tests {
                     SshDestination::new("build".into()).unwrap(),
                     home.clone(),
                 ),
+                RemoteUser::new("remote".into()).unwrap(),
                 RemoteDirectory::new("/srv/project".into()).unwrap(),
                 home,
                 RemoteConnectionState::connected(1),
@@ -116,6 +195,38 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(workspaces.workspace(id).unwrap().name(), "project · build");
+        assert_eq!(workspaces.workspace(id).unwrap().name(), "project");
+    }
+
+    #[test]
+    fn automatic_name_collisions_should_span_all_machines() {
+        let mut workspaces = WorkspaceCollection::new(PathBuf::from("/home/local"), |_, _| ());
+        let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
+        let mut create = |destination: &str| {
+            workspaces
+                .create_remote_workspace(
+                    RemoteWorkspaceTarget::new(
+                        SshDestination::new(destination.into()).unwrap(),
+                        RemoteDirectoryIdentity::new("/srv/project".into()).unwrap(),
+                    ),
+                    RemoteUser::new("remote".into()).unwrap(),
+                    RemoteDirectory::new("/srv/project".into()).unwrap(),
+                    home.clone(),
+                    RemoteConnectionState::connected(1),
+                    |_| (),
+                )
+                .unwrap()
+        };
+
+        let first = create("build");
+        let second = create("build");
+        let other_machine = create("build-alias");
+
+        assert_eq!(workspaces.workspace(first).unwrap().name(), "project");
+        assert_eq!(workspaces.workspace(second).unwrap().name(), "project (2)");
+        assert_eq!(
+            workspaces.workspace(other_machine).unwrap().name(),
+            "project (3)"
+        );
     }
 }

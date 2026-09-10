@@ -13,9 +13,9 @@ pub(crate) use terminal_tab::{
 };
 pub(crate) use workspace_collection::{
     CurrentDirectory, DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory,
-    RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceTarget, RemoteWorkspaceValueError,
-    SshDestination, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError, WorkspaceId,
-    WorkspaceLocation,
+    RemoteDirectory, RemoteDirectoryIdentity, RemoteUser, RemoteWorkspaceTarget,
+    RemoteWorkspaceValueError, SshDestination, ValidatedLocalDirectory, WorkspaceCollection,
+    WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 
 pub(crate) use remote_workspace::{

@@ -51,12 +51,41 @@ impl std::fmt::Debug for CurrentDirectory {
 ///
 /// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
 pub(crate) enum RemoteWorkspaceValueError {
+    #[error("Remote user must be one non-empty, whitespace-free token")]
+    User,
     #[error("SSH destination must be one non-option, control-free token")]
     Destination,
     #[error("Remote Directory must be an absolute or ~/ path without control characters")]
     StartingDirectory,
     #[error("Physical remote directory identity must be an absolute control-free path")]
     DirectoryIdentity,
+}
+
+/// The validated account name discovered from a connected remote destination.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RemoteUser(String);
+
+impl fmt::Debug for RemoteUser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteUser(<redacted>)")
+    }
+}
+
+impl RemoteUser {
+    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(RemoteWorkspaceValueError::User);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The exact OpenSSH destination token selected by the user.
@@ -192,6 +221,7 @@ pub(crate) enum WorkspaceLocation {
     Local,
     Remote {
         key: RemoteWorkspaceTarget,
+        remote_user: RemoteUser,
         remote_directory: RemoteDirectory,
         remote_home_identity: RemoteDirectoryIdentity,
         connection_state: RemoteConnectionState,
@@ -285,7 +315,8 @@ pub(crate) struct WorkspaceEntry<T> {
     id: WorkspaceId,
     name: String,
     custom_name: Option<String>,
-    fallback_name: String,
+    automatic_name_base: String,
+    automatic_directory: Option<CurrentDirectory>,
     location: WorkspaceLocation,
     pinned_directory: Option<PinnedDirectory>,
     directory_location: HomeDirectoryLocation,
@@ -349,14 +380,20 @@ impl<T> WorkspaceEntry<T> {
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
-            _ => self.local_home_directory(),
+            _ => match &self.automatic_directory {
+                Some(CurrentDirectory::Local(directory)) => Some(directory),
+                _ => self.local_home_directory(),
+            },
         }
     }
 
     pub(crate) fn remote_display_directory(&self) -> Option<&RemoteDirectory> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Remote { directory, .. }) => Some(directory),
-            _ => self.remote_starting_directory(),
+            _ => match &self.automatic_directory {
+                Some(CurrentDirectory::Remote(directory)) => Some(directory),
+                _ => self.remote_starting_directory(),
+            },
         }
     }
 
@@ -401,7 +438,8 @@ impl<T> WorkspaceCollection<T> {
                 id,
                 name: default_workspace_name(1),
                 custom_name: None,
-                fallback_name: default_workspace_name(1),
+                automatic_name_base: "Default".to_owned(),
+                automatic_directory: None,
                 location: WorkspaceLocation::Local,
                 pinned_directory: None,
                 directory_location: HomeDirectoryLocation::Local(directory),
@@ -500,7 +538,8 @@ impl<T> WorkspaceCollection<T> {
         let name = self.next_default_workspace_name(None);
         self.workspaces.push(WorkspaceEntry {
             id,
-            fallback_name: name.clone(),
+            automatic_name_base: "Default".to_owned(),
+            automatic_directory: None,
             name,
             custom_name: None,
             location: WorkspaceLocation::Local,
@@ -518,6 +557,7 @@ impl<T> WorkspaceCollection<T> {
     pub(crate) fn create_remote_workspace(
         &mut self,
         key: RemoteWorkspaceTarget,
+        remote_user: RemoteUser,
         remote_directory: RemoteDirectory,
         remote_home_identity: RemoteDirectoryIdentity,
         connection_state: RemoteConnectionState,
@@ -525,28 +565,21 @@ impl<T> WorkspaceCollection<T> {
     ) -> Result<WorkspaceId, WorkspaceError> {
         let (id, next) = self.next_workspace_id()?;
         let payload = create_payload(id);
-        let base = key.destination().as_str();
-        let mut name = base.to_owned();
-        let mut ordinal = 2;
-        while self
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.name == name)
-        {
-            name = format!("{base} {ordinal}");
-            ordinal += 1;
-        }
+        let location = WorkspaceLocation::Remote {
+            key,
+            remote_user,
+            remote_directory,
+            remote_home_identity,
+            connection_state,
+        };
+        let name = self.next_default_workspace_name(None);
         self.workspaces.push(WorkspaceEntry {
             id,
-            fallback_name: name.clone(),
+            automatic_name_base: "Default".to_owned(),
+            automatic_directory: None,
             name,
             custom_name: None,
-            location: WorkspaceLocation::Remote {
-                key,
-                remote_directory,
-                remote_home_identity,
-                connection_state,
-            },
+            location,
             pinned_directory: None,
             directory_location: HomeDirectoryLocation::Remote,
             availability: DirectoryAvailability::Available,
@@ -556,6 +589,32 @@ impl<T> WorkspaceCollection<T> {
         self.next_workspace_id = next;
         self.recalculate_automatic_names();
         Ok(id)
+    }
+
+    pub(crate) fn update_automatic_directory(
+        &mut self,
+        workspace_id: WorkspaceId,
+        directory: CurrentDirectory,
+    ) -> Result<(), WorkspaceError> {
+        let workspace = self
+            .workspace_mut(workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        if !matches!(
+            (&workspace.location, &directory),
+            (WorkspaceLocation::Local, CurrentDirectory::Local(_))
+                | (
+                    WorkspaceLocation::Remote { .. },
+                    CurrentDirectory::Remote(_)
+                )
+        ) {
+            return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
+        }
+        if workspace.automatic_directory.as_ref() == Some(&directory) {
+            return Ok(());
+        }
+        workspace.automatic_directory = Some(directory);
+        self.recalculate_automatic_names();
+        Ok(())
     }
 
     pub(crate) fn set_pinned_directory(
@@ -604,47 +663,21 @@ impl<T> WorkspaceCollection<T> {
         let workspace = self
             .workspace_mut(workspace_id)
             .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
-        workspace.custom_name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+        if name.trim().is_empty() {
+            return Ok(());
+        }
+        workspace.custom_name = Some(name.trim().to_owned());
         self.recalculate_automatic_names();
         Ok(())
     }
 
-    /// Freezes a creation name without colliding with another Workspace on the same machine.
+    /// A supplied name is explicit even when it matches an automatic name.
     pub(crate) fn name_workspace_for_creation(
         &mut self,
         workspace_id: WorkspaceId,
         name: String,
     ) -> Result<(), WorkspaceError> {
-        let workspace = self
-            .workspace(workspace_id)
-            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
-        let base = name.trim();
-        if base.is_empty() {
-            return self.rename_workspace(workspace_id, name);
-        }
-        let occupied: std::collections::HashSet<_> = self
-            .workspaces
-            .iter()
-            .filter(|other| {
-                other.id != workspace_id
-                    && match (&workspace.location, &other.location) {
-                        (WorkspaceLocation::Local, WorkspaceLocation::Local) => true,
-                        (
-                            WorkspaceLocation::Remote { key, .. },
-                            WorkspaceLocation::Remote { key: other_key, .. },
-                        ) => key.destination() == other_key.destination(),
-                        _ => false,
-                    }
-            })
-            .map(|workspace| workspace.name())
-            .collect();
-        let mut unique_name = base.to_owned();
-        let mut ordinal = 1;
-        while occupied.contains(unique_name.as_str()) {
-            unique_name = format!("{base} {ordinal}");
-            ordinal += 1;
-        }
-        self.rename_workspace(workspace_id, unique_name)
+        self.rename_workspace(workspace_id, name)
     }
 
     pub(crate) fn set_directory_unavailable(
@@ -656,6 +689,25 @@ impl<T> WorkspaceCollection<T> {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
         workspace.availability = DirectoryAvailability::Unavailable { reason };
+        Ok(())
+    }
+
+    pub(crate) fn set_remote_user(
+        &mut self,
+        workspace_id: WorkspaceId,
+        remote_user: RemoteUser,
+    ) -> Result<(), WorkspaceError> {
+        let Some(workspace) = self.workspace_mut(workspace_id) else {
+            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
+        };
+        let WorkspaceLocation::Remote {
+            remote_user: stored_user,
+            ..
+        } = &mut workspace.location
+        else {
+            return Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id));
+        };
+        *stored_user = remote_user;
         Ok(())
     }
 
@@ -705,7 +757,8 @@ impl<T> WorkspaceCollection<T> {
                 &mut self.workspaces[index],
                 WorkspaceEntry {
                     id: replacement_workspace_id,
-                    fallback_name: replacement_name.clone(),
+                    automatic_name_base: "Default".to_owned(),
+                    automatic_directory: None,
                     name: replacement_name,
                     custom_name: None,
                     location: WorkspaceLocation::Local,
@@ -815,7 +868,11 @@ impl<T> WorkspaceCollection<T> {
 }
 
 fn default_workspace_name(workspace_number: usize) -> String {
-    format!("Workspace {workspace_number}")
+    if workspace_number == 1 {
+        "Default".to_owned()
+    } else {
+        format!("Default ({workspace_number})")
+    }
 }
 
 #[cfg(test)]
@@ -857,9 +914,14 @@ mod tests {
         RemoteDirectory::new(value.to_owned()).unwrap()
     }
 
+    fn remote_user(value: &str) -> RemoteUser {
+        RemoteUser::new(value.to_owned()).unwrap()
+    }
+
     #[test]
     fn remote_identity_debug_should_redact_destination_and_directories() {
         let destination = ssh_destination("sensitive-host");
+        let remote_user = remote_user("sensitive-user");
         let selected = remote_directory("/sensitive/selected");
         let physical = RemoteDirectoryIdentity::new("/sensitive/physical".to_owned()).unwrap();
         let key = RemoteWorkspaceTarget::new(destination.clone(), physical.clone());
@@ -870,6 +932,7 @@ mod tests {
 
         for debug in [
             format!("{destination:?}"),
+            format!("{remote_user:?}"),
             format!("{selected:?}"),
             format!("{physical:?}"),
             format!("{key:?}"),
@@ -940,6 +1003,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/home/test/project"),
+                remote_user("tester"),
                 remote_directory("~/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(1),
@@ -965,6 +1029,7 @@ mod tests {
         let first = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(1),
@@ -974,6 +1039,7 @@ mod tests {
         let second = workspaces
             .create_remote_workspace(
                 remote_key("orb-alias", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(1),
@@ -1117,6 +1183,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(u64::MAX),
@@ -1145,6 +1212,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(7),
@@ -1175,6 +1243,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(7),
@@ -1210,6 +1279,7 @@ mod tests {
             let workspace_id = workspaces
                 .create_remote_workspace(
                     remote_key(&format!("orb-{index}"), "/srv/project"),
+                    remote_user("tester"),
                     remote_directory("/srv/project"),
                     remote_identity("/home/test"),
                     state,
@@ -1237,6 +1307,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::disconnected(7),
@@ -1275,6 +1346,7 @@ mod tests {
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
+                remote_user("tester"),
                 remote_directory("/srv/project"),
                 remote_identity("/home/test"),
                 RemoteConnectionState::connected(4),
@@ -1374,6 +1446,7 @@ mod tests {
             workspaces
                 .create_remote_workspace(
                     remote_key("server", "/home/me"),
+                    remote_user("me"),
                     remote_directory("~/"),
                     remote_identity("/home/me"),
                     RemoteConnectionState::connected(1),
@@ -1384,8 +1457,8 @@ mod tests {
         let first = create();
         let second = create();
         assert_ne!(first, second);
-        assert_eq!(workspaces.workspace(first).unwrap().name(), "server");
-        assert_eq!(workspaces.workspace(second).unwrap().name(), "server 2");
+        assert_eq!(workspaces.workspace(first).unwrap().name(), "Default (2)");
+        assert_eq!(workspaces.workspace(second).unwrap().name(), "Default (3)");
         let remote_pin = PinnedDirectory::Remote {
             directory: remote_directory("/app"),
             identity: remote_identity("/app"),
@@ -1504,7 +1577,7 @@ mod tests {
             .iter()
             .map(WorkspaceEntry::name)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["Projects", "Workspace 2", "Workspace 1"]);
+        assert_eq!(names, vec!["Projects", "Default (2)", "Default"]);
     }
 
     #[test]
@@ -1535,7 +1608,7 @@ mod tests {
                 workspaces.active_workspace().name(),
                 stored_working_directory,
             ),
-            ("Workspace 2", Path::new("/Users/test/projects"))
+            ("Default (2)", Path::new("/Users/test/projects"))
         );
         assert_eq!(
             observed_pointer.get(),
@@ -1599,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_name_should_fill_suffix_gaps_without_renumbering_frozen_names() {
+    fn creation_name_should_preserve_explicit_names_including_duplicates() {
         let mut workspaces = new_workspaces(());
         let first = workspaces.active_workspace_id();
         workspaces
@@ -1625,12 +1698,12 @@ mod tests {
                 .iter()
                 .map(WorkspaceEntry::name)
                 .collect::<Vec<_>>(),
-            ["Project", "Project 2", "Project 1", "Project 3"]
+            ["Project", "Project 2", "Project", "Project"]
         );
     }
 
     #[test]
-    fn creation_name_should_avoid_automatic_names_and_remain_frozen_after_directory_changes() {
+    fn creation_name_should_claim_an_automatic_name_and_remain_frozen_after_directory_changes() {
         let mut workspaces = new_workspaces(());
         let automatic_name = workspaces.active_workspace().name().to_owned();
         let id = workspaces
@@ -1647,7 +1720,7 @@ mod tests {
             .unwrap();
 
         let workspace = workspaces.workspace(id).unwrap();
-        let expected = format!("{automatic_name} 1");
+        let expected = automatic_name;
         assert_eq!(
             (workspace.name(), workspace.custom_name.as_deref()),
             (expected.as_str(), Some(expected.as_str()))
@@ -1670,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_name_should_scope_remote_collisions_to_the_exact_destination() {
+    fn creation_name_should_preserve_explicit_names_across_all_machines() {
         let mut workspaces = new_workspaces(());
         let local = workspaces.active_workspace_id();
         workspaces
@@ -1685,6 +1758,7 @@ mod tests {
             let id = workspaces
                 .create_remote_workspace(
                     remote_key(destination, directory),
+                    remote_user("tester"),
                     remote_directory(directory),
                     remote_identity("/home/test"),
                     RemoteConnectionState::connected(1),
@@ -1710,7 +1784,7 @@ mod tests {
                 .to_owned(),
         );
 
-        assert_eq!(assigned, ["Project", "Project 1", "Project", "Project 1"]);
+        assert_eq!(assigned, ["Project", "Project", "Project", "Project"]);
     }
 
     #[test]
@@ -1781,7 +1855,7 @@ mod tests {
             .iter()
             .map(WorkspaceEntry::name)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["renamed", "Workspace 2"]);
+        assert_eq!(names, vec!["renamed", "Default (2)"]);
     }
 
     #[test]
@@ -1794,7 +1868,7 @@ mod tests {
             (result, workspaces.active_workspace().name()),
             (
                 Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
-                "Workspace 1",
+                "Default",
             )
         );
     }
@@ -1969,7 +2043,7 @@ mod tests {
                 1,
                 WorkspaceId::new(2),
                 WorkspaceId::new(2),
-                "Workspace 1",
+                "Default",
                 Path::new("/replacement"),
                 &"replacement payload",
             )

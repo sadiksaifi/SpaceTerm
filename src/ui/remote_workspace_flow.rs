@@ -11,10 +11,8 @@ use spaceterm_ui::{
 };
 use thiserror::Error;
 
+use super::remote_directory_picker::RemoteDirectoryProvider;
 use super::remote_directory_picker::RemoteDirectoryProviderError;
-use super::remote_directory_picker::{
-    RemoteDirectoryProvider, RemoteDirectorySelection, RemoteWorkspaceAccount,
-};
 use super::ssh_host_form::{
     ManagedHostFormBackend, ManagedHostFormBackendError, SshHostForm, SshHostFormEvent,
     SshHostFormMode,
@@ -29,6 +27,7 @@ use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::live_connection::ControlConnectionObserver;
 use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::ssh::process::TransientSshErrorOutput;
+use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::RemoteTerminalChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
@@ -371,7 +370,7 @@ impl ManagedHostFormBackend for FlowManagedHostBackend {
 pub(crate) struct RemoteWorkspaceFlowCompletion {
     session: RemoteWorkspaceConnectedSession,
     destination: SshDestination,
-    directory: RemoteDirectory,
+    initial_directory: RemoteDirectory,
     physical_directory: RemoteDirectoryIdentity,
     account: RemoteWorkspaceAccount,
     terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
@@ -383,7 +382,7 @@ impl RemoteWorkspaceFlowCompletion {
     pub(crate) fn for_test(
         session: RemoteWorkspaceConnectedSession,
         destination: SshDestination,
-        directory: RemoteDirectory,
+        initial_directory: RemoteDirectory,
         physical_directory: RemoteDirectoryIdentity,
         account: RemoteWorkspaceAccount,
         terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
@@ -392,7 +391,7 @@ impl RemoteWorkspaceFlowCompletion {
         Self {
             session,
             destination,
-            directory,
+            initial_directory,
             physical_directory,
             account,
             terminal_channels,
@@ -404,8 +403,8 @@ impl RemoteWorkspaceFlowCompletion {
         &self.destination
     }
 
-    pub(crate) const fn directory(&self) -> &RemoteDirectory {
-        &self.directory
+    pub(crate) const fn initial_directory(&self) -> &RemoteDirectory {
+        &self.initial_directory
     }
 
     pub(crate) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
@@ -447,7 +446,7 @@ impl RemoteWorkspaceFlowCompletion {
         (
             self.session,
             self.destination,
-            self.directory,
+            self.initial_directory,
             self.physical_directory,
             self.account,
             self.terminal_channels,
@@ -1560,14 +1559,7 @@ impl RemoteWorkspaceFlow {
                 }
                 match result {
                     Ok(account) => {
-                        let directory = RemoteDirectory::new("~/".to_owned())
-                            .expect("remote home is a valid remote directory");
-                        let selection = RemoteDirectorySelection::new(
-                            directory,
-                            account.home_identity().clone(),
-                            account,
-                        );
-                        flow.complete(selection, window, cx);
+                        flow.complete_at_home(account, window, cx);
                     }
                     Err(error) => {
                         let error = match error {
@@ -1621,9 +1613,9 @@ impl RemoteWorkspaceFlow {
         self.publish(cx);
     }
 
-    fn complete(
+    fn complete_at_home(
         &mut self,
-        selection: RemoteDirectorySelection,
+        account: RemoteWorkspaceAccount,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1632,7 +1624,7 @@ impl RemoteWorkspaceFlow {
         };
         let terminal_channels = match connection
             .session
-            .bind_terminal_channels(selection.account().login_shell())
+            .bind_terminal_channels(account.login_shell())
         {
             Ok(provider) => provider,
             Err(_) => {
@@ -1670,9 +1662,10 @@ impl RemoteWorkspaceFlow {
         let completion = RemoteWorkspaceFlowCompletion {
             session: connection.session,
             destination: connection.destination,
-            directory: selection.directory().clone(),
-            physical_directory: selection.physical_directory().clone(),
-            account: selection.account().clone(),
+            initial_directory: RemoteDirectory::new("~/".to_owned())
+                .expect("remote home is a valid remote directory"),
+            physical_directory: account.home_identity().clone(),
+            account,
             terminal_channels,
             lifecycle,
         };
@@ -3224,7 +3217,7 @@ mod tests {
         let handle = events.borrow().completions[0].clone();
         let completion = handle.take().unwrap();
         assert_eq!(completion.destination().as_str(), "deploy@work");
-        assert_eq!(completion.directory().as_str(), "~/");
+        assert_eq!(completion.initial_directory().as_str(), "~/");
         assert_eq!(completion.physical_directory().as_str(), "/home/tester");
         assert_eq!(completion.remote_home_identity().as_str(), "/home/tester");
         assert!(handle.take().is_none());

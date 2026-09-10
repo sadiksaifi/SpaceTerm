@@ -19,6 +19,7 @@ struct TabEntry<T> {
 pub(crate) struct TabCollection<T> {
     tabs: Vec<TabEntry<T>>,
     active_tab_id: TabId,
+    root_tab_id: TabId,
     next_tab_id: u64,
 }
 
@@ -31,6 +32,7 @@ impl<T> TabCollection<T> {
                 payload: create_initial_payload(initial_tab_id),
             }],
             active_tab_id: initial_tab_id,
+            root_tab_id: initial_tab_id,
             next_tab_id: 2,
         }
     }
@@ -48,6 +50,11 @@ impl<T> TabCollection<T> {
             unreachable!("the Active Tab ID must always reference an owned Tab")
         };
         tab
+    }
+
+    pub(crate) fn root_tab(&self) -> &T {
+        self.tab(self.root_tab_id)
+            .expect("the Root Tab must belong to the Workspace")
     }
 
     pub(crate) fn tab(&self, tab_id: TabId) -> Option<&T> {
@@ -96,6 +103,9 @@ impl<T> TabCollection<T> {
         }
 
         let closed_tab = self.tabs.remove(index);
+        if self.root_tab_id == tab_id {
+            self.root_tab_id = self.tabs[0].id;
+        }
         if self.active_tab_id == tab_id {
             let fallback_index = index.min(self.tabs.len() - 1);
             self.active_tab_id = self.tabs[fallback_index].id;
@@ -121,6 +131,19 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+
+    #[test]
+    fn root_tab_should_ignore_focus_and_reordering_and_promote_on_close() {
+        let mut tabs = TabCollection::new(|_| "initial");
+        let second = tabs.create_tab(|_| "second").unwrap();
+        tabs.create_tab(|_| "third").unwrap();
+        tabs.tabs.swap(0, 1);
+        assert_eq!(tabs.root_tab(), &"initial");
+        tabs.close_tab(TabId::new(1)).unwrap();
+        assert_eq!(tabs.root_tab(), &"second");
+        tabs.close_tab(second).unwrap();
+        assert_eq!(tabs.root_tab(), &"third");
+    }
 
     struct DropProbe {
         drops: Rc<Cell<usize>>,
