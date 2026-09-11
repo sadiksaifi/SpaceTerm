@@ -1,3 +1,4 @@
+pub(crate) mod app_directories;
 pub(crate) mod app_paths;
 pub(crate) mod appearance;
 pub(crate) mod application_activity;

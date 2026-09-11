@@ -1,16 +1,15 @@
 //! Identity-aware storage for the single appearance preferences and catalog document.
 
-use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
-use crate::platform::app_paths::{AppPathRoot, AppPaths, AppPathsError};
+use crate::platform::app_directories::AppDirectoryRoot;
+use crate::platform::app_paths::{AppPaths, AppPathsError};
 use crate::platform::secure_filesystem::{
     PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory, SecureEntryIdentity,
     SecureFilesystemError,
 };
 
 pub(super) const MAXIMUM_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-const DOCUMENT_NAME: &str = "settings.json";
 const PREPARE_ATTEMPTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -75,12 +74,12 @@ impl ConfigSettingsStorage {
         let directory = if create {
             Some(
                 self.paths
-                    .ensure_secure_root(AppPathRoot::Config)
+                    .ensure_secure_root(AppDirectoryRoot::Config)
                     .map_err(path_error)?,
             )
         } else {
             self.paths
-                .open_secure_root(AppPathRoot::Config)
+                .open_secure_root(AppDirectoryRoot::Config)
                 .map_err(path_error)?
         };
         *retained = directory.clone();
@@ -93,13 +92,11 @@ impl SettingsStorage for ConfigSettingsStorage {
         let Some(directory) = self.directory(false)? else {
             return Ok(None);
         };
+        let target = self.paths.directories().config_file();
+        let name = target.file_name().ok_or(StorageError::Unavailable)?;
         self.paths
             .filesystem()
-            .read_private_file(
-                &directory,
-                OsStr::new(DOCUMENT_NAME),
-                MAXIMUM_DOCUMENT_BYTES,
-            )
+            .read_private_file(&directory, name, MAXIMUM_DOCUMENT_BYTES)
             .map_err(filesystem_error)
     }
 
@@ -113,7 +110,8 @@ impl SettingsStorage for ConfigSettingsStorage {
         }
         let directory = self.directory(true)?.ok_or(StorageError::Unavailable)?;
         let filesystem = self.paths.filesystem();
-        let name = OsStr::new(DOCUMENT_NAME);
+        let target = self.paths.directories().config_file();
+        let name = target.file_name().ok_or(StorageError::Unavailable)?;
         for _ in 0..PREPARE_ATTEMPTS {
             let mut nonce = [0; 16];
             getrandom::fill(&mut nonce).map_err(|_| StorageError::Unavailable)?;

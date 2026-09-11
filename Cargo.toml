@@ -29,8 +29,13 @@ app-position = { x = 180, y = 170 }
 application-folder-position = { x = 480, y = 170 }
 
 [workspace]
-members = ["crates/spaceterm-ui", "third_party/libghostty-vt", "third_party/libghostty-vt-sys"]
-default-members = [".", "crates/spaceterm-ui"]
+members = [
+    "crates/spaceterm-directories",
+    "crates/spaceterm-ui",
+    "third_party/libghostty-vt",
+    "third_party/libghostty-vt-sys",
+]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
 resolver = "2"
 
 [features]
@@ -55,6 +60,7 @@ libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, 
 libc = "=0.2.189"
 portable-pty = "=0.9.0"
 smallvec = "=1.15.2"
+spaceterm-directories = { path = "crates/spaceterm-directories" }
 spaceterm-ui = { path = "crates/spaceterm-ui" }
 thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"

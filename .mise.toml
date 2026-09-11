@@ -93,7 +93,7 @@ cargo run --features appearance-exerciser --locked
 
 [tasks.check]
 description = "Check every target and feature"
-run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --all-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
 [tasks."dev:appearance:macos"]
 description = "Run the source appearance exerciser as a separate inspectable macOS app"
@@ -101,11 +101,11 @@ run = "bash scripts/dev-appearance-macos.sh"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks.fmt]
 description = "Format shared Rust sources"
-run = "cargo fmt --package spaceterm --package spaceterm-ui"
+run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui"
 
 [tasks."fmt:files"]
 description = "Format selected Rust files during focused changes"
@@ -116,22 +116,22 @@ run = '''python3 -c 'import os, shlex, subprocess; subprocess.run(["rustfmt", "-
 
 [tasks."fmt:check"]
 description = "Check shared Rust formatting"
-run = "cargo fmt --package spaceterm --package spaceterm-ui -- --check"
+run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check"
 
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
-run = "cargo test --package spaceterm --package spaceterm-ui --all-targets --all-features --locked"
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked"
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks."test:one"]
 description = "Run tests matching a filter"
 usage = '''
 arg "<filter>" help="Test name filter"
 '''
-run = 'cargo test --package spaceterm --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
+run = 'cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
 
 [tasks."test:vendor"]
 description = "Test terminal-library patches with the application feature set"
@@ -147,11 +147,11 @@ run = "cargo test --package spaceterm --all-targets --no-default-features --lock
 
 [tasks."lint:rust"]
 description = "Lint every target and feature for the current platform"
-run = "cargo clippy --package spaceterm --package spaceterm-ui --all-targets --all-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --package spaceterm --package spaceterm-ui --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:scripts"]
 description = "Check shared scripts"

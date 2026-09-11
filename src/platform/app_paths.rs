@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
+#[cfg(test)]
+use super::app_directories::{APP_DIR_NAME, AppDirectoryEnvironment};
+use super::app_directories::{AppDirectories, AppDirectoryFile, AppDirectoryRoot, DirectoryError};
 use super::secure_filesystem::{
     SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
 };
@@ -15,60 +18,23 @@ pub(crate) const ASKPASS_RUNTIME_OWNER_KIND: &str = "a";
 pub(crate) const ASKPASS_RUNTIME_SOCKET_NAME: &str = "a";
 pub(crate) const CONTROL_RUNTIME_OWNER_KIND: &str = "c";
 pub(crate) const CONTROL_RUNTIME_SOCKET_NAME: &str = "c";
-const HOME_ENVIRONMENT_VARIABLE: &str = "HOME";
-const XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CONFIG_HOME";
-const XDG_DATA_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_HOME";
-const XDG_STATE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_STATE_HOME";
-const XDG_CACHE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CACHE_HOME";
-const XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE: &str = "XDG_RUNTIME_DIR";
-
 static NEXT_RUNTIME_OWNER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Default, Eq, PartialEq)]
-pub(crate) struct AppPathEnvironment {
-    pub(crate) home: Option<OsString>,
-    pub(crate) xdg_config_home: Option<OsString>,
-    pub(crate) xdg_data_home: Option<OsString>,
-    pub(crate) xdg_state_home: Option<OsString>,
-    pub(crate) xdg_cache_home: Option<OsString>,
-    pub(crate) xdg_runtime_dir: Option<OsString>,
-}
-
-impl std::fmt::Debug for AppPathEnvironment {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AppPathEnvironment(<redacted>)")
-    }
-}
-
-impl AppPathEnvironment {
-    pub(crate) fn capture() -> Self {
-        Self {
-            home: std::env::var_os(HOME_ENVIRONMENT_VARIABLE),
-            xdg_config_home: std::env::var_os(XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE),
-            xdg_data_home: std::env::var_os(XDG_DATA_HOME_ENVIRONMENT_VARIABLE),
-            xdg_state_home: std::env::var_os(XDG_STATE_HOME_ENVIRONMENT_VARIABLE),
-            xdg_cache_home: std::env::var_os(XDG_CACHE_HOME_ENVIRONMENT_VARIABLE),
-            xdg_runtime_dir: std::env::var_os(XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE),
-        }
-    }
-
-    pub(crate) fn configured_runtime_root(&self) -> Option<PathBuf> {
-        absolute_environment_path(self.xdg_runtime_dir.as_deref())
-    }
-}
-
+#[cfg(test)]
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct AppPathHostFacts {
     runtime_fallback_root: Option<PathBuf>,
     local_ipc_path_maximum: NonZeroUsize,
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for AppPathHostFacts {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("AppPathHostFacts(..)")
     }
 }
 
+#[cfg(test)]
 impl AppPathHostFacts {
     pub(crate) fn new(
         runtime_fallback_root: PathBuf,
@@ -98,6 +64,7 @@ impl AppPathHostFacts {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum AppPathHostFactsError {
     #[error("the runtime fallback root is invalid")]
@@ -106,98 +73,81 @@ pub(crate) enum AppPathHostFactsError {
     InvalidLocalIpcPathMaximum,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AppPathRoot {
-    Config,
-    Data,
-    State,
-    Cache,
-}
-
 pub(crate) struct AppPaths {
-    config: PathBuf,
-    data: PathBuf,
-    state: PathBuf,
-    cache: PathBuf,
-    runtime: PathBuf,
+    directories: AppDirectories,
     local_ipc_path_maximum: NonZeroUsize,
     filesystem: Arc<dyn SecureFilesystem>,
 }
 
 impl AppPaths {
+    #[cfg(test)]
     pub(crate) fn resolve(
-        environment: &AppPathEnvironment,
+        environment: &AppDirectoryEnvironment,
         host: &AppPathHostFacts,
         filesystem: Arc<dyn SecureFilesystem>,
     ) -> Result<Self, AppPathsError> {
-        let home = absolute_environment_path(environment.home.as_deref());
-        let config = resolve_root(
-            environment.xdg_config_home.as_deref(),
-            home.as_deref(),
-            AppPathRoot::Config,
-            &[".config"],
+        let directories = AppDirectories::resolve_xdg(
+            APP_DIR_NAME,
+            environment,
+            host.runtime_fallback_root.clone(),
         )?;
-        let data = resolve_root(
-            environment.xdg_data_home.as_deref(),
-            home.as_deref(),
-            AppPathRoot::Data,
-            &[".local", "share"],
-        )?;
-        let state = resolve_root(
-            environment.xdg_state_home.as_deref(),
-            home.as_deref(),
-            AppPathRoot::State,
-            &[".local", "state"],
-        )?;
-        let cache = resolve_root(
-            environment.xdg_cache_home.as_deref(),
-            home.as_deref(),
-            AppPathRoot::Cache,
-            &[".cache"],
-        )?;
-        let runtime_base = environment
-            .configured_runtime_root()
-            .or_else(|| host.runtime_fallback_root.clone())
-            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
         Ok(Self {
-            config,
-            data,
-            state,
-            cache,
-            runtime: runtime_base.join("spaceterm"),
+            directories,
             local_ipc_path_maximum: host.local_ipc_path_maximum,
             filesystem,
         })
     }
 
+    pub(crate) fn from_directories(
+        directories: AppDirectories,
+        local_ipc_path_maximum: usize,
+        filesystem: Arc<dyn SecureFilesystem>,
+    ) -> Result<Self, AppPathsError> {
+        let local_ipc_path_maximum = NonZeroUsize::new(local_ipc_path_maximum)
+            .ok_or(AppPathsError::InvalidLocalIpcPathMaximum)?;
+        Ok(Self {
+            directories,
+            local_ipc_path_maximum,
+            filesystem,
+        })
+    }
+
+    pub(crate) fn directories(&self) -> &AppDirectories {
+        &self.directories
+    }
+
     #[cfg(test)]
     pub(crate) fn config(&self) -> &Path {
-        &self.config
+        &self.directories.config
     }
     #[cfg(test)]
     pub(crate) fn runtime(&self) -> &Path {
-        &self.runtime
+        self.directories.runtime.as_deref().unwrap()
     }
 
     pub(crate) fn managed_ssh_config(&self) -> PathBuf {
-        self.config.join("ssh_config")
+        self.directories.managed_ssh_config().into_path()
+    }
+
+    pub(crate) fn managed_ssh_config_file(&self) -> AppDirectoryFile {
+        self.directories.managed_ssh_config()
     }
 
     pub(crate) fn open_secure_root(
         &self,
-        root: AppPathRoot,
+        root: AppDirectoryRoot,
     ) -> Result<Option<SecureDirectory>, AppPathsError> {
         self.filesystem
-            .open_private_directory(self.root(root))
+            .open_private_directory(self.directories.root(root))
             .map_err(Into::into)
     }
 
     pub(crate) fn ensure_secure_root(
         &self,
-        root: AppPathRoot,
+        root: AppDirectoryRoot,
     ) -> Result<SecureDirectory, AppPathsError> {
         self.filesystem
-            .ensure_private_directory(self.root(root))
+            .ensure_private_directory(self.directories.root(root))
             .map_err(Into::into)
     }
 
@@ -207,7 +157,13 @@ impl AppPaths {
 
     pub(crate) fn create_runtime_owner(&self, kind: &str) -> Result<RuntimeOwner, AppPathsError> {
         validate_child_name(kind)?;
-        let runtime = self.filesystem.ensure_private_directory(&self.runtime)?;
+        let runtime_path = self
+            .directories
+            .runtime
+            .as_ref()
+            .ok_or(AppPathsError::RuntimeRootUnavailable)?
+            .clone();
+        let runtime = self.filesystem.ensure_private_directory(&runtime_path)?;
         for _ in 0..RUNTIME_OWNER_CREATION_ATTEMPTS {
             let sequence = NEXT_RUNTIME_OWNER.fetch_add(1, Ordering::Relaxed);
             let name = runtime_owner_name(kind, std::process::id(), sequence);
@@ -215,7 +171,9 @@ impl AppPaths {
                 .filesystem
                 .create_private_child(&runtime, OsStr::new(&name))
             {
-                Ok(directory) => return Ok(self.runtime_owner(runtime, name, directory)),
+                Ok(directory) => {
+                    return Ok(self.runtime_owner(runtime_path, runtime, name, directory));
+                }
                 Err(SecureFilesystemError::AlreadyExists) => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -231,16 +189,22 @@ impl AppPaths {
         sequence: u64,
     ) -> Result<RuntimeOwner, AppPathsError> {
         validate_child_name(kind)?;
-        let runtime = self.filesystem.ensure_private_directory(&self.runtime)?;
+        let runtime_path = self
+            .directories
+            .runtime
+            .as_ref()
+            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
+        let runtime = self.filesystem.ensure_private_directory(runtime_path)?;
         let name = runtime_owner_name(kind, process_id, sequence);
         let directory = self
             .filesystem
             .create_private_child(&runtime, OsStr::new(&name))?;
-        Ok(self.runtime_owner(runtime, name, directory))
+        Ok(self.runtime_owner(runtime_path.clone(), runtime, name, directory))
     }
 
     fn runtime_owner(
         &self,
+        runtime_path: PathBuf,
         runtime: SecureDirectory,
         name: String,
         directory: SecureDirectory,
@@ -248,21 +212,12 @@ impl AppPaths {
         RuntimeOwner {
             filesystem: Arc::clone(&self.filesystem),
             runtime,
-            path: self.runtime.join(&name),
+            path: runtime_path.join(&name),
             name: OsString::from(name),
             directory,
             local_ipc_path_maximum: self.local_ipc_path_maximum,
             artifacts: Mutex::new(Vec::new()),
             closed: false,
-        }
-    }
-
-    fn root(&self, root: AppPathRoot) -> &Path {
-        match root {
-            AppPathRoot::Config => &self.config,
-            AppPathRoot::Data => &self.data,
-            AppPathRoot::State => &self.state,
-            AppPathRoot::Cache => &self.cache,
         }
     }
 }
@@ -460,8 +415,10 @@ impl std::fmt::Debug for RegisteredRuntimeSocket {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum AppPathsError {
-    #[error("HOME is required to resolve the {root:?} application root")]
-    MissingHome { root: AppPathRoot },
+    #[error(transparent)]
+    Directories(#[from] DirectoryError),
+    #[error("the local IPC path maximum is invalid")]
+    InvalidLocalIpcPathMaximum,
     #[error("the application runtime root is unavailable")]
     RuntimeRootUnavailable,
     #[error("the application path is unsafe")]
@@ -487,36 +444,12 @@ impl From<SecureFilesystemError> for AppPathsError {
     }
 }
 
-fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
-    value
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-}
-
+#[cfg(test)]
 fn is_absolute_normal_path(path: &Path) -> bool {
     path.is_absolute()
         && path
             .components()
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-}
-
-fn resolve_root(
-    configured: Option<&OsStr>,
-    home: Option<&Path>,
-    root: AppPathRoot,
-    fallback_components: &[&str],
-) -> Result<PathBuf, AppPathsError> {
-    let base = match absolute_environment_path(configured) {
-        Some(configured) => configured,
-        None => {
-            let home = home.ok_or(AppPathsError::MissingHome { root })?;
-            fallback_components
-                .iter()
-                .fold(home.to_path_buf(), |path, component| path.join(component))
-        }
-    };
-    Ok(base.join("spaceterm"))
 }
 
 fn validate_child_name(name: &str) -> Result<(), AppPathsError> {
@@ -534,25 +467,12 @@ fn validate_child_name(name: &str) -> Result<(), AppPathsError> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
-    #[test]
-    fn captured_environment_debug_should_redact_paths() {
-        let environment = AppPathEnvironment {
-            home: Some("/sensitive/home".into()),
-            xdg_runtime_dir: Some("/sensitive/runtime".into()),
-            ..AppPathEnvironment::default()
-        };
-
-        let debug = format!("{environment:?}");
-        assert_eq!(debug, "AppPathEnvironment(<redacted>)");
-        assert!(!debug.contains("sensitive"));
-    }
+    use crate::platform::app_directories::AppDirectoryEnvironment;
 
     use crate::platform::testing::RecordingFilesystem;
-    fn environment() -> AppPathEnvironment {
-        AppPathEnvironment {
+    fn environment() -> AppDirectoryEnvironment {
+        AppDirectoryEnvironment {
             home: Some("/home/test".into()),
             ..Default::default()
         }
@@ -563,7 +483,7 @@ mod tests {
 
     #[test]
     fn resolve_should_apply_xdg_precedence_and_validate_spelling() {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             xdg_config_home: Some("/explicit/../config".into()),
             xdg_runtime_dir: Some("relative".into()),
             ..environment()
@@ -580,7 +500,7 @@ mod tests {
 
     #[test]
     fn resolve_should_preserve_explicit_runtime_spelling_without_fallback_facts() {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             xdg_runtime_dir: Some("/explicit/../runtime".into()),
             ..environment()
         };
@@ -600,14 +520,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_should_reject_missing_runtime_root_and_fallback() {
-        let result = AppPaths::resolve(
+    fn runtime_owner_should_report_an_unavailable_runtime_directory() {
+        let paths = AppPaths::resolve(
             &environment(),
             &AppPathHostFacts::without_runtime_fallback(200).unwrap(),
             Arc::new(RecordingFilesystem::default()),
-        );
+        )
+        .unwrap();
 
-        assert!(matches!(result, Err(AppPathsError::RuntimeRootUnavailable)));
+        assert!(matches!(
+            paths.create_runtime_owner("a"),
+            Err(AppPathsError::RuntimeRootUnavailable)
+        ));
     }
 
     #[test]

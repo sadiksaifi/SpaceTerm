@@ -206,7 +206,8 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::askpass::{
         AskPassHelperReply, AskPassPresentationFailure, AskPassPresenter, AskPassProtocolReply,
         CAPABILITY_ENV, ENDPOINT_ENV, read_reply, start_attempt_with_presenter, write_request,
@@ -238,8 +239,9 @@ mod tests {
 
         fn paths(&self) -> AppPaths {
             AppPaths::resolve(
-                &AppPathEnvironment {
+                &AppDirectoryEnvironment {
                     home: None,
+                    tmpdir: None,
                     xdg_config_home: Some(self.0.join("config").into_os_string()),
                     xdg_data_home: Some(self.0.join("data").into_os_string()),
                     xdg_state_home: Some(self.0.join("state").into_os_string()),

@@ -1,5 +1,6 @@
 use super::storage::*;
-use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+use crate::platform::app_directories::AppDirectoryEnvironment;
+use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
 use crate::platform::secure_filesystem::{SecureCommitOutcome, SecureFilesystemError};
 use crate::platform::testing::RecordingFilesystem;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 fn storage() -> (ConfigSettingsStorage, Arc<RecordingFilesystem>) {
     let filesystem = Arc::new(RecordingFilesystem::default());
     let paths = AppPaths::resolve(
-        &AppPathEnvironment {
+        &AppDirectoryEnvironment {
             home: Some("/home/test".into()),
             ..Default::default()
         },
@@ -178,7 +179,7 @@ mod native {
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             let paths = AppPaths::resolve(
-                &AppPathEnvironment {
+                &AppDirectoryEnvironment {
                     home: Some(root.clone().into_os_string()),
                     xdg_config_home: Some(root.join("config").into_os_string()),
                     ..Default::default()

@@ -838,7 +838,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::testing::{
         EmptyHostConfigFilesystem, RecordingControlSocketProbe, RecordingFilesystem,
     };
@@ -953,9 +954,9 @@ mod tests {
     fn factory_with_capability(
         startup_capability: SshCapability,
     ) -> NativeRemoteWorkspaceFlowBackendFactory<RecordingAdapter> {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             home: Some("/Users/test".into()),
-            ..AppPathEnvironment::default()
+            ..AppDirectoryEnvironment::default()
         };
         let host = AppPathHostFacts::new(PathBuf::from("/private/tmp"), 103).unwrap();
         let paths = AppPaths::resolve(
@@ -1328,7 +1329,7 @@ mod tests {
             let scope = registry.begin_connect(cancellation.clone()).unwrap();
             let filesystem = Arc::new(RecordingFilesystem::default());
             let paths = AppPaths::resolve(
-                &AppPathEnvironment {
+                &AppDirectoryEnvironment {
                     home: Some("/fixture/home".into()),
                     ..Default::default()
                 },

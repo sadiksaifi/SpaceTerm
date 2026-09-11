@@ -5163,11 +5163,20 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
+ "spaceterm-directories",
  "spaceterm-ui",
  "thiserror 2.0.19",
  "unicode-bidi",
  "unicode-segmentation",
  "zeroize",
+]
+
+[[package]]
+name = "spaceterm-directories"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.19",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

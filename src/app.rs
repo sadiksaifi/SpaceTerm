@@ -6,10 +6,10 @@ use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
 };
 
-use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+use crate::platform::app_directories::AppDirectoryEnvironment;
+use crate::platform::app_paths::AppPaths;
 use crate::platform::application_menu::{ApplicationMenuAdapter, ApplicationMenuCommand};
 use crate::platform::control_socket::ControlSocketProbe;
-use crate::platform::secure_filesystem::SecureFilesystem;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{
     OpenSshExecutable, SshCapability, SshCapabilityProbe, SshUnavailableReason,
@@ -53,15 +53,10 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             Arc::clone(&self.paths),
         ))
     }
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "startup consumes independently captured host facts and capabilities"
-    )]
     pub(crate) fn capture(
-        path_environment: AppPathEnvironment,
+        path_environment: AppDirectoryEnvironment,
         ssh_environment: StartupSshEnvironment,
-        path_host_facts: &AppPathHostFacts,
-        secure_filesystem: Arc<dyn SecureFilesystem>,
+        paths: AppPaths,
         executable: OpenSshExecutable,
         process_adapter: A,
         control_socket_probe: Arc<dyn ControlSocketProbe>,
@@ -86,10 +81,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             SshUnavailableReason::ProbeFailed,
         ));
         Ok(Self {
-            paths: Arc::new(
-                AppPaths::resolve(&path_environment, path_host_facts, secure_filesystem)
-                    .map_err(|_| StartupDependenciesError::Paths)?,
-            ),
+            paths: Arc::new(paths),
             home_directory,
             ssh_environment,
             ssh_capability,
