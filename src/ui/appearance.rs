@@ -69,6 +69,7 @@ pub(crate) struct ChromeAppearance {
     pub(crate) colors: ChromeColors,
     pub(crate) regular: Font,
     pub(crate) emphasis: Font,
+    pub(crate) caption: Font,
     pub(crate) heading: Font,
     pub(crate) text_scale: f32,
     pub(crate) spacing_scale: f32,
@@ -81,6 +82,7 @@ impl Default for ChromeAppearance {
         emphasis.weight = FontWeight::SEMIBOLD;
         Self {
             colors: ChromeColors::default(),
+            caption: regular.clone(),
             regular,
             heading: emphasis.clone(),
             emphasis,
@@ -104,6 +106,7 @@ impl ChromeAppearance {
             colors: resolved.colors.clone(),
             regular: prepared_font(&resolved.typography.body),
             emphasis: prepared_font(&resolved.typography.navigation),
+            caption: prepared_font(&resolved.typography.caption),
             heading: prepared_font(&resolved.typography.heading),
             text_scale: resolved.typography.body.size / 13.0,
             spacing_scale: match resolved.density {

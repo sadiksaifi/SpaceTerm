@@ -14,6 +14,27 @@ fn resolve(preferences: &AppearancePreferences) -> ResolvedAppearance {
 }
 
 #[test]
+fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
+    let mut preferences = AppearancePreferences::default();
+    preferences.chrome.typography.regular_weight = 500;
+    preferences.chrome.typography.emphasis_weight = 700;
+    preferences.chrome.typography.base_size = 24.0;
+    let resolved = resolve(&preferences);
+    let typography = &resolved.chrome.typography;
+
+    assert_eq!(typography.caption.weight, 400);
+    assert_eq!(
+        typography.caption.primary_family,
+        typography.body.primary_family
+    );
+    assert_eq!(typography.caption.size, 12.65 * (24.0 / 13.0));
+    assert_eq!(typography.navigation.weight, 700);
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    assert_eq!(prepared.caption.weight, gpui::FontWeight::NORMAL);
+    assert_eq!(prepared.caption.family, prepared.regular.family);
+}
+
+#[test]
 fn dark_defaults_match_the_consumed_vague_pro_values() {
     let terminal = TerminalColors::default();
     assert_eq!(

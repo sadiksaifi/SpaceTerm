@@ -360,7 +360,7 @@ fn resolve_chrome_typography(
         small: base.with_role(11.0 * scale, requested.regular_weight),
         control: base.with_role(13.0 * scale, requested.regular_weight),
         navigation: base.with_role(12.0 * scale, requested.emphasis_weight),
-        caption: base.with_role(12.65 * scale, requested.emphasis_weight),
+        caption: base.with_role(12.65 * scale, 400),
         heading: base.with_role(14.0 * scale, requested.heading_weight),
         shortcut: base.with_role(11.0 * scale, requested.regular_weight),
     }

@@ -276,7 +276,7 @@ fn measure_caption_segment(
     }
     let run = gpui::TextRun {
         len: text.len(),
-        font: appearance.emphasis.clone(),
+        font: appearance.caption.clone(),
         color: gpui_color(appearance.colors.text).into(),
         background_color: None,
         underline: None,
@@ -1834,7 +1834,7 @@ fn render_pane_caption_content(
         .pl(appearance.spacing(PANE_CAPTION_LEFT_PADDING))
         .pr(appearance.spacing(PANE_CAPTION_RIGHT_PADDING))
         .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
-        .font(appearance.emphasis.clone())
+        .font(appearance.caption.clone())
         .text_size(appearance.text_size(PANE_CAPTION_TEXT_SIZE))
         .text_color(gpui_color(color))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
