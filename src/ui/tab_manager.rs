@@ -1387,8 +1387,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use gpui::{
-        Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent,
-        TestAppContext, TouchPhase, VisualTestContext, point,
+        DivInspectorState, Hsla, Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent,
+        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
@@ -1460,6 +1460,141 @@ mod tests {
                 .resolved_icon_foreground(button_state_foreground),
             gpui_color(colors.text_muted)
         );
+    }
+
+    fn tab_icon_test_theme(
+        normal: Rgba,
+        hovered: Rgba,
+        pressed: Rgba,
+    ) -> spaceterm_ui::ButtonTheme {
+        use spaceterm_ui::{
+            ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle,
+            ButtonVariants,
+        };
+
+        let paint = |icon_foreground| {
+            ButtonPaint::new(rgba(0), rgba(0), rgba(0)).icon_foreground(icon_foreground)
+        };
+        let neutral =
+            ButtonVariantStyle::new(paint(normal), paint(normal), paint(normal), paint(normal));
+        let ghost =
+            ButtonVariantStyle::new(paint(normal), paint(hovered), paint(pressed), paint(normal));
+        let metrics = ButtonMetrics::new(px(28.0));
+        ButtonTheme::new(
+            ButtonVariants::new(neutral, neutral, neutral, ghost, neutral, neutral, neutral),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
+            normal,
+        )
+    }
+
+    fn inspect_lucide_glyph_foreground(
+        selector: &'static str,
+        pressed: bool,
+        observed: &Rc<RefCell<Vec<(Option<SharedString>, Option<Hsla>)>>>,
+        cx: &mut VisualTestContext,
+    ) -> Hsla {
+        let mut position = cx
+            .debug_bounds(selector)
+            .expect("the tab IconButton was not rendered")
+            .center();
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        if pressed {
+            cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        }
+        cx.run_until_parked();
+
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+        position = cx
+            .debug_bounds(selector)
+            .expect("the tab IconButton was not rendered with the inspector open")
+            .center();
+        observed.borrow_mut().clear();
+        cx.simulate_mouse_move(
+            position,
+            pressed.then_some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        let mut foreground = None;
+        for _ in 0..16 {
+            foreground = observed.borrow().iter().rev().find_map(|(family, color)| {
+                family
+                    .as_ref()
+                    .is_some_and(|family| family.as_ref() == "lucide")
+                    .then_some(*color)
+                    .flatten()
+            });
+            if foreground.is_some() {
+                break;
+            }
+            cx.simulate_event(ScrollWheelEvent {
+                position,
+                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        }
+
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+        if pressed {
+            let outside = cx
+                .debug_bounds("tab-manager-content")
+                .expect("Tab content was not rendered")
+                .center();
+            cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::none());
+            cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+            cx.run_until_parked();
+        }
+
+        foreground.expect("the runtime Lucide glyph style was not inspectable")
+    }
+
+    #[gpui::test]
+    fn tab_icon_glyphs_should_use_hovered_and_pressed_button_foregrounds(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        let normal = rgba(0x11_22_33_ff);
+        let hovered = rgba(0x22_cc_44_ff);
+        let pressed = rgba(0x44_66_ee_ff);
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_styles = Rc::clone(&observed);
+        cx.update(|window, cx| {
+            cx.set_global(tab_icon_test_theme(normal, hovered, pressed));
+            cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+                observed_styles.borrow_mut().push((
+                    state
+                        .base_style
+                        .text
+                        .as_ref()
+                        .and_then(|text| text.font_family.clone()),
+                    state.base_style.text.as_ref().and_then(|text| text.color),
+                ));
+                gpui::Empty
+            });
+            cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+                div()
+                    .children(inspector.render_inspector_states(window, cx))
+                    .into_any_element()
+            }));
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        for selector in ["create-tab-button", "tab-close-button-1"] {
+            assert_eq!(
+                inspect_lucide_glyph_foreground(selector, false, &observed, cx),
+                Hsla::from(hovered),
+                "{selector} must paint its glyph with the hovered IconButton foreground"
+            );
+            assert_eq!(
+                inspect_lucide_glyph_foreground(selector, true, &observed, cx),
+                Hsla::from(pressed),
+                "{selector} must paint its glyph with the pressed IconButton foreground"
+            );
+        }
     }
     use crate::domain::PaneId;
     use crate::domain::ZoomState;
