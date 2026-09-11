@@ -59,9 +59,8 @@ impl WorkspaceChromeLayout {
             .width;
         let pin_width = if pinned { PIN_SIZE + IDENTITY_GAP } else { 0.0 };
         let identity_width = (name_width + px(pin_width)).min(px(NAME_AND_PIN_MAXIMUM_WIDTH));
-        let content_width = px(SWITCHER_HORIZONTAL_PADDING * 2.0)
-            + px((ICON_SIZE + IDENTITY_GAP) * 2.0)
-            + identity_width;
+        let content_width =
+            px(SWITCHER_HORIZONTAL_PADDING * 2.0) + px(ICON_SIZE + IDENTITY_GAP) + identity_width;
         (px(TRAFFIC_LIGHT_CLEARANCE + COLLAPSED_ACTION_GAP + COLLAPSED_TRAILING_GAP)
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
@@ -111,10 +110,8 @@ impl WorkspaceChromeLayout {
 
 pub(super) struct WorkspaceChromeIdentity {
     pub(super) name: String,
-    pub(super) icon: IconName,
     pub(super) pinned: bool,
     pub(super) foreground: Rgba,
-    pub(super) icon_color: Rgba,
     pub(super) pin_color: Rgba,
 }
 
@@ -129,12 +126,6 @@ impl WorkspaceChromeIdentity {
             .gap(px(IDENTITY_GAP))
             .flex_1()
             .min_w_0()
-            .child(
-                div()
-                    .debug_selector(|| "workspace-chip-icon".to_owned())
-                    .flex_shrink_0()
-                    .child(Icon::new(self.icon, px(ICON_SIZE), self.icon_color)),
-            )
             .when(self.pinned, |chip| {
                 chip.child(
                     div()

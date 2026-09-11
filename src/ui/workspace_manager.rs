@@ -9,7 +9,7 @@ use super::workspace_sidebar::{
 };
 use super::workspace_sidebar::{
     SIDEBAR_ROW_HORIZONTAL_PADDING, SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel,
-    WorkspaceSidebar, remote_connection_color, remote_connection_status,
+    WorkspaceSidebar, remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
@@ -2844,16 +2844,11 @@ impl WorkspaceManager {
     /// chip would be duplicate chrome; with it closed nothing on screen does.
     fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
-        let workspace_icon = match workspace.location() {
-            WorkspaceLocation::Remote { .. } => IconName::Globe,
-            WorkspaceLocation::Local => IconName::Terminal,
-        };
         let available = workspace.availability().is_available();
         let remote_connection_phase = workspace
             .remote_connection_state()
             .map(RemoteConnectionState::phase);
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let remote_color = remote_connection_phase.map(remote_connection_color);
         let name = workspace.name().to_owned();
         let (path, _) = directory_labels(
             workspace.location(),
@@ -2878,10 +2873,8 @@ impl WorkspaceManager {
         (
             WorkspaceChromeIdentity {
                 name: name.clone(),
-                icon: workspace_icon,
                 pinned: workspace.pinned_directory().is_some(),
                 foreground,
-                icon_color: remote_color.map(gpui_color).unwrap_or(icon_color),
                 pin_color: icon_color,
             },
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
