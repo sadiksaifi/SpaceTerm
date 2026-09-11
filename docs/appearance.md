@@ -113,6 +113,19 @@ italic, bold-as-bright, and density field; one color override role for an exact 
 color, typography, density, or rendering group; or all appearance preferences. Resetting a role
 removes that override so it inherits again. No reset removes installed custom schemes.
 
+## Settings Window
+
+The Settings Window is the interface for everything above: Application Appearance, Terminal
+Appearance, and Color Schemes. It opens from the application menu and its key equivalent, presents
+one navigation list beside one scrolling detail pane, and searches Settings Row labels and keywords.
+Appearance Mode presents Light, Dark, and Auto per domain, mapping onto a fixed selection with that
+appearance or a system light/dark pair; the scheme pickers are restricted to the appearance the mode
+selects. Changes preview live and commit shortly after the last change, so there is no save action.
+See [ADR 0005](adr/0005-present-settings-in-a-separate-operating-system-window.md).
+
+Per-role color overrides are not editable from the Settings Window. They remain supported by the
+document and reachable through import and the settings file.
+
 ## Native boundary and development exerciser
 
 Portable resolution accepts only an optional light/dark System Appearance fact and installed-font

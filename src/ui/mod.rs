@@ -18,6 +18,8 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
+mod segmented_control_theme;
+pub(crate) mod settings_window;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;

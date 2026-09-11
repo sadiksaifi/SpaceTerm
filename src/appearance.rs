@@ -70,11 +70,14 @@ pub(crate) use resolution::{
 };
 pub(crate) use scheme::{
     Appearance, CatalogError, ChromeColors, CustomScheme, SchemeCatalog, SchemeId, SchemeKind,
-    TerminalColors,
+    SchemeSummary, TerminalColors,
 };
 
+pub(crate) use builtin::fallback_id as builtin_fallback_scheme;
+pub(crate) use resolution::AppearanceDiagnostic;
+
 #[cfg(test)]
-pub(crate) use resolution::{AppearanceDiagnostic, ResolutionError};
+pub(crate) use resolution::ResolutionError;
 #[cfg(test)]
 pub(crate) use scheme::{
     ChromeColorOverrides, ChromeScheme, OptionalColorOverride, SchemeMetadata,

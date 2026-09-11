@@ -275,7 +275,7 @@ mod tests {
             .join("spaceterm-appearance-exerciser")
             .join(super::super::app_directories::APP_DIR_NAME);
 
-        assert_eq!(directories.config_file(), config.join("settings.json"));
+        assert_eq!(directories.settings_file(), config.join("settings.json"));
         assert_eq!(
             directories.managed_ssh_config().path(),
             config.join("ssh_config")

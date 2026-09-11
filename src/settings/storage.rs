@@ -92,7 +92,7 @@ impl SettingsStorage for ConfigSettingsStorage {
         let Some(directory) = self.directory(false)? else {
             return Ok(None);
         };
-        let target = self.paths.directories().config_file();
+        let target = self.paths.directories().settings_file();
         let name = target.file_name().ok_or(StorageError::Unavailable)?;
         self.paths
             .filesystem()
@@ -110,7 +110,7 @@ impl SettingsStorage for ConfigSettingsStorage {
         }
         let directory = self.directory(true)?.ok_or(StorageError::Unavailable)?;
         let filesystem = self.paths.filesystem();
-        let target = self.paths.directories().config_file();
+        let target = self.paths.directories().settings_file();
         let name = target.file_name().ok_or(StorageError::Unavailable)?;
         for _ in 0..PREPARE_ATTEMPTS {
             let mut nonce = [0; 16];

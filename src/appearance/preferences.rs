@@ -299,7 +299,7 @@ impl AppearancePreferences {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
-    reason = "the complete typed reset surface is consumed by the optional settings UI"
+    reason = "the Settings Window consumes the field and group targets; the color-role targets await an override editor"
 )]
 pub(crate) enum ResetTarget {
     ChromeSchemeSelection,
@@ -336,7 +336,7 @@ pub(crate) enum ResetTarget {
 impl ResetTarget {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn chrome_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
         Some(Self::ChromeColorOverride {
@@ -347,7 +347,7 @@ impl ResetTarget {
 
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn terminal_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
         Some(Self::TerminalColorOverride {
@@ -363,7 +363,7 @@ pub(crate) struct ChromeColorRole(&'static str);
 impl ChromeColorRole {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn new(role: &'static str) -> Option<Self> {
         ChromeColorOverrides::supports_role(role).then_some(Self(role))
@@ -380,7 +380,7 @@ pub(crate) struct TerminalColorRole(&'static str);
 impl TerminalColorRole {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn new(role: &'static str) -> Option<Self> {
         TerminalColorOverrides::supports_role(role).then_some(Self(role))
