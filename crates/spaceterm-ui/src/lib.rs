@@ -19,6 +19,7 @@ mod modal;
 mod overlay_scrollbar;
 mod resize_handle;
 mod text_input;
+mod toggle;
 mod tooltip;
 mod window_drag_region;
 
@@ -91,6 +92,11 @@ pub use text_input::{
     TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
     TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
+pub use toggle::{
+    Checkbox, CheckboxChange, CheckboxState, Switch, SwitchChange, ToggleActivationSource,
+    ToggleMetrics, TogglePaint, TogglePaints, ToggleSize, ToggleSizes, ToggleTheme,
+    ToggleValuePaints,
+};
 pub use tooltip::{
     Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTargetVisibility,
     TooltipTheme,
@@ -109,6 +115,7 @@ pub struct ControlThemeCatalog {
     generation: ControlThemeGeneration,
     typography: ControlTypography,
     button: ButtonTheme,
+    toggle: ToggleTheme,
     scrollbar: ScrollbarTheme,
     resize_handle: ResizeHandleTheme,
     menu: MenuTheme,
@@ -166,6 +173,7 @@ impl ControlThemeCatalog {
     )]
     pub fn new(
         button: ButtonTheme,
+        toggle: ToggleTheme,
         scrollbar: ScrollbarTheme,
         resize_handle: ResizeHandleTheme,
         menu: MenuTheme,
@@ -179,6 +187,7 @@ impl ControlThemeCatalog {
             generation: ControlThemeGeneration::default(),
             typography: ControlTypography::default(),
             button,
+            toggle,
             scrollbar,
             resize_handle,
             menu,
@@ -219,6 +228,7 @@ impl ControlThemeCatalog {
     /// unchanged.
     pub fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
         self.button = self.button.scaled_metrics(text_scale, spacing_scale);
+        self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
         self.scrollbar = self.scrollbar.scaled_metrics(text_scale, spacing_scale);
         self.resize_handle = self.resize_handle.scaled_metrics(text_scale, spacing_scale);
         self.menu = self.menu.scaled_metrics(text_scale, spacing_scale);
@@ -280,6 +290,7 @@ pub fn replace_control_theme_catalog(
 
 fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.button);
+    cx.set_global(catalog.toggle);
     cx.set_global(catalog.scrollbar);
     cx.set_global(catalog.resize_handle);
     cx.set_global(catalog.menu);
