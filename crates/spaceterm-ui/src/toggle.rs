@@ -2,8 +2,9 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, ElementId, FocusHandle, Global, InteractiveElement as _, IntoElement,
-    KeyDownEvent, KeyUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    KeyDownEvent, KeyUpEvent, MouseButton, ParentElement as _, Pixels, RenderOnce, Rgba,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -596,8 +597,9 @@ impl ToggleCore {
             state.synchronize(enabled, self.tab_stop, cx);
         });
         let focus_handle = state.read(cx).focus_handle.clone();
-        let keyboard_pressed = state.read(cx).keyboard_pressed;
-        let focused = focus_handle.is_focused(window);
+        let (keyboard_pressed, focus_visible) =
+            state.read_with(cx, |state, _| (state.keyboard_pressed, state.focus_visible));
+        let focused = focus_handle.is_focused(window) && focus_visible;
         let paint = if !enabled {
             style.disabled
         } else if keyboard_pressed {
@@ -611,7 +613,6 @@ impl ToggleCore {
         let indicator_selector = format!("{selector}-indicator");
         let thumb_selector = format!("{selector}-thumb");
         let focus_selector = format!("{selector}-keyboard-focus");
-        let label_state_id = format!("{selector}-label-state");
         let indicator = match kind {
             ToggleKind::Checkbox(value) => checkbox_indicator(
                 value,
@@ -637,22 +638,12 @@ impl ToggleCore {
             ),
         };
         let label = div()
-            .id(SharedString::from(label_state_id))
             .min_w_0()
             .text_color(paint.label)
             .text_size(style.metrics.font_size)
             .line_height(gpui::relative(style.metrics.line_height))
             .font(crate::control_typography(cx).regular().clone())
-            .child(self.label.clone())
-            .when(enabled && !keyboard_pressed, |label| {
-                label
-                    .group_hover(INTERACTION_GROUP, move |label| {
-                        label.text_color(style.hovered.label)
-                    })
-                    .group_active(INTERACTION_GROUP, move |label| {
-                        label.text_color(style.pressed.label)
-                    })
-            });
+            .child(self.label.clone());
         let is_switch = matches!(kind, ToggleKind::Switch);
         let content = if is_switch {
             vec![label.into_any_element(), indicator]
@@ -670,6 +661,7 @@ impl ToggleCore {
             }
             cx.stop_propagation();
         };
+        let pointer_state = state.clone();
         let key_down_state = state.clone();
         let key_up_state = state;
         let keyboard_focus = focus_handle.clone();
@@ -690,6 +682,9 @@ impl ToggleCore {
             .cursor_default()
             .block_mouse_except_scroll()
             .track_focus(&focus_handle)
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                pointer_state.update(cx, |state, cx| state.pointer_focus(cx));
+            })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key != "space" || event.keystroke.modifiers.modified() {
                     return;
@@ -756,8 +751,6 @@ fn checkbox_indicator(
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
     let state_id = format!("{selector}-state");
-    let mark_state_id = format!("{selector}-mark-state");
-    let mark_state_id = SharedString::from(mark_state_id);
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
@@ -787,38 +780,20 @@ fn checkbox_indicator(
         .when(value == CheckboxState::Checked, |indicator| {
             indicator.child(
                 div()
-                    .id(mark_state_id.clone())
                     .text_color(paint.foreground)
                     .text_size(metrics.checkbox_extent * 0.8)
                     .line_height(metrics.checkbox_extent)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("✓")
-                    .when(enabled && !keyboard_pressed, |mark| {
-                        mark.group_hover(INTERACTION_GROUP, move |mark| {
-                            mark.text_color(style.hovered.foreground)
-                        })
-                        .group_active(INTERACTION_GROUP, move |mark| {
-                            mark.text_color(style.pressed.foreground)
-                        })
-                    }),
+                    .child("✓"),
             )
         })
         .when(value == CheckboxState::Mixed, |indicator| {
             indicator.child(
                 div()
-                    .id(mark_state_id)
                     .w(metrics.checkbox_extent * 0.5)
                     .h(metrics.border_width * 2.0)
                     .rounded(metrics.border_width)
-                    .bg(paint.foreground)
-                    .when(enabled && !keyboard_pressed, |mark| {
-                        mark.group_hover(INTERACTION_GROUP, move |mark| {
-                            mark.bg(style.hovered.foreground)
-                        })
-                        .group_active(INTERACTION_GROUP, move |mark| {
-                            mark.bg(style.pressed.foreground)
-                        })
-                    }),
+                    .bg(paint.foreground),
             )
         })
         .when(focused, |indicator| {
@@ -850,10 +825,11 @@ fn switch_indicator(
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
     let state_id = format!("{selector}-state");
-    let thumb_state_id = format!("{thumb_selector}-state");
     let thumb_extent = (metrics.switch_height - metrics.switch_inset * 2.0).max(px(1.0));
-    let off_offset = metrics.switch_inset;
-    let on_offset = (metrics.switch_width - metrics.switch_inset - thumb_extent).max(off_offset);
+    let content_inset = (metrics.switch_inset - metrics.border_width).max(px(0.0));
+    let off_offset = px(0.0);
+    let on_offset =
+        (metrics.switch_width - metrics.switch_inset * 2.0 - thumb_extent).max(off_offset);
     let thumb_offset = if on != right_to_left {
         on_offset
     } else {
@@ -864,9 +840,12 @@ fn switch_indicator(
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
         .relative()
+        .flex()
+        .items_center()
         .flex_none()
         .w(metrics.switch_width)
         .h(metrics.switch_height)
+        .p(content_inset)
         .rounded(radius)
         .border(metrics.border_width)
         .border_color(paint.border)
@@ -886,23 +865,12 @@ fn switch_indicator(
         })
         .child(
             div()
-                .id(SharedString::from(thumb_state_id))
                 .debug_selector(move || thumb_selector)
-                .absolute()
-                .top(metrics.switch_inset)
+                .relative()
                 .left(thumb_offset)
                 .size(thumb_extent)
                 .rounded(thumb_extent / 2.0)
-                .bg(paint.foreground)
-                .when(enabled && !keyboard_pressed, |thumb| {
-                    thumb
-                        .group_hover(INTERACTION_GROUP, move |thumb| {
-                            thumb.bg(style.hovered.foreground)
-                        })
-                        .group_active(INTERACTION_GROUP, move |thumb| {
-                            thumb.bg(style.pressed.foreground)
-                        })
-                }),
+                .bg(paint.foreground),
         )
         .when(focused, |indicator| {
             indicator.child(focus_outline(
@@ -938,6 +906,7 @@ struct ToggleControlState {
     focus_handle: FocusHandle,
     enabled: bool,
     keyboard_pressed: bool,
+    focus_visible: bool,
 }
 
 impl ToggleControlState {
@@ -946,10 +915,9 @@ impl ToggleControlState {
         cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
             .detach();
         cx.on_blur(&focus_handle, window, |state, _, cx| {
-            if state.keyboard_pressed {
-                state.keyboard_pressed = false;
-                cx.notify();
-            }
+            state.keyboard_pressed = false;
+            state.focus_visible = true;
+            cx.notify();
         })
         .detach();
         cx.observe_window_activation(window, |state, window, cx| {
@@ -963,6 +931,7 @@ impl ToggleControlState {
             focus_handle,
             enabled: false,
             keyboard_pressed: false,
+            focus_visible: true,
         }
     }
 
@@ -978,8 +947,16 @@ impl ToggleControlState {
     }
 
     fn keyboard_down(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.enabled && !self.keyboard_pressed {
+        if self.enabled && (!self.keyboard_pressed || !self.focus_visible) {
             self.keyboard_pressed = true;
+            self.focus_visible = true;
+            cx.notify();
+        }
+    }
+
+    fn pointer_focus(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.focus_visible {
+            self.focus_visible = false;
             cx.notify();
         }
     }
@@ -1264,6 +1241,19 @@ mod tests {
         assert!(focus.left() < indicator.left() && focus.right() > indicator.right());
     }
 
+    #[gpui::test]
+    fn pointer_activation_should_not_draw_keyboard_focus_ring(cx: &mut TestAppContext) {
+        let (_, _, _, _, _, cx) = toggle_window(cx, false);
+        let bounds = cx
+            .debug_bounds("test-checkbox")
+            .expect("checkbox should render");
+
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("test-checkbox-keyboard-focus"), None);
+    }
+
     struct DirectionRoot;
 
     impl Render for DirectionRoot {
@@ -1296,5 +1286,92 @@ mod tests {
 
         assert!(ltr_thumb.center().x > ltr_track.center().x);
         assert!(rtl_thumb.center().x < rtl_track.center().x);
+    }
+
+    struct ControlledGeometryRoot {
+        checkbox_state: CheckboxState,
+        switch_on: bool,
+    }
+
+    impl Render for ControlledGeometryRoot {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let checkbox_root = cx.entity().downgrade();
+            let switch_root = cx.entity().downgrade();
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    Checkbox::new("geometry-checkbox", "Checkbox", self.checkbox_state)
+                        .debug_selector("geometry-checkbox")
+                        .on_change(move |change, _, cx| {
+                            let _ = checkbox_root.update(cx, |root, cx| {
+                                root.checkbox_state = change.requested();
+                                cx.notify();
+                            });
+                        }),
+                )
+                .child(
+                    Switch::new("geometry-switch", "Switch", self.switch_on)
+                        .debug_selector("geometry-switch")
+                        .on_change(move |change, _, cx| {
+                            let _ = switch_root.update(cx, |root, cx| {
+                                root.switch_on = change.requested();
+                                cx.notify();
+                            });
+                        }),
+                )
+        }
+    }
+
+    fn geometry_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| ControlledGeometryRoot {
+            checkbox_state: CheckboxState::Mixed,
+            switch_on: false,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx
+    }
+
+    #[gpui::test]
+    fn checkbox_activation_should_not_reflow_row_or_indicator(cx: &mut TestAppContext) {
+        let cx = geometry_window(cx);
+        let row_before = cx.debug_bounds("geometry-checkbox").unwrap();
+        let indicator_before = cx.debug_bounds("geometry-checkbox-indicator").unwrap();
+
+        cx.simulate_click(row_before.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("geometry-checkbox"), Some(row_before));
+        assert_eq!(
+            cx.debug_bounds("geometry-checkbox-indicator"),
+            Some(indicator_before)
+        );
+    }
+
+    #[gpui::test]
+    fn switch_activation_should_not_reflow_row_or_track(cx: &mut TestAppContext) {
+        let cx = geometry_window(cx);
+        let row_before = cx.debug_bounds("geometry-switch").unwrap();
+        let track_before = cx.debug_bounds("geometry-switch-indicator").unwrap();
+
+        cx.simulate_click(row_before.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("geometry-switch"), Some(row_before));
+        assert_eq!(
+            cx.debug_bounds("geometry-switch-indicator"),
+            Some(track_before)
+        );
+    }
+
+    #[gpui::test]
+    fn switch_thumb_should_be_vertically_centered_in_track(cx: &mut TestAppContext) {
+        let cx = geometry_window(cx);
+        let track = cx.debug_bounds("geometry-switch-indicator").unwrap();
+        let thumb = cx.debug_bounds("geometry-switch-thumb").unwrap();
+
+        assert_eq!(thumb.center().y, track.center().y);
     }
 }

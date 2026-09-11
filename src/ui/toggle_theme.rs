@@ -15,12 +15,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
                     colors.border,
                     colors.text,
                 ),
-                paint(
-                    colors.element_selected,
-                    colors.element_selected_foreground,
-                    colors.border_selected,
-                    colors.text,
-                ),
+                on_paint(colors.icon_accent, colors.text),
             ),
             values(
                 paint(
@@ -29,12 +24,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
                     colors.border,
                     colors.text,
                 ),
-                paint(
-                    colors.element_selected_hover,
-                    colors.element_selected_hover_foreground,
-                    colors.border_selected,
-                    colors.text,
-                ),
+                on_paint(colors.link_text_hover, colors.text),
             ),
             values(
                 paint(
@@ -43,12 +33,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
                     colors.border_focused,
                     colors.text,
                 ),
-                paint(
-                    colors.element_active,
-                    colors.element_active_foreground,
-                    colors.border_focused,
-                    colors.text,
-                ),
+                on_paint(colors.link_text_hover, colors.text),
             ),
             values(
                 paint(
@@ -57,10 +42,11 @@ pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
                     colors.border_disabled,
                     colors.text_disabled,
                 ),
-                paint(
-                    colors.element_disabled,
-                    colors.icon_disabled,
-                    colors.border_disabled,
+                on_paint(
+                    Color {
+                        a: 0x66,
+                        ..colors.icon_accent
+                    },
                     colors.text_disabled,
                 ),
             ),
@@ -92,6 +78,34 @@ fn paint(background: Color, foreground: Color, border: Color, label: Color) -> T
     )
 }
 
+fn on_paint(background: Color, label: Color) -> TogglePaint {
+    paint(
+        background,
+        contrasting_foreground(background),
+        background,
+        label,
+    )
+}
+
+fn contrasting_foreground(background: Color) -> Color {
+    let linear = |channel: u8| {
+        let channel = f32::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background.r)
+        + 0.7152 * linear(background.g)
+        + 0.0722 * linear(background.b);
+    if luminance > 0.5 {
+        Color::rgb(0x000000)
+    } else {
+        Color::rgb(0xffffff)
+    }
+}
+
 fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
 }
@@ -105,5 +119,19 @@ mod tests {
         let theme = theme(&ChromeColors::default());
 
         assert_ne!(theme, theme.scaled_metrics(1.25, 1.25));
+    }
+
+    #[test]
+    fn on_paint_should_use_accent_as_the_complete_surface() {
+        let colors = ChromeColors::default();
+        let paint = on_paint(colors.icon_accent, colors.text);
+
+        assert_eq!(
+            (paint.background(), paint.border()),
+            (
+                gpui_color(colors.icon_accent),
+                gpui_color(colors.icon_accent)
+            )
+        );
     }
 }
