@@ -1,4 +1,10 @@
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
+use super::workspace_sidebar::{
+    COLLAPSED_SWITCHER_LEADING_GAP, COLLAPSED_SWITCHER_TRAILING_GAP,
+    EXPANDED_SWITCHER_TRAILING_GAP, SIDEBAR_TOGGLE_INSET, TOP_CHROME_ACTION_GAP,
+    TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP, WORKSPACE_CHIP_ICON_SIZE, WORKSPACE_CHIP_PIN_SIZE,
+    WORKSPACE_CHIP_TEXT_SIZE, WORKSPACE_SWITCHER_PADDING, collapsed_top_chrome_width,
+};
 #[cfg(test)]
 use super::workspace_sidebar::{
     SIDEBAR_MAXIMUM_WIDTH, SIDEBAR_ROW_HEIGHT, TERMINAL_CONTENT_MINIMUM_WIDTH,
@@ -6,11 +12,6 @@ use super::workspace_sidebar::{
 use super::workspace_sidebar::{
     SIDEBAR_ROW_HORIZONTAL_PADDING, SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel,
     WorkspaceSidebar, remote_connection_color, remote_connection_status,
-};
-use super::workspace_sidebar::{
-    SIDEBAR_TOGGLE_INSET, TOP_CHROME_ACTION_GAP, TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP,
-    WORKSPACE_CHIP_ICON_SIZE, WORKSPACE_CHIP_PIN_SIZE, WORKSPACE_CHIP_TEXT_SIZE,
-    WORKSPACE_SWITCHER_PADDING, collapsed_top_chrome_width,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
@@ -3111,13 +3112,17 @@ impl WorkspaceManager {
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .left(px(TRAFFIC_LIGHT_CLEARANCE))
                     .right(px(if sidebar_visible {
-                        TOP_CHROME_ACTION_GAP / 2.0
+                        EXPANDED_SWITCHER_TRAILING_GAP
                     } else {
-                        TOP_CHROME_ACTION_GAP
+                        COLLAPSED_SWITCHER_TRAILING_GAP
                     }))
                     .flex()
                     .items_center()
-                    .gap(px(TOP_CHROME_ACTION_GAP))
+                    .gap(px(if sidebar_visible {
+                        TOP_CHROME_ACTION_GAP
+                    } else {
+                        COLLAPSED_SWITCHER_LEADING_GAP
+                    }))
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
                             Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
