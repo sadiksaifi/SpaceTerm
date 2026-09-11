@@ -450,6 +450,7 @@ impl WorkspaceSidebar {
         &self,
         sidebar: WeakEntity<Self>,
         handle_width: Pixels,
+        top_chrome_height: Pixels,
     ) -> AnyElement {
         let pointer_guard = Self::pointer_guard(sidebar.clone());
         let selector = "workspace-sidebar-resize-handle";
@@ -462,7 +463,7 @@ impl WorkspaceSidebar {
         )
         .tab_stop(true)
         .reset_on_double_click(true)
-        .target(ResizeHandleTarget::SpaciousLeading(px(TOP_CHROME_HEIGHT)))
+        .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)
         .on_event(move |event, window, cx| {
             let event = *event;
@@ -480,7 +481,7 @@ impl WorkspaceSidebar {
             wrapper.bottom_0().child(handle).into_any_element()
         } else {
             wrapper
-                .h(px(TOP_CHROME_HEIGHT))
+                .h(top_chrome_height)
                 .child(handle)
                 .into_any_element()
         }

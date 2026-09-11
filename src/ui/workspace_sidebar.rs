@@ -4,10 +4,7 @@ mod text;
 mod view;
 
 use super::workspace_chrome::WorkspaceChromeLayout;
-use super::{
-    NewRemoteWorkspace, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
-};
+use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{RemoteConnectionPhase, WorkspaceId};

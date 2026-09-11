@@ -5104,6 +5104,45 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
 }
 
 #[gpui::test]
+fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let appearance = crate::ui::appearance::ChromeAppearance {
+        text_scale: 24.0 / 13.0,
+        spacing_scale: 1.25,
+        ..crate::ui::appearance::ChromeAppearance::default()
+    };
+    cx.update(|window, cx| {
+        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let expanded_chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the expanded top-left Chrome was not rendered");
+    let expanded_target = cx
+        .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+        .expect("the expanded spacious resize target was not rendered");
+
+    click("toggle-sidebar-button", cx);
+
+    let collapsed_chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left Chrome was not rendered");
+    let collapsed_target = cx
+        .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+        .expect("the collapsed spacious resize target was not rendered");
+
+    assert_eq!(
+        (expanded_target.size.height, collapsed_target.size.height,),
+        (expanded_chrome.size.height, collapsed_chrome.size.height,)
+    );
+    assert!(expanded_chrome.size.height > px(TOP_CHROME_HEIGHT));
+}
+
+#[gpui::test]
 fn dragging_sidebar_divider_at_top_chrome_edges_should_not_move_window(cx: &mut TestAppContext) {
     let (manager, platform, cx) = workspace_manager_with_operating_system_window_drag_platform(cx);
 

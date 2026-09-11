@@ -3234,11 +3234,11 @@ impl Render for WorkspaceManager {
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
             })
-            .child(
-                self.sidebar
-                    .read(cx)
-                    .render_resize_handle(self.sidebar.downgrade(), chrome.width),
-            )
+            .child(self.sidebar.read(cx).render_resize_handle(
+                self.sidebar.downgrade(),
+                chrome.width,
+                super::appearance::chrome(cx).top_height(),
+            ))
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))
