@@ -1,0 +1,15 @@
+[package]
+name = "spaceterm-directories"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "=2.0.19"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }

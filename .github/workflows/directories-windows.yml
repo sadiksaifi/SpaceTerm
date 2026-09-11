@@ -1,0 +1,33 @@
+name: Windows application directories
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/directories-windows.yml"
+      - ".mise.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/spaceterm-directories/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/directories-windows.yml"
+      - ".mise.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/spaceterm-directories/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jdx/mise-action@v3
+        with:
+          install: false
+      - run: mise run test:windows:directories

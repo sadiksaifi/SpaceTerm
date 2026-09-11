@@ -28,6 +28,7 @@ fn application_directory_discovery_stays_in_its_platform_module() {
             "std::env::var_os(\"XDG_STATE_HOME\")",
             "std::env::var_os(\"XDG_CACHE_HOME\")",
             "std::env::var_os(\"XDG_RUNTIME_DIR\")",
+            "spaceterm_directories::",
         ] {
             assert!(
                 !production.contains(forbidden),
