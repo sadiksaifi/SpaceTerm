@@ -807,7 +807,8 @@ mod tests {
 
     use super::*;
     use crate::domain::SshDestination;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
     use crate::platform::testing::{RecordingControlSocketProbe, RecordingFilesystem};
     use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
     use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
@@ -824,8 +825,9 @@ mod tests {
         }
 
         fn paths(&self) -> AppPaths {
-            let environment = AppPathEnvironment {
+            let environment = AppDirectoryEnvironment {
                 home: None,
+                tmpdir: None,
                 xdg_config_home: Some(self.0.join("config").into_os_string()),
                 xdg_data_home: Some(self.0.join("data").into_os_string()),
                 xdg_state_home: Some(self.0.join("state").into_os_string()),

@@ -24,15 +24,25 @@ fn capture_startup_dependencies() -> Result<
     StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
     StartupDependenciesError,
 > {
+    let path_environment = super::app_directories::AppDirectoryEnvironment::capture();
     #[cfg(feature = "appearance-exerciser")]
-    let mut path_environment = super::app_paths::AppPathEnvironment::capture();
+    let mut directories =
+        super::app_directories::AppDirectories::resolve(super::app_directories::APP_DIR_NAME)
+            .map_err(|_| StartupDependenciesError::Paths)?;
     #[cfg(not(feature = "appearance-exerciser"))]
-    let path_environment = super::app_paths::AppPathEnvironment::capture();
+    let directories =
+        super::app_directories::AppDirectories::resolve(super::app_directories::APP_DIR_NAME)
+            .map_err(|_| StartupDependenciesError::Paths)?;
     #[cfg(feature = "appearance-exerciser")]
-    isolate_appearance_exerciser_config(&mut path_environment)?;
-    let path_host_facts = runtime_path_host_facts(&path_environment, || {
-        std::fs::canonicalize(std::env::temp_dir())
-    })?;
+    isolate_appearance_exerciser_config(&mut directories)?;
+    let secure_filesystem: Arc<dyn super::secure_filesystem::SecureFilesystem> =
+        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem);
+    let paths = super::app_paths::AppPaths::from_directories(
+        directories,
+        103,
+        Arc::clone(&secure_filesystem),
+    )
+    .map_err(|_| StartupDependenciesError::Paths)?;
     let executable = crate::ssh::command::OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh"))
         .map_err(|_| StartupDependenciesError::Paths)?;
     StartupDependencies::capture(
@@ -42,8 +52,7 @@ fn capture_startup_dependencies() -> Result<
             "/usr/bin:/bin".into(),
         )
         .map_err(|_| StartupDependenciesError::Paths)?,
-        &path_host_facts,
-        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem),
+        paths,
         executable,
         super::macos_ssh_process::MacOsSshProcessAdapter,
         Arc::new(super::macos_control_socket::MacosControlSocketProbe),
@@ -53,7 +62,7 @@ fn capture_startup_dependencies() -> Result<
 
 #[cfg(feature = "appearance-exerciser")]
 fn isolate_appearance_exerciser_config(
-    environment: &mut super::app_paths::AppPathEnvironment,
+    directories: &mut super::app_directories::AppDirectories,
 ) -> Result<(), StartupDependenciesError> {
     use std::ffi::OsStr;
     use std::path::Component;
@@ -76,15 +85,13 @@ fn isolate_appearance_exerciser_config(
     let root = std::fs::canonicalize(parent)
         .map_err(|_| StartupDependenciesError::Paths)?
         .join("spaceterm-appearance-exerciser");
-    if environment.xdg_config_home.as_deref() == Some(root.as_os_str()) {
-        return Err(StartupDependenciesError::Paths);
-    }
-    environment.xdg_config_home = Some(root.into_os_string());
+    directories.config = root.join(super::app_directories::APP_DIR_NAME);
     Ok(())
 }
 
+#[cfg(test)]
 fn runtime_path_host_facts(
-    environment: &super::app_paths::AppPathEnvironment,
+    environment: &super::app_directories::AppDirectoryEnvironment,
     fallback: impl FnOnce() -> std::io::Result<PathBuf>,
 ) -> Result<super::app_paths::AppPathHostFacts, StartupDependenciesError> {
     if environment.configured_runtime_root().is_some() {
@@ -253,7 +260,8 @@ fn compose(
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::AppPaths;
 
     #[test]
     fn macos_shell_capture_preserves_mode_compatibility_and_inherited_values() {
@@ -383,10 +391,10 @@ mod tests {
 
     #[test]
     fn runtime_facts_should_not_consult_an_unused_temporary_fallback() {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             home: Some("/Users/test".into()),
             xdg_runtime_dir: Some("/private/runtime".into()),
-            ..AppPathEnvironment::default()
+            ..AppDirectoryEnvironment::default()
         };
         let consulted = std::cell::Cell::new(false);
         let facts = runtime_path_host_facts(&environment, || {
@@ -410,9 +418,9 @@ mod tests {
 
     #[test]
     fn runtime_facts_should_report_an_unavailable_required_temporary_fallback() {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             xdg_runtime_dir: Some("relative/runtime".into()),
-            ..AppPathEnvironment::default()
+            ..AppDirectoryEnvironment::default()
         };
         let result = runtime_path_host_facts(&environment, || {
             Err(std::io::Error::from(std::io::ErrorKind::NotFound))

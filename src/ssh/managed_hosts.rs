@@ -6,7 +6,8 @@ use thiserror::Error;
 
 use super::destination::SshHostAlias;
 use super::host_config::{DiscoveredSshHost, HostConfigSource};
-use crate::platform::app_paths::{AppPathRoot, AppPaths, AppPathsError};
+use crate::platform::app_directories::AppDirectoryRoot;
+use crate::platform::app_paths::{AppPaths, AppPathsError};
 use crate::platform::secure_filesystem::{
     PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory, SecureEntryIdentity,
     SecureFilesystemError,
@@ -179,7 +180,7 @@ impl<'a> ManagedHostsStore<'a> {
                     .map(|_| ())
                     .map_err(|_| ManagedHostsError::NonCanonical);
             }
-            let directory = self.paths.ensure_secure_root(AppPathRoot::Config)?;
+            let directory = self.paths.ensure_secure_root(AppDirectoryRoot::Config)?;
             let bytes = serialize_managed_hosts(&[]);
             match self.commit(&directory, bytes.as_bytes(), None)? {
                 SecureCommitOutcome::Committed => return Ok(()),
@@ -278,7 +279,7 @@ impl<'a> ManagedHostsStore<'a> {
         hosts: &[ManagedSshHost],
         expected: Option<&SecureEntryIdentity>,
     ) -> Result<SecureCommitOutcome, ManagedHostsError> {
-        let directory = self.paths.ensure_secure_root(AppPathRoot::Config)?;
+        let directory = self.paths.ensure_secure_root(AppDirectoryRoot::Config)?;
         let bytes = serialize_managed_hosts(hosts);
         if bytes.len() > MANAGED_CONFIG_BYTES {
             return Err(ManagedHostsError::StorageUnavailable);
@@ -287,7 +288,7 @@ impl<'a> ManagedHostsStore<'a> {
     }
 
     fn read_snapshot(&self) -> Result<Option<PrivateFileSnapshot>, ManagedHostsError> {
-        let Some(directory) = self.paths.open_secure_root(AppPathRoot::Config)? else {
+        let Some(directory) = self.paths.open_secure_root(AppDirectoryRoot::Config)? else {
             return Ok(None);
         };
         let target = self.paths.managed_ssh_config();
@@ -609,7 +610,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::secure_filesystem::{
         PreparedPrivateFile, SecureCommitResult, SecureFilesystem,
     };
@@ -812,7 +814,7 @@ mod tests {
     }
 
     fn paths(filesystem: Arc<RecordingFilesystem>) -> AppPaths {
-        let environment = AppPathEnvironment {
+        let environment = AppDirectoryEnvironment {
             home: Some("/home/test".into()),
             ..Default::default()
         };

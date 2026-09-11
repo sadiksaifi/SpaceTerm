@@ -5167,6 +5167,7 @@ dependencies = [
  "thiserror 2.0.19",
  "unicode-bidi",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

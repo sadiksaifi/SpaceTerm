@@ -1,6 +1,44 @@
 //! Structural regression gates for the shared application and UI boundary.
 
 #[test]
+fn application_directory_discovery_stays_in_its_platform_module() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let owner = root.join("platform/app_directories.rs");
+    let mut files = Vec::new();
+    collect_rust_sources(&root, &mut files);
+    for path in files {
+        if path == owner || path == root.join("architecture_tests.rs") || is_test_source(&path) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for forbidden in [
+            "XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE",
+            "XDG_DATA_HOME_ENVIRONMENT_VARIABLE",
+            "XDG_STATE_HOME_ENVIRONMENT_VARIABLE",
+            "XDG_CACHE_HOME_ENVIRONMENT_VARIABLE",
+            "XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE",
+            "FOLDERID_RoamingAppData",
+            "FOLDERID_LocalAppData",
+            "Library/Application Support/spaceterm",
+            "Library/Caches/spaceterm",
+            "Library/Logs/spaceterm",
+            "std::env::var_os(\"XDG_CONFIG_HOME\")",
+            "std::env::var_os(\"XDG_DATA_HOME\")",
+            "std::env::var_os(\"XDG_STATE_HOME\")",
+            "std::env::var_os(\"XDG_CACHE_HOME\")",
+            "std::env::var_os(\"XDG_RUNTIME_DIR\")",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "{} bypasses AppDirectories with {forbidden}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let groups: &[(&str, &[&str])] = &[

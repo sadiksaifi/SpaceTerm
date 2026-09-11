@@ -68,6 +68,14 @@ cocoa = "=0.26.0"
 objc = "=0.2.7"
 raw-window-handle = "=0.6.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }
 
