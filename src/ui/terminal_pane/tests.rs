@@ -5294,6 +5294,64 @@ fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let events = records.last_event_sender().unwrap();
+    let mut retained = blinking_cursor_screen(true, true);
+    Arc::make_mut(&mut retained).generation = crate::terminal::PresentationGeneration::test(1);
+    events.try_send(SessionEvent::Screen(retained)).unwrap();
+    cx.run_until_parked();
+
+    let paints_before = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_some()
+    }));
+    pane.update(cx, |pane, _| {
+        pane.present_failure_at(
+            TerminalFailure::presentation("retain-current-frame"),
+            true,
+            Some(RecoveryAction::Presentation),
+            pane.screen.generation,
+        );
+    });
+
+    cx.update(|window, cx| {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.terminal.scheme = crate::appearance::SchemeSelection::Fixed {
+            id: crate::appearance::SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
+            appearance: crate::appearance::Appearance::Light,
+        };
+        publish_terminal_preferences(preferences, cx);
+        pane.update(cx, |pane, cx| pane.refresh_appearance(window, cx));
+    });
+    cx.run_until_parked();
+
+    let expected = cx.update(|_, cx| {
+        super::super::appearance_runtime::current(cx)
+            .terminal
+            .colors
+            .background
+    });
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.surface_background()),
+        expected,
+        "the Pane Caption and terminal padding must match the reprojected retained frame"
+    );
+    let paints_after = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(
+        paints_after > paints_before,
+        "the retained cursor scene must rebuild under the new terminal appearance"
+    );
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+        paints_after,
+        "cursor blink must resume retained-scene reuse after the appearance rebuild"
+    );
+}
+
+#[gpui::test]
 fn second_glyph_preflight_failure_submits_only_the_last_valid_generation(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();

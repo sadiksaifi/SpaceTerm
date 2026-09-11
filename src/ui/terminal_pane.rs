@@ -3609,9 +3609,11 @@ impl Render for TerminalPane {
         } else {
             self.fallback_render_cache.clone()
         };
-        let background = gpui_color(display_screen.background);
-        if self.surface_background != display_screen.background {
-            self.surface_background = display_screen.background;
+        let projected_display_screen =
+            ScreenSnapshot::projected_for_renderer(&display_screen, &self.appearance.terminal);
+        let background = gpui_color(projected_display_screen.background);
+        if self.surface_background != projected_display_screen.background {
+            self.surface_background = projected_display_screen.background;
             cx.emit(TerminalPaneEvent::SurfaceBackgroundChanged);
         }
         let active_hovered_link = displaying_current
@@ -3834,7 +3836,9 @@ impl Render for TerminalPane {
                         .absolute()
                         .inset_0()
                         .border_2()
-                        .border_color(gpui_color(display_screen.configured_colors.visual_bell)),
+                        .border_color(gpui_color(
+                            projected_display_screen.configured_colors.visual_bell,
+                        )),
                 )
             })
             .when_some(

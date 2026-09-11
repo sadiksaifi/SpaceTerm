@@ -255,6 +255,7 @@ pub(crate) struct TerminalGridElement {
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
     scale_factor: f32,
+    source_presentation: Arc<ScreenSnapshot>,
     presentation: Arc<ScreenSnapshot>,
     presentation_operation: Option<OperationToken>,
     graphics_attempt: Option<GraphicsAttemptToken>,
@@ -310,6 +311,7 @@ impl TerminalGridElement {
         mut configuration: TerminalGridConfiguration,
         cx: &mut App,
     ) -> Self {
+        let source_presentation = Arc::clone(screen);
         let screen =
             ScreenSnapshot::projected_for_renderer(screen, &configuration.terminal_appearance);
         let fallback = configuration
@@ -400,6 +402,7 @@ impl TerminalGridElement {
             find_spans: configuration.find_spans,
             graphics: configuration.graphics,
             scale_factor: configuration.scale_factor,
+            source_presentation,
             presentation: Arc::clone(&screen),
             presentation_operation: configuration.presentation_operation,
             graphics_attempt: configuration.graphics_attempt,
