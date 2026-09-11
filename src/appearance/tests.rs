@@ -35,6 +35,21 @@ fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
 }
 
 #[test]
+fn list_highlight_must_be_opaque_to_match_on_different_chrome_surfaces() {
+    let translucent = Color::rgba(0x25253080);
+    let colors = ChromeColors {
+        list_item_background: translucent,
+        ..ChromeColors::default()
+    };
+    let overrides = ChromeColorOverrides {
+        list_item_background: Some(translucent),
+        ..ChromeColorOverrides::default()
+    };
+    assert_eq!(colors.validate(), Err(CatalogError::UnsupportedAlpha));
+    assert_eq!(overrides.validate(), Err(CatalogError::UnsupportedAlpha));
+}
+
+#[test]
 fn dark_defaults_match_the_consumed_vague_pro_values() {
     let terminal = TerminalColors::default();
     assert_eq!(
@@ -88,8 +103,8 @@ fn dark_defaults_match_the_consumed_vague_pro_values() {
             legacy.title_bar_inactive_background,
         ),
         (
-            "tab_active_background",
-            chrome.tab_active_background,
+            "list_item_background",
+            chrome.list_item_background,
             legacy.tab_active_background,
         ),
         (

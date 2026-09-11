@@ -28,11 +28,18 @@ Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, and `#RRGGBBAA`, with red, green, blue
 ordering. Canonical output is lowercase `#RRGGBBAA`. Terminal foreground, background, cursor,
 normal/bright/dim ANSI arrays, default bright/dim foregrounds, and optional interaction
 foregrounds must be opaque. Chrome root, panel, popup, title, Tab, and text-input
-surfaces must be opaque. Selection, Find, hover, scrim, shadow, and visual-bell overlays may use
-alpha.
+surfaces and list highlights must be opaque. Text selection, Find, other hover, scrim, shadow,
+and visual-bell overlays may use alpha.
 
 Pane Captions share their terminal's displayed background, including terminal-program changes.
 Their text, typography, controls, and symmetric density-scaled padding remain Chrome-owned.
+
+Chrome lists use one `list_item_background` for hovered, selected, and selected-plus-hovered
+items across the sidebar, pickers, context menus, ComboBox rows, and active-window Tabs.
+The default is the former sidebar selection color: `#252530` in Vague Pro Dark and `#e4e5ea`
+in SpaceTerm Light. Inactive-window Tabs retain their uniform inactive band. This shared role
+replaces separate sidebar hover/selection and active-Tab background roles; Zed imports derive it
+from `element.selected`. Buttons and terminal text selection retain their own roles.
 
 ## Chrome roles
 
@@ -41,8 +48,8 @@ the same surface, text, border, element, status, and input roles rather than acc
 component-specific colors.
 
 - Surfaces: `background`, `panel_background`, `elevated_surface_background`,
-  `title_bar_background`, `title_bar_inactive_background`, `tab_active_background`,
-  `tab_inactive_background`.
+  `title_bar_background`, `title_bar_inactive_background`, `tab_inactive_background`,
+  `list_item_background`.
 - Text and icons: `text`, `text_secondary`, `text_muted`, `text_placeholder`, `text_disabled`,
   `text_accent`, `link_text`, `link_text_hover`, `icon`, `icon_muted`, `icon_disabled`,
   `icon_accent`.
@@ -53,8 +60,8 @@ component-specific colors.
   `element_hover_foreground`, `element_active_foreground`, `element_selected_foreground`,
   `element_selected_hover_foreground`, `element_disabled_foreground`.
 - Ghost controls: the same six states prefixed by `ghost_element_`, with paired foreground roles.
-- Navigation: `navigation_selection`, `sidebar_selection`, `sidebar_selection_hover`,
-  `sidebar_hover`, `sidebar_focus`. Active/inactive text and icons reuse the primary/muted roles.
+- Navigation: `navigation_selection`, `sidebar_focus`. Active/inactive text and icons reuse the
+  primary/muted roles; list-row backgrounds use `list_item_background`.
 - Status: `info`, `info_background`, `success`, `warning`, `warning_background`,
   `warning_border`, `error`, `error_background`, and `error_border`.
 - Inputs: `input_text`, `input_placeholder`, `input_disabled_text`, `input_caret`,

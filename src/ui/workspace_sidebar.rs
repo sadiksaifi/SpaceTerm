@@ -699,11 +699,7 @@ mod tests {
     fn secondary_text_should_be_readable_on_every_row_background() {
         let colors = ChromeColors::default();
         let foreground = luminance(secondary_text_color(&colors));
-        for background in [
-            colors.panel_background,
-            colors.sidebar_selection,
-            colors.sidebar_hover,
-        ] {
+        for background in [colors.panel_background, colors.list_item_background] {
             let background = luminance(background);
             assert!(
                 (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05) >= 4.5

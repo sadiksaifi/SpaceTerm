@@ -93,12 +93,12 @@ impl TabChromePresentation {
             Self {
                 window_active,
                 background: colors.title_bar_background,
-                active_tab_background: colors.tab_active_background,
+                active_tab_background: colors.list_item_background,
                 inactive_tab_background: colors.tab_inactive_background,
                 active_tab_foreground: colors.text_accent,
                 inactive_tab_foreground: colors.text_muted,
                 icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
+                hover_background: colors.list_item_background,
                 active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
@@ -1411,12 +1411,12 @@ mod tests {
             TabChromePresentation {
                 window_active: true,
                 background: colors.title_bar_background,
-                active_tab_background: colors.tab_active_background,
+                active_tab_background: colors.list_item_background,
                 inactive_tab_background: colors.tab_inactive_background,
                 active_tab_foreground: colors.text_accent,
                 inactive_tab_foreground: colors.text_muted,
                 icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
+                hover_background: colors.list_item_background,
                 active_tab_underline: colors.border_selected,
                 divider: colors.border,
             }

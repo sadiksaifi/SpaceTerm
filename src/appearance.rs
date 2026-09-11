@@ -9,7 +9,7 @@ macro_rules! chrome_color_fields {
         $macro! {
             background, panel_background, elevated_surface_background,
             title_bar_background, title_bar_inactive_background,
-            tab_active_background, tab_inactive_background,
+            tab_inactive_background, list_item_background,
             text, text_secondary, text_muted, text_placeholder, text_disabled,
             text_accent, link_text, link_text_hover,
             icon, icon_muted, icon_disabled, icon_accent,
@@ -25,8 +25,7 @@ macro_rules! chrome_color_fields {
             ghost_element_foreground, ghost_element_hover_foreground,
             ghost_element_active_foreground, ghost_element_selected_foreground,
             ghost_element_selected_hover_foreground, ghost_element_disabled_foreground,
-            navigation_selection, sidebar_selection,
-            sidebar_selection_hover, sidebar_hover, sidebar_focus,
+            navigation_selection, sidebar_focus,
             info, info_background, success,
             warning, warning_background, warning_border, error, error_background, error_border,
             input_text, input_placeholder, input_disabled_text, input_caret,

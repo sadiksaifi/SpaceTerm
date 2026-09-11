@@ -132,15 +132,9 @@ impl WorkspaceSidebar {
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
             .when(active, |row| {
-                row.bg(gpui_color(appearance.colors.sidebar_selection))
+                row.bg(gpui_color(appearance.colors.list_item_background))
             })
-            .hover(|row| {
-                row.bg(gpui_color(if active {
-                    appearance.colors.sidebar_selection_hover
-                } else {
-                    appearance.colors.sidebar_hover
-                }))
-            })
+            .hover(|row| row.bg(gpui_color(appearance.colors.list_item_background)))
             .on_click(move |_, _, cx| {
                 let _ = click_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Activate {
