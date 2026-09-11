@@ -355,6 +355,11 @@ impl ButtonTheme {
         }
     }
 
+    /// Returns the outer side length of an icon button in this theme.
+    pub fn icon_button_size(self, size: ButtonSize) -> Pixels {
+        self.sizes.resolve(size).height
+    }
+
     fn resolve(self, variant: ButtonVariant, size: ButtonSize, shape: ButtonShape) -> ButtonStyle {
         let variant = self.variants.resolve(variant);
         let metrics = self.sizes.resolve(size);

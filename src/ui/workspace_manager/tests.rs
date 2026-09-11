@@ -1,7 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::ui::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
-use crate::ui::workspace_sidebar::COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH;
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
@@ -5302,10 +5301,11 @@ fn double_clicking_sidebar_handle_should_request_default_width(cx: &mut TestAppC
 fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
-        collapsed_top_chrome_width(
+        WorkspaceChromeLayout::collapsed_width(
             manager.read(cx).workspaces.active_workspace().name(),
             false,
             window,
+            cx,
         )
     });
     let root = cx
@@ -5558,7 +5558,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         .expect("sidebar toggle");
     assert_eq!(chooser.size, toggle.size);
     let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
-    assert_eq!(toggle.left(), chrome.left() + px(TRAFFIC_LIGHT_CLEARANCE));
+    assert_eq!(toggle.left(), chrome.left() + px(78.0));
     assert!(toggle.right() < chooser.left());
     let tabs = cx.debug_bounds("tab-bar").unwrap();
     assert_eq!(tabs.left() - chooser.right(), px(2.0));
@@ -5804,10 +5804,10 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             divider.center().x,
         ),
         (
-            px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
-            px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
-            root.origin.x + px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
-            root.origin.x + px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH),
+            px(232.0),
+            px(232.0),
+            root.origin.x + px(232.0),
+            root.origin.x + px(232.0),
         )
     );
 }
@@ -5837,7 +5837,7 @@ fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContex
     let tab_bar = cx
         .debug_bounds("tab-bar")
         .expect("the Tab bar was not rendered");
-    assert!(chrome.size.width < px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH));
+    assert!(chrome.size.width < px(232.0));
     assert_eq!(
         (spacer.size.width, tab_bar.origin.x),
         (chrome.size.width, root.origin.x + chrome.size.width)
@@ -5888,7 +5888,7 @@ fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut 
     let unpinned_chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
     assert_eq!(
         pinned_chrome.size.width - unpinned_chrome.size.width,
-        px(WORKSPACE_CHIP_PIN_SIZE + WORKSPACE_CHIP_GAP)
+        px(17.0)
     );
     assert!(cx.debug_bounds("workspace-chip-label").unwrap().size.width >= label.size.width);
     fs::remove_dir_all(directory).unwrap();
@@ -5910,7 +5910,7 @@ fn collapsed_top_chrome_should_preserve_the_default_label_beside_both_actions(
         let run = window.text_style().to_run("Default".len());
         window
             .text_system()
-            .shape_line("Default".into(), px(WORKSPACE_CHIP_TEXT_SIZE), &[run], None)
+            .shape_line("Default".into(), px(12.0), &[run], None)
             .width
     });
 
@@ -5954,7 +5954,13 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let workspace_icon = cx.debug_bounds("workspace-chip-icon").unwrap();
     let label = cx.debug_bounds("workspace-chip-label").unwrap();
     let tabs = cx.debug_bounds("tab-bar").unwrap();
+    assert_eq!(expanded_toggle.left(), px(78.0));
+    assert_eq!(expanded_toggle.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(chooser.left(), expanded_toggle.right());
+    // Twelve pixels of content padding inside the one-pixel trigger border.
+    assert_eq!(switcher_icon.left() - chooser.left(), px(13.0));
+    let trailing_inset = chooser.right() - label.right();
+    assert!(trailing_inset >= px(13.0) && trailing_inset < px(14.0));
     assert!(switcher_icon.right() <= workspace_icon.left());
     assert!(workspace_icon.right() <= label.left());
     assert_eq!(tabs.left() - chooser.right(), px(4.0));
@@ -5992,6 +5998,55 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
         }));
     }
     assert_eq!(platform.counts(), (0, 0, 0, 0));
+}
+
+#[gpui::test]
+fn collapsed_chrome_should_measure_the_installed_switcher_border(cx: &mut TestAppContext) {
+    use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
+
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "A".into())
+            .unwrap();
+        cx.notify();
+    });
+    click("toggle-sidebar-button", cx);
+    let original_chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    let original_label = cx.debug_bounds("workspace-chip-label").unwrap();
+    cx.update(|window, cx| {
+        let color = gpui::rgb(0x222222);
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                color, color, color, color, color, color, color, color, color, color, color,
+            ),
+            ComboBoxMetrics::new(px(240.0), px(40.0)).shape(px(7.0), px(3.0)),
+        ));
+        window.refresh();
+    });
+    redraw(cx);
+
+    let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
+    assert_eq!(chrome.size.width, original_chrome.size.width + px(4.0));
+    assert_eq!(
+        cx.debug_bounds("workspace-chip-label").unwrap().size.width,
+        original_label.size.width
+    );
+    assert_eq!(
+        cx.debug_bounds("tab-manager-top-spacer")
+            .unwrap()
+            .size
+            .width,
+        chrome.size.width
+    );
+    assert_eq!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-divider")
+            .unwrap()
+            .center()
+            .x,
+        chrome.right()
+    );
 }
 
 #[gpui::test]
@@ -6312,10 +6367,11 @@ fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut Test
 fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
-        collapsed_top_chrome_width(
+        WorkspaceChromeLayout::collapsed_width(
             manager.read(cx).workspaces.active_workspace().name(),
             false,
             window,
+            cx,
         )
     });
     let expanded_chrome = cx

@@ -590,6 +590,12 @@ impl ComboBoxTheme {
     pub fn new(paint: ComboBoxPaint, metrics: ComboBoxMetrics) -> Self {
         Self { paint, metrics }
     }
+
+    /// Measures a custom trigger's outer width, including its themed borders.
+    /// The caller's content width must include any caller-owned padding.
+    pub fn custom_trigger_width(self, content_width: Pixels) -> Pixels {
+        content_width + self.metrics.border_width * 2.0
+    }
 }
 
 impl Global for ComboBoxTheme {}

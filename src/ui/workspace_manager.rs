@@ -1,9 +1,7 @@
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
-use super::workspace_sidebar::{
-    COLLAPSED_SWITCHER_LEADING_GAP, COLLAPSED_SWITCHER_TRAILING_GAP,
-    EXPANDED_SWITCHER_TRAILING_GAP, SIDEBAR_TOGGLE_INSET, TOP_CHROME_ACTION_GAP,
-    TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP, WORKSPACE_CHIP_ICON_SIZE, WORKSPACE_CHIP_PIN_SIZE,
-    WORKSPACE_CHIP_TEXT_SIZE, WORKSPACE_SWITCHER_PADDING, collapsed_top_chrome_width,
+use super::workspace_chrome::{
+    ICON_SIZE as WORKSPACE_CHROME_ICON_SIZE, TOGGLE_SIZE, WorkspaceChromeIdentity,
+    WorkspaceChromeLayout,
 };
 #[cfg(test)]
 use super::workspace_sidebar::{
@@ -77,7 +75,7 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
-    AnchoredPlacementConfig, ButtonSize, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
+    AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
     ComboBoxFallback, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
     ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
@@ -86,7 +84,6 @@ use spaceterm_ui::{
     window_combo_box_is_open, window_modal_is_open,
 };
 
-const WORKSPACE_CHROME_ICON_SIZE: f32 = 14.0;
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str) {
@@ -870,20 +867,18 @@ impl WorkspaceManager {
         let Some(workspace) = self.workspaces.workspace(workspace_id) else {
             return;
         };
-        let top_chrome_width = if self.sidebar.read(cx).layout().visible {
-            self.sidebar.read(cx).layout().width
-        } else {
-            collapsed_top_chrome_width(
-                workspace.name(),
-                workspace.pinned_directory().is_some(),
-                window,
-            )
-        };
+        let chrome = WorkspaceChromeLayout::resolve(
+            self.sidebar.read(cx).layout(),
+            workspace.name(),
+            workspace.pinned_directory().is_some(),
+            window,
+            cx,
+        );
         workspace.payload().update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 self.sidebar.read(cx).layout().visible,
                 self.sidebar.read(cx).layout().width,
-                top_chrome_width,
+                chrome.width,
                 cx,
             );
         });
@@ -2847,7 +2842,7 @@ impl WorkspaceManager {
     ///
     /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
     /// chip would be duplicate chrome; with it closed nothing on screen does.
-    fn render_workspace_chip(&self) -> (AnyElement, Tooltip) {
+    fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
         let workspace_icon = match workspace.location() {
             WorkspaceLocation::Remote { .. } => IconName::Globe,
@@ -2880,49 +2875,15 @@ impl WorkspaceManager {
             .map(|status| format!("{path}: {status}"))
             .unwrap_or_else(|| path.clone());
 
-        let chip = div()
-            .id("workspace-chip")
-            .debug_selector(|| "workspace-chip".to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(WORKSPACE_CHIP_GAP))
-            .flex_1()
-            .min_w_0()
-            .child(
-                div()
-                    .debug_selector(|| "workspace-chip-icon".to_owned())
-                    .flex_shrink_0()
-                    .child(Icon::new(
-                        workspace_icon,
-                        px(WORKSPACE_CHIP_ICON_SIZE),
-                        remote_color.map(gpui_color).unwrap_or(icon_color),
-                    )),
-            )
-            .when(workspace.pinned_directory().is_some(), |chip| {
-                chip.child(
-                    div()
-                        .debug_selector(|| "workspace-chip-pin".to_owned())
-                        .flex_shrink_0()
-                        .child(Icon::new(
-                            IconName::Pin,
-                            px(WORKSPACE_CHIP_PIN_SIZE),
-                            icon_color,
-                        )),
-                )
-            })
-            .child(
-                div()
-                    .debug_selector(|| "workspace-chip-label".to_owned())
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(WORKSPACE_CHIP_TEXT_SIZE))
-                    .text_color(foreground)
-                    .child(name.clone()),
-            );
-
         (
-            chip.into_any_element(),
+            WorkspaceChromeIdentity {
+                name: name.clone(),
+                icon: workspace_icon,
+                pinned: workspace.pinned_directory().is_some(),
+                foreground,
+                icon_color: remote_color.map(gpui_color).unwrap_or(icon_color),
+                pin_color: icon_color,
+            },
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!("{name}\n{tooltip_detail}"))
                 .debug_selector("workspace-switcher-tooltip"),
@@ -2931,21 +2892,12 @@ impl WorkspaceManager {
 
     fn render_top_left_chrome(
         &self,
+        layout: WorkspaceChromeLayout,
         manager: WeakEntity<Self>,
         window: &Window,
         cx: &App,
     ) -> AnyElement {
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
-        let width = if sidebar_visible {
-            self.sidebar.read(cx).layout().width
-        } else {
-            let workspace = self.workspaces.active_workspace();
-            collapsed_top_chrome_width(
-                workspace.name(),
-                workspace.pinned_directory().is_some(),
-                window,
-            )
-        };
         let (toggle_icon, toggle_label) =
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
@@ -3034,28 +2986,9 @@ impl WorkspaceManager {
                 .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
         )
         .when(!sidebar_visible, |chooser| {
-            let (chip, tooltip) = self.render_workspace_chip();
+            let (identity, tooltip) = self.workspace_chrome_identity();
             chooser
-                .custom_trigger(
-                    div()
-                        .flex()
-                        .items_center()
-                        .w_full()
-                        .min_w_0()
-                        .px(px(WORKSPACE_SWITCHER_PADDING))
-                        .gap(px(WORKSPACE_CHIP_GAP))
-                        .child(
-                            div()
-                                .debug_selector(|| "workspace-switcher-icon".to_owned())
-                                .flex_shrink_0()
-                                .child(Icon::custom(
-                                    CustomIconName::RectangleStack,
-                                    px(WORKSPACE_CHROME_ICON_SIZE),
-                                    gpui_color(ACTIVE_THEME.text),
-                                )),
-                        )
-                        .child(chip),
-                )
+                .custom_trigger(identity.render(gpui_color(ACTIVE_THEME.text)))
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
@@ -3086,12 +3019,6 @@ impl WorkspaceManager {
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         });
-        // The visible control owns clicks where it meets the sidebar resize target.
-        let chooser = div()
-            .min_w_0()
-            .when(!sidebar_visible, |chooser| chooser.w_full())
-            .occlude()
-            .child(chooser);
         let content = div()
             .relative()
             .size_full()
@@ -3107,41 +3034,25 @@ impl WorkspaceManager {
                     .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .child(
-                div()
-                    .absolute()
-                    .top(px(SIDEBAR_TOGGLE_INSET))
-                    .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                    .right(px(if sidebar_visible {
-                        EXPANDED_SWITCHER_TRAILING_GAP
-                    } else {
-                        COLLAPSED_SWITCHER_TRAILING_GAP
-                    }))
-                    .flex()
-                    .items_center()
-                    .gap(px(if sidebar_visible {
-                        TOP_CHROME_ACTION_GAP
-                    } else {
-                        COLLAPSED_SWITCHER_LEADING_GAP
-                    }))
-                    .child(
-                        IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
-                            Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
-                                .into_any_element()
-                        })
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Regular)
-                        .debug_selector("toggle-sidebar-button")
-                        .tooltip(
-                            Tooltip::new("toggle-sidebar-tooltip", toggle_label)
-                                .debug_selector("toggle-sidebar-tooltip"),
-                        )
-                        .on_activate(move |_, window, cx| {
-                            let _ = toggle_manager.update(cx, |manager, cx| {
-                                manager.toggle_sidebar(window, cx);
-                            });
-                        }),
+                layout.render_controls(
+                    IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
+                        Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
+                            .into_any_element()
+                    })
+                    .variant(ButtonVariant::Ghost)
+                    .size(TOGGLE_SIZE)
+                    .debug_selector("toggle-sidebar-button")
+                    .tooltip(
+                        Tooltip::new("toggle-sidebar-tooltip", toggle_label)
+                            .debug_selector("toggle-sidebar-tooltip"),
                     )
-                    .child(div().flex().flex_1().min_w_0().justify_end().child(chooser)),
+                    .on_activate(move |_, window, cx| {
+                        let _ = toggle_manager.update(cx, |manager, cx| {
+                            manager.toggle_sidebar(window, cx);
+                        });
+                    }),
+                    chooser,
+                ),
             );
         let drag_region = WindowDragRegion::new(
             "workspace-top-chrome-drag-region",
@@ -3169,7 +3080,7 @@ impl WorkspaceManager {
             .absolute()
             .top_0()
             .left_0()
-            .w(width)
+            .w(layout.width)
             .h(px(TOP_CHROME_HEIGHT))
             .bg(gpui_color(if window.is_window_active() {
                 ACTIVE_THEME.title_bar_background
@@ -3240,6 +3151,23 @@ impl Render for WorkspaceManager {
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
+        let workspace = self.workspaces.active_workspace();
+        let sidebar_layout = self.sidebar.read(cx).layout();
+        let chrome = WorkspaceChromeLayout::resolve(
+            sidebar_layout,
+            workspace.name(),
+            workspace.pinned_directory().is_some(),
+            window,
+            cx,
+        );
+        active_tab_manager.update(cx, |manager, cx| {
+            manager.set_sidebar_layout(
+                sidebar_layout.visible,
+                sidebar_layout.width,
+                chrome.width,
+                cx,
+            );
+        });
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
         self.sidebar.update(cx, |sidebar, cx| {
@@ -3303,9 +3231,9 @@ impl Render for WorkspaceManager {
             .child(
                 self.sidebar
                     .read(cx)
-                    .render_resize_handle(self.sidebar.downgrade(), window),
+                    .render_resize_handle(self.sidebar.downgrade(), chrome.width),
             )
-            .child(self.render_top_left_chrome(manager.clone(), window, cx));
+            .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))
     }
