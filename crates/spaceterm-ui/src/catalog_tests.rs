@@ -36,6 +36,16 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
         ),
         accent,
     );
+    let toggle_value = ToggleValuePaints::new(
+        TogglePaint::new(surface, text, muted, text),
+        TogglePaint::new(accent, text, accent, text),
+    );
+    let toggle_metrics = ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+    let toggle = ToggleTheme::new(
+        TogglePaints::new(toggle_value, toggle_value, toggle_value, toggle_value),
+        ToggleSizes::new(toggle_metrics, toggle_metrics),
+        accent,
+    );
     let menu_paint = MenuPaint::new(
         surface, surface, text, muted, muted, surface, text, accent, surface,
     );
@@ -47,6 +57,7 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
     let text_input_paint = TextInputPaint::new(text, muted, accent, text, muted, accent);
     ControlThemeCatalog::new(
         button,
+        toggle,
         ScrollbarTheme::new(muted, text, accent),
         ResizeHandleTheme::new(
             ResizeHandlePaint::new(muted, text, accent, accent, muted),
@@ -102,6 +113,7 @@ struct CatalogObserver {
 impl Render for CatalogObserver {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let _ = cx.global::<ButtonTheme>();
+        let _ = cx.global::<ToggleTheme>();
         let _ = cx.global::<ScrollbarTheme>();
         let _ = cx.global::<ResizeHandleTheme>();
         let _ = cx.global::<MenuTheme>();
@@ -165,6 +177,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     cx.update(|_, cx| {
         assert_eq!(cx.global::<ButtonTheme>(), &replacement.button);
+        assert_eq!(cx.global::<ToggleTheme>(), &replacement.toggle);
         assert_eq!(cx.global::<ScrollbarTheme>(), &replacement.scrollbar);
         assert_eq!(cx.global::<ResizeHandleTheme>(), &replacement.resize_handle);
         assert_eq!(cx.global::<MenuTheme>(), &replacement.menu);

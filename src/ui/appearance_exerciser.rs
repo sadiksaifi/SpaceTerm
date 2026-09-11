@@ -12,10 +12,11 @@ use gpui::{
     WindowHandle, WindowOptions, actions, div, px, rgba, size,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, Button, ButtonSize, ButtonVariant, ComboBox, ComboBoxItem, ContextMenu,
-    Dialog, DialogCloseDecision, DialogInitialFocus, MenuEntry, ModalAction, ModalActionRole,
-    ModalId, ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressState,
-    TextInput, TextInputContentMode, TextInputVariant, Tooltip,
+    Alert, AlertIntent, Button, ButtonSize, ButtonVariant, Checkbox, CheckboxState, ComboBox,
+    ComboBoxItem, ContextMenu, Dialog, DialogCloseDecision, DialogInitialFocus, MenuEntry,
+    ModalAction, ModalActionRole, ModalId, ProgressCancelDecision, ProgressCancellation,
+    ProgressDialog, ProgressState, Switch, TextInput, TextInputContentMode, TextInputVariant,
+    ToggleSize, Tooltip,
 };
 
 use crate::appearance::{
@@ -90,6 +91,8 @@ struct AppearanceExerciser {
     status: String,
     field_reset_index: usize,
     reset_index: usize,
+    checkbox_state: CheckboxState,
+    switch_on: bool,
 }
 
 impl AppearanceExerciser {
@@ -111,6 +114,8 @@ impl AppearanceExerciser {
             status: String::from("Ready. Storage is isolated."),
             field_reset_index: 0,
             reset_index: 0,
+            checkbox_state: CheckboxState::Mixed,
+            switch_on: false,
         }
     }
 
@@ -658,6 +663,32 @@ impl Render for AppearanceExerciser {
                         let _ = weak.update(cx, handler);
                     })
             };
+        let checkbox_weak = weak.clone();
+        let checkbox = Checkbox::new(
+            "appearance-checkbox",
+            "Restore panes when SpaceTerm opens",
+            self.checkbox_state,
+        )
+        .size(ToggleSize::Regular)
+        .on_change(move |change, _, cx| {
+            let _ = checkbox_weak.update(cx, |this, cx| {
+                this.checkbox_state = change.requested();
+                cx.notify();
+            });
+        });
+        let switch_weak = weak.clone();
+        let notification_switch = Switch::new(
+            "appearance-switch",
+            "Attention notifications",
+            self.switch_on,
+        )
+        .size(ToggleSize::Regular)
+        .on_change(move |change, _, cx| {
+            let _ = switch_weak.update(cx, |this, cx| {
+                this.switch_on = change.requested();
+                cx.notify();
+            });
+        });
         let content = div().id("appearance-exerciser-scroll").size_full().flex().flex_col().overflow_y_scroll()
             .gap(appearance.spacing(10.0))
             .p(appearance.spacing(14.0))
@@ -698,6 +729,15 @@ impl Render for AppearanceExerciser {
                 .child(action("appearance-reload-fonts", "Reload Fonts", Self::reload_fonts))
                 .child(action("appearance-show-fixtures", "Show Acceptance Fixtures", Self::show_fixture_window))
                 .child(action("appearance-show-terminal", "Show Terminal Window", Self::show_terminal_window)))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(appearance.spacing(18.0))
+                    .child(checkbox)
+                    .child(notification_switch),
+            )
             .child(div().text_size(appearance.text_size(12.0)).whitespace_normal().child(self.status.clone()))
             .child(div().text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(
                 "The JSON editor is a bounded single-line development field. Export, edit or paste a native settings/color package, then use the matching action. Preview never writes; Commit uses the isolated retained Config root."

@@ -30,6 +30,7 @@ mod terminal_ime;
 mod terminal_pane;
 mod terminal_symbols;
 mod text_input_theme;
+mod toggle_theme;
 mod tooltip_theme;
 mod workspace_chrome;
 mod workspace_manager;
@@ -156,6 +157,7 @@ mod tests {
 
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
+                && cx.has_global::<spaceterm_ui::ToggleTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
                 && cx.has_global::<spaceterm_ui::ResizeHandleTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
