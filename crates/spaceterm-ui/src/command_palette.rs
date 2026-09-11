@@ -1467,6 +1467,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     hover_suppressed: bool,
     pointer_anchor: gpui::Point<Pixels>,
     list: ListState,
+    list_row_heights: Option<[Pixels; 4]>,
     scrollbar_reveal_pending: bool,
     selection_reveal_pending: bool,
     _input_subscription: Subscription,
@@ -1821,6 +1822,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             hover_suppressed: false,
             pointer_anchor: gpui::point(px(0.0), px(0.0)),
             list,
+            list_row_heights: None,
             scrollbar_reveal_pending: false,
             selection_reveal_pending: false,
             _input_subscription: input_subscription,
@@ -2774,6 +2776,27 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             self.reveal_scrollbar(cx);
         } else {
             self.sync_scrollbar(cx);
+        }
+        let row_heights = [
+            metrics.single_line_row_height,
+            metrics.row_height,
+            metrics.section_height,
+            metrics.separator_height,
+        ];
+        if self
+            .list_row_heights
+            .replace(row_heights)
+            .is_some_and(|previous| previous != row_heights)
+        {
+            // GPUI retains offscreen heights until reset, even when the list width is unchanged.
+            let scroll_top = self.list.logical_scroll_top();
+            self.list.reset(self.presented_results.len());
+            self.list.scroll_to(scroll_top);
+            // Synchronize the scrollbar once the current layout has remeasured the list.
+            let palette = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = palette.update(cx, |_, cx| cx.notify());
+            });
         }
         if std::mem::take(&mut self.selection_reveal_pending) {
             let palette = cx.entity().downgrade();
