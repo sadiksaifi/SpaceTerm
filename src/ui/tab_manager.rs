@@ -1487,10 +1487,12 @@ mod tests {
         )
     }
 
+    type InspectedGlyphStyles = Rc<RefCell<Vec<(Option<SharedString>, Option<Hsla>)>>>;
+
     fn inspect_lucide_glyph_foreground(
         selector: &'static str,
         pressed: bool,
-        observed: &Rc<RefCell<Vec<(Option<SharedString>, Option<Hsla>)>>>,
+        observed: &InspectedGlyphStyles,
         cx: &mut VisualTestContext,
     ) -> Hsla {
         let mut position = cx
