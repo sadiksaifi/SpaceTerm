@@ -4,14 +4,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{
-    Action, App, Context, Entity, EventEmitter, PromptButton, PromptLevel, Render, SharedString,
-    Window, div, px,
-};
+use gpui::{Action, App, Context, Entity, EventEmitter, Render, SharedString, Window, div};
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName, MenuEntry,
+    Alert, AlertIntent, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy,
+    CommandPaletteCloseReason, CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName,
+    MenuEntry, ModalAction, ModalActionRole, ModalId,
 };
 
 use super::{
@@ -34,7 +32,6 @@ use crate::local_path::{
     DirectoryPathFormatError, LocalPathSemantics, ParsedDirectoryPath,
     display_directory_with_style, parse_directory_path,
 };
-const ROW_ICON_SIZE: f32 = 14.0;
 const DIRECTORY_SELECTION_ACTION: &str = "directory-picker-directory-selection";
 const RETRY_ACTION: &str = "directory-picker-retry";
 const SYSTEM_SETTINGS_ACTION: &str = "directory-picker-open-system-settings";
@@ -575,41 +572,67 @@ impl DirectoryPicker {
             "Create {}? Missing parent directories will also be created.",
             parsed.display()
         );
-        let response = window.prompt(
-            PromptLevel::Info,
+        let picker = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let result = Alert::new(
+            ModalId::new("directory-picker-create"),
+            "Create directory",
             "Create this directory?",
-            Some(&detail),
-            &[
-                PromptButton::ok("Create & Pin"),
-                PromptButton::cancel("Cancel"),
+            detail,
+            vec![
+                ModalAction::new(
+                    true,
+                    "Create & Pin",
+                    ModalActionRole::Affirmative,
+                    "directory-picker-create-confirm",
+                )
+                .default_action(true),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "directory-picker-create-cancel",
+                ),
             ],
-            cx,
-        );
-        cx.spawn_in(window, async move |picker, cx| {
-            let answer = response.await.ok();
-            let _ = picker.update_in(cx, |picker, window, cx| {
-                if !picker.open
-                    || picker.busy != Some(DirectoryPickerBusy::CreationPrompt)
-                    || picker.parsed.as_ref().map(ParsedDirectoryPath::exact_path)
-                        != Some(parsed.exact_path())
-                {
-                    return;
+        )
+        .intent(AlertIntent::Informational)
+        .present(window, cx, move |outcome, cx| {
+            let answer = matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: true,
+                    ..
                 }
-                if answer == Some(0) {
-                    picker.start_validation(
-                        parsed.exact_path().to_owned(),
-                        ValidationKind::Creation,
-                        window,
-                        cx,
-                    );
-                } else {
-                    picker.busy = None;
-                    picker.publish(cx);
-                    picker.refocus_path(window, cx);
-                }
+            );
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = picker.update(cx, |picker, cx| {
+                    if !picker.open
+                        || picker.busy != Some(DirectoryPickerBusy::CreationPrompt)
+                        || picker.parsed.as_ref().map(ParsedDirectoryPath::exact_path)
+                            != Some(parsed.exact_path())
+                    {
+                        return;
+                    }
+                    if answer {
+                        picker.start_validation(
+                            parsed.exact_path().to_owned(),
+                            ValidationKind::Creation,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        picker.busy = None;
+                        picker.publish(cx);
+                        picker.refocus_path(window, cx);
+                    }
+                });
             });
-        })
-        .detach();
+        });
+        if result.is_err() {
+            self.busy = None;
+            self.publish(cx);
+            self.refocus_path(window, cx);
+        }
     }
 
     fn start_validation(
@@ -891,8 +914,8 @@ fn directory_palette_item(
         entry.path().to_path_buf(),
         format!("{}{}", entry.name(), paths.separator()),
     )
-    .leading_icon(move |foreground| {
-        Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
+    .leading_icon(move |foreground, size| {
+        Icon::new(IconName::Folder, size, foreground).into_any_element()
     })
     .debug_selector(selector)
 }
@@ -1846,11 +1869,14 @@ mod tests {
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
-        assert!(cx.has_pending_prompt());
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         cx.deactivate_window();
         cx.run_until_parked();
         cx.update(|window, _| window.activate_window());
-        cx.simulate_prompt_answer("Cancel");
+        let cancel = cx
+            .debug_bounds("modal-action-directory-picker-create-cancel")
+            .expect("cancel action should render");
+        cx.simulate_click(cancel.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(path_bar(&picker, cx), "~/new-project");
@@ -1878,11 +1904,15 @@ mod tests {
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
-        assert!(cx.has_pending_prompt());
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         cx.deactivate_window();
         cx.run_until_parked();
         cx.update(|window, _| window.activate_window());
-        cx.simulate_prompt_answer("Create & Pin");
+        let confirm = cx
+            .debug_bounds("modal-action-directory-picker-create-confirm")
+            .expect("creation action should render");
+        cx.simulate_mouse_move(confirm.center(), None, gpui::Modifiers::none());
+        cx.simulate_click(confirm.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
@@ -1961,8 +1991,11 @@ mod tests {
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
-        cx.simulate_prompt_answer("Create & Pin");
-        assert!(cx.executor().tick(), "prompt completion did not run");
+        let confirm = cx
+            .debug_bounds("modal-action-directory-picker-create-confirm")
+            .expect("creation action should render");
+        cx.simulate_mouse_move(confirm.center(), None, gpui::Modifiers::none());
+        cx.simulate_click(confirm.center(), gpui::Modifiers::none());
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
         });
@@ -1972,7 +2005,10 @@ mod tests {
         cx.run_until_parked();
 
         assert!(!programmatic_dismissed);
-        assert_eq!(retained, (true, Some(DirectoryPickerBusy::Creating)));
+        assert_eq!(
+            retained,
+            (true, Some(DirectoryPickerBusy::AwaitingActivation))
+        );
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.busy),
             Some(DirectoryPickerBusy::AwaitingActivation)
@@ -2067,8 +2103,11 @@ mod tests {
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Create & Pin");
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        let confirm = cx
+            .debug_bounds("modal-action-directory-picker-create-confirm")
+            .expect("creation action should render");
+        cx.simulate_click(confirm.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         let input = path_bar(&picker, cx);

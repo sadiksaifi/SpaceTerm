@@ -3,6 +3,7 @@ use super::secure_filesystem::*;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub(crate) struct RecordingFilesystem {
@@ -10,9 +11,38 @@ pub(crate) struct RecordingFilesystem {
     pub(crate) events: Mutex<Vec<&'static str>>,
     sockets: Mutex<std::collections::BTreeMap<PathBuf, u64>>,
     next: std::sync::atomic::AtomicU64,
+    pub(crate) root_failure: Mutex<Option<SecureFilesystemError>>,
+    prepared_files: Arc<AtomicUsize>,
+    pub(crate) files: Mutex<RecordingPrivateFiles>,
+}
+
+#[derive(Default)]
+pub(crate) struct RecordingPrivateFiles {
+    pub(crate) values: std::collections::BTreeMap<PathBuf, (Vec<u8>, u64)>,
+    pub(crate) successor_after_commit: Option<Vec<u8>>,
+    pub(crate) commit_outcome: Option<SecureCommitOutcome>,
+    pub(crate) prepare_failures: usize,
+    pub(crate) prepare_error: Option<SecureFilesystemError>,
+    pub(crate) prepare_count: usize,
+    pub(crate) commit_error: Option<SecureFilesystemError>,
+    pub(crate) read_failure: Option<SecureFilesystemError>,
 }
 #[derive(Clone)]
 struct RecordingDirectory(PathBuf);
+
+struct RecordingPreparedFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    _lease: RecordingPreparedFileLease,
+}
+
+struct RecordingPreparedFileLease(Arc<AtomicUsize>);
+
+impl Drop for RecordingPreparedFileLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 impl RecordingFilesystem {
     fn path(directory: &SecureDirectory) -> Result<&PathBuf, SecureFilesystemError> {
@@ -25,6 +55,10 @@ impl RecordingFilesystem {
     fn directory(path: PathBuf) -> SecureDirectory {
         SecureDirectory(Arc::new(RecordingDirectory(path)))
     }
+
+    pub(crate) fn prepared_file_count(&self) -> usize {
+        self.prepared_files.load(Ordering::Relaxed)
+    }
 }
 
 impl SecureFilesystem for RecordingFilesystem {
@@ -32,6 +66,9 @@ impl SecureFilesystem for RecordingFilesystem {
         &self,
         path: &Path,
     ) -> Result<Option<SecureDirectory>, SecureFilesystemError> {
+        if let Some(error) = *self.root_failure.lock().unwrap() {
+            return Err(error);
+        }
         Ok(self
             .directories
             .lock()
@@ -44,6 +81,9 @@ impl SecureFilesystem for RecordingFilesystem {
         path: &Path,
     ) -> Result<SecureDirectory, SecureFilesystemError> {
         self.events.lock().unwrap().push("ensure");
+        if let Some(error) = *self.root_failure.lock().unwrap() {
+            return Err(error);
+        }
         self.directories.lock().unwrap().insert(path.to_path_buf());
         Ok(Self::directory(path.to_path_buf()))
     }
@@ -61,6 +101,9 @@ impl SecureFilesystem for RecordingFilesystem {
     }
     fn verify_directory(&self, _: &SecureDirectory) -> Result<(), SecureFilesystemError> {
         self.events.lock().unwrap().push("verify");
+        if let Some(error) = *self.root_failure.lock().unwrap() {
+            return Err(error);
+        }
         Ok(())
     }
     fn remove_private_child(
@@ -74,27 +117,89 @@ impl SecureFilesystem for RecordingFilesystem {
     }
     fn read_private_file(
         &self,
-        _: &SecureDirectory,
-        _: &OsStr,
-        _: usize,
+        directory: &SecureDirectory,
+        name: &OsStr,
+        maximum_bytes: usize,
     ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError> {
-        Ok(None)
+        let files = self.files.lock().unwrap();
+        if let Some(error) = files.read_failure {
+            return Err(error);
+        }
+        files
+            .values
+            .get(&Self::path(directory)?.join(name))
+            .map(|(bytes, identity)| {
+                if bytes.len() > maximum_bytes {
+                    return Err(SecureFilesystemError::Unsafe);
+                }
+                Ok(PrivateFileSnapshot {
+                    bytes: bytes.clone(),
+                    identity: SecureEntryIdentity::from_opaque(*identity),
+                })
+            })
+            .transpose()
     }
     fn prepare_private_file(
         &self,
-        _: &SecureDirectory,
-        _: &OsStr,
-        _: &[u8],
+        directory: &SecureDirectory,
+        name: &OsStr,
+        bytes: &[u8],
         _: [u8; 16],
     ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
-        Ok(PreparedPrivateFile(Box::new(())))
+        let mut files = self.files.lock().unwrap();
+        files.prepare_count += 1;
+        if let Some(error) = files.prepare_error {
+            return Err(error);
+        }
+        if files.prepare_failures > 0 {
+            files.prepare_failures -= 1;
+            return Err(SecureFilesystemError::AlreadyExists);
+        }
+        let path = Self::path(directory)?.join(name);
+        self.prepared_files.fetch_add(1, Ordering::Relaxed);
+        Ok(PreparedPrivateFile::from_opaque(RecordingPreparedFile {
+            path,
+            bytes: bytes.to_vec(),
+            _lease: RecordingPreparedFileLease(Arc::clone(&self.prepared_files)),
+        }))
     }
     fn commit_private_file(
         &self,
-        _: PreparedPrivateFile,
-        _: Option<&SecureEntryIdentity>,
-    ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
-        Ok(SecureCommitOutcome::Committed)
+        prepared: PreparedPrivateFile,
+        expected: Option<&SecureEntryIdentity>,
+    ) -> Result<SecureCommitResult, SecureFilesystemError> {
+        let RecordingPreparedFile {
+            path,
+            bytes,
+            _lease,
+        } = *prepared
+            .into_opaque::<RecordingPreparedFile>()
+            .map_err(|_| SecureFilesystemError::Unsafe)?;
+        let expected = expected
+            .and_then(|identity| identity.opaque_ref::<u64>())
+            .copied();
+        let mut files = self.files.lock().unwrap();
+        if let Some(error) = files.commit_error {
+            return Err(error);
+        }
+        if files.values.get(&path).map(|(_, identity)| *identity) != expected {
+            return Ok(SecureCommitResult::conflict());
+        }
+        let outcome = files
+            .commit_outcome
+            .unwrap_or(SecureCommitOutcome::Committed);
+        if outcome == SecureCommitOutcome::Conflict {
+            return Ok(SecureCommitResult::conflict());
+        }
+        let identity = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        files.values.insert(path.clone(), (bytes, identity));
+        if let Some(bytes) = files.successor_after_commit.take() {
+            files.values.insert(path, (bytes, identity + 1));
+        }
+        Ok(SecureCommitResult::committed(
+            outcome,
+            SecureEntryIdentity::from_opaque(identity),
+        ))
     }
     fn register_socket(
         &self,

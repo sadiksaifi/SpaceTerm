@@ -62,6 +62,9 @@ pub struct TooltipMetrics {
     primary_font_size: Pixels,
     secondary_font_size: Pixels,
     keyboard_font_size: Pixels,
+    primary_line_height: Pixels,
+    secondary_line_height: Pixels,
+    keyboard_line_height: Pixels,
 }
 
 impl TooltipMetrics {
@@ -80,6 +83,9 @@ impl TooltipMetrics {
             primary_font_size: px(11.0),
             secondary_font_size: px(10.0),
             keyboard_font_size: px(10.0),
+            primary_line_height: px(13.0),
+            secondary_line_height: px(12.0),
+            keyboard_line_height: px(12.0),
         }
     }
 
@@ -116,6 +122,54 @@ impl TooltipMetrics {
         self.keyboard_font_size = bounded_metric(keyboard, 8.0, 20.0, 10.0);
         self
     }
+
+    /// Sets primary, secondary, and keyboard-equivalent line heights.
+    pub fn line_heights(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
+        self.primary_line_height = bounded_metric(primary, 8.0, 64.0, 13.0);
+        self.secondary_line_height = bounded_metric(secondary, 8.0, 64.0, 12.0);
+        self.keyboard_line_height = bounded_metric(keyboard, 8.0, 64.0, 12.0);
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(text_scale)
+            .max(crate::appearance::normalized_scale(spacing_scale));
+        Self {
+            maximum_width: self.maximum_width * width_scale,
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
+            content_gap: crate::appearance::scale_metric(self.content_gap, spacing_scale),
+            keyboard_gap: crate::appearance::scale_metric(self.keyboard_gap, spacing_scale),
+            target_gap: crate::appearance::scale_metric(self.target_gap, spacing_scale),
+            viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            primary_font_size: crate::appearance::scale_metric(self.primary_font_size, text_scale),
+            secondary_font_size: crate::appearance::scale_metric(
+                self.secondary_font_size,
+                text_scale,
+            ),
+            keyboard_font_size: crate::appearance::scale_metric(
+                self.keyboard_font_size,
+                text_scale,
+            ),
+            primary_line_height: crate::appearance::scale_metric(
+                self.primary_line_height,
+                text_scale,
+            ),
+            secondary_line_height: crate::appearance::scale_metric(
+                self.secondary_line_height,
+                text_scale,
+            ),
+            keyboard_line_height: crate::appearance::scale_metric(
+                self.keyboard_line_height,
+                text_scale,
+            ),
+        }
+    }
 }
 
 fn bounded_metric(value: Pixels, minimum: f32, maximum: f32, fallback: f32) -> Pixels {
@@ -138,6 +192,13 @@ impl TooltipTheme {
     /// Creates a complete tooltip theme from application-owned colors and bounded metrics.
     pub fn new(paint: TooltipPaint, metrics: TooltipMetrics) -> Self {
         Self { paint, metrics }
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            ..self
+        }
     }
 }
 
@@ -303,6 +364,7 @@ impl RenderOnce for TooltipTarget {
                     render_surface(
                         &self.tooltip,
                         cx.global::<TooltipTheme>(),
+                        crate::control_typography(cx).regular().clone(),
                         window.viewport_size(),
                     ),
                     cx.global::<TooltipTheme>().metrics,
@@ -327,7 +389,12 @@ impl RenderOnce for TooltipTarget {
     }
 }
 
-fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels>) -> AnyElement {
+fn render_surface(
+    tooltip: &Tooltip,
+    theme: &TooltipTheme,
+    font: gpui::Font,
+    viewport: Size<Pixels>,
+) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
     let available = available_tooltip_size(viewport, metrics.viewport_margin);
@@ -344,6 +411,7 @@ fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels
                 .flex_grow()
                 .whitespace_normal()
                 .text_size(metrics.primary_font_size)
+                .line_height(metrics.primary_line_height)
                 .text_color(paint.primary)
                 .child(tooltip.text.clone()),
         )
@@ -353,6 +421,7 @@ fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .text_size(metrics.keyboard_font_size)
+                    .line_height(metrics.keyboard_line_height)
                     .text_color(paint.keyboard)
                     .child(keyboard),
             )
@@ -376,6 +445,7 @@ fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels
         .border(metrics.border_width)
         .border_color(paint.border)
         .bg(paint.background)
+        .font(font)
         .cursor_default()
         .child(primary)
         .when_some(tooltip.detail.clone(), |surface, detail| {
@@ -383,6 +453,7 @@ fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels
                 div()
                     .whitespace_normal()
                     .text_size(metrics.secondary_font_size)
+                    .line_height(metrics.secondary_line_height)
                     .text_color(paint.secondary)
                     .child(detail),
             )

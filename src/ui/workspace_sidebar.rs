@@ -4,12 +4,10 @@ mod text;
 mod view;
 
 use super::workspace_chrome::WorkspaceChromeLayout;
-use super::{
-    NewRemoteWorkspace, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
-};
+use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
+use crate::appearance::ChromeColors;
+use crate::appearance::Color;
 use crate::domain::{RemoteConnectionPhase, WorkspaceId};
-use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -422,12 +420,15 @@ pub(super) fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&
     }
 }
 
-pub(super) fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
+pub(super) fn remote_connection_color(
+    phase: RemoteConnectionPhase,
+    colors: &ChromeColors,
+) -> Color {
     match phase {
-        RemoteConnectionPhase::Reconnecting => ACTIVE_THEME.info,
-        RemoteConnectionPhase::Connected => ACTIVE_THEME.success,
-        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => ACTIVE_THEME.icon,
-        RemoteConnectionPhase::Failed => ACTIVE_THEME.error,
+        RemoteConnectionPhase::Reconnecting => colors.info,
+        RemoteConnectionPhase::Connected => colors.success,
+        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => colors.icon_muted,
+        RemoteConnectionPhase::Failed => colors.error,
     }
 }
 
@@ -595,15 +596,8 @@ impl WorkspaceSidebar {
 }
 
 // Preserve the muted hierarchy while keeping small text readable on selected and hovered rows.
-fn secondary_text_color() -> Color {
-    let muted = ACTIVE_THEME.text_muted;
-    let text = ACTIVE_THEME.text;
-    let channel = |muted: u8, text: u8| ((u16::from(muted) * 7 + u16::from(text)) / 8) as u8;
-    Color::from_rgb_components(
-        channel(muted.r, text.r),
-        channel(muted.g, text.g),
-        channel(muted.b, text.b),
-    )
+fn secondary_text_color(colors: &ChromeColors) -> Color {
+    colors.text_secondary
 }
 
 impl WorkspaceSidebar {
@@ -703,11 +697,12 @@ mod tests {
     }
     #[test]
     fn secondary_text_should_be_readable_on_every_row_background() {
-        let foreground = luminance(secondary_text_color());
+        let colors = ChromeColors::default();
+        let foreground = luminance(secondary_text_color(&colors));
         for background in [
-            ACTIVE_THEME.panel_background,
-            ACTIVE_THEME.element_selected,
-            ACTIVE_THEME.ghost_element_hover,
+            colors.panel_background,
+            colors.ghost_element_selected,
+            colors.ghost_element_hover,
         ] {
             let background = luminance(background);
             assert!(
@@ -718,20 +713,26 @@ mod tests {
     #[test]
     fn connection_states_should_use_semantic_colors() {
         assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Reconnecting),
-            ACTIVE_THEME.info
+            remote_connection_color(
+                RemoteConnectionPhase::Reconnecting,
+                &ChromeColors::default()
+            ),
+            ChromeColors::default().info
         );
         assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Failed),
-            ACTIVE_THEME.error
+            remote_connection_color(RemoteConnectionPhase::Failed, &ChromeColors::default()),
+            ChromeColors::default().error
         );
         assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Disconnected),
-            ACTIVE_THEME.icon
+            remote_connection_color(
+                RemoteConnectionPhase::Disconnected,
+                &ChromeColors::default()
+            ),
+            ChromeColors::default().icon_muted
         );
         assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Closing),
-            ACTIVE_THEME.icon
+            remote_connection_color(RemoteConnectionPhase::Closing, &ChromeColors::default()),
+            ChromeColors::default().icon_muted
         );
     }
 }

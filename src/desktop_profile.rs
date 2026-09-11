@@ -180,7 +180,7 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 21] {
+fn required_presented_actions() -> [&'static str; 22] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
@@ -199,6 +199,7 @@ fn required_presented_actions() -> [&'static str; 21] {
         crate::ui::ActivateWorkspace8.name(),
         crate::ui::ActivateWorkspace9.name(),
         SwitchWorkspace.name(),
+        crate::ui::ToggleSidebar.name(),
         NewWorkspace.name(),
         crate::ui::NewRemoteWorkspace.name(),
         CreateTab.name(),
@@ -239,6 +240,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(crate::ui::ActivateWorkspace8, "Ctrl+8"),
             ActionShortcut::new(crate::ui::ActivateWorkspace9, "Ctrl+9"),
             ActionShortcut::new(SwitchWorkspace, "Primary+K"),
+            ActionShortcut::new(crate::ui::ToggleSidebar, "Primary+B"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(crate::ui::NewRemoteWorkspace, "Primary+Shift+N"),
             ActionShortcut::new(CreateTab, "Primary+T"),
@@ -250,6 +252,11 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(TogglePaneZoom, "Primary+Shift+Enter"),
             ActionShortcut::new(ClosePane, "Primary+W"),
             ActionShortcut::new(CloseTab, "Primary+Shift+W"),
+            #[cfg(feature = "appearance-exerciser")]
+            ActionShortcut::new(
+                crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                "Primary+Alt+C",
+            ),
         ],
     )
 }
@@ -311,6 +318,21 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        #[cfg(feature = "appearance-exerciser")]
+        let expected = {
+            let mut expected = expected;
+            expected.extend([
+                format!(
+                    "alt-cmd-a\tNone\t{}",
+                    crate::ui::appearance_exerciser::ShowAppearanceExerciser.name()
+                ),
+                format!(
+                    "alt-cmd-c\tNone\t{}",
+                    crate::ui::appearance_exerciser::ToggleAppearancePreview.name()
+                ),
+            ]);
+            expected
+        };
         assert_eq!(actual, expected);
     }
 

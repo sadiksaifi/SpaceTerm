@@ -48,6 +48,11 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
+    pub(crate) fn settings_storage(&self) -> Arc<dyn crate::settings::storage::SettingsStorage> {
+        Arc::new(crate::settings::storage::ConfigSettingsStorage::new(
+            Arc::clone(&self.paths),
+        ))
+    }
     #[expect(
         clippy::too_many_arguments,
         reason = "startup consumes independently captured host facts and capabilities"
@@ -538,8 +543,20 @@ pub(crate) struct HostComposition {
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     titlebar: Option<TitlebarOptions>,
+    appearance: Option<(
+        Arc<dyn crate::settings::storage::SettingsStorage>,
+        Rc<dyn crate::platform::appearance::AppearancePlatform>,
+    )>,
 }
 impl HostComposition {
+    pub(crate) fn with_appearance(
+        mut self,
+        storage: Arc<dyn crate::settings::storage::SettingsStorage>,
+        platform: Rc<dyn crate::platform::appearance::AppearancePlatform>,
+    ) -> Self {
+        self.appearance = Some((storage, platform));
+        self
+    }
     pub(crate) fn new(
         parts: HostCompositionParts,
     ) -> Result<Self, crate::desktop_profile::DesktopProfileError> {
@@ -560,6 +577,7 @@ impl HostComposition {
             services: parts.services,
             window_movement: parts.window_movement,
             titlebar: parts.titlebar,
+            appearance: None,
         })
     }
 }
@@ -623,13 +641,22 @@ fn start_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    if let Some((storage, platform)) = &host.appearance {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
+            .map_err(|_| RuntimeError::Initialization)?;
+    }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     host.profile.install(cx);
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
     init(cx, Rc::clone(&host.adapters.application_menu));
-    open(cx, host)
+    let workspace = open(cx, host)?;
+    #[cfg(feature = "appearance-exerciser")]
+    crate::ui::appearance_exerciser::open(workspace, cx)
+        .map_err(|_| RuntimeError::Initialization)?;
+    Ok(workspace)
 }
 
 #[cfg(test)]

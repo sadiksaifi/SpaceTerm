@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::accessibility::{
@@ -954,7 +955,7 @@ fn check_presentation(issue: u8) -> Result<(), String> {
         10 => {
             require(
                 snapshot.rows[0][0].foreground_source
-                    == TerminalColor::Rgb(crate::theme::Color::from_rgb_components(1, 2, 3)),
+                    == TerminalColor::Rgb(crate::appearance::Color::from_rgb_components(1, 2, 3)),
                 "color-source",
                 "truecolor foreground was not preserved",
             )?;
@@ -1884,6 +1885,29 @@ fn semantic_snapshot_fixtures_match_terminal_state() {
             panic!("{error}");
         }
     }
+}
+
+#[test]
+fn appearance_classification_query_and_mode_reports_track_applied_generation() {
+    let mut emulator = emulator(8, 2).unwrap();
+    emulator.feed(b"\x1b[?996n");
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;1n");
+
+    emulator.feed(b"\x1b[?2031h");
+    let mut update = crate::terminal::test_terminal_appearance_update();
+    update.generation = crate::appearance::AppearanceGeneration::new(2);
+    Arc::make_mut(&mut update.appearance).appearance = crate::appearance::Appearance::Light;
+    emulator.apply_appearance(update).unwrap();
+
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;2n");
+    let screen = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        (
+            screen.appearance_generation.get(),
+            screen.terminal_appearance
+        ),
+        (2, crate::appearance::Appearance::Light)
+    );
 }
 
 #[test]

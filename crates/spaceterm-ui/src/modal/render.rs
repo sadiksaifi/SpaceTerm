@@ -184,6 +184,7 @@ fn render_overlay(
 ) -> AnyElement {
     let metrics = theme.metrics;
     let paint = theme.paint;
+    let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
     let desired_width = metrics.width_for(match snapshot.kind {
         ModalKind::Alert => DialogSize::Regular,
@@ -271,6 +272,7 @@ fn render_overlay(
         geometry.size.height * metrics.header_maximum_fraction(),
         metrics,
         paint,
+        typography.heading().clone(),
     );
     let suppression_is_focused = suppression_focus.is_focused(window);
     let body = render_body(
@@ -329,6 +331,7 @@ fn render_overlay(
         .border_color(paint.border)
         .bg(paint.surface)
         .text_color(paint.primary_text)
+        .font(typography.regular().clone())
         .track_focus(&scope)
         .key_context(MODAL_KEY_CONTEXT)
         .on_action(move |_: &TraverseForward, window, cx| {
@@ -495,6 +498,7 @@ fn render_header(
     maximum_height: gpui::Pixels,
     metrics: ModalMetrics,
     paint: ModalPaint,
+    heading_font: gpui::Font,
 ) -> AnyElement {
     let (title, description) = match &snapshot.semantics {
         PreparedModalSemantics::Alert { visible_title, .. } => (visible_title.clone(), None),
@@ -525,7 +529,7 @@ fn render_header(
                 .min_w_0()
                 .text_size(metrics.title_size)
                 .text_color(paint.primary_text)
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font(heading_font)
                 .whitespace_normal()
                 .child(title),
         )
@@ -915,10 +919,14 @@ fn render_alert_suppression(
     } else {
         IconName::Square
     };
-    let checkbox_color = if selected {
-        paint.progress_fill
+    let checkbox_color = if !enabled {
+        paint.suppression_disabled
+    } else if focused {
+        paint.suppression_focused
+    } else if selected {
+        paint.suppression_selected
     } else {
-        paint.secondary_text
+        paint.suppression_unselected
     };
     let control = div()
         .id(("modal-suppression", presentation.value()))

@@ -3,13 +3,15 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use super::secure_filesystem::{
-    PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory,
-    SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
+    PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome, SecureCommitResult,
+    SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
 };
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -32,10 +34,25 @@ struct NativeIdentity {
     inode: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFileVersion {
+    entry: NativeIdentity,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFileIdentity {
+    version: NativeFileVersion,
+    fingerprint: [u8; 32],
+}
+
 struct NativePreparedFile {
     directory: Arc<NativeDirectory>,
     file: File,
     identity: NativeIdentity,
+    file_identity: Option<NativeFileIdentity>,
     temporary_name: CString,
     target_name: OsString,
     active: bool,
@@ -145,7 +162,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(classify(error)),
         };
-        let identity = private_file_identity(&file.metadata().map_err(classify)?)?;
+        let version = private_file_version(&file.metadata().map_err(classify)?)?;
         let mut bytes = Vec::new();
         (&file)
             .take(maximum_bytes.saturating_add(1) as u64)
@@ -154,12 +171,20 @@ impl SecureFilesystem for MacosSecureFilesystem {
         if bytes.len() > maximum_bytes {
             return Err(SecureFilesystemError::Unsafe);
         }
-        verify_directory_entry(&directory)?;
-        let current =
-            file_identity_at(&directory.file, name)?.ok_or(SecureFilesystemError::Unsafe)?;
-        if current != identity {
+        let open_version = private_file_version(&file.metadata().map_err(classify)?)?;
+        if open_version != version {
             return Err(SecureFilesystemError::Unsafe);
         }
+        verify_directory_entry(&directory)?;
+        let current =
+            file_version_at(&directory.file, name)?.ok_or(SecureFilesystemError::Unsafe)?;
+        if current != version {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        let identity = NativeFileIdentity {
+            version,
+            fingerprint: fingerprint(&bytes),
+        };
         Ok(Some(PrivateFileSnapshot {
             bytes,
             identity: SecureEntryIdentity(Arc::new(identity)),
@@ -179,7 +204,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
         let temporary = open_file_at_cstring(
             &directory.file,
             &temporary_name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
             PRIVATE_FILE_MODE,
         )
         .map_err(classify)?;
@@ -188,6 +213,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             directory: Arc::clone(&directory),
             file: temporary,
             identity,
+            file_identity: None,
             temporary_name,
             target_name: target.to_os_string(),
             active: true,
@@ -197,6 +223,11 @@ impl SecureFilesystem for MacosSecureFilesystem {
             private_file_identity(&prepared.file.metadata()?).map_err(as_io_error)?;
             (&prepared.file).write_all(bytes)?;
             prepared.file.sync_all()?;
+            let version = private_file_version(&prepared.file.metadata()?).map_err(as_io_error)?;
+            prepared.file_identity = Some(NativeFileIdentity {
+                version,
+                fingerprint: fingerprint(bytes),
+            });
             verify_directory_entry(&directory).map_err(as_io_error)
         })() {
             prepared.active = true;
@@ -209,25 +240,30 @@ impl SecureFilesystem for MacosSecureFilesystem {
         &self,
         prepared: PreparedPrivateFile,
         expected: Option<&SecureEntryIdentity>,
-    ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
+    ) -> Result<SecureCommitResult, SecureFilesystemError> {
         let mut prepared = prepared
             .0
             .downcast::<NativePreparedFile>()
             .map_err(|_| SecureFilesystemError::Unsafe)?;
+        let prepared_file_identity = prepared
+            .file_identity
+            .ok_or(SecureFilesystemError::Unsafe)?;
         let _transaction = lock_private_directory(&prepared.directory)?;
         verify_directory_entry(&prepared.directory)?;
-        let open_identity = private_file_identity(&prepared.file.metadata().map_err(classify)?)?;
-        if open_identity != prepared.identity {
-            return Err(SecureFilesystemError::Unsafe);
-        }
+        validate_prepared_file(&prepared)?;
         let temporary_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
         if file_identity_at(&prepared.directory.file, temporary_name)? != Some(prepared.identity) {
             return Err(SecureFilesystemError::Unsafe);
         }
-        let actual = file_identity_at(&prepared.directory.file, &prepared.target_name)?;
-        let expected = expected.map(identity).transpose()?.copied();
-        if actual != expected {
-            return Ok(SecureCommitOutcome::Conflict);
+        let expected = expected.map(file_snapshot_identity).transpose()?.copied();
+        let matches_expected = match expected {
+            Some(expected) => {
+                file_matches_snapshot_at(&prepared.directory.file, &prepared.target_name, expected)?
+            }
+            None => file_identity_at(&prepared.directory.file, &prepared.target_name)?.is_none(),
+        };
+        if !matches_expected {
+            return Ok(SecureCommitResult::conflict());
         }
         if let Some(expected) = expected {
             validate_prepared_file(&prepared)?;
@@ -245,9 +281,13 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 rollback_prepared_swap(&mut prepared)?;
                 return Err(error);
             }
-            match file_identity_at(&prepared.directory.file, &prepared.target_name) {
-                Ok(Some(installed)) if installed == prepared.identity => {}
-                Ok(_) => {
+            match file_matches_snapshot_at(
+                &prepared.directory.file,
+                &prepared.target_name,
+                prepared_file_identity,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
                     rollback_prepared_swap(&mut prepared)?;
                     return Err(SecureFilesystemError::Unsafe);
                 }
@@ -257,11 +297,11 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 }
             }
             let displaced_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
-            match file_identity_at(&prepared.directory.file, displaced_name) {
-                Ok(Some(displaced)) if displaced == expected => {}
-                Ok(_) => {
+            match file_matches_snapshot_at(&prepared.directory.file, displaced_name, expected) {
+                Ok(true) => {}
+                Ok(false) => {
                     rollback_prepared_swap(&mut prepared)?;
-                    return Ok(SecureCommitOutcome::Conflict);
+                    return Ok(SecureCommitResult::conflict());
                 }
                 Err(error) => {
                     rollback_prepared_swap(&mut prepared)?;
@@ -275,7 +315,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             if let Err(error) = quarantine_and_remove(
                 &prepared.directory.file,
                 displaced_name,
-                expected,
+                expected.version.entry,
                 EntryKind::RegularFile,
             ) {
                 rollback_prepared_swap(&mut prepared)?;
@@ -288,7 +328,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             match rename_exclusive_at(&prepared.directory.file, temporary_name, &target_name) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    return Ok(SecureCommitOutcome::Conflict);
+                    return Ok(SecureCommitResult::conflict());
                 }
                 Err(error) => return Err(classify(error)),
             }
@@ -297,9 +337,13 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 rollback_exclusive_publish(&mut prepared)?;
                 return Err(error);
             }
-            match file_identity_at(&prepared.directory.file, &prepared.target_name) {
-                Ok(Some(installed)) if installed == prepared.identity => {}
-                Ok(_) => {
+            match file_matches_snapshot_at(
+                &prepared.directory.file,
+                &prepared.target_name,
+                prepared_file_identity,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
                     rollback_exclusive_publish(&mut prepared)?;
                     return Err(SecureFilesystemError::Unsafe);
                 }
@@ -313,11 +357,13 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 return Err(error);
             }
         }
+        let published_identity = SecureEntryIdentity(Arc::new(prepared_file_identity));
         prepared.active = false;
-        match prepared.directory.file.sync_all() {
-            Ok(()) => Ok(SecureCommitOutcome::Committed),
-            Err(_) => Ok(SecureCommitOutcome::CommittedButUnsynced),
-        }
+        let outcome = match prepared.directory.file.sync_all() {
+            Ok(()) => SecureCommitOutcome::Committed,
+            Err(_) => SecureCommitOutcome::CommittedButUnsynced,
+        };
+        Ok(SecureCommitResult::committed(outcome, published_identity))
     }
 
     fn register_socket(
@@ -403,7 +449,18 @@ fn directory(handle: &SecureDirectory) -> Result<Arc<NativeDirectory>, SecureFil
 fn identity(handle: &SecureEntryIdentity) -> Result<&NativeIdentity, SecureFilesystemError> {
     handle
         .0
+        .as_any()
         .downcast_ref::<NativeIdentity>()
+        .ok_or(SecureFilesystemError::Unsafe)
+}
+
+fn file_snapshot_identity(
+    handle: &SecureEntryIdentity,
+) -> Result<&NativeFileIdentity, SecureFilesystemError> {
+    handle
+        .0
+        .as_any()
+        .downcast_ref::<NativeFileIdentity>()
         .ok_or(SecureFilesystemError::Unsafe)
 }
 
@@ -574,9 +631,29 @@ fn private_file_identity(metadata: &fs::Metadata) -> Result<NativeIdentity, Secu
     Ok(metadata_identity(metadata))
 }
 
+fn private_file_version(
+    metadata: &fs::Metadata,
+) -> Result<NativeFileVersion, SecureFilesystemError> {
+    Ok(NativeFileVersion {
+        entry: private_file_identity(metadata)?,
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+    })
+}
+
 fn validate_prepared_file(prepared: &NativePreparedFile) -> Result<(), SecureFilesystemError> {
-    let open_identity = private_file_identity(&prepared.file.metadata().map_err(classify)?)?;
-    if open_identity != prepared.identity {
+    let expected = prepared
+        .file_identity
+        .ok_or(SecureFilesystemError::Unsafe)?;
+    let before = private_file_version(&prepared.file.metadata().map_err(classify)?)?;
+    let open_fingerprint = file_fingerprint(&prepared.file, expected.version.size)?;
+    let after = private_file_version(&prepared.file.metadata().map_err(classify)?)?;
+    if before != expected.version
+        || after != expected.version
+        || open_fingerprint != expected.fingerprint
+        || before.entry != prepared.identity
+    {
         return Err(SecureFilesystemError::Unsafe);
     }
     Ok(())
@@ -745,6 +822,90 @@ fn file_identity_at(
         device: status.st_dev as u64,
         inode: status.st_ino,
     }))
+}
+
+fn file_version_at(
+    parent: &File,
+    name: &OsStr,
+) -> Result<Option<NativeFileVersion>, SecureFilesystemError> {
+    let status = match status_at(parent, name) {
+        Ok(status) => status,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(classify(error)),
+    };
+    let mode = u32::from(status.st_mode);
+    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG)
+        || status.st_uid != effective_user_id()
+        || mode & 0o7777 != PRIVATE_FILE_MODE
+        || status.st_nlink != 1
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(Some(NativeFileVersion {
+        entry: NativeIdentity {
+            device: status.st_dev as u64,
+            inode: status.st_ino,
+        },
+        size: status.st_size as u64,
+        modified_seconds: status.st_mtime,
+        modified_nanoseconds: status.st_mtime_nsec,
+    }))
+}
+
+fn file_matches_snapshot_at(
+    parent: &File,
+    name: &OsStr,
+    expected: NativeFileIdentity,
+) -> Result<bool, SecureFilesystemError> {
+    let file = match open_file_at(parent, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(classify(error)),
+    };
+    let before = private_file_version(&file.metadata().map_err(classify)?)?;
+    if before != expected.version {
+        return Ok(false);
+    }
+    let fingerprint = file_fingerprint(&file, expected.version.size)?;
+    let after = private_file_version(&file.metadata().map_err(classify)?)?;
+    Ok(after == expected.version && fingerprint == expected.fingerprint)
+}
+
+fn fingerprint(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn file_fingerprint(file: &File, expected_size: u64) -> Result<[u8; 32], SecureFilesystemError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut offset = 0_u64;
+    while offset < expected_size {
+        let remaining = expected_size - offset;
+        let length = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| SecureFilesystemError::Unsafe)?;
+        let read = loop {
+            match file.read_at(&mut buffer[..length], offset) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result.map_err(classify)?,
+            }
+        };
+        if read == 0 {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        hasher.update(&buffer[..read]);
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or(SecureFilesystemError::Unsafe)?;
+    }
+    let mut trailing = [0_u8; 1];
+    if file
+        .read_at(&mut trailing, expected_size)
+        .map_err(classify)?
+        != 0
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn socket_identity_at(
@@ -1150,7 +1311,7 @@ mod tests {
             .prepare_private_file(&directory, OsStr::new("config"), b"first", [1; 16])
             .unwrap();
         assert_eq!(
-            filesystem.commit_private_file(first, None).unwrap(),
+            filesystem.commit_private_file(first, None).unwrap().outcome,
             SecureCommitOutcome::Committed
         );
         let snapshot = filesystem
@@ -1166,7 +1327,8 @@ mod tests {
         assert_eq!(
             filesystem
                 .commit_private_file(replacement, Some(&snapshot.identity))
-                .unwrap(),
+                .unwrap()
+                .outcome,
             SecureCommitOutcome::Committed
         );
 
@@ -1174,8 +1336,83 @@ mod tests {
             .commit_private_file(stale, Some(&snapshot.identity))
             .unwrap();
 
-        assert_eq!(result, SecureCommitOutcome::Conflict);
+        assert_eq!(result.outcome, SecureCommitOutcome::Conflict);
         assert_eq!(fs::read(root.join("config")).unwrap(), b"replacement");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_should_preserve_an_in_place_external_edit() {
+        let root = test_root("in-place-edit");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let initial = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"initial", [26; 16])
+            .unwrap();
+        filesystem.commit_private_file(initial, None).unwrap();
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let replacement = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", [27; 16])
+            .unwrap();
+        let target = root.join("config");
+        let original_modified = fs::metadata(&target).unwrap().modified().unwrap();
+        fs::write(&target, b"changed").unwrap();
+        File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+
+        let edited = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let result = filesystem
+            .commit_private_file(replacement, Some(&snapshot.identity))
+            .unwrap();
+
+        assert_ne!(edited.identity, snapshot.identity);
+        assert_eq!(result.outcome, SecureCommitOutcome::Conflict);
+        assert_eq!(fs::read(&target).unwrap(), b"changed");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_should_rollback_when_displaced_snapshot_validation_fails() {
+        let root = test_root("displaced-validation");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let initial = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"initial", [28; 16])
+            .unwrap();
+        filesystem.commit_private_file(initial, None).unwrap();
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let replacement = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", [29; 16])
+            .unwrap();
+        let displaced = prepared_path(&root, &replacement);
+        let retained_link = root.join("retained-link");
+        let hook_displaced = displaced.clone();
+        let hook_retained_link = retained_link.clone();
+        AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::hard_link(hook_displaced, hook_retained_link).unwrap();
+            }));
+        });
+
+        let result = filesystem.commit_private_file(replacement, Some(&snapshot.identity));
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"initial");
+        assert_eq!(fs::read(retained_link).unwrap(), b"initial");
+        assert!(!displaced.exists());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1237,8 +1474,14 @@ mod tests {
             excluded,
             "publication must retain exclusion through validation"
         );
-        assert_eq!(first_result.unwrap(), SecureCommitOutcome::Committed);
-        assert_eq!(second_result.unwrap(), SecureCommitOutcome::Committed);
+        assert_eq!(
+            first_result.unwrap().outcome,
+            SecureCommitOutcome::Committed
+        );
+        assert_eq!(
+            second_result.unwrap().outcome,
+            SecureCommitOutcome::Committed
+        );
         assert_eq!(fs::read(root.join("config")).unwrap(), b"first+second");
         let _ = fs::remove_dir_all(root);
     }
@@ -1338,7 +1581,10 @@ mod tests {
             .prepare_private_file(&directory, OsStr::new("config"), b"original", [5; 16])
             .unwrap();
         assert_eq!(
-            filesystem.commit_private_file(original, None).unwrap(),
+            filesystem
+                .commit_private_file(original, None)
+                .unwrap()
+                .outcome,
             SecureCommitOutcome::Committed
         );
         let snapshot = filesystem

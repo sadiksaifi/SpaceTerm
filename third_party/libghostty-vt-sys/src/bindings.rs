@@ -3463,6 +3463,14 @@ pub mod TerminalData {
     pub const CURSOR_AT_PROMPT: Type = 39;
     #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
     pub const CLIPBOARD_WRITE_MAX_BYTES: Type = 40;
+    #[doc = " Whether the effective foreground is an OSC override.\n\n Output type: bool *"]
+    pub const COLOR_FOREGROUND_OVERRIDDEN: Type = 41;
+    #[doc = " Whether the effective background is an OSC override.\n\n Output type: bool *"]
+    pub const COLOR_BACKGROUND_OVERRIDDEN: Type = 42;
+    #[doc = " Whether the effective cursor color is an OSC override.\n\n Output type: bool *"]
+    pub const COLOR_CURSOR_OVERRIDDEN: Type = 43;
+    #[doc = " Palette indices whose effective values are OSC overrides.\n\n Output type: GhosttyColorPaletteMask *"]
+    pub const COLOR_PALETTE_OVERRIDES: Type = 44;
     #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
     pub const MAX_VALUE: Type = 2147483647;
 }

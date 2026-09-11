@@ -10,7 +10,8 @@ use gpui::{
 };
 
 use crate::{
-    Icon, IconName, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    ControlShadow, Icon, IconName, TextInput, TextInputEvent, TextInputTabBehavior,
+    TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -549,7 +550,8 @@ pub enum CommandPaletteAccessory {
     Checkmark,
 }
 
-type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type ActionIconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 
 /// One control rendered at the trailing edge of the command-palette search line.
 ///
@@ -559,7 +561,7 @@ type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 pub struct CommandPaletteAction {
     id: SharedString,
     accessibility_name: SharedString,
-    icon: IconBuilder,
+    icon: ActionIconBuilder,
     disabled: bool,
     debug_selector: Option<String>,
 }
@@ -705,7 +707,7 @@ pub struct CommandPaletteItem<I> {
     section: Option<SharedString>,
     keywords: Vec<SharedString>,
     disabled: bool,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<RowIconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
 }
@@ -773,8 +775,8 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Adds a bounded leading icon built with the resolved row foreground color.
-    pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    /// Adds a bounded leading icon built with the resolved row foreground color and live size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
     }
@@ -1040,6 +1042,7 @@ pub struct CommandPalettePaint {
     muted: Rgba,
     disabled: Rgba,
     hover_background: Rgba,
+    hover_foreground: Rgba,
     selected_background: Rgba,
     selected_foreground: Rgba,
     match_foreground: Rgba,
@@ -1077,6 +1080,7 @@ impl CommandPalettePaint {
             muted,
             disabled,
             hover_background: selected_background,
+            hover_foreground: selected_foreground,
             selected_background,
             selected_foreground,
             match_foreground,
@@ -1104,6 +1108,12 @@ impl CommandPalettePaint {
     /// Sets the pointer-hover row background, which stays distinct from the selected background.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
+        self
+    }
+
+    /// Sets the foreground of a pointer-highlighted result independently of keyboard selection.
+    pub fn hover_foreground(mut self, color: Rgba) -> Self {
+        self.hover_foreground = color;
         self
     }
 
@@ -1148,6 +1158,8 @@ pub struct CommandPaletteMetrics {
     accessory_padding: Pixels,
     accessory_line_padding: Pixels,
     accessory_radius: Pixels,
+    line_height: Pixels,
+    icon_size: Pixels,
 }
 
 impl CommandPaletteMetrics {
@@ -1178,6 +1190,8 @@ impl CommandPaletteMetrics {
             accessory_padding: px(5.0),
             accessory_line_padding: px(2.0),
             accessory_radius: px(4.0),
+            line_height: px(16.0),
+            icon_size: px(12.0),
         }
     }
 
@@ -1282,6 +1296,84 @@ impl CommandPaletteMetrics {
         self
     }
 
+    /// Sets the shared text line height and chrome glyph size.
+    pub fn text_geometry(mut self, line_height: Pixels, icon_size: Pixels) -> Self {
+        self.line_height = line_height;
+        self.icon_size = icon_size;
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(text_scale)
+            .max(crate::appearance::normalized_scale(spacing_scale));
+        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+        Self {
+            panel_width: self.panel_width * width_scale,
+            maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
+            top_offset: crate::appearance::scale_metric(self.top_offset, spacing_scale),
+            viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
+            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            input_height: crate::appearance::scale_line_box(
+                self.input_height,
+                self.line_height,
+                text_scale,
+                spacing_scale,
+            ),
+            row_height: crate::appearance::scale_line_box(
+                self.row_height,
+                self.line_height * 2.0,
+                text_scale,
+                spacing_scale,
+            ),
+            single_line_row_height: crate::appearance::scale_line_box(
+                self.single_line_row_height,
+                self.line_height,
+                text_scale,
+                spacing_scale,
+            ),
+            row_line_gap: crate::appearance::scale_metric(self.row_line_gap, spacing_scale),
+            section_height: crate::appearance::scale_line_box(
+                self.section_height,
+                self.secondary_size,
+                text_scale,
+                spacing_scale,
+            ),
+            separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
+            footer_height: crate::appearance::scale_line_box(
+                self.footer_height,
+                self.secondary_size,
+                text_scale,
+                spacing_scale,
+            ),
+            footer_padding: self
+                .footer_padding
+                .map(|value| crate::appearance::scale_metric(value, spacing_scale)),
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
+                .max(icon_size),
+            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            input_size: crate::appearance::scale_metric(self.input_size, text_scale),
+            label_size: crate::appearance::scale_metric(self.label_size, text_scale),
+            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
+            accessory_padding: crate::appearance::scale_metric(
+                self.accessory_padding,
+                spacing_scale,
+            ),
+            accessory_line_padding: crate::appearance::scale_metric(
+                self.accessory_line_padding,
+                spacing_scale,
+            ),
+            accessory_radius: crate::appearance::scale_metric(self.accessory_radius, spacing_scale),
+            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
+            icon_size,
+        }
+    }
+
     /// Returns the shared left edge of the editor, headings, status text, and row content.
     fn content_leading_inset(&self) -> Pixels {
         self.panel_padding + self.horizontal_padding
@@ -1303,12 +1395,30 @@ impl CommandPaletteMetrics {
 pub struct CommandPaletteTheme {
     paint: CommandPalettePaint,
     metrics: CommandPaletteMetrics,
+    shadow: ControlShadow,
 }
 
 impl CommandPaletteTheme {
     /// Creates a complete command-palette theme.
     pub fn new(paint: CommandPalettePaint, metrics: CommandPaletteMetrics) -> Self {
-        Self { paint, metrics }
+        Self {
+            paint,
+            metrics,
+            shadow: ControlShadow::large_default(),
+        }
+    }
+
+    /// Sets the semantic elevation used by the command-palette panel.
+    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            ..self
+        }
     }
 }
 
@@ -1357,6 +1467,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     hover_suppressed: bool,
     pointer_anchor: gpui::Point<Pixels>,
     list: ListState,
+    list_row_heights: Option<[Pixels; 4]>,
     scrollbar_reveal_pending: bool,
     selection_reveal_pending: bool,
     _input_subscription: Subscription,
@@ -1711,6 +1822,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             hover_suppressed: false,
             pointer_anchor: gpui::point(px(0.0), px(0.0)),
             list,
+            list_row_heights: None,
             scrollbar_reveal_pending: false,
             selection_reveal_pending: false,
             _input_subscription: input_subscription,
@@ -2659,10 +2771,32 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         }
         let theme = *cx.global::<CommandPaletteTheme>();
         let metrics = theme.metrics;
+        let font = crate::control_typography(cx).regular().clone();
         if std::mem::take(&mut self.scrollbar_reveal_pending) {
             self.reveal_scrollbar(cx);
         } else {
             self.sync_scrollbar(cx);
+        }
+        let row_heights = [
+            metrics.single_line_row_height,
+            metrics.row_height,
+            metrics.section_height,
+            metrics.separator_height,
+        ];
+        if self
+            .list_row_heights
+            .replace(row_heights)
+            .is_some_and(|previous| previous != row_heights)
+        {
+            // GPUI retains offscreen heights until reset, even when the list width is unchanged.
+            let scroll_top = self.list.logical_scroll_top();
+            self.list.reset(self.presented_results.len());
+            self.list.scroll_to(scroll_top);
+            // Synchronize the scrollbar once the current layout has remeasured the list.
+            let palette = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = palette.update(cx, |_, cx| cx.notify());
+            });
         }
         if std::mem::take(&mut self.selection_reveal_pending) {
             let palette = cx.entity().downgrade();
@@ -2724,6 +2858,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .w(viewport.width)
             .h(viewport.height)
             .key_context(KEY_CONTEXT)
+            .font(font)
+            .line_height(metrics.line_height)
             .track_focus(&self.focus_scope)
             .tab_group()
             .child(outside)
@@ -2885,7 +3021,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .flex_col()
             .overflow_hidden()
             .rounded(metrics.corner_radius)
-            .shadow_lg()
+            .shadow(theme.shadow.layers())
             .border(metrics.border_width)
             .border_color(paint.border)
             .bg(paint.background)
@@ -2965,14 +3101,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .relative()
             .size_full()
             .child(
-                list(self.list.clone(), move |index, _, _| {
+                list(self.list.clone(), move |index, _, cx| {
                     let Some(row) = presented_results.row(index) else {
                         return div().into_any_element();
                     };
                     let row_height = row.height(theme.metrics);
                     match row {
                         PaletteRow::Section(label) => {
-                            render_section(label.clone(), row_height, theme).into_any_element()
+                            let font = crate::control_typography(cx).emphasis().clone();
+                            render_section(label.clone(), row_height, theme, font)
+                                .into_any_element()
                         }
                         PaletteRow::Separator => {
                             render_row_separator(row_height, theme).into_any_element()
@@ -3200,6 +3338,7 @@ fn render_section(
     label: SharedString,
     height: Pixels,
     theme: CommandPaletteTheme,
+    font: gpui::Font,
 ) -> impl IntoElement {
     let metrics = theme.metrics;
     div()
@@ -3209,6 +3348,7 @@ fn render_section(
         .flex()
         .items_center()
         .text_size(metrics.secondary_size)
+        .font(font)
         .text_color(theme.paint.section_foreground)
         .child(label)
 }
@@ -3275,7 +3415,11 @@ fn render_row<I: Clone + Eq + 'static>(
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
-    let foreground = row_foreground(paint, item.disabled, selected);
+    let foreground = if selected && !hover_suppressed && !item.disabled {
+        paint.hover_foreground
+    } else {
+        row_foreground(paint, item.disabled, selected)
+    };
     let secondary = if item.disabled {
         paint.disabled
     } else {
@@ -3326,11 +3470,14 @@ fn render_row<I: Clone + Eq + 'static>(
             .items_center()
             .justify_center();
         if let Some(icon) = item.leading_icon.clone() {
-            leading = leading.child(icon(if item.disabled {
-                paint.disabled_icon_foreground
-            } else {
-                paint.icon_foreground
-            }));
+            leading = leading.child(icon(
+                if item.disabled {
+                    paint.disabled_icon_foreground
+                } else {
+                    paint.icon_foreground
+                },
+                metrics.icon_size,
+            ));
         }
         row = row.child(leading);
     }
@@ -3350,12 +3497,7 @@ fn render_row<I: Clone + Eq + 'static>(
             metrics.label_size,
         )))
         .when_some(item.trailing.clone(), |line, accessory| {
-            line.child(render_accessory(
-                accessory,
-                secondary,
-                paint.selected_background,
-                metrics,
-            ))
+            line.child(render_accessory(accessory, secondary, metrics))
         });
     let text = div()
         .min_w_0()
@@ -3483,7 +3625,6 @@ fn highlighted_text(
 fn render_accessory(
     accessory: CommandPaletteAccessory,
     color: Rgba,
-    _status_background: Rgba,
     metrics: CommandPaletteMetrics,
 ) -> AnyElement {
     match accessory {
@@ -3503,7 +3644,7 @@ fn render_accessory(
             .child(text)
             .into_any_element(),
         CommandPaletteAccessory::Checkmark => {
-            Icon::new(IconName::Check, px(12.0), color).into_any_element()
+            Icon::new(IconName::Check, metrics.icon_size, color).into_any_element()
         }
     }
 }

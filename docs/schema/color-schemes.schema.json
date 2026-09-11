@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spaceterm.dev/schema/color-schemes-v1.json",
+  "title": "SpaceTerm color-scheme package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schemes"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schemes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "appearance-settings.schema.json#/$defs/customScheme" }
+    }
+  }
+}

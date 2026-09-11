@@ -3,6 +3,21 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
+pub(super) trait EntryIdentityValue: Any + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn equals(&self, other: &dyn EntryIdentityValue) -> bool;
+}
+
+impl<T: Any + Eq + Send + Sync> EntryIdentityValue for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn equals(&self, other: &dyn EntryIdentityValue) -> bool {
+        other.as_any().downcast_ref::<T>() == Some(self)
+    }
+}
+
 /// Content-free classifications for failures at the secure filesystem boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecureFilesystemError {
@@ -18,7 +33,7 @@ pub(crate) struct SecureDirectory(pub(super) Arc<dyn Any + Send + Sync>);
 
 /// Opaque identity for one inspected directory entry.
 #[derive(Clone)]
-pub(crate) struct SecureEntryIdentity(pub(super) Arc<dyn Any + Send + Sync>);
+pub(crate) struct SecureEntryIdentity(pub(super) Arc<dyn EntryIdentityValue>);
 
 /// Opaque prepared same-directory file replacement.
 pub(crate) struct PreparedPrivateFile(pub(super) Box<dyn Any + Send>);
@@ -42,15 +57,23 @@ impl SecureDirectory {
 
 impl SecureEntryIdentity {
     #[cfg(test)]
-    pub(crate) fn from_opaque(value: impl Any + Send + Sync) -> Self {
+    pub(crate) fn from_opaque(value: impl Any + Eq + Send + Sync) -> Self {
         Self(Arc::new(value))
     }
 
     #[cfg(test)]
     pub(crate) fn opaque_ref<T: Any>(&self) -> Option<&T> {
-        self.0.downcast_ref()
+        self.0.as_any().downcast_ref()
     }
 }
+
+impl PartialEq for SecureEntryIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.equals(other.0.as_ref())
+    }
+}
+
+impl Eq for SecureEntryIdentity {}
 
 impl PreparedPrivateFile {
     #[cfg(test)]
@@ -72,6 +95,39 @@ pub(crate) enum SecureCommitOutcome {
     Committed,
     Conflict,
     CommittedButUnsynced,
+}
+
+/// The result of one identity-checked publication.
+///
+/// Successful results carry the identity of the exact prepared file published while the
+/// filesystem transaction was held. Callers must not recover write authority from a later path
+/// read, which could already observe a competing successor.
+pub(crate) struct SecureCommitResult {
+    pub(crate) outcome: SecureCommitOutcome,
+    pub(crate) published_identity: Option<SecureEntryIdentity>,
+}
+
+impl SecureCommitResult {
+    pub(crate) fn conflict() -> Self {
+        Self {
+            outcome: SecureCommitOutcome::Conflict,
+            published_identity: None,
+        }
+    }
+
+    pub(crate) fn committed(
+        outcome: SecureCommitOutcome,
+        published_identity: SecureEntryIdentity,
+    ) -> Self {
+        debug_assert!(matches!(
+            outcome,
+            SecureCommitOutcome::Committed | SecureCommitOutcome::CommittedButUnsynced
+        ));
+        Self {
+            outcome,
+            published_identity: Some(published_identity),
+        }
+    }
 }
 
 /// Irreducible race-resistant filesystem mechanics used by portable storage policy.
@@ -127,7 +183,7 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         &self,
         prepared: PreparedPrivateFile,
         expected: Option<&SecureEntryIdentity>,
-    ) -> Result<SecureCommitOutcome, SecureFilesystemError>;
+    ) -> Result<SecureCommitResult, SecureFilesystemError>;
 
     fn register_socket(
         &self,

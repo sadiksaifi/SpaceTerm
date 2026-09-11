@@ -323,6 +323,7 @@ impl<'a> ManagedHostsStore<'a> {
                         .paths
                         .filesystem()
                         .commit_private_file(prepared, expected)
+                        .map(|result| result.outcome)
                         .map_err(map_filesystem_error);
                 }
                 Err(SecureFilesystemError::AlreadyExists) => continue,
@@ -609,7 +610,9 @@ mod tests {
 
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
-    use crate::platform::secure_filesystem::{PreparedPrivateFile, SecureFilesystem};
+    use crate::platform::secure_filesystem::{
+        PreparedPrivateFile, SecureCommitResult, SecureFilesystem,
+    };
 
     #[derive(Default)]
     struct RecordingFilesystem {
@@ -629,7 +632,7 @@ mod tests {
 
     #[derive(Clone)]
     struct RecordingDirectory(PathBuf);
-    #[derive(Clone)]
+    #[derive(Clone, Eq, PartialEq)]
     struct RecordingIdentity(u64);
     struct RecordingPrepared(PathBuf, String, Vec<u8>);
 
@@ -744,7 +747,7 @@ mod tests {
             &self,
             prepared: PreparedPrivateFile,
             expected: Option<&SecureEntryIdentity>,
-        ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
+        ) -> Result<SecureCommitResult, SecureFilesystemError> {
             let RecordingPrepared(path, name, bytes) = *prepared
                 .into_opaque::<RecordingPrepared>()
                 .map_err(|_| SecureFilesystemError::Unsafe)?;
@@ -760,16 +763,19 @@ mod tests {
             state.events.push("commit");
             if state.conflicts_remaining > 0 {
                 state.conflicts_remaining -= 1;
-                return Ok(SecureCommitOutcome::Conflict);
+                return Ok(SecureCommitResult::conflict());
             }
             let key = (path, name);
             if state.files.get(&key).map(|(_, identity)| *identity) != expected {
-                return Ok(SecureCommitOutcome::Conflict);
+                return Ok(SecureCommitResult::conflict());
             }
             state.next_identity += 1;
             let identity = state.next_identity;
             state.files.insert(key, (bytes, identity));
-            Ok(SecureCommitOutcome::Committed)
+            Ok(SecureCommitResult::committed(
+                SecureCommitOutcome::Committed,
+                SecureEntryIdentity::from_opaque(RecordingIdentity(identity)),
+            ))
         }
 
         fn register_socket(

@@ -154,6 +154,7 @@ struct WheelContainmentRoot {
 struct IconTriggerRoot {
     disabled: bool,
     custom: bool,
+    icon_color: Rc<Cell<gpui::Rgba>>,
     before_focus: FocusHandle,
     after_focus: FocusHandle,
     events: Rc<RefCell<Vec<ComboBoxLifecycleEvent>>>,
@@ -162,6 +163,7 @@ struct IconTriggerRoot {
 impl Render for IconTriggerRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let events = Rc::clone(&self.events);
+        let icon_color = Rc::clone(&self.icon_color);
         crate::TooltipLayer::new(
             div()
                 .relative()
@@ -177,10 +179,11 @@ impl Render for IconTriggerRoot {
                         "Choose Workspace",
                         items(),
                     )
-                    .icon_trigger(|foreground| {
+                    .icon_trigger(move |foreground, size| {
+                        icon_color.set(foreground);
                         div()
                             .debug_selector(|| "combo-box-trigger-icon".to_owned())
-                            .size(px(12.0))
+                            .size(size)
                             .bg(foreground)
                             .into_any_element()
                     })
@@ -436,6 +439,13 @@ fn items() -> Vec<ComboBoxItem<u8>> {
             .debug_selector("combo-row-disabled"),
         ComboBoxItem::new(3, "Remote Workspace")
             .keywords(["ssh"])
+            .leading_icon(|foreground, size| {
+                div()
+                    .debug_selector(|| "combo-row-remote-icon".to_owned())
+                    .size(size)
+                    .bg(foreground)
+                    .into_any_element()
+            })
             .debug_selector("combo-row-remote"),
         ComboBoxItem::new(4, "Zellij Session").debug_selector("combo-row-zellij"),
     ]
@@ -655,6 +665,7 @@ fn icon_trigger_window(cx: &mut TestAppContext, disabled: bool) -> IconTriggerWi
     let (root, cx) = cx.add_window_view(move |_, cx| IconTriggerRoot {
         disabled,
         custom: false,
+        icon_color: Rc::new(Cell::new(rgba(0))),
         before_focus: cx.focus_handle().tab_stop(true),
         after_focus: cx.focus_handle().tab_stop(true),
         events: root_events,
@@ -2141,6 +2152,169 @@ fn repeated_end_should_reveal_the_active_last_result_after_manual_scrolling(
 }
 
 #[gpui::test]
+fn combo_box_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let observed = Rc::new(Cell::new(rgba(0)));
+    let icon_color = observed.clone();
+    root.update(cx, |root, cx| {
+        root.items = vec![
+            ComboBoxItem::new(1, "Contrast row")
+                .leading_icon(move |foreground, size| {
+                    icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("contrast-row"),
+        ];
+        cx.notify();
+    });
+    let white = rgba(0xffffffff);
+    let black = rgba(0x000000ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(black),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    assert_eq!(observed.get(), white);
+    let row = cx.debug_bounds("contrast-row").unwrap().center();
+    cx.simulate_mouse_move(row, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(observed.get(), black);
+    let green = rgba(0x004400ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(green),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    assert_eq!(observed.get(), green);
+    let trigger = trigger_center(cx);
+    cx.simulate_mouse_move(trigger, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(observed.get(), white);
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+}
+
+#[gpui::test]
+fn combo_box_hover_should_follow_replaced_rows_under_a_stationary_pointer(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let first_color = Rc::new(Cell::new(rgba(0)));
+    let second_color = Rc::new(Cell::new(rgba(0)));
+    let first_icon_color = first_color.clone();
+    let second_icon_color = second_color.clone();
+    root.update(cx, |root, cx| {
+        root.items = vec![
+            ComboBoxItem::new(1, "First")
+                .leading_icon(move |foreground, size| {
+                    first_icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("first-hover-row"),
+            ComboBoxItem::new(2, "Second")
+                .leading_icon(move |foreground, size| {
+                    second_icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("second-hover-row"),
+        ];
+        cx.notify();
+    });
+    let white = rgba(0xffffffff);
+    let black = rgba(0x000000ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(black),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    let pointer = cx.debug_bounds("first-hover-row").unwrap().center();
+    cx.simulate_mouse_move(pointer, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!((first_color.get(), second_color.get()), (black, white));
+
+    root.update(cx, |root, cx| {
+        root.items.swap(0, 1);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.debug_bounds("second-hover-row").unwrap().center(),
+        pointer
+    );
+    assert_eq!(
+        (first_color.get(), second_color.get()),
+        (white, black),
+        "hover paint must follow the current hitbox, not the old item or reused row element",
+    );
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+}
+
+#[gpui::test]
+fn trigger_icons_should_use_live_icon_colors_instead_of_text_colors(cx: &mut TestAppContext) {
+    let (root, _, cx) = icon_trigger_window(cx, false);
+    let text = rgba(0x11_22_33_ff);
+    let icon = rgba(0x44_aa_88_ff);
+    let disabled_icon = rgba(0x66_55_aa_ff);
+    let paint = ComboBoxPaint::new(
+        text, text, text, text, text, text, text, text, text, text, text,
+    )
+    .trigger_icon_colors(icon, disabled_icon);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            paint,
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    assert_eq!(root.read_with(cx, |root, _| root.icon_color.get()), icon);
+
+    open_by_pointer(cx);
+    assert_eq!(root.read_with(cx, |root, _| root.icon_color.get()), icon);
+    cx.simulate_keystrokes("escape");
+    root.update(cx, |root, cx| {
+        root.disabled = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        root.read_with(cx, |root, _| root.icon_color.get()),
+        disabled_icon
+    );
+}
+
+#[gpui::test]
 fn icon_trigger_should_remain_a_centered_square_without_the_prompt(cx: &mut TestAppContext) {
     let (_, _, cx) = icon_trigger_window(cx, false);
 
@@ -2151,6 +2325,54 @@ fn icon_trigger_should_remain_a_centered_square_without_the_prompt(cx: &mut Test
     assert_eq!(trigger.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(icon.center(), trigger.center());
     assert!(cx.debug_bounds("combo-box-trigger-label").is_none());
+}
+
+#[gpui::test]
+fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
+    let (_root, _events, cx) = icon_trigger_window(cx, false);
+    open_by_pointer(cx);
+    cx.simulate_input("ssh");
+    cx.run_until_parked();
+
+    let default_theme = cx.update(|_, cx| *cx.global::<ComboBoxTheme>());
+    let default_size = px(12.0);
+    let default_trigger_icon = cx
+        .debug_bounds("combo-box-trigger-icon")
+        .expect("the default trigger icon was not rendered");
+    let default_row_icon = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the filtered row icon was not rendered");
+
+    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
+    let scaled_size = px(24.0);
+    cx.update(|window, cx| {
+        cx.set_global(scaled_theme);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let scaled_trigger_icon = cx
+        .debug_bounds("combo-box-trigger-icon")
+        .expect("the open ComboBox trigger icon was not refreshed");
+    let scaled_row_icon = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the open filtered row icon was not refreshed");
+    assert_eq!(
+        (default_trigger_icon.size, default_row_icon.size),
+        (
+            gpui::size(default_size, default_size),
+            gpui::size(default_size, default_size),
+        )
+    );
+    assert_eq!(
+        (scaled_trigger_icon.size, scaled_row_icon.size),
+        (
+            gpui::size(scaled_size, scaled_size),
+            gpui::size(scaled_size, scaled_size),
+        )
+    );
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
+    assert!(cx.debug_bounds("combo-row-remote").is_some());
 }
 
 #[gpui::test]

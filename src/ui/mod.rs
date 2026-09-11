@@ -1,3 +1,7 @@
+pub(crate) mod appearance;
+#[cfg(feature = "appearance-exerciser")]
+pub(crate) mod appearance_exerciser;
+pub(crate) mod appearance_runtime;
 mod button_theme;
 mod combo_box_theme;
 mod command_palette_theme;
@@ -112,12 +116,14 @@ actions!(
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
 pub(crate) const TERMINAL_FIND_KEY_CONTEXT: &str = "TerminalFind";
 pub(crate) const TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT: &str = "TerminalPasteConfirmation";
+#[cfg(test)]
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
-    spaceterm_ui::init(cx, control_theme_catalog::catalog())
+    appearance::initialize(cx);
+    spaceterm_ui::init(cx, control_theme_catalog::catalog(appearance::chrome(cx)))
 }
 
 #[cfg(test)]
@@ -154,10 +160,12 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::ResizeHandleTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
                 && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
+                && cx.has_global::<spaceterm_ui::ComboBoxTheme>()
                 && cx.has_global::<spaceterm_ui::TextInputTheme>()
                 && cx.has_global::<spaceterm_ui::TooltipTheme>()
                 && cx.has_global::<spaceterm_ui::ModalTheme>()
-                && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme()
+                && *cx.global::<spaceterm_ui::ModalTheme>()
+                    == modal_theme::theme(&appearance::chrome(cx).colors)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
                     == spaceterm_ui::ModalDesktopPolicy::mac_os()

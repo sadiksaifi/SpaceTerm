@@ -24,7 +24,12 @@ fn capture_startup_dependencies() -> Result<
     StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
     StartupDependenciesError,
 > {
+    #[cfg(feature = "appearance-exerciser")]
+    let mut path_environment = super::app_paths::AppPathEnvironment::capture();
+    #[cfg(not(feature = "appearance-exerciser"))]
     let path_environment = super::app_paths::AppPathEnvironment::capture();
+    #[cfg(feature = "appearance-exerciser")]
+    isolate_appearance_exerciser_config(&mut path_environment)?;
     let path_host_facts = runtime_path_host_facts(&path_environment, || {
         std::fs::canonicalize(std::env::temp_dir())
     })?;
@@ -44,6 +49,38 @@ fn capture_startup_dependencies() -> Result<
         Arc::new(super::macos_control_socket::MacosControlSocketProbe),
         Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
     )
+}
+
+#[cfg(feature = "appearance-exerciser")]
+fn isolate_appearance_exerciser_config(
+    environment: &mut super::app_paths::AppPathEnvironment,
+) -> Result<(), StartupDependenciesError> {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    if std::env::var_os("SPACETERM_APPEARANCE_EXERCISER").as_deref() != Some(OsStr::new("1")) {
+        return Ok(());
+    }
+    let requested = std::env::var_os("SPACETERM_APPEARANCE_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("spaceterm-appearance-exerciser"));
+    let normal = requested.is_absolute()
+        && requested
+            .components()
+            .all(|component| !matches!(component, Component::ParentDir | Component::CurDir))
+        && requested.file_name() == Some(OsStr::new("spaceterm-appearance-exerciser"));
+    if !normal {
+        return Err(StartupDependenciesError::Paths);
+    }
+    let parent = requested.parent().ok_or(StartupDependenciesError::Paths)?;
+    let root = std::fs::canonicalize(parent)
+        .map_err(|_| StartupDependenciesError::Paths)?
+        .join("spaceterm-appearance-exerciser");
+    if environment.xdg_config_home.as_deref() == Some(root.as_os_str()) {
+        return Err(StartupDependenciesError::Paths);
+    }
+    environment.xdg_config_home = Some(root.into_os_string());
+    Ok(())
 }
 
 fn runtime_path_host_facts(
@@ -95,6 +132,7 @@ fn desktop_profile(
                 ActionShortcut::new(crate::ui::ActivateWorkspace8, "⌃8"),
                 ActionShortcut::new(crate::ui::ActivateWorkspace9, "⌃9"),
                 ActionShortcut::new(SwitchWorkspace, "⌘K"),
+                ActionShortcut::new(crate::ui::ToggleSidebar, "⌘B"),
                 ActionShortcut::new(NewWorkspace, "⌘N"),
                 ActionShortcut::new(crate::ui::NewRemoteWorkspace, "⇧⌘N"),
                 ActionShortcut::new(CreateTab, "⌘T"),
@@ -106,6 +144,11 @@ fn desktop_profile(
                 ActionShortcut::new(TogglePaneZoom, "⇧⌘↩"),
                 ActionShortcut::new(ClosePane, "⌘W"),
                 ActionShortcut::new(CloseTab, "⇧⌘W"),
+                #[cfg(feature = "appearance-exerciser")]
+                ActionShortcut::new(
+                    crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                    "⌥⌘C",
+                ),
             ],
         ),
         locale,
@@ -115,6 +158,7 @@ fn desktop_profile(
 fn compose(
     startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
 ) -> Result<HostComposition, DesktopProfileError> {
+    let settings_storage = startup.settings_storage();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
@@ -197,6 +241,12 @@ fn compose(
             appears_transparent: true,
             traffic_light_position: Some(point(px(12.0), px(11.0))),
         }),
+    })
+    .map(|host| {
+        host.with_appearance(
+            settings_storage,
+            Rc::new(super::macos_appearance::MacosAppearancePlatform),
+        )
     })
 }
 
@@ -387,6 +437,7 @@ mod tests {
             .install(cx);
             let presentation = DesktopPresentation::get(cx);
             assert_eq!(presentation.shortcut(&SwitchWorkspace), "⌘K");
+            assert_eq!(presentation.shortcut(&crate::ui::ToggleSidebar), "⌘B");
             assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
             assert_eq!(presentation.shortcut(&crate::ui::NewRemoteWorkspace), "⇧⌘N");
             assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
@@ -396,6 +447,11 @@ mod tests {
             assert_eq!(presentation.shortcut(&TogglePaneZoom), "⇧⌘↩");
             assert_eq!(presentation.shortcut(&ClosePane), "⌘W");
             assert_eq!(presentation.shortcut(&CloseTab), "⇧⌘W");
+            #[cfg(feature = "appearance-exerciser")]
+            assert_eq!(
+                presentation.shortcut(&crate::ui::appearance_exerciser::ToggleAppearancePreview),
+                "⌥⌘C"
+            );
             assert_eq!(presentation.command_palette_confirm_shortcut(), "⌘↩");
             assert_eq!(
                 presentation.wording().directory_selection,

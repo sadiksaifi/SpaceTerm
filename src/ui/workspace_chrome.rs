@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Pixels, Rgba, Window, div, px};
 use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon, IconName};
 
+use super::appearance::{ChromeAppearance, chrome};
 use super::workspace_sidebar::SidebarLayout;
 
 pub(super) const ICON_SIZE: f32 = 14.0;
@@ -49,21 +50,20 @@ impl WorkspaceChromeLayout {
     }
 
     pub(super) fn collapsed_width(name: &str, pinned: bool, window: &Window, cx: &App) -> Pixels {
-        let name_width = window
-            .text_system()
-            .shape_line(
-                name.to_owned().into(),
-                px(NAME_TEXT_SIZE),
-                &[window.text_style().to_run(name.len())],
-                None,
-            )
-            .width;
-        let pin_width = if pinned { PIN_SIZE + PIN_NAME_GAP } else { 0.0 };
-        let identity_width = (name_width + px(pin_width)).min(px(NAME_AND_PIN_MAXIMUM_WIDTH));
-        let content_width = px(SWITCHER_HORIZONTAL_PADDING * 2.0)
-            + px(ICON_SIZE + SWITCHER_IDENTITY_GAP)
+        let appearance = chrome(cx);
+        let name_width = appearance.measure_emphasis(name, NAME_TEXT_SIZE, window);
+        let pin_width = if pinned {
+            appearance.spacing(PIN_SIZE + PIN_NAME_GAP)
+        } else {
+            px(0.0)
+        };
+        let identity_width =
+            (name_width + pin_width).min(appearance.spacing(NAME_AND_PIN_MAXIMUM_WIDTH));
+        let content_width = appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
+            + appearance.spacing(ICON_SIZE + SWITCHER_IDENTITY_GAP)
             + identity_width;
-        (px(TRAFFIC_LIGHT_CLEARANCE + COLLAPSED_ACTION_GAP + COLLAPSED_TRAILING_GAP)
+        (px(TRAFFIC_LIGHT_CLEARANCE)
+            + appearance.spacing(COLLAPSED_ACTION_GAP + COLLAPSED_TRAILING_GAP)
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
                 .custom_trigger_width(content_width))
@@ -74,7 +74,12 @@ impl WorkspaceChromeLayout {
         self,
         toggle: impl IntoElement,
         switcher: impl IntoElement,
+        cx: &App,
     ) -> AnyElement {
+        let appearance = chrome(cx);
+        // Keep drag-region occlusion outside the tooltip target so the toggle cannot
+        // block its own help. Its button preserves hover within this control container.
+        let toggle = div().flex_none().block_mouse_except_scroll().child(toggle);
         // The visible control owns clicks where it meets the sidebar resize target.
         let switcher = div()
             .min_w_0()
@@ -83,16 +88,16 @@ impl WorkspaceChromeLayout {
             .child(switcher);
         div()
             .absolute()
-            .top(px(CONTROL_TOP_INSET))
+            .top(appearance.spacing(CONTROL_TOP_INSET))
             .left(px(TRAFFIC_LIGHT_CLEARANCE))
-            .right(px(if self.sidebar_visible {
+            .right(appearance.spacing(if self.sidebar_visible {
                 EXPANDED_TRAILING_GAP
             } else {
                 COLLAPSED_TRAILING_GAP
             }))
             .flex()
             .items_center()
-            .gap(px(if self.sidebar_visible {
+            .gap(appearance.spacing(if self.sidebar_visible {
                 EXPANDED_MINIMUM_ACTION_GAP
             } else {
                 COLLAPSED_ACTION_GAP
@@ -118,14 +123,15 @@ pub(super) struct WorkspaceChromeIdentity {
 }
 
 impl WorkspaceChromeIdentity {
-    pub(super) fn render(self, switcher_color: Rgba) -> AnyElement {
+    pub(super) fn render(self, switcher_color: Rgba, appearance: &ChromeAppearance) -> AnyElement {
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(PIN_NAME_GAP))
+            .gap(appearance.spacing(PIN_NAME_GAP))
+            .font(appearance.emphasis.clone())
             .flex_1()
             .min_w_0()
             .when(self.pinned, |chip| {
@@ -133,7 +139,11 @@ impl WorkspaceChromeIdentity {
                     div()
                         .debug_selector(|| "workspace-chip-pin".to_owned())
                         .flex_shrink_0()
-                        .child(Icon::new(IconName::Pin, px(PIN_SIZE), self.pin_color)),
+                        .child(Icon::new(
+                            IconName::Pin,
+                            appearance.spacing(PIN_SIZE),
+                            self.pin_color,
+                        )),
                 )
             })
             .child(
@@ -141,7 +151,7 @@ impl WorkspaceChromeIdentity {
                     .debug_selector(|| "workspace-chip-label".to_owned())
                     .min_w_0()
                     .truncate()
-                    .text_size(px(NAME_TEXT_SIZE))
+                    .text_size(appearance.text_size(NAME_TEXT_SIZE))
                     .text_color(self.foreground)
                     .child(self.name),
             );
@@ -150,15 +160,15 @@ impl WorkspaceChromeIdentity {
             .items_center()
             .w_full()
             .min_w_0()
-            .px(px(SWITCHER_HORIZONTAL_PADDING))
-            .gap(px(SWITCHER_IDENTITY_GAP))
+            .px(appearance.spacing(SWITCHER_HORIZONTAL_PADDING))
+            .gap(appearance.spacing(SWITCHER_IDENTITY_GAP))
             .child(
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
                     .flex_shrink_0()
                     .child(Icon::custom(
                         CustomIconName::RectangleStack,
-                        px(ICON_SIZE),
+                        appearance.spacing(ICON_SIZE),
                         switcher_color,
                     )),
             )

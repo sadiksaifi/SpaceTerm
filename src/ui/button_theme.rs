@@ -3,141 +3,141 @@ use spaceterm_ui::{
     ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle, ButtonVariants,
 };
 
-use crate::theme::{ACTIVE_THEME, Color};
+use crate::appearance::{ChromeColors, Color};
 
-pub(super) fn theme() -> ButtonTheme {
+pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
     ButtonTheme::new(
         ButtonVariants::new(
             variant(
                 paint(
-                    ACTIVE_THEME.element_selected,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_selected,
+                    colors.element_selected_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.element_hover,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_selected_hover,
+                    colors.element_selected_hover_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.element_active,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_active,
+                    colors.element_active_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.element_disabled,
-                    ACTIVE_THEME.text_disabled,
-                    ACTIVE_THEME.icon_disabled,
-                    ACTIVE_THEME.border_transparent,
-                ),
-            ),
-            variant(
-                paint(
-                    ACTIVE_THEME.element_background,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.element_hover,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.element_active,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.element_disabled,
-                    ACTIVE_THEME.text_disabled,
-                    ACTIVE_THEME.icon_disabled,
-                    ACTIVE_THEME.border_transparent,
-                ),
-            ),
-            outline(),
-            variant(
-                paint(
-                    ACTIVE_THEME.ghost_element_background,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.ghost_element_hover,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.ghost_element_active,
-                    ACTIVE_THEME.text,
-                    ACTIVE_THEME.icon,
-                    ACTIVE_THEME.border_transparent,
-                ),
-                paint(
-                    ACTIVE_THEME.ghost_element_disabled,
-                    ACTIVE_THEME.text_disabled,
-                    ACTIVE_THEME.icon_disabled,
-                    ACTIVE_THEME.border_transparent,
-                ),
-            ),
-            bare(),
-            variant(
-                paint(
-                    ACTIVE_THEME.error_background,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error_border,
-                ),
-                paint(
-                    ACTIVE_THEME.element_hover,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error_border,
-                ),
-                paint(
-                    ACTIVE_THEME.element_active,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error,
-                    ACTIVE_THEME.error_border,
-                ),
-                paint(
-                    ACTIVE_THEME.element_disabled,
-                    ACTIVE_THEME.text_disabled,
-                    ACTIVE_THEME.icon_disabled,
-                    ACTIVE_THEME.border_disabled,
+                    colors.element_disabled,
+                    colors.element_disabled_foreground,
+                    colors.icon_disabled,
+                    colors.border_transparent,
                 ),
             ),
             variant(
                 paint(
-                    ACTIVE_THEME.ghost_element_background,
-                    ACTIVE_THEME.link_text_hover,
-                    ACTIVE_THEME.link_text_hover,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_background,
+                    colors.element_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.ghost_element_background,
-                    ACTIVE_THEME.link_text_hover,
-                    ACTIVE_THEME.link_text_hover,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_hover,
+                    colors.element_hover_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.ghost_element_background,
-                    ACTIVE_THEME.text_accent,
-                    ACTIVE_THEME.text_accent,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_active,
+                    colors.element_active_foreground,
+                    colors.icon,
+                    colors.border_transparent,
                 ),
                 paint(
-                    ACTIVE_THEME.ghost_element_background,
-                    ACTIVE_THEME.text_disabled,
-                    ACTIVE_THEME.icon_disabled,
-                    ACTIVE_THEME.border_transparent,
+                    colors.element_disabled,
+                    colors.element_disabled_foreground,
+                    colors.icon_disabled,
+                    colors.border_transparent,
+                ),
+            ),
+            outline(colors),
+            variant(
+                paint(
+                    colors.ghost_element_background,
+                    colors.ghost_element_foreground,
+                    colors.icon,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_hover,
+                    colors.ghost_element_hover_foreground,
+                    colors.icon,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_active,
+                    colors.ghost_element_active_foreground,
+                    colors.icon,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_disabled,
+                    colors.ghost_element_disabled_foreground,
+                    colors.icon_disabled,
+                    colors.border_transparent,
+                ),
+            ),
+            bare(colors),
+            variant(
+                paint(
+                    colors.error_background,
+                    colors.error,
+                    colors.error,
+                    colors.error_border,
+                ),
+                paint(
+                    colors.element_hover,
+                    colors.error,
+                    colors.error,
+                    colors.error_border,
+                ),
+                paint(
+                    colors.element_active,
+                    colors.error,
+                    colors.error,
+                    colors.error_border,
+                ),
+                paint(
+                    colors.element_disabled,
+                    colors.element_disabled_foreground,
+                    colors.icon_disabled,
+                    colors.border_disabled,
+                ),
+            ),
+            variant(
+                paint(
+                    colors.ghost_element_background,
+                    colors.link_text,
+                    colors.link_text,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_background,
+                    colors.link_text_hover,
+                    colors.link_text_hover,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_background,
+                    colors.text_accent,
+                    colors.text_accent,
+                    colors.border_transparent,
+                ),
+                paint(
+                    colors.ghost_element_background,
+                    colors.ghost_element_disabled_foreground,
+                    colors.icon_disabled,
+                    colors.border_transparent,
                 ),
             ),
         ),
@@ -163,7 +163,7 @@ pub(super) fn theme() -> ButtonTheme {
                 .corner_radius(px(6.0))
                 .font_size(px(12.0)),
         ),
-        gpui_color(ACTIVE_THEME.border_focused),
+        gpui_color(colors.border_focused),
     )
 }
 
@@ -171,30 +171,25 @@ pub(super) fn theme() -> ButtonTheme {
 ///
 /// Chrome that must read as floating uses this: nothing paints behind the glyph, so the control
 /// carries the same visual weight as the text beside it.
-fn bare() -> ButtonVariantStyle {
+fn bare(colors: &ChromeColors) -> ButtonVariantStyle {
     variant(
         paint(
             transparent(),
-            ACTIVE_THEME.text_muted,
-            ACTIVE_THEME.text_muted,
+            colors.text_muted,
+            colors.text_muted,
+            transparent(),
+        ),
+        paint(transparent(), colors.text, colors.text, transparent()),
+        paint(
+            transparent(),
+            colors.text_accent,
+            colors.text_accent,
             transparent(),
         ),
         paint(
             transparent(),
-            ACTIVE_THEME.text,
-            ACTIVE_THEME.text,
-            transparent(),
-        ),
-        paint(
-            transparent(),
-            ACTIVE_THEME.text_accent,
-            ACTIVE_THEME.text_accent,
-            transparent(),
-        ),
-        paint(
-            transparent(),
-            ACTIVE_THEME.text_disabled,
-            ACTIVE_THEME.icon_disabled,
+            colors.text_disabled,
+            colors.icon_disabled,
             transparent(),
         ),
     )
@@ -202,37 +197,34 @@ fn bare() -> ButtonVariantStyle {
 
 /// A fully transparent paint value, so a state paints nothing rather than a themed surface.
 fn transparent() -> Color {
-    Color {
-        a: 0,
-        ..ACTIVE_THEME.background
-    }
+    Color::rgba(0)
 }
 
-fn outline() -> ButtonVariantStyle {
+fn outline(colors: &ChromeColors) -> ButtonVariantStyle {
     variant(
         paint(
-            ACTIVE_THEME.element_background,
-            ACTIVE_THEME.text,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border,
+            colors.element_background,
+            colors.element_foreground,
+            colors.icon,
+            colors.border,
         ),
         paint(
-            ACTIVE_THEME.element_hover,
-            ACTIVE_THEME.text,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border,
+            colors.element_hover,
+            colors.element_hover_foreground,
+            colors.icon,
+            colors.border,
         ),
         paint(
-            ACTIVE_THEME.element_active,
-            ACTIVE_THEME.text,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border,
+            colors.element_active,
+            colors.element_active_foreground,
+            colors.icon,
+            colors.border,
         ),
         paint(
-            ACTIVE_THEME.element_disabled,
-            ACTIVE_THEME.text_disabled,
-            ACTIVE_THEME.icon_disabled,
-            ACTIVE_THEME.border_disabled,
+            colors.element_disabled,
+            colors.element_disabled_foreground,
+            colors.icon_disabled,
+            colors.border_disabled,
         ),
     )
 }
@@ -265,14 +257,14 @@ mod tests {
 
     #[test]
     fn outline_press_should_preserve_the_normal_border() {
-        let outline = outline();
+        let outline = outline(&ChromeColors::default());
 
         assert_eq!(outline.normal().border(), outline.pressed().border());
     }
 
     #[test]
     fn bare_controls_should_paint_no_surface_in_any_state() {
-        let bare = bare();
+        let bare = bare(&ChromeColors::default());
 
         for paint in [
             bare.normal(),

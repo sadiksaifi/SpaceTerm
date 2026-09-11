@@ -19,7 +19,7 @@ pub use crate::anchored_placement::{
     AnchoredPlacementConfig as MenuPlacementConfig,
 };
 use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
-use crate::{Icon, IconName};
+use crate::{ControlShadow, Icon, IconName};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
@@ -225,6 +225,8 @@ pub struct MenuPaint {
     muted: Rgba,
     disabled: Rgba,
     selected_background: Rgba,
+    hover_background: Rgba,
+    hover_foreground: Rgba,
     selected_foreground: Rgba,
     destructive: Rgba,
     separator: Rgba,
@@ -258,6 +260,8 @@ impl MenuPaint {
             muted,
             disabled,
             selected_background,
+            hover_background: selected_background,
+            hover_foreground: selected_foreground,
             selected_foreground,
             destructive,
             separator,
@@ -266,6 +270,18 @@ impl MenuPaint {
             trigger_border: border,
             focus_border: selected_background,
         }
+    }
+
+    /// Sets row hover independently of keyboard selection.
+    pub fn hover_background(mut self, color: Rgba) -> Self {
+        self.hover_background = color;
+        self
+    }
+
+    /// Sets the foreground paired with the row hover background.
+    pub fn hover_foreground(mut self, color: Rgba) -> Self {
+        self.hover_foreground = color;
+        self
     }
 
     /// Sets the trigger's normal, hovered, and border colors.
@@ -300,6 +316,8 @@ pub struct MenuMetrics {
     shortcut_font_size: Pixels,
     panel_padding: Pixels,
     submenu_gap: Pixels,
+    icon_size: Pixels,
+    separator_thickness: Pixels,
 }
 
 impl MenuMetrics {
@@ -320,6 +338,8 @@ impl MenuMetrics {
             shortcut_font_size: px(11.0),
             panel_padding: px(4.0),
             submenu_gap: px(2.0),
+            icon_size: px(12.0),
+            separator_thickness: px(1.0),
         }
     }
 
@@ -372,6 +392,59 @@ impl MenuMetrics {
         self.submenu_gap = submenu_gap;
         self
     }
+
+    /// Sets the shared glyph size and visible separator thickness.
+    pub fn decoration_metrics(mut self, icon_size: Pixels, separator_thickness: Pixels) -> Self {
+        self.icon_size = icon_size;
+        self.separator_thickness = separator_thickness;
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(text_scale)
+            .max(crate::appearance::normalized_scale(spacing_scale));
+        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+        Self {
+            panel_width: self.panel_width * width_scale,
+            row_height: crate::appearance::scale_line_box(
+                self.row_height,
+                self.font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            section_height: crate::appearance::scale_line_box(
+                self.section_height,
+                self.shortcut_font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
+            trigger_height: crate::appearance::scale_line_box(
+                self.trigger_height,
+                self.font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale)
+                .max(icon_size),
+            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
+            shortcut_font_size: crate::appearance::scale_metric(
+                self.shortcut_font_size,
+                text_scale,
+            ),
+            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
+            icon_size,
+            separator_thickness: self.separator_thickness,
+        }
+    }
 }
 
 /// Complete metric catalog for menu densities.
@@ -399,6 +472,14 @@ impl MenuSizes {
             MenuSize::Wide => self.wide,
         }
     }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            small: self.small.scaled(text_scale, spacing_scale),
+            regular: self.regular.scaled(text_scale, spacing_scale),
+            wide: self.wide.scaled(text_scale, spacing_scale),
+        }
+    }
 }
 
 /// Application-owned menu colors and bounded metrics.
@@ -406,18 +487,37 @@ impl MenuSizes {
 pub struct MenuTheme {
     paint: MenuPaint,
     sizes: MenuSizes,
+    shadow: ControlShadow,
 }
 
 impl MenuTheme {
     /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
-        Self { paint, sizes }
+        Self {
+            paint,
+            sizes,
+            shadow: ControlShadow::medium_default(),
+        }
+    }
+
+    /// Sets the semantic elevation used by every menu panel.
+    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            ..self
+        }
     }
 
     fn resolve(self, size: MenuSize) -> MenuStyle {
         MenuStyle {
             paint: self.paint,
             metrics: self.sizes.resolve(size),
+            shadow: self.shadow,
         }
     }
 }
@@ -428,9 +528,11 @@ impl Global for MenuTheme {}
 struct MenuStyle {
     paint: MenuPaint,
     metrics: MenuMetrics,
+    shadow: ControlShadow,
 }
 
-type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type TriggerIconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 type InternalActivation = Rc<dyn Fn(MenuActivationSource, &mut Window, &mut App)>;
 type PickerChangeHandler<T> = Rc<dyn Fn(&PickerChange<T>, &mut Window, &mut App)>;
 type MenuLifecycleHandler = Rc<dyn Fn(&MenuLifecycleEvent, &mut App)>;
@@ -463,7 +565,7 @@ struct MenuItem<A> {
     disabled: bool,
     destructive: bool,
     shortcut: Option<SharedString>,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     mark: EntryMark,
     debug_selector: Option<String>,
 }
@@ -508,10 +610,10 @@ impl<A> MenuRadioOption<A> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// The selected radio mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.item.icon = Some(Rc::new(build));
         self
     }
@@ -660,10 +762,10 @@ impl<A> MenuEntry<A> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// A selected checkbox or radio mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         match &mut self.kind {
             MenuEntryKind::Item(item) => item.icon = Some(Rc::new(build)),
             MenuEntryKind::Submenu { item, .. } => item.icon = Some(Rc::new(build)),
@@ -722,7 +824,7 @@ pub(crate) struct PlainMenuAction<'entry, A> {
 pub struct Menu<A: Clone + 'static> {
     core: MenuControl<A>,
     label: SharedString,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<TriggerIconBuilder>,
     icon_trigger: bool,
 }
 
@@ -776,7 +878,7 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
                     .child(self.label)
                     .child(div().ml_auto().child(Icon::new(
                         IconName::ChevronDown,
-                        px(12.0),
+                        style.metrics.icon_size,
                         disclosure_foreground,
                     )))
             })
@@ -863,7 +965,7 @@ pub struct PickerOption<T> {
     value: T,
     label: SharedString,
     disabled: bool,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     debug_selector: Option<String>,
 }
 
@@ -885,10 +987,10 @@ impl<T> PickerOption<T> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// The selected option mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.icon = Some(Rc::new(build));
         self
     }
@@ -922,7 +1024,7 @@ impl std::error::Error for PickerBuildError {}
 pub struct Picker<T: Clone + PartialEq + 'static> {
     core: MenuControl<T>,
     selected_label: SharedString,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<TriggerIconBuilder>,
     on_change: Option<PickerChangeHandler<T>>,
 }
 
@@ -965,7 +1067,7 @@ impl<T: Clone + PartialEq + 'static> Picker<T> {
                 )
                 .disabled(option.disabled);
                 if let Some(icon) = option.icon {
-                    entry = entry.icon(move |color| icon(color));
+                    entry = entry.icon(move |color, size| icon(color, size));
                 }
                 if let Some(selector) = option.debug_selector {
                     entry = entry.debug_selector(selector);
@@ -1034,7 +1136,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
             .child(div().flex_grow().child(self.selected_label))
             .child(Icon::new(
                 IconName::ChevronDown,
-                px(12.0),
+                style.metrics.icon_size,
                 disclosure_foreground,
             ))
             .into_any_element();
@@ -1157,6 +1259,7 @@ impl<A> MenuControl<A> {
 impl<A: Clone + 'static> MenuControl<A> {
     fn render(self, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
         let style = cx.global::<MenuTheme>().resolve(self.size);
+        let font = crate::control_typography(cx).regular().clone();
         let enabled = self.is_enabled();
         let handler = self.on_activate;
         let lifecycle = self.on_lifecycle;
@@ -1385,6 +1488,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                     paint.disabled
                 })
                 .text_size(style.metrics.font_size)
+                .font(font)
                 .when(enabled && !open, |trigger| {
                     trigger.hover(move |style| style.bg(paint.trigger_hover_background))
                 });
@@ -1420,7 +1524,7 @@ enum InternalEntryKind {
         disabled: bool,
         destructive: bool,
         shortcut: Option<SharedString>,
-        icon: Option<IconBuilder>,
+        icon: Option<RowIconBuilder>,
         mark: EntryMark,
         debug_selector: Option<String>,
         activate: InternalActivation,
@@ -1432,7 +1536,7 @@ enum InternalEntryKind {
         disabled: bool,
         destructive: bool,
         shortcut: Option<SharedString>,
-        icon: Option<IconBuilder>,
+        icon: Option<RowIconBuilder>,
         debug_selector: Option<String>,
         entries: Vec<InternalEntry>,
     },
@@ -1750,6 +1854,7 @@ struct MenuState {
     restore_focus: Option<WeakFocusHandle>,
     active_path: Vec<usize>,
     highlighted: Vec<Option<usize>>,
+    hovered_row: Option<(usize, usize)>,
     panel_scroll: Vec<MenuPanelScroll>,
     typeahead: String,
     last_typeahead: Option<Instant>,
@@ -1815,6 +1920,7 @@ impl MenuState {
                     Rgba::default(),
                 ),
                 metrics: MenuMetrics::new(px(0.0), px(0.0)),
+                shadow: ControlShadow::none(),
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
@@ -1829,6 +1935,7 @@ impl MenuState {
             restore_focus: None,
             active_path: Vec::new(),
             highlighted: vec![None],
+            hovered_row: None,
             panel_scroll: Vec::new(),
             typeahead: String::new(),
             last_typeahead: None,
@@ -1931,6 +2038,7 @@ impl MenuState {
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
         self.open = true;
+        self.hovered_row = None;
         self.open_generation = self.open_generation.wrapping_add(1);
         self.reservation = reservation;
         self.awaiting_context_snapshot = self.freeze_entries_while_open;
@@ -2161,6 +2269,10 @@ impl MenuState {
         cx: &mut gpui::Context<Self>,
     ) {
         if !hovered {
+            if self.hovered_row == Some((depth, index)) {
+                self.hovered_row = None;
+                cx.notify();
+            }
             if depth > 0 {
                 self.schedule_submenu_close(depth - 1, cx);
             } else if self.active_path.get(depth) == Some(&index) {
@@ -2176,6 +2288,7 @@ impl MenuState {
             return;
         }
         self.invalidate_submenu_task();
+        self.hovered_row = Some((depth, index));
         self.highlighted.truncate(depth + 1);
         while self.highlighted.len() <= depth {
             self.highlighted.push(None);
@@ -2527,7 +2640,9 @@ fn activate_menu(
 }
 
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
+    let hovered_row = state.read(cx).hovered_row;
     let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
         let menu = state.read(cx);
         (
@@ -2635,6 +2750,7 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
         .w(viewport.width)
         .h(viewport.height)
         .key_context(KEY_CONTEXT)
+        .font(typography.regular().clone())
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
     for (depth, bounds, entries, highlighted, scroll) in panels {
@@ -2644,8 +2760,12 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             bounds,
             entries,
             highlighted,
+            hovered_row
+                .filter(|(hover_depth, _)| *hover_depth == depth)
+                .map(|(_, index)| index),
             style,
             scroll,
+            &typography,
         ));
     }
 
@@ -2732,14 +2852,20 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
     .into_any_element()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one recursive overlay renderer consumes placement, state, style, and typography"
+)]
 fn render_panel(
     state: WeakEntity<MenuState>,
     depth: usize,
     bounds: Bounds<Pixels>,
     entries: Vec<InternalEntry>,
     highlighted: Option<usize>,
+    hovered: Option<usize>,
     style: MenuStyle,
     scroll: ScrollHandle,
+    typography: &crate::ControlTypography,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -2753,7 +2879,7 @@ fn render_panel(
         .h(bounds.size.height)
         .overflow_hidden()
         .rounded(style.metrics.corner_radius)
-        .shadow_md()
+        .shadow(style.shadow.layers())
         .border(style.metrics.border_width)
         .border_color(style.paint.border)
         .bg(style.paint.background)
@@ -2779,7 +2905,12 @@ fn render_panel(
                         .mx(style.metrics.panel_padding)
                         .flex()
                         .items_center()
-                        .child(div().h(px(1.0)).w_full().bg(style.paint.separator)),
+                        .child(
+                            div()
+                                .h(style.metrics.separator_thickness)
+                                .w_full()
+                                .bg(style.paint.separator),
+                        ),
                 );
             }
             InternalEntryKind::Heading(label) => {
@@ -2792,6 +2923,7 @@ fn render_panel(
                         .items_center()
                         .text_color(style.paint.muted)
                         .text_size(style.metrics.shortcut_font_size)
+                        .font(typography.emphasis().clone())
                         .child(label),
                 );
             }
@@ -2819,6 +2951,7 @@ fn render_panel(
                     false,
                     Some(activate),
                     highlighted == Some(index),
+                    hovered == Some(index),
                     style,
                 ));
             }
@@ -2845,6 +2978,7 @@ fn render_panel(
                     true,
                     None,
                     highlighted == Some(index),
+                    hovered == Some(index),
                     style,
                 ));
             }
@@ -2865,17 +2999,25 @@ fn render_row(
     disabled: bool,
     destructive: bool,
     shortcut: Option<SharedString>,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     mark: EntryMark,
     debug_selector: Option<String>,
     submenu: bool,
     activation: Option<InternalActivation>,
     highlighted: bool,
+    hovered: bool,
     style: MenuStyle,
 ) -> AnyElement {
-    let foreground = row_foreground(style.paint, disabled, destructive, highlighted);
-    let secondary_foreground =
-        row_secondary_foreground(style.paint, disabled, destructive, highlighted);
+    let foreground = if hovered && !disabled && !destructive {
+        style.paint.hover_foreground
+    } else {
+        row_foreground(style.paint, disabled, destructive, highlighted)
+    };
+    let secondary_foreground = if hovered && !disabled && !destructive {
+        style.paint.hover_foreground
+    } else {
+        row_secondary_foreground(style.paint, disabled, destructive, highlighted)
+    };
     let hover_state = state.clone();
     let pointer_state = state;
     let logical_name = label.clone();
@@ -2893,6 +3035,9 @@ fn render_row(
         .text_color(foreground)
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))
+        .when(hovered && !disabled, |row| {
+            row.bg(style.paint.hover_background)
+        })
         .when(!disabled, |row| {
             row.on_hover(move |hovered, _, cx| {
                 let _ = hover_state.update(cx, |state, cx| {
@@ -2907,9 +3052,9 @@ fn render_row(
         .items_center()
         .justify_center();
     if let Some(indicator) = mark_icon(mark) {
-        leading = leading.child(Icon::new(indicator, px(12.0), foreground));
+        leading = leading.child(Icon::new(indicator, style.metrics.icon_size, foreground));
     } else if let Some(icon) = icon {
-        leading = leading.child(icon(foreground));
+        leading = leading.child(icon(foreground, style.metrics.icon_size));
     }
     row = row
         .child(leading)
@@ -2925,17 +3070,38 @@ fn render_row(
         .when(submenu, |row| {
             row.child(Icon::new(
                 IconName::ChevronRight,
-                px(12.0),
+                style.metrics.icon_size,
                 secondary_foreground,
             ))
         });
     if !disabled {
+        let hover_state = pointer_state.clone();
         let down_state = pointer_state.clone();
         let move_state = pointer_state.clone();
         let up_state = pointer_state;
         let pointer_tracker = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, _| {
+            move |_, hitbox, window, cx| {
+                // Layout or submenu replacement can move a row without a pointer event.
+                let actually_hovered = hitbox.is_hovered(window);
+                if actually_hovered != hovered {
+                    let hover_state = hover_state.clone();
+                    cx.defer(move |cx| {
+                        let _ = hover_state.update(cx, |state, cx| {
+                            if !state.open {
+                                return;
+                            }
+                            if actually_hovered {
+                                state.hovered_row = Some((depth, index));
+                            } else if state.hovered_row == Some((depth, index)) {
+                                state.hovered_row = None;
+                            } else {
+                                return;
+                            }
+                            cx.notify();
+                        });
+                    });
+                }
                 let down_hitbox = hitbox.clone();
                 let move_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
@@ -3137,6 +3303,24 @@ mod tests {
         );
         let metrics = MenuMetrics::new(px(160.0), px(28.0));
         MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
+    }
+
+    #[test]
+    fn row_hover_paint_should_not_replace_selection_paint() {
+        let original = test_theme().paint;
+        let hovered = rgba(0xabcdef80);
+        let hover_foreground = rgba(0x123456ff);
+        let paint = original
+            .hover_background(hovered)
+            .hover_foreground(hover_foreground);
+        assert_eq!(paint.hover_background, hovered);
+        assert_eq!(paint.hover_foreground, hover_foreground);
+        assert_eq!(paint.selected_foreground, original.selected_foreground);
+        assert_eq!(paint.selected_background, original.selected_background);
+        assert_eq!(
+            paint.trigger_hover_background,
+            original.trigger_hover_background
+        );
     }
 
     fn inert(label: &str, disabled: bool) -> InternalEntry {
@@ -3482,10 +3666,12 @@ mod tests {
     struct TestRoot {
         events: Rc<RefCell<Vec<MenuActivation<&'static str>>>>,
         other_focus: FocusHandle,
+        icon_color: Rc<Cell<Rgba>>,
     }
     impl Render for TestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let events = self.events.clone();
+            let icon_color = self.icon_color.clone();
             div()
                 .size_full()
                 .child(div().track_focus(&self.other_focus).child("Other"))
@@ -3497,7 +3683,16 @@ mod tests {
                             MenuEntry::action("Disabled", "disabled")
                                 .disabled(true)
                                 .debug_selector("disabled-entry"),
-                            MenuEntry::action("Open", "open").debug_selector("open-entry"),
+                            MenuEntry::action("Open", "open")
+                                .icon(move |foreground, size| {
+                                    icon_color.set(foreground);
+                                    div()
+                                        .debug_selector(|| "open-entry-icon".to_owned())
+                                        .size(size)
+                                        .bg(foreground)
+                                        .into_any_element()
+                                })
+                                .debug_selector("open-entry"),
                             MenuEntry::action("Close", "close"),
                             MenuEntry::action("Inspect", "inspect"),
                         ],
@@ -3522,10 +3717,101 @@ mod tests {
         let (root, cx) = cx.add_window_view(move |_, cx| TestRoot {
             events: root_events,
             other_focus: cx.focus_handle().tab_stop(true),
+            icon_color: Rc::new(Cell::new(rgba(0))),
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    #[gpui::test]
+    fn menu_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
+        let (root, events, cx) = menu_window(cx);
+        let mut theme = test_theme();
+        theme.paint = theme
+            .paint
+            .hover_background(rgba(0xffffffff))
+            .hover_foreground(rgba(0x000000ff));
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        let trigger = cx.debug_bounds("menu-trigger").unwrap().center();
+        cx.simulate_click(trigger, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff)
+        );
+        let row = cx.debug_bounds("open-entry").unwrap().center();
+        cx.simulate_mouse_move(row, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x000000ff)
+        );
+        theme.paint = theme.paint.hover_foreground(rgba(0x004400ff));
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x004400ff)
+        );
+        theme = theme.scaled_metrics(2.0, 2.0);
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let moved_row = cx.debug_bounds("open-entry").unwrap();
+        assert!(!moved_row.contains(&row));
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff),
+            "a row moved away from a stationary pointer must lose hover paint",
+        );
+        cx.simulate_mouse_move(moved_row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x004400ff)
+        );
+        cx.simulate_mouse_move(trigger, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff)
+        );
+        assert!(events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn custom_row_icon_should_follow_the_resolved_live_menu_metric(cx: &mut TestAppContext) {
+        let (_root, _events, cx) = menu_window(cx);
+        let default_size = test_theme().resolve(MenuSize::Regular).metrics.icon_size;
+        let trigger = cx.debug_bounds("menu-trigger").expect("menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let default_icon = cx
+            .debug_bounds("open-entry-icon")
+            .expect("the default custom row icon was not rendered");
+
+        let theme = test_theme().scaled_metrics(2.0, 1.25);
+        let expected_size = theme.resolve(MenuSize::Regular).metrics.icon_size;
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let scaled_icon = cx
+            .debug_bounds("open-entry-icon")
+            .expect("the open custom row icon was not refreshed");
+        assert_eq!(default_icon.size, size(default_size, default_size));
+        assert_eq!(scaled_icon.size, size(expected_size, expected_size));
     }
 
     struct ScrollTestRoot {

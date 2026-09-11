@@ -40,6 +40,12 @@ fn register_font_with(
 /// A bundled vector icon outside the Lucide family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CustomIconName {
+    /// A panel with a left sidebar, rendered with the bundled chrome vectors.
+    PanelLeft,
+    /// A panel with a right sidebar, rendered with the bundled chrome vectors.
+    PanelRight,
+    /// An add action, rendered with the bundled chrome vectors.
+    Plus,
     /// Stacked rectangular surfaces, using the supplied rectangle.stack artwork.
     RectangleStack,
     /// Globe with an add badge, using the supplied globe.plus artwork.
@@ -53,6 +59,9 @@ pub enum CustomIconName {
 impl CustomIconName {
     fn path(self) -> &'static str {
         match self {
+            Self::PanelLeft => "spaceterm-ui/icons/panel-left.svg",
+            Self::PanelRight => "spaceterm-ui/icons/panel-right.svg",
+            Self::Plus => "spaceterm-ui/icons/plus.svg",
             Self::RectangleStack => "spaceterm-ui/icons/rectangle-stack.svg",
             Self::FilterCircle => "spaceterm-ui/icons/filter-circle.svg",
             Self::GlobePlus => "spaceterm-ui/icons/globe-plus.svg",
@@ -62,6 +71,18 @@ impl CustomIconName {
 }
 
 const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
+    (
+        "spaceterm-ui/icons/panel-left.svg",
+        include_bytes!("../assets/icons/panel-left.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/panel-right.svg",
+        include_bytes!("../assets/icons/panel-right.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/plus.svg",
+        include_bytes!("../assets/icons/plus.svg"),
+    ),
     (
         "spaceterm-ui/icons/filter-circle.svg",
         include_bytes!("../assets/icons/filter-circle.svg"),
@@ -314,6 +335,9 @@ mod tests {
                 .list("spaceterm-ui/icons")
                 .expect("owned directory"),
             vec![
+                CustomIconName::PanelLeft.path().into(),
+                CustomIconName::PanelRight.path().into(),
+                CustomIconName::Plus.path().into(),
                 CustomIconName::FilterCircle.path().into(),
                 SharedString::from(path),
                 CustomIconName::GlobePlus.path().into(),
@@ -331,6 +355,9 @@ mod tests {
     #[gpui::test]
     fn custom_vector_should_rasterize_into_an_unclipped_square(cx: &mut TestAppContext) {
         for (icon, width) in [
+            (CustomIconName::PanelLeft, 24),
+            (CustomIconName::PanelRight, 24),
+            (CustomIconName::Plus, 24),
             (CustomIconName::RectangleStack, 24),
             (CustomIconName::FilterCircle, 22),
             (CustomIconName::GlobePlus, 33),

@@ -105,5 +105,18 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
     ]);
+    #[cfg(feature = "appearance-exerciser")]
+    bindings.extend([
+        KeyBinding::new(
+            "cmd-alt-a",
+            crate::ui::appearance_exerciser::ShowAppearanceExerciser,
+            None,
+        ),
+        KeyBinding::new(
+            "cmd-alt-c",
+            crate::ui::appearance_exerciser::ToggleAppearancePreview,
+            None,
+        ),
+    ]);
     bindings
 }

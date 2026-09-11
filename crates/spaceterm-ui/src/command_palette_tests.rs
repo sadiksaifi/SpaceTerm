@@ -51,6 +51,13 @@ fn items() -> Vec<CommandPaletteItem<u8>> {
         CommandPaletteItem::new(1, "Open Workspace")
             .description("Choose a directory")
             .keywords(["project"])
+            .leading_icon(|foreground, size| {
+                div()
+                    .debug_selector(|| "row-open-icon".to_owned())
+                    .size(size)
+                    .bg(foreground)
+                    .into_any_element()
+            })
             .debug_selector("row-open"),
         CommandPaletteItem::new(2, "Disabled Command")
             .disabled(true)
@@ -422,6 +429,113 @@ fn open_palette(
 }
 
 #[gpui::test]
+fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
+    let (root, palette, _events, _underlay, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    let default_theme = test_theme();
+    let default_size = default_theme.metrics.icon_size;
+    let default_icon = cx
+        .debug_bounds("row-open-icon")
+        .expect("the default custom row icon was not rendered");
+
+    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
+    let scaled_size = scaled_theme.metrics.icon_size;
+    cx.update(|window, cx| {
+        cx.set_global(scaled_theme);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let scaled_icon = cx
+        .debug_bounds("row-open-icon")
+        .expect("the open custom row icon was not refreshed");
+    assert_eq!(default_icon.size, gpui::size(default_size, default_size));
+    assert_eq!(scaled_icon.size, gpui::size(scaled_size, scaled_size));
+}
+
+#[gpui::test]
+fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_position(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _events, _underlay, cx) = palette_window(cx);
+    cx.simulate_resize(gpui::size(px(340.0), px(500.0)));
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            (0_u8..20)
+                .map(|id| {
+                    CommandPaletteItem::new(id, format!("Command {id}"))
+                        .debug_selector(format!("font-change-row-{id}"))
+                })
+                .collect(),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| palette.set_query("Command", cx));
+    cx.run_until_parked();
+    let initial_theme = test_theme();
+    let initial_panel = cx.debug_bounds("command-palette-panel").unwrap();
+    cx.simulate_event(ScrollWheelEvent {
+        position: initial_panel.center(),
+        delta: ScrollDelta::Pixels(point(
+            px(0.0),
+            -(initial_theme.metrics.single_line_row_height * 5.0 + px(7.0)),
+        )),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    let selected = palette.read_with(cx, |palette, _| palette.selected_item_id().copied());
+    let initial_row = cx.debug_bounds("font-change-row-5").unwrap();
+    let initial_editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let initial_row_offset = initial_row.top()
+        - initial_editor.bottom()
+        - initial_theme.metrics.border_width
+        - initial_theme.metrics.panel_padding;
+    assert!((initial_row_offset + px(7.0)).abs() <= px(1.0));
+
+    let replacement = initial_theme.scaled_metrics(24.0 / 13.0, 1.0);
+    cx.update(|window, cx| {
+        cx.set_global(replacement);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let row = cx.debug_bounds("font-change-row-5").unwrap();
+    let thumb = cx.debug_bounds("command-palette-scrollbar-thumb").unwrap();
+    let track_height = panel.size.height
+        - editor.size.height
+        - replacement.metrics.panel_padding * 2.0
+        - replacement.metrics.border_width * 3.0;
+    let expected_thumb_height =
+        px((f32::from(track_height).powi(2) / (20.0 * f32::from(row.size.height))).max(24.0));
+    assert_eq!(panel.size.width, initial_panel.size.width);
+    assert!(row.size.height > initial_row.size.height);
+    assert!(
+        (thumb.size.height - expected_thumb_height).abs() <= px(1.0),
+        "the scrollbar must include the new height of every offscreen row: actual {:?}, expected {:?}",
+        thumb.size.height,
+        expected_thumb_height,
+    );
+    let row_offset = row.top()
+        - editor.bottom()
+        - replacement.metrics.border_width
+        - replacement.metrics.panel_padding;
+    assert!((row_offset - initial_row_offset).abs() <= px(1.0));
+    assert_eq!(
+        palette.read_with(cx, |palette, _| {
+            (
+                palette.query().to_owned(),
+                palette.selected_item_id().copied(),
+            )
+        }),
+        (String::from("Command"), selected),
+    );
+}
+
+#[gpui::test]
 fn pinned_fallback_should_receive_exact_query_and_yield_to_ordinary_matches(
     cx: &mut TestAppContext,
 ) {
@@ -607,7 +721,7 @@ fn wheel_scrolling_the_results_should_not_reenter_the_list_state(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn wheel_scroll_should_not_clone_offscreen_items(cx: &mut TestAppContext) {
+fn non_geometry_updates_should_not_clone_offscreen_items(cx: &mut TestAppContext) {
     cx.set_global(test_theme());
     install_control_themes(cx);
     cx.update(crate::text_input::init);
@@ -654,6 +768,20 @@ fn wheel_scroll_should_not_clone_offscreen_items(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert_eq!(offscreen_clones.get(), 0);
+
+    let mut replacement = test_theme();
+    replacement.paint.foreground = rgba(0x102030ff);
+    cx.update(|window, cx| {
+        cx.set_global(replacement);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        offscreen_clones.get(),
+        0,
+        "color-only replacement must not remeasure offscreen rows",
+    );
 }
 
 #[gpui::test]
@@ -817,7 +945,7 @@ fn lone_decorated_footer_entries_should_stay_behind_a_disclosure(cx: &mut TestAp
         ),
         (
             "icon",
-            MenuEntry::action("Finder", "icon".into()).icon(|_| div().into_any_element()),
+            MenuEntry::action("Finder", "icon".into()).icon(|_, _| div().into_any_element()),
         ),
     ];
 

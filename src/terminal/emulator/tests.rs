@@ -5,6 +5,7 @@ use super::*;
 use crate::terminal::TerminalAccessibilityModel;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use crate::terminal::metadata::{DirectoryProvenance, ProgressMetadata};
+use crate::theme::ACTIVE_THEME;
 
 fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
     TerminalGeometry::from_grid(
@@ -16,6 +17,25 @@ fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> Terminal
 
 fn emulator(cols: u16, rows: u16) -> TerminalEmulator {
     TerminalEmulator::new(geometry(cols, rows, 10.0, 20.0)).unwrap()
+}
+
+fn appearance_update(
+    generation: u64,
+    appearance: crate::appearance::Appearance,
+    foreground: Color,
+    background: Color,
+    cursor: Color,
+) -> crate::terminal::TerminalAppearanceUpdate {
+    let base = crate::terminal::test_terminal_appearance_update();
+    let mut resolved = (*base.appearance).clone();
+    resolved.appearance = appearance;
+    resolved.colors.foreground = foreground;
+    resolved.colors.background = background;
+    resolved.colors.cursor = cursor;
+    crate::terminal::TerminalAppearanceUpdate::new(
+        crate::appearance::AppearanceGeneration::new(generation),
+        Arc::new(resolved),
+    )
 }
 
 fn emulator_with_terminal_name(
@@ -644,6 +664,273 @@ fn snapshots_preserve_foreground_color_sources() {
             TerminalColor::Rgb(Color::from_rgb_components(1, 2, 3)),
         ]
     );
+}
+
+#[test]
+fn appearance_updates_publish_applied_generation_without_losing_content() {
+    let initial = appearance_update(
+        7,
+        crate::appearance::Appearance::Dark,
+        Color::from_rgb_components(10, 20, 30),
+        Color::from_rgb_components(40, 50, 60),
+        Color::from_rgb_components(70, 80, 90),
+    );
+    let mut emulator =
+        TerminalEmulator::new_with_appearance(geometry(8, 1, 10.0, 20.0), initial).unwrap();
+    emulator.feed(b"content");
+    let before = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(before.appearance_generation.get(), 7);
+
+    let updated = appearance_update(
+        8,
+        crate::appearance::Appearance::Light,
+        Color::from_rgb_components(110, 120, 130),
+        Color::from_rgb_components(240, 230, 220),
+        Color::from_rgb_components(140, 150, 160),
+    );
+    emulator.apply_appearance(updated).unwrap();
+    let after = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(after.appearance_generation.get(), 8);
+    assert_eq!(
+        after.terminal_appearance,
+        crate::appearance::Appearance::Light
+    );
+    assert_eq!(
+        after.colors.foreground,
+        Color::from_rgb_components(110, 120, 130)
+    );
+    assert_eq!(
+        after.colors.background,
+        Color::from_rgb_components(240, 230, 220)
+    );
+    assert_eq!(row_text(&after, 0), row_text(&before, 0));
+    assert!(after.damage.appearance);
+}
+
+#[test]
+fn appearance_updates_preserve_equal_osc_overrides_and_extended_palette() {
+    let mut emulator = emulator(8, 1);
+    let override_color = Color::from_rgb_components(1, 2, 3);
+    emulator.feed(b"\x1b]10;#010203\x07\x1b]12;#040506\x07\x1b]4;1;#0a0b0c\x07");
+    let before = emulator.snapshot().unwrap().unwrap();
+    let extended = before.colors.palette[200];
+
+    let mut updated = appearance_update(
+        9,
+        crate::appearance::Appearance::Dark,
+        override_color,
+        Color::from_rgb_components(7, 8, 9),
+        Color::from_rgb_components(4, 5, 6),
+    );
+    Arc::make_mut(&mut updated.appearance).colors.normal[1] =
+        Color::from_rgb_components(10, 11, 12);
+    emulator.apply_appearance(updated).unwrap();
+    let overridden = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(overridden.colors.foreground, override_color);
+    assert_eq!(
+        overridden.colors.foreground_source,
+        TerminalDefaultColorSource::ProgramOverride
+    );
+    assert_eq!(
+        overridden.colors.cursor_source,
+        TerminalDefaultColorSource::ProgramOverride
+    );
+    assert!(overridden.colors.palette_overrides[1]);
+    assert_eq!(
+        overridden.colors.palette[1],
+        Color::from_rgb_components(10, 11, 12)
+    );
+    assert_eq!(overridden.colors.palette[200], extended);
+
+    emulator.feed(b"\x1b]110\x07\x1b]112\x07\x1b]104;1\x07");
+    let reset = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        reset.colors.foreground_source,
+        TerminalDefaultColorSource::HostDefault
+    );
+    assert_eq!(
+        reset.colors.cursor_source,
+        TerminalDefaultColorSource::HostDefault
+    );
+    assert!(!reset.colors.palette_overrides[1]);
+}
+
+#[test]
+fn fallback_reprojection_preserves_program_colors_and_refreshes_host_defaults() {
+    let initial = appearance_update(
+        7,
+        crate::appearance::Appearance::Dark,
+        Color::from_rgb_components(210, 211, 212),
+        Color::from_rgb_components(20, 21, 22),
+        Color::from_rgb_components(200, 201, 202),
+    );
+    let mut emulator =
+        TerminalEmulator::new_with_appearance(geometry(8, 1, 10.0, 20.0), initial).unwrap();
+    emulator.feed(b"\x1b]10;#010203\x07\x1b]12;#040506\x07\x1b]4;1;#0a0b0c\x07");
+    let retained = emulator.snapshot().unwrap().unwrap();
+    let retained_extended = retained.colors.palette[200];
+
+    let mut current = appearance_update(
+        12,
+        crate::appearance::Appearance::Light,
+        Color::from_rgb_components(30, 31, 32),
+        Color::from_rgb_components(240, 241, 242),
+        Color::from_rgb_components(40, 41, 42),
+    );
+    let current_appearance = Arc::make_mut(&mut current.appearance);
+    current_appearance.colors.normal[1] = Color::from_rgb_components(50, 51, 52);
+    current_appearance.colors.normal[2] = Color::from_rgb_components(60, 61, 62);
+    current_appearance.colors.selection_background = Color::from_rgb_components(70, 71, 72);
+    current_appearance.bold_as_bright = false;
+
+    let projected = ScreenSnapshot::projected_for_renderer(&retained, &current.appearance);
+
+    assert_eq!(projected.appearance_generation.get(), 7);
+    assert_eq!(
+        projected.terminal_appearance,
+        crate::appearance::Appearance::Light
+    );
+    assert_eq!(
+        projected.colors.foreground,
+        Color::from_rgb_components(1, 2, 3)
+    );
+    assert_eq!(
+        projected.colors.background,
+        Color::from_rgb_components(240, 241, 242)
+    );
+    assert_eq!(projected.cursor.color, Color::from_rgb_components(4, 5, 6));
+    assert_eq!(
+        projected.cursor.text_color,
+        Color::from_rgb_components(240, 241, 242)
+    );
+    assert_eq!(
+        projected.colors.palette[1],
+        Color::from_rgb_components(10, 11, 12)
+    );
+    assert_eq!(
+        projected.colors.palette[2],
+        Color::from_rgb_components(60, 61, 62)
+    );
+    assert_eq!(projected.colors.palette[200], retained_extended);
+    assert_eq!(
+        projected.configured_colors.selection_background,
+        Color::from_rgb_components(70, 71, 72)
+    );
+    assert!(!projected.bold_as_bright);
+    assert_eq!(
+        projected.background,
+        projected.colors.effective_background()
+    );
+    assert_eq!(
+        retained.colors.background,
+        Color::from_rgb_components(20, 21, 22)
+    );
+}
+
+#[test]
+fn fallback_reprojection_refreshes_host_cursor_and_reversed_background() {
+    let initial = appearance_update(
+        3,
+        crate::appearance::Appearance::Dark,
+        Color::from_rgb_components(220, 221, 222),
+        Color::from_rgb_components(10, 11, 12),
+        Color::from_rgb_components(200, 201, 202),
+    );
+    let mut emulator =
+        TerminalEmulator::new_with_appearance(geometry(8, 1, 10.0, 20.0), initial).unwrap();
+    emulator.feed(b"\x1b[?5h");
+    let retained = emulator.snapshot().unwrap().unwrap();
+
+    let mut current = appearance_update(
+        4,
+        crate::appearance::Appearance::Light,
+        Color::from_rgb_components(31, 32, 33),
+        Color::from_rgb_components(241, 242, 243),
+        Color::from_rgb_components(41, 42, 43),
+    );
+    Arc::make_mut(&mut current.appearance).colors.cursor_text =
+        Some(Color::from_rgb_components(51, 52, 53));
+
+    let projected = ScreenSnapshot::projected_for_renderer(&retained, &current.appearance);
+
+    assert_eq!(projected.appearance_generation.get(), 3);
+    assert_eq!(
+        projected.colors.foreground,
+        Color::from_rgb_components(31, 32, 33)
+    );
+    assert_eq!(
+        projected.colors.background,
+        Color::from_rgb_components(241, 242, 243)
+    );
+    assert_eq!(projected.background, Color::from_rgb_components(31, 32, 33));
+    assert_eq!(
+        projected.cursor.color,
+        Color::from_rgb_components(41, 42, 43)
+    );
+    assert_eq!(
+        projected.cursor.text_color,
+        Color::from_rgb_components(51, 52, 53)
+    );
+
+    let reused = ScreenSnapshot::projected_for_renderer(&projected, &current.appearance);
+    assert!(Arc::ptr_eq(&reused, &projected));
+}
+
+#[test]
+fn color_scheme_query_and_mode_2031_reports_follow_applied_appearance() {
+    let mut emulator = TerminalEmulator::new_with_appearance(
+        geometry(8, 1, 10.0, 20.0),
+        appearance_update(
+            1,
+            crate::appearance::Appearance::Dark,
+            Color::from_rgb_components(220, 220, 220),
+            Color::from_rgb_components(20, 20, 20),
+            Color::from_rgb_components(220, 220, 220),
+        ),
+    )
+    .unwrap();
+
+    emulator.feed(b"\x1b[?996n");
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;1n");
+
+    emulator.feed(b"\x1b[?2031h");
+    emulator
+        .apply_appearance(appearance_update(
+            2,
+            crate::appearance::Appearance::Light,
+            Color::from_rgb_components(20, 20, 20),
+            Color::from_rgb_components(240, 240, 240),
+            Color::from_rgb_components(20, 20, 20),
+        ))
+        .unwrap();
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;2n");
+
+    emulator
+        .apply_appearance(appearance_update(
+            3,
+            crate::appearance::Appearance::Light,
+            Color::from_rgb_components(30, 30, 30),
+            Color::from_rgb_components(250, 250, 250),
+            Color::from_rgb_components(30, 30, 30),
+        ))
+        .unwrap();
+    assert!(emulator.take_pty_responses().is_empty());
+
+    emulator.feed(b"\x1b[?2031l");
+    emulator
+        .apply_appearance(appearance_update(
+            4,
+            crate::appearance::Appearance::Dark,
+            Color::from_rgb_components(230, 230, 230),
+            Color::from_rgb_components(10, 10, 10),
+            Color::from_rgb_components(230, 230, 230),
+        ))
+        .unwrap();
+    assert!(emulator.take_pty_responses().is_empty());
+    emulator.feed(b"\x1b[?996n");
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;1n");
 }
 
 #[test]
@@ -2617,6 +2904,7 @@ fn remote_metadata_context_should_never_resolve_file_links_as_local_paths() {
         identity::TERM_FALLBACK,
         Instant::now(),
         LocalFilesystemAuthority::testing_without_access(),
+        crate::terminal::test_terminal_appearance_update(),
     )
     .unwrap();
 
@@ -3417,6 +3705,7 @@ fn kitty_remote_graphics_cannot_enable_local_file_or_shared_memory_transports() 
         identity::TERM_FALLBACK,
         Instant::now(),
         LocalFilesystemAuthority::testing_without_access(),
+        crate::terminal::test_terminal_appearance_update(),
     )
     .unwrap();
     for medium in ["f", "t", "s"] {

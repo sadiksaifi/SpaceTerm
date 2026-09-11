@@ -189,6 +189,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         &self,
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
+        initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, SessionError> {
         let launch = match launch_plan {
             TerminalLaunchPlan::Local(local) => SessionLaunch::local(
@@ -204,6 +205,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             geometry,
             launch,
             self.local_filesystem.clone(),
+            initial_appearance,
         )?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
@@ -238,6 +240,7 @@ impl TerminalSession {
             geometry,
             launch,
             local_filesystem,
+            test_terminal_appearance_update(),
         )
     }
 
@@ -246,12 +249,14 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         launch: SessionLaunch,
         filesystem: LocalFilesystemAuthority,
+        initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedSession, SessionError> {
         Self::start_deferred_with_context(
             geometry,
             launch.metadata,
             launch.fallback_title,
             filesystem,
+            initial_appearance,
             move |size, output, close_handle| {
                 let prepared = launch.process.prepare()?;
                 let terminal_name = prepared.terminal_name();
@@ -285,6 +290,7 @@ impl TerminalSession {
             metadata_context,
             test_launch_planner().fallback_title(),
             LocalFilesystemAuthority::testing(),
+            test_terminal_appearance_update(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
                     .map(|owner| (owner, identity::TERM_FALLBACK))
@@ -297,6 +303,7 @@ impl TerminalSession {
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
         local_filesystem: LocalFilesystemAuthority,
+        initial_appearance: TerminalAppearanceUpdate,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
@@ -354,6 +361,7 @@ impl TerminalSession {
                         fallback_title,
                         terminal_name,
                         local_filesystem,
+                        initial_appearance,
                     },
                     command_rx,
                     reader_transport,
@@ -428,6 +436,7 @@ impl TerminalSession {
                         fallback_title: "Terminal".to_owned(),
                         terminal_name,
                         local_filesystem: LocalFilesystemAuthority::testing(),
+                        initial_appearance: test_terminal_appearance_update(),
                     },
                     command_rx,
                     reader_transport,

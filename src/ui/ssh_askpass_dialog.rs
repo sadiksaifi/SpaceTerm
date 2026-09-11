@@ -7,11 +7,12 @@ use spaceterm_ui::{
     TextInputEscapeBehavior, TextInputReturnBehavior, TextInputVariant,
 };
 
+use super::appearance::chrome;
+use crate::appearance::Color;
 use crate::platform::ssh_askpass::{
     AskPassCompletion, AskPassConfirmationPresentation, AskPassPresentationError, AskPassRequest,
     AskPassResponseError, AskPassResult, AskPassSecret, AskPassSecretPresentation,
 };
-use crate::theme::{ACTIVE_THEME, Color};
 
 const CONFIRMATION_MODAL_ID: &str = "ssh-askpass-confirmation";
 const SECRET_MODAL_ID: &str = "ssh-askpass-secret";
@@ -418,15 +419,17 @@ impl AskPassSecretBody {
 
 impl Render for AskPassSecretBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = chrome(cx).clone();
         let input_focus = self.input.read(cx).focus_handle();
         div()
+            .font(appearance.regular.clone())
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(appearance.spacing(12.0))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                    .text_size(appearance.text_size(12.0))
+                    .text_color(gpui_color(appearance.colors.text_muted))
                     .whitespace_normal()
                     .child(self.detail.clone()),
             )
@@ -434,37 +437,37 @@ impl Render for AskPassSecretBody {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(5.0))
+                    .gap(appearance.spacing(5.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                            .text_size(appearance.text_size(12.0))
+                            .text_color(gpui_color(appearance.colors.text_muted))
                             .child(self.field_label),
                     )
                     .child(
                         div()
                             .id("ssh-askpass-secret-input-frame")
                             .debug_selector(|| "ssh-askpass-secret-input-frame".to_owned())
-                            .h(px(SECRET_INPUT_HEIGHT))
+                            .h(appearance.height(SECRET_INPUT_HEIGHT, 13.0))
                             .w_full()
                             .min_w_0()
                             .flex_shrink_0()
                             .flex()
                             .items_center()
                             .overflow_hidden()
-                            .px(px(8.0))
+                            .px(appearance.spacing(8.0))
                             .rounded(px(4.0))
                             .border(px(1.0))
                             .border_color(gpui_color(if self.required_error {
-                                ACTIVE_THEME.error_border
+                                appearance.colors.input_invalid_border
                             } else if self.input.read(cx).is_focused() {
-                                ACTIVE_THEME.border_focused
+                                appearance.colors.input_focused_border
                             } else {
-                                ACTIVE_THEME.border
+                                appearance.colors.input_border
                             }))
-                            .bg(gpui_color(ACTIVE_THEME.element_background))
-                            .text_size(px(13.0))
-                            .text_color(gpui_color(ACTIVE_THEME.text))
+                            .bg(gpui_color(appearance.colors.input_background))
+                            .text_size(appearance.text_size(13.0))
+                            .text_color(gpui_color(appearance.colors.text))
                             .on_click(move |_, window, cx| {
                                 input_focus.focus(window);
                                 cx.stop_propagation();
@@ -475,8 +478,8 @@ impl Render for AskPassSecretBody {
                         field.child(
                             div()
                                 .debug_selector(|| "ssh-askpass-required-error".to_owned())
-                                .text_size(px(11.0))
-                                .text_color(gpui_color(ACTIVE_THEME.error))
+                                .text_size(appearance.text_size(11.0))
+                                .text_color(gpui_color(appearance.colors.error))
                                 .child(REQUIRED_SECRET_MESSAGE),
                         )
                     }),

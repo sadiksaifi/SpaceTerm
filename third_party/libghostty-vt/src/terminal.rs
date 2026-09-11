@@ -758,6 +758,27 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(self)
     }
 
+    /// Whether the effective foreground is an OSC override.
+    pub fn fg_color_overridden(&self) -> Result<bool> {
+        self.get(Data::COLOR_FOREGROUND_OVERRIDDEN)
+    }
+
+    /// Whether the effective background is an OSC override.
+    pub fn bg_color_overridden(&self) -> Result<bool> {
+        self.get(Data::COLOR_BACKGROUND_OVERRIDDEN)
+    }
+
+    /// Whether the effective cursor color is an OSC override.
+    pub fn cursor_color_overridden(&self) -> Result<bool> {
+        self.get(Data::COLOR_CURSOR_OVERRIDDEN)
+    }
+
+    /// Palette indices whose effective values are OSC overrides.
+    pub fn color_palette_overrides(&self) -> Result<style::PaletteMask> {
+        self.get::<ffi::ColorPaletteMask>(Data::COLOR_PALETTE_OVERRIDES)
+            .map(style::PaletteMask::from_raw)
+    }
+
     /// Set the maximum bytes the APC handler will buffer for all protocols.
     ///
     /// This prevents malicious input from causing unbounded memory allocation.
@@ -2058,6 +2079,39 @@ mod tests {
         // may contain a null contents pointer in the native interface.
         let request = unsafe { ClipboardWrite::from_raw(&empty) };
         assert_eq!(request.contents().count(), 0);
+    }
+
+    #[test]
+    fn color_provenance_distinguishes_equal_osc_overrides_from_defaults() {
+        let mut terminal = Terminal::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        let equal = RgbColor { r: 1, g: 2, b: 3 };
+        terminal.set_default_fg_color(Some(equal)).unwrap();
+        let mut palette = terminal.default_color_palette().unwrap();
+        palette.set(style::PaletteIndex::RED, equal);
+        terminal.set_default_color_palette(Some(palette)).unwrap();
+
+        terminal.vt_write(b"\x1b]10;#010203\x07\x1b]4;1;#010203\x07");
+        assert!(terminal.fg_color_overridden().unwrap());
+        assert!(
+            terminal
+                .color_palette_overrides()
+                .unwrap()
+                .is_set(style::PaletteIndex::RED)
+        );
+
+        terminal.vt_write(b"\x1b]110\x07\x1b]104;1\x07");
+        assert!(!terminal.fg_color_overridden().unwrap());
+        assert!(
+            !terminal
+                .color_palette_overrides()
+                .unwrap()
+                .is_set(style::PaletteIndex::RED)
+        );
     }
 
     #[test]

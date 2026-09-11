@@ -122,9 +122,15 @@ impl TerminalGridPresentation {
             && self.grid.as_ref().is_some_and(|grid| {
                 let previous = &grid.read(cx).0;
                 previous.cursor_layer.is_some()
-                    && Arc::ptr_eq(&previous.presentation, screen)
+                    && Arc::ptr_eq(&previous.source_presentation, screen)
+                    && previous.presentation.terminal_appearance
+                        == configuration.terminal_appearance.appearance
+                    && previous.presentation.configured_colors.as_ref()
+                        == &configuration.terminal_appearance.colors
+                    && previous.presentation.bold_as_bright
+                        == configuration.terminal_appearance.bold_as_bright
                     && previous.cache == cache
-                    && previous.font_family == configuration.font_family
+                    && previous.terminal_fonts == configuration.terminal_fonts
                     && previous.font_size == configuration.font_size
                     && previous.line_height == configuration.line_height
                     && previous.cell_width == configuration.cell_width

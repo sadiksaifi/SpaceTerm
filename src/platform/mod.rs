@@ -1,7 +1,10 @@
 pub(crate) mod app_paths;
+pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 pub(crate) mod control_socket;
+#[cfg(target_os = "macos")]
+mod macos_appearance;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
 

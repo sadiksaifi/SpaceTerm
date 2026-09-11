@@ -9,8 +9,9 @@ use super::{
     FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, PasteConfirmationId,
     PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
     SelectionCopy, SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
-    TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 
@@ -102,6 +103,7 @@ pub(crate) struct RecordedSessionStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
     launch_plan: TerminalLaunchPlan,
+    pub(crate) initial_appearance: TerminalAppearanceUpdate,
 }
 
 impl RecordedSessionStart {
@@ -146,6 +148,7 @@ pub(crate) enum RecordedSessionCommand {
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
     SetPresentable(bool),
+    UpdateAppearance(TerminalAppearanceUpdate),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -332,6 +335,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
         &self,
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
+        initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, SessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
@@ -339,6 +343,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             session_id,
             geometry,
             launch_plan,
+            initial_appearance,
         });
 
         if let Some(message) = &self.start_failure
@@ -516,6 +521,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn set_presentable(&self, presentable: bool) {
         self.record(RecordedSessionCommand::SetPresentable(presentable));
     }
+
+    fn update_appearance(&self, update: TerminalAppearanceUpdate) {
+        self.record(RecordedSessionCommand::UpdateAppearance(update));
+    }
 }
 
 /// Isolated resource layout supplied explicitly to portable launch policy.
@@ -594,6 +603,7 @@ mod tests {
                     "project on remote".to_owned(),
                     prepared,
                 ))),
+                crate::terminal::test_terminal_appearance_update(),
             )
             .unwrap();
 

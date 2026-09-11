@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "schemes": [
+    {
+      "kind": "chrome",
+      "id": "example.invalid.chrome",
+      "name": "Rejected unknown role",
+      "appearance": "dark",
+      "colors": {
+        "editor_background": "#141415"
+      }
+    }
+  ]
+}

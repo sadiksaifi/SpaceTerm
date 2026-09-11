@@ -282,6 +282,21 @@ impl ResizeHandleTheme {
     pub fn pointer_target_thickness(self, target: ResizeHandleTarget) -> Pixels {
         self.metrics.pointer_target_thickness(target)
     }
+
+    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+        let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
+        Self {
+            metrics: ResizeHandleMetrics {
+                visible_thickness: self.metrics.visible_thickness * spacing_scale,
+                hitbox_thickness: self.metrics.hitbox_thickness * spacing_scale,
+                hover_thickness: self.metrics.hover_thickness * spacing_scale,
+                active_thickness: self.metrics.active_thickness * spacing_scale,
+                focus_thickness: self.metrics.focus_thickness * spacing_scale,
+            }
+            .normalized(),
+            ..self
+        }
+    }
 }
 
 impl Global for ResizeHandleTheme {}

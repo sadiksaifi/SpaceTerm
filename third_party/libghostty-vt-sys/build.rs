@@ -22,6 +22,10 @@ const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
         compiled_source: include_bytes!("patches/spaceterm-terminal-effects.patch"),
     },
     SpaceTermPatch {
+        relative_path: "patches/spaceterm-color-provenance.patch",
+        compiled_source: include_bytes!("patches/spaceterm-color-provenance.patch"),
+    },
+    SpaceTermPatch {
         relative_path: "patches/spaceterm-accessibility.patch",
         compiled_source: include_bytes!("patches/spaceterm-accessibility.patch"),
     },

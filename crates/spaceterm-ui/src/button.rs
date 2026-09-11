@@ -5,12 +5,12 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Font, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, actions,
-    canvas, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Global, HitboxBehavior,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TextRun, WeakFocusHandle, Window, actions, canvas, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -206,6 +206,8 @@ pub struct ButtonMetrics {
     corner_radius: Pixels,
     border_width: Pixels,
     font_size: Pixels,
+    single_line_height: f32,
+    multiline_line_height: f32,
 }
 
 impl ButtonMetrics {
@@ -218,6 +220,8 @@ impl ButtonMetrics {
             corner_radius: px(5.0),
             border_width: px(1.0),
             font_size: px(12.0),
+            single_line_height: 1.0,
+            multiline_line_height: 1.2,
         }
     }
 
@@ -249,6 +253,34 @@ impl ButtonMetrics {
     pub fn font_size(mut self, size: Pixels) -> Self {
         self.font_size = size;
         self
+    }
+
+    /// Sets relative line heights for single-line and multiline labels.
+    pub fn line_heights(mut self, single_line: f32, multiline: f32) -> Self {
+        self.single_line_height = single_line.clamp(1.0, 2.0);
+        self.multiline_line_height = multiline.clamp(1.0, 2.0);
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            height: crate::appearance::scale_line_box(
+                self.height,
+                self.font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
+            single_line_height: self.single_line_height,
+            multiline_line_height: self.multiline_line_height,
+        }
     }
 }
 
@@ -332,6 +364,15 @@ impl ButtonSizes {
             ButtonSize::Large => self.large,
         }
     }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            compact: self.compact.scaled(text_scale, spacing_scale),
+            small: self.small.scaled(text_scale, spacing_scale),
+            regular: self.regular.scaled(text_scale, spacing_scale),
+            large: self.large.scaled(text_scale, spacing_scale),
+        }
+    }
 }
 
 /// Application-owned presentation installed once for every reusable button.
@@ -360,6 +401,13 @@ impl ButtonTheme {
         self.sizes.resolve(size).height
     }
 
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            ..self
+        }
+    }
+
     fn resolve(self, variant: ButtonVariant, size: ButtonSize, shape: ButtonShape) -> ButtonStyle {
         let variant = self.variants.resolve(variant);
         let metrics = self.sizes.resolve(size);
@@ -378,6 +426,8 @@ impl ButtonTheme {
             },
             border_width: metrics.border_width,
             font_size: metrics.font_size,
+            single_line_height: metrics.single_line_height,
+            multiline_line_height: metrics.multiline_line_height,
         }
     }
 }
@@ -394,15 +444,10 @@ pub(crate) fn measure_button_intrinsic_width(
         cx.global::<ButtonTheme>()
             .resolve(ButtonVariant::Secondary, size, ButtonShape::Rounded);
     let text_style = window.text_style();
+    let font = crate::control_typography(cx).regular().clone();
     let run = TextRun {
         len: label.len(),
-        font: Font {
-            family: text_style.font_family,
-            features: text_style.font_features,
-            fallbacks: text_style.font_fallbacks,
-            weight: text_style.font_weight,
-            style: text_style.font_style,
-        },
+        font,
         color: text_style.color,
         background_color: None,
         underline: None,
@@ -429,6 +474,8 @@ struct ButtonStyle {
     corner_radius: Pixels,
     border_width: Pixels,
     font_size: Pixels,
+    single_line_height: f32,
+    multiline_line_height: f32,
 }
 
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
@@ -824,7 +871,11 @@ impl RenderOnce for Button {
                 .child(
                     div()
                         .min_w_0()
-                        .line_height(gpui::relative(if multiline { 1.2 } else { 1.0 }))
+                        .line_height(gpui::relative(if multiline {
+                            style.multiline_line_height
+                        } else {
+                            style.single_line_height
+                        }))
                         .when(multiline, |label| label.whitespace_normal().text_center())
                         .child(self.label),
                 )
@@ -1018,6 +1069,7 @@ impl ButtonCore {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
+        let font = crate::control_typography(cx).regular().clone();
         let enabled = !self.disabled && self.on_activate.is_some();
         let modal_focus_handle = self.modal_focus_handle.clone();
         let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
@@ -1177,6 +1229,7 @@ impl ButtonCore {
             .bg(paint.background)
             .text_color(paint.foreground)
             .text_size(style.font_size)
+            .font(font)
             .cursor_default()
             .when(!preserve_ancestor_hover, |button| {
                 button.block_mouse_except_scroll()

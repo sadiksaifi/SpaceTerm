@@ -1,5 +1,5 @@
 use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
@@ -25,11 +25,15 @@ use libghostty_vt::selection::gesture::{
 };
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{
-    HyperlinkResolution, Mode, Point, PointCoordinate, ProgressState, ScrollViewport,
+    ColorScheme, HyperlinkResolution, Mode, Point, PointCoordinate, ProgressState, ScrollViewport,
     SemanticPromptAction,
 };
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::appearance::{
+    Appearance, AppearanceGeneration, Color, ResolvedTerminalAppearance, TerminalColors,
+};
+use crate::terminal::TerminalAppearanceUpdate;
 use crate::terminal::accessibility::{
     AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
     AccessibilityScreen, AccessibilitySelectionRefs, AccessibilitySelectionRequest,
@@ -56,8 +60,6 @@ use crate::terminal::pointer_input::{
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 use crate::terminal::{FindDirection, FindQueryGeneration, TerminalFindSnapshot};
-use crate::theme::{ACTIVE_THEME, Color};
-
 const MAX_WHEEL_STEPS: i32 = 100;
 const MAX_SCROLLBACK_ROWS: usize = 10_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
@@ -160,18 +162,37 @@ pub(crate) struct TerminalColorsSnapshot {
     pub(crate) background: Color,
     pub(crate) palette: Arc<[Color; 256]>,
     pub(crate) reversed: bool,
+    pub(crate) foreground_source: TerminalDefaultColorSource,
+    pub(crate) background_source: TerminalDefaultColorSource,
+    pub(crate) cursor_source: TerminalDefaultColorSource,
+    pub(crate) palette_overrides: Arc<[bool; 256]>,
+    pub(crate) configured: Arc<TerminalColors>,
+    pub(crate) bold_as_bright: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TerminalDefaultColorSource {
+    #[default]
+    HostDefault,
+    ProgramOverride,
 }
 
 impl TerminalColorsSnapshot {
-    fn themed() -> Self {
-        let mut palette = [ACTIVE_THEME.terminal_foreground; 256];
-        palette[..8].copy_from_slice(&ACTIVE_THEME.terminal_normal());
-        palette[8..16].copy_from_slice(&ACTIVE_THEME.terminal_bright());
+    fn configured(configured: &TerminalColors, bold_as_bright: bool) -> Self {
+        let mut palette = [configured.foreground; 256];
+        palette[..8].copy_from_slice(&configured.normal);
+        palette[8..16].copy_from_slice(&configured.bright);
         Self {
-            foreground: ACTIVE_THEME.terminal_foreground,
-            background: ACTIVE_THEME.terminal_background,
+            foreground: configured.foreground,
+            background: configured.background,
             palette: Arc::new(palette),
             reversed: false,
+            foreground_source: TerminalDefaultColorSource::HostDefault,
+            background_source: TerminalDefaultColorSource::HostDefault,
+            cursor_source: TerminalDefaultColorSource::HostDefault,
+            palette_overrides: Arc::new([false; 256]),
+            configured: Arc::new(configured.clone()),
+            bold_as_bright,
         }
     }
 
@@ -269,14 +290,15 @@ pub(crate) struct CursorSnapshot {
 
 impl Default for CursorSnapshot {
     fn default() -> Self {
+        let configured = TerminalColors::default();
         Self {
             position: None,
             visible: false,
             blinking: false,
             password_input: false,
             shape: CursorShapeSnapshot::default(),
-            color: ACTIVE_THEME.terminal_foreground,
-            text_color: ACTIVE_THEME.terminal_background,
+            color: configured.cursor,
+            text_color: configured.cursor_text.unwrap_or(configured.background),
         }
     }
 }
@@ -361,6 +383,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) search: bool,
     pub(crate) graphics_content: bool,
     pub(crate) graphics_geometry: bool,
+    pub(crate) appearance: bool,
 }
 
 impl SnapshotDamage {
@@ -379,6 +402,7 @@ impl SnapshotDamage {
             search: false,
             graphics_content: true,
             graphics_geometry: true,
+            appearance: true,
         }
     }
 
@@ -405,6 +429,10 @@ pub(crate) struct ScrollbarSnapshot {
 #[derive(Clone, Debug)]
 pub(crate) struct ScreenSnapshot {
     pub(crate) generation: PresentationGeneration,
+    pub(crate) appearance_generation: AppearanceGeneration,
+    pub(crate) terminal_appearance: Appearance,
+    pub(crate) configured_colors: Arc<TerminalColors>,
+    pub(crate) bold_as_bright: bool,
     pub(crate) rows: Arc<[RowSnapshot]>,
     /// Soft-wrap markers corresponding one-to-one with the published viewport rows.
     pub(crate) row_soft_wrapped: Arc<[bool]>,
@@ -430,6 +458,10 @@ impl PartialEq for ScreenSnapshot {
         self.rows == other.rows
             && self.row_soft_wrapped == other.row_soft_wrapped
             && self.generation == other.generation
+            && self.appearance_generation == other.appearance_generation
+            && self.terminal_appearance == other.terminal_appearance
+            && self.configured_colors == other.configured_colors
+            && self.bold_as_bright == other.bold_as_bright
             && self.background == other.background
             && self.colors == other.colors
             && self.size == other.size
@@ -451,19 +483,33 @@ impl PartialEq for ScreenSnapshot {
 impl Eq for ScreenSnapshot {}
 
 impl ScreenSnapshot {
-    pub(crate) fn empty(paths: crate::local_path::LocalPathSemantics) -> Arc<Self> {
+    pub(crate) fn empty_with_appearance(
+        paths: crate::local_path::LocalPathSemantics,
+        initial_appearance: &TerminalAppearanceUpdate,
+    ) -> Arc<Self> {
+        let appearance = &initial_appearance.appearance;
+        let colors =
+            TerminalColorsSnapshot::configured(&appearance.colors, appearance.bold_as_bright);
         Arc::new(Self {
             generation: PresentationGeneration::default(),
+            appearance_generation: initial_appearance.generation,
+            terminal_appearance: appearance.appearance,
+            configured_colors: Arc::new(appearance.colors.clone()),
+            bold_as_bright: appearance.bold_as_bright,
             rows: Arc::from([]),
             row_soft_wrapped: Arc::from([]),
-            background: ACTIVE_THEME.terminal_background,
-            colors: TerminalColorsSnapshot::themed(),
+            background: appearance.colors.background,
+            colors,
             size: ScreenSizeSnapshot::default(),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
             active_screen: ActiveScreenSnapshot::default(),
             cursor: CursorSnapshot {
-                color: ACTIVE_THEME.terminal_foreground,
+                color: appearance.colors.cursor,
+                text_color: appearance
+                    .colors
+                    .cursor_text
+                    .unwrap_or(appearance.colors.background),
                 ..CursorSnapshot::default()
             },
             text_blinking: false,
@@ -476,6 +522,69 @@ impl ScreenSnapshot {
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
         })
+    }
+
+    /// Recolors retained content for rendering without claiming that the worker applied a newer
+    /// appearance generation. Program-owned defaults and palette entries remain unchanged.
+    pub(crate) fn projected_for_renderer(
+        screen: &Arc<Self>,
+        appearance: &ResolvedTerminalAppearance,
+    ) -> Arc<Self> {
+        if screen.terminal_appearance == appearance.appearance
+            && screen.configured_colors.as_ref() == &appearance.colors
+            && screen.bold_as_bright == appearance.bold_as_bright
+        {
+            return Arc::clone(screen);
+        }
+        screen.reprojected(appearance)
+    }
+
+    fn reprojected(&self, appearance: &ResolvedTerminalAppearance) -> Arc<Self> {
+        let mut colors = self.colors.clone();
+        if colors.foreground_source == TerminalDefaultColorSource::HostDefault {
+            colors.foreground = appearance.colors.foreground;
+        }
+        if colors.background_source == TerminalDefaultColorSource::HostDefault {
+            colors.background = appearance.colors.background;
+        }
+        let mut palette = *colors.palette;
+        for index in 0..8 {
+            if !colors.palette_overrides[index] {
+                palette[index] = appearance.colors.normal[index];
+            }
+            if !colors.palette_overrides[index + 8] {
+                palette[index + 8] = appearance.colors.bright[index];
+            }
+        }
+        colors.palette = Arc::new(palette);
+        colors.configured = Arc::new(appearance.colors.clone());
+        colors.bold_as_bright = appearance.bold_as_bright;
+
+        let mut cursor = self.cursor;
+        if colors.cursor_source == TerminalDefaultColorSource::HostDefault {
+            cursor.color = appearance.colors.cursor;
+            cursor.text_color = appearance
+                .colors
+                .cursor_text
+                .unwrap_or_else(|| colors.effective_background());
+        } else {
+            cursor.text_color = colors.effective_background();
+        }
+        let background = colors.effective_background();
+        Arc::new(Self {
+            terminal_appearance: appearance.appearance,
+            configured_colors: Arc::clone(&colors.configured),
+            bold_as_bright: appearance.bold_as_bright,
+            background,
+            colors,
+            cursor,
+            ..self.clone()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty(paths: crate::local_path::LocalPathSemantics) -> Arc<Self> {
+        Self::empty_with_appearance(paths, &crate::terminal::test_terminal_appearance_update())
     }
 
     #[cfg(test)]
@@ -520,12 +629,17 @@ impl ScreenSnapshot {
 
     #[cfg(test)]
     fn empty_value() -> Self {
+        let configured = TerminalColors::default();
         Self {
             generation: PresentationGeneration::default(),
+            appearance_generation: AppearanceGeneration::INITIAL,
+            terminal_appearance: Appearance::Dark,
+            configured_colors: Arc::new(TerminalColors::default()),
+            bold_as_bright: true,
             rows: Arc::from([]),
             row_soft_wrapped: Arc::from([]),
-            background: ACTIVE_THEME.terminal_background,
-            colors: TerminalColorsSnapshot::themed(),
+            background: configured.background,
+            colors: TerminalColorsSnapshot::configured(&configured, true),
             size: ScreenSizeSnapshot::default(),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
@@ -607,6 +721,7 @@ pub(crate) struct TerminalEmulator {
     cached_mouse_tracking: Option<bool>,
     cached_selection_present: Option<bool>,
     cached_metadata_revision: Option<u64>,
+    cached_appearance_generation: Option<AppearanceGeneration>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     selection_drag_position: Option<SurfacePosition>,
@@ -615,6 +730,8 @@ pub(crate) struct TerminalEmulator {
     presentation_generation: PresentationGeneration,
     synchronized_output_last_activity: Option<Instant>,
     find: TerminalFindState,
+    applied_appearance: TerminalAppearanceUpdate,
+    reported_appearance: Rc<Cell<Appearance>>,
 }
 
 enum MetadataEvent {
@@ -717,13 +834,22 @@ impl EmulatorAction {
 impl TerminalEmulator {
     #[cfg(test)]
     pub(crate) fn new(geometry: TerminalGeometry) -> Result<Self, Error> {
-        Self::new_with_metadata(
+        Self::new_with_appearance(geometry, crate::terminal::test_terminal_appearance_update())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_appearance(
+        geometry: TerminalGeometry,
+        initial_appearance: TerminalAppearanceUpdate,
+    ) -> Result<Self, Error> {
+        Self::new_with_metadata_and_appearance(
             geometry,
             "",
             "",
             None,
             identity::TERM_FALLBACK,
             Instant::now(),
+            initial_appearance,
         )
     }
 
@@ -736,7 +862,28 @@ impl TerminalEmulator {
         terminal_name: &'static str,
         epoch: Instant,
     ) -> Result<Self, Error> {
-        Self::new_with_metadata_context(
+        Self::new_with_metadata_and_appearance(
+            geometry,
+            initial_directory,
+            fallback_title,
+            local_hostname,
+            terminal_name,
+            epoch,
+            crate::terminal::test_terminal_appearance_update(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_metadata_and_appearance(
+        geometry: TerminalGeometry,
+        initial_directory: &str,
+        fallback_title: &str,
+        local_hostname: Option<&str>,
+        terminal_name: &'static str,
+        epoch: Instant,
+        initial_appearance: TerminalAppearanceUpdate,
+    ) -> Result<Self, Error> {
+        Self::new_with_metadata_context_and_appearance(
             geometry,
             TerminalMetadataContext::local(
                 crate::local_path::LocalPathSemantics::Posix,
@@ -746,6 +893,7 @@ impl TerminalEmulator {
             fallback_title,
             terminal_name,
             epoch,
+            initial_appearance,
         )
     }
 
@@ -757,6 +905,25 @@ impl TerminalEmulator {
         terminal_name: &'static str,
         epoch: Instant,
     ) -> Result<Self, Error> {
+        Self::new_with_metadata_context_and_appearance(
+            geometry,
+            metadata_context,
+            fallback_title,
+            terminal_name,
+            epoch,
+            crate::terminal::test_terminal_appearance_update(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_metadata_context_and_appearance(
+        geometry: TerminalGeometry,
+        metadata_context: TerminalMetadataContext,
+        fallback_title: &str,
+        terminal_name: &'static str,
+        epoch: Instant,
+        initial_appearance: TerminalAppearanceUpdate,
+    ) -> Result<Self, Error> {
         Self::new_with_local_filesystem(
             geometry,
             metadata_context,
@@ -764,6 +931,7 @@ impl TerminalEmulator {
             terminal_name,
             epoch,
             LocalFilesystemAuthority::testing(),
+            initial_appearance,
         )
     }
 
@@ -774,6 +942,7 @@ impl TerminalEmulator {
         terminal_name: &'static str,
         epoch: Instant,
         local_filesystem: LocalFilesystemAuthority,
+        initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<Self, Error> {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
@@ -798,7 +967,10 @@ impl TerminalEmulator {
             .set_kitty_image_from_shared_mem_allowed(false)?
             .set_apc_max_bytes_kitty(Some(APC_TRANSMISSION_LIMIT))?;
 
-        apply_theme(&mut terminal)?;
+        apply_terminal_appearance_defaults_transactional(
+            &mut terminal,
+            &initial_appearance.appearance,
+        )?;
         terminal.resize(grid.cols, grid.rows, cell.width, cell.height)?;
         terminal.on_pty_write({
             let pty_responses = Rc::clone(&pty_responses);
@@ -808,6 +980,11 @@ impl TerminalEmulator {
         // by dividing the fractional PTY pixel extent can underestimate their size
         // and make Unicode-placeholder rows wrap beyond the terminal grid.
         terminal.on_size(|terminal| terminal.size_report().ok())?;
+        let reported_appearance = Rc::new(Cell::new(initial_appearance.appearance.appearance));
+        terminal.on_color_scheme({
+            let reported_appearance = Rc::clone(&reported_appearance);
+            move |_| Some(color_scheme(reported_appearance.get()))
+        })?;
         terminal.on_title_changed({
             let pending_metadata = Rc::clone(&pending_metadata);
             move |terminal| {
@@ -970,6 +1147,7 @@ impl TerminalEmulator {
             cached_mouse_tracking: None,
             cached_selection_present: None,
             cached_metadata_revision: None,
+            cached_appearance_generation: None,
             geometry,
             active_pointer: None,
             selection_drag_position: None,
@@ -978,6 +1156,8 @@ impl TerminalEmulator {
             presentation_generation: PresentationGeneration::default(),
             synchronized_output_last_activity: None,
             find: TerminalFindState::default(),
+            applied_appearance: initial_appearance,
+            reported_appearance,
         })
     }
 
@@ -1149,6 +1329,33 @@ impl TerminalEmulator {
 
     pub(crate) fn take_pty_responses(&self) -> Vec<u8> {
         mem::take(&mut *self.pty_responses.borrow_mut())
+    }
+
+    pub(crate) fn apply_appearance(
+        &mut self,
+        update: TerminalAppearanceUpdate,
+    ) -> Result<(), Error> {
+        if update.generation <= self.applied_appearance.generation {
+            return Ok(());
+        }
+
+        let appearance_changed =
+            update.appearance.appearance != self.applied_appearance.appearance.appearance;
+        let report = if appearance_changed && self.terminal.mode(Mode::COLOR_SCHEME_REPORT)? {
+            let mut bytes = [0; 32];
+            let length = color_scheme(update.appearance.appearance).encode_report(&mut bytes)?;
+            Some(bytes[..length].to_vec())
+        } else {
+            None
+        };
+
+        apply_terminal_appearance_defaults_transactional(&mut self.terminal, &update.appearance)?;
+        self.reported_appearance.set(update.appearance.appearance);
+        self.applied_appearance = update;
+        if let Some(report) = report {
+            self.pty_responses.borrow_mut().extend_from_slice(&report);
+        }
+        Ok(())
     }
 
     pub(crate) fn take_attention_events(&self) -> Vec<AttentionEvent> {
@@ -2044,11 +2251,21 @@ impl TerminalEmulator {
             ActiveScreenSnapshot::Alternate => &self.primary_row_cache,
         };
 
+        let palette_overrides = self.terminal.color_palette_overrides()?;
+        let configured_colors = Arc::new(self.applied_appearance.appearance.colors.clone());
         let terminal_colors = TerminalColorsSnapshot {
             foreground: colors.foreground.into(),
             background: colors.background.into(),
             palette: Arc::new(colors.palette.map(Color::from)),
             reversed: self.terminal.mode(Mode::REVERSE_COLORS)?,
+            foreground_source: color_source(self.terminal.fg_color_overridden()?),
+            background_source: color_source(self.terminal.bg_color_overridden()?),
+            cursor_source: color_source(self.terminal.cursor_color_overridden()?),
+            palette_overrides: Arc::new(std::array::from_fn(|index| {
+                palette_overrides.is_set(PaletteIndex(index as u8))
+            })),
+            configured: Arc::clone(&configured_colors),
+            bold_as_bright: self.applied_appearance.appearance.bold_as_bright,
         };
         let build_cursor = |rows: &[RowSnapshot]| CursorSnapshot {
             position: cursor_position.map(|(column, row, at_wide_tail)| {
@@ -2059,7 +2276,15 @@ impl TerminalEmulator {
             password_input: cursor_password_input,
             shape: cursor_shape,
             color: cursor_color,
-            text_color: terminal_colors.effective_background(),
+            text_color: if terminal_colors.cursor_source == TerminalDefaultColorSource::HostDefault
+            {
+                terminal_colors
+                    .configured
+                    .cursor_text
+                    .unwrap_or_else(|| terminal_colors.effective_background())
+            } else {
+                terminal_colors.effective_background()
+            },
         };
         let mut cursor = build_cursor(row_cache);
         let rebuild_all = matches!(dirty, Dirty::Full)
@@ -2088,6 +2313,8 @@ impl TerminalEmulator {
                 search: find_changed,
                 graphics_content: graphics_content_changed,
                 graphics_geometry: graphics_geometry_changed,
+                appearance: self.cached_appearance_generation
+                    != Some(self.applied_appearance.generation),
                 ..SnapshotDamage::default()
             }
         };
@@ -2288,6 +2515,7 @@ impl TerminalEmulator {
         self.cached_mouse_tracking = Some(mouse_tracking);
         self.cached_selection_present = Some(selection_present);
         self.cached_metadata_revision = Some(metadata.revision);
+        self.cached_appearance_generation = Some(self.applied_appearance.generation);
         self.title = Arc::clone(&title);
 
         self.presentation_generation = self.presentation_generation.next();
@@ -2298,6 +2526,10 @@ impl TerminalEmulator {
         self.find.mark_published();
         Ok(Some(Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
+            appearance_generation: self.applied_appearance.generation,
+            terminal_appearance: self.applied_appearance.appearance.appearance,
+            configured_colors,
+            bold_as_bright: self.applied_appearance.appearance.bold_as_bright,
             rows: Arc::from(row_cache.clone()),
             row_soft_wrapped: Arc::from(row_soft_wrapped),
             background: terminal_colors.effective_background(),
@@ -2455,24 +2687,77 @@ const ANSI_BRIGHT_INDICES: [PaletteIndex; 8] = [
     PaletteIndex::BRIGHT_WHITE,
 ];
 
-fn apply_theme(terminal: &mut Terminal<'static, 'static>) -> Result<(), libghostty_vt::Error> {
-    let theme = &*ACTIVE_THEME;
-    terminal
-        .set_default_fg_color(Some(ghostty_color(theme.terminal_foreground)))?
-        .set_default_bg_color(Some(ghostty_color(theme.terminal_background)))?
-        .set_default_cursor_color(Some(ghostty_color(theme.terminal_foreground)))?;
-
+fn apply_terminal_appearance_defaults(
+    terminal: &mut Terminal<'static, 'static>,
+    appearance: &ResolvedTerminalAppearance,
+) -> Result<(), Error> {
+    terminal.set_default_fg_color(Some(ghostty_color(appearance.colors.foreground)))?;
+    terminal.set_default_bg_color(Some(ghostty_color(appearance.colors.background)))?;
+    terminal.set_default_cursor_color(Some(ghostty_color(appearance.colors.cursor)))?;
     let mut palette = terminal.default_color_palette()?;
     for (index, color) in ANSI_NORMAL_INDICES
         .into_iter()
-        .zip(theme.terminal_normal())
-        .chain(ANSI_BRIGHT_INDICES.into_iter().zip(theme.terminal_bright()))
+        .zip(appearance.colors.normal)
+        .chain(
+            ANSI_BRIGHT_INDICES
+                .into_iter()
+                .zip(appearance.colors.bright),
+        )
     {
         palette.set(index, ghostty_color(color));
     }
     terminal.set_default_color_palette(Some(palette))?;
-
     Ok(())
+}
+
+fn apply_terminal_appearance_defaults_transactional(
+    terminal: &mut Terminal<'static, 'static>,
+    appearance: &ResolvedTerminalAppearance,
+) -> Result<(), Error> {
+    let foreground = terminal.default_fg_color()?;
+    let background = terminal.default_bg_color()?;
+    let cursor = terminal.default_cursor_color()?;
+    let palette = terminal.default_color_palette()?;
+
+    let Err(apply_error) = apply_terminal_appearance_defaults(terminal, appearance) else {
+        return Ok(());
+    };
+
+    let mut rollback_error = None;
+    if let Err(error) = terminal.set_default_fg_color(foreground) {
+        rollback_error = Some(error);
+    }
+    if let Err(error) = terminal.set_default_bg_color(background)
+        && rollback_error.is_none()
+    {
+        rollback_error = Some(error);
+    }
+    if let Err(error) = terminal.set_default_cursor_color(cursor)
+        && rollback_error.is_none()
+    {
+        rollback_error = Some(error);
+    }
+    if let Err(error) = terminal.set_default_color_palette(Some(palette))
+        && rollback_error.is_none()
+    {
+        rollback_error = Some(error);
+    }
+    Err(rollback_error.unwrap_or(apply_error))
+}
+
+fn color_scheme(appearance: Appearance) -> ColorScheme {
+    match appearance {
+        Appearance::Light => ColorScheme::Light,
+        Appearance::Dark => ColorScheme::Dark,
+    }
+}
+
+fn color_source(overridden: bool) -> TerminalDefaultColorSource {
+    if overridden {
+        TerminalDefaultColorSource::ProgramOverride
+    } else {
+        TerminalDefaultColorSource::HostDefault
+    }
 }
 
 fn ghostty_color(color: Color) -> RgbColor {

@@ -2,12 +2,17 @@ use gpui::prelude::*;
 use gpui::{App, IntoElement, RenderOnce, SharedString, Window, div};
 
 #[derive(IntoElement)]
+/// A count-based middle truncation helper, not a font-measured layout primitive.
+///
+/// The limit counts Unicode scalar values, including the ellipsis, and may split grapheme
+/// clusters. Use a measured, grapheme-aware owner for font-sensitive application labels.
 pub struct MiddleTruncatedText {
     text: SharedString,
     maximum_characters: usize,
 }
 
 impl MiddleTruncatedText {
+    /// Sets the scalar-value budget. Budgets of zero or one produce an ellipsis when truncated.
     pub fn new(text: impl Into<SharedString>, maximum_characters: usize) -> Self {
         Self {
             text: text.into(),

@@ -28,6 +28,7 @@ fn osc8_relative_file_targets_bind_to_the_directory_at_emission() {
         identity::TERM_FALLBACK,
         Instant::now(),
         crate::platform::macos_adapter_tests::local_filesystem(),
+        crate::terminal::test_terminal_appearance_update(),
     )
     .unwrap();
 

@@ -1,11 +1,11 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, Font, Pixels, SharedString, TextRun, Window, canvas, div, px};
+use gpui::{AnyElement, Pixels, SharedString, canvas, div, px};
 use spaceterm_ui::{Icon, IconName};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{gpui_color, secondary_text_color};
-use crate::theme::ACTIVE_THEME;
-use crate::theme::Color;
+use crate::appearance::Color;
+use crate::ui::appearance::ChromeAppearance;
 
 use super::SIDEBAR_NAME_TEXT_SIZE as NAME_SIZE;
 const DETAIL_SIZE: f32 = 12.0;
@@ -17,12 +17,14 @@ pub(super) fn title(
     name_element: AnyElement,
     machine: Option<SharedString>,
     id: u64,
+    appearance: ChromeAppearance,
 ) -> AnyElement {
+    let height = appearance.height(22.0, NAME_SIZE);
     canvas(
         move |bounds, window, cx| {
-            let name_width = measure(&name, NAME_SIZE, window);
+            let name_width = appearance.measure_emphasis(&name, NAME_SIZE, window);
             let machine = machine.and_then(|machine| {
-                let full_width = measure(&machine, DETAIL_SIZE, window);
+                let full_width = appearance.measure(&machine, DETAIL_SIZE, window);
                 machine_width(bounds.size.width, name_width, full_width)
                     .map(|width| (machine, width))
             });
@@ -33,15 +35,16 @@ pub(super) fn title(
                 .items_center()
                 .child(div().min_w_0().flex_1().child(name_element))
                 .when_some(machine, |row, (machine, width)| {
-                    row.gap(px(GAP)).child(
+                    row.gap(appearance.spacing(GAP)).child(
                         div()
                             .id(("workspace-machine", id))
                             .debug_selector(move || format!("workspace-machine-{id}"))
                             .w(width)
                             .flex_shrink_0()
                             .truncate()
-                            .text_size(px(DETAIL_SIZE))
-                            .text_color(gpui_color(secondary_text_color()))
+                            .font(appearance.regular.clone())
+                            .text_size(appearance.text_size(DETAIL_SIZE))
+                            .text_color(gpui_color(secondary_text_color(&appearance.colors)))
                             .child(machine),
                     )
                 })
@@ -53,7 +56,7 @@ pub(super) fn title(
         |_, mut content, window, cx| content.paint(window, cx),
     )
     .w_full()
-    .h(px(22.0))
+    .h(height)
     .into_any_element()
 }
 
@@ -69,17 +72,25 @@ pub(super) fn detail(
     status_color: Option<Color>,
     selector: Option<String>,
     id: u64,
+    appearance: ChromeAppearance,
 ) -> AnyElement {
+    let height = appearance.height(18.0, DETAIL_SIZE);
     canvas(
         move |bounds, window, cx| {
-            let counts_width = measure(&counts, DETAIL_SIZE, window).ceil();
-            let pin_width = if pinned { px(PIN_WIDTH) } else { px(0.0) };
-            let available = (bounds.size.width - counts_width - px(GAP) - pin_width).max(px(0.0));
+            let counts_width = appearance.measure(&counts, DETAIL_SIZE, window).ceil();
+            let pin_width = if pinned {
+                appearance.spacing(PIN_WIDTH)
+            } else {
+                px(0.0)
+            };
+            let available =
+                (bounds.size.width - counts_width - appearance.spacing(GAP) - pin_width)
+                    .max(px(0.0));
             let fitted = if status_color.is_some() {
                 text
             } else {
                 fit_trailing_path(&text, available, |value| {
-                    measure(value, DETAIL_SIZE, window)
+                    appearance.measure(value, DETAIL_SIZE, window)
                 })
                 .into()
             };
@@ -91,14 +102,14 @@ pub(super) fn detail(
                 .when(pinned, |path| {
                     path.child(
                         div()
-                            .w(px(PIN_WIDTH))
+                            .w(appearance.spacing(PIN_WIDTH))
                             .flex_shrink_0()
                             .id(("workspace-row-pin", id))
                             .debug_selector(move || format!("workspace-row-pin-{id}"))
                             .child(Icon::new(
                                 IconName::Pin,
-                                px(12.0),
-                                gpui_color(ACTIVE_THEME.icon),
+                                appearance.spacing(12.0),
+                                gpui_color(appearance.colors.icon),
                             )),
                     )
                 })
@@ -112,7 +123,8 @@ pub(super) fn detail(
                             selector.unwrap_or_else(|| format!("workspace-row-path-{id}"))
                         })
                         .text_color(gpui_color(
-                            status_color.unwrap_or_else(secondary_text_color),
+                            status_color
+                                .unwrap_or_else(|| secondary_text_color(&appearance.colors)),
                         ))
                         .child(fitted),
                 );
@@ -121,8 +133,9 @@ pub(super) fn detail(
                 .h_full()
                 .flex()
                 .items_center()
-                .gap(px(GAP))
-                .text_size(px(DETAIL_SIZE))
+                .gap(appearance.spacing(GAP))
+                .font(appearance.regular.clone())
+                .text_size(appearance.text_size(DETAIL_SIZE))
                 .child(path)
                 .child(
                     div()
@@ -131,7 +144,7 @@ pub(super) fn detail(
                         .whitespace_nowrap()
                         .id(("workspace-counts", id))
                         .debug_selector(move || format!("workspace-counts-{id}"))
-                        .text_color(gpui_color(secondary_text_color()))
+                        .text_color(gpui_color(secondary_text_color(&appearance.colors)))
                         .child(counts),
                 )
                 .into_any_element();
@@ -142,30 +155,8 @@ pub(super) fn detail(
         |_, mut content, window, cx| content.paint(window, cx),
     )
     .w_full()
-    .h(px(18.0))
+    .h(height)
     .into_any_element()
-}
-
-fn measure(text: &str, size: f32, window: &Window) -> Pixels {
-    let style = window.text_style();
-    let run = TextRun {
-        len: text.len(),
-        font: Font {
-            family: style.font_family,
-            features: style.font_features,
-            fallbacks: style.font_fallbacks,
-            weight: style.font_weight,
-            style: style.font_style,
-        },
-        color: style.color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text.to_owned().into(), px(size), &[run], None)
-        .width
 }
 
 fn fit_trailing_path(text: &str, available: Pixels, measure: impl Fn(&str) -> Pixels) -> String {

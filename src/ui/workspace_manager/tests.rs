@@ -1,6 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::ui::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
+use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
@@ -353,13 +353,13 @@ fn remote_directory_labels_should_preserve_an_explicit_destination_user() {
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
     let (visible_icon, visible_label) = sidebar_toggle_presentation(true);
     assert_eq!(
-        (visible_icon.unicode(), visible_label),
-        (IconName::PanelLeft.unicode(), "Close Sidebar")
+        (visible_icon, visible_label),
+        (CustomIconName::PanelLeft, "Hide Sidebar")
     );
     let (hidden_icon, hidden_label) = sidebar_toggle_presentation(false);
     assert_eq!(
-        (hidden_icon.unicode(), hidden_label),
-        (IconName::PanelRight.unicode(), "Open Sidebar")
+        (hidden_icon, hidden_label),
+        (CustomIconName::PanelRight, "Show Sidebar")
     );
 }
 
@@ -4130,6 +4130,19 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
             .pinned_directory()
             .is_some()
     }));
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    click("modal-action-tab-start-error-ok", cx);
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 
     fs::rename(&parked, &project).unwrap();
     cx.simulate_keystrokes("cmd-t");
@@ -5088,6 +5101,45 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
         .size;
 
     assert_eq!((top_geometry, body_geometry), (expected, expected));
+}
+
+#[gpui::test]
+fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let appearance = crate::ui::appearance::ChromeAppearance {
+        text_scale: 24.0 / 13.0,
+        spacing_scale: 1.25,
+        ..crate::ui::appearance::ChromeAppearance::default()
+    };
+    cx.update(|window, cx| {
+        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let expanded_chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the expanded top-left Chrome was not rendered");
+    let expanded_target = cx
+        .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+        .expect("the expanded spacious resize target was not rendered");
+
+    click("toggle-sidebar-button", cx);
+
+    let collapsed_chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left Chrome was not rendered");
+    let collapsed_target = cx
+        .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+        .expect("the collapsed spacious resize target was not rendered");
+
+    assert_eq!(
+        (expanded_target.size.height, collapsed_target.size.height,),
+        (expanded_chrome.size.height, collapsed_chrome.size.height,)
+    );
+    assert!(expanded_chrome.size.height > px(TOP_CHROME_HEIGHT));
 }
 
 #[gpui::test]
@@ -7312,7 +7364,7 @@ fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &m
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
-    assert!(cx.has_pending_prompt());
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(
@@ -7338,7 +7390,7 @@ fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
     });
     cx.run_until_parked();
 
-    assert!(cx.has_pending_prompt());
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(
@@ -7364,7 +7416,7 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     });
     cx.run_until_parked();
 
-    assert!(!cx.has_pending_prompt());
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(
@@ -7857,6 +7909,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     for (button, tooltip) in [
+        ("toggle-sidebar-button", "toggle-sidebar-tooltip"),
         (
             "new-remote-workspace-button",
             "new-remote-workspace-tooltip",
@@ -7877,6 +7930,26 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
         cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
         cx.run_until_parked();
     }
+}
+
+#[gpui::test]
+fn collapsed_sidebar_toggle_should_show_its_tooltip_over_the_icon(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    click("toggle-sidebar-button", cx);
+    cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    let center = cx.debug_bounds("toggle-sidebar-button").unwrap().center();
+    cx.simulate_mouse_move(center, None, Modifiers::default());
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("toggle-sidebar-tooltip").is_some());
+    assert_eq!(
+        crate::desktop_profile::testing_presentation().shortcut(&ToggleSidebar),
+        "Primary+B"
+    );
 }
 
 #[gpui::test]

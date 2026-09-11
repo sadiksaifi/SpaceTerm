@@ -1464,7 +1464,7 @@ fn prepare_accessibility_presentation(
             pane.accessibility_element = factory.create(
                 window,
                 pane.accessibility.as_ref().clone(),
-                pane.font_family.as_ref(),
+                &pane.appearance.terminal.typography.regular,
                 px(pane.font_size),
             );
         });
@@ -1983,6 +1983,139 @@ fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
     assert_eq!((before, after), (18.0, 19.0));
 }
 
+fn publish_terminal_preferences(
+    preferences: crate::appearance::AppearancePreferences,
+    cx: &mut App,
+) {
+    use crate::appearance::{
+        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, SchemeCatalog,
+        SystemAppearance,
+    };
+    let previous = super::super::appearance_runtime::current(cx);
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::new(previous.generation.get() + 1),
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts {
+                system_ui: AvailableFont {
+                    family: ".SystemUIFont".into(),
+                    class: FontClass::Proportional,
+                    resolution_identity: "ui".into(),
+                },
+                system_monospace: AvailableFont {
+                    family: "Menlo".into(),
+                    class: FontClass::Monospace,
+                    resolution_identity: "system-monospace".into(),
+                },
+                installed: Vec::new(),
+            },
+        )
+        .unwrap();
+    cx.set_global(super::super::appearance_runtime::InstalledAppearance(
+        Arc::new(resolved),
+    ));
+}
+
+#[gpui::test]
+fn live_terminal_typography_preserves_relative_zoom_and_reset_uses_current_base(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx) = terminal_pane(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| pane.set_font_size(20.0, window, cx));
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.terminal.typography.base_size = 31.0;
+        preferences.terminal.typography.regular_weight = 600;
+        preferences.terminal.typography.bold_weight = 800;
+        preferences.terminal.typography.line_height = 1.5;
+        publish_terminal_preferences(preferences.clone(), cx);
+        pane.update(cx, |pane, cx| {
+            pane.refresh_appearance(window, cx);
+            assert_eq!(pane.zoom_delta, 2.0);
+            assert_eq!(pane.font_size, 32.0);
+            assert_eq!(pane.line_height, 48.0);
+            assert_eq!(pane.terminal_fonts.regular.weight, gpui::FontWeight(600.0));
+            assert_eq!(pane.terminal_fonts.bold.weight, gpui::FontWeight(800.0));
+            pane.increase_font_size(&IncreaseTerminalFontSize, window, cx);
+            assert_eq!(pane.zoom_delta, 3.0);
+            assert_eq!(pane.font_size, 32.0);
+            pane.decrease_font_size(&DecreaseTerminalFontSize, window, cx);
+            assert_eq!(pane.zoom_delta, 2.0);
+            assert_eq!(pane.font_size, 32.0);
+        });
+        preferences.terminal.typography.base_size = 12.0;
+        publish_terminal_preferences(preferences, cx);
+        pane.update(cx, |pane, cx| {
+            pane.refresh_appearance(window, cx);
+            assert_eq!(pane.font_size, 14.0);
+            pane.reset_font_size(&ResetTerminalFontSize, window, cx);
+            assert_eq!(pane.zoom_delta, 0.0);
+            assert_eq!(pane.font_size, 12.0);
+        });
+    });
+}
+
+#[gpui::test]
+fn queued_appearance_screens_cannot_revert_the_latest_terminal_request(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    cx.update(|window, cx| {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.terminal.typography.base_size = 20.0;
+        publish_terminal_preferences(preferences.clone(), cx);
+        pane.update(cx, |pane, cx| pane.refresh_appearance(window, cx));
+        let intermediate = pane.read_with(cx, |pane, _| pane.requested_terminal_generation);
+        preferences.terminal.typography.base_size = 22.0;
+        publish_terminal_preferences(preferences.clone(), cx);
+        pane.update(cx, |pane, cx| {
+            pane.refresh_appearance(window, cx);
+            let mut stale = (*graphics_screen(100, 1)).clone();
+            stale.appearance_generation = intermediate;
+            assert!(!pane.handle_event(SessionEvent::Screen(Arc::new(stale)), cx));
+            assert!(pane.screen.generation < crate::terminal::PresentationGeneration::test(100));
+            let mut latest = (*graphics_screen(101, 1)).clone();
+            latest.appearance_generation = pane.requested_terminal_generation;
+            assert!(pane.handle_event(SessionEvent::Screen(Arc::new(latest)), cx));
+        });
+        let terminal_generation = pane.read_with(cx, |pane, _| pane.requested_terminal_generation);
+        preferences.chrome.typography.base_size = 24.0;
+        publish_terminal_preferences(preferences, cx);
+        pane.update(cx, |pane, cx| {
+            pane.refresh_appearance(window, cx);
+            assert_eq!(pane.requested_terminal_generation, terminal_generation);
+            let mut next = (*graphics_screen(102, 1)).clone();
+            next.appearance_generation = terminal_generation;
+            assert!(pane.handle_event(SessionEvent::Screen(Arc::new(next)), cx));
+        });
+    });
+}
+
+#[gpui::test]
+fn color_only_terminal_change_preserves_geometry_and_prepared_fonts(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    cx.update(|window, cx| {
+        let (geometry, fonts, width) = pane.read_with(cx, |pane, _| {
+            (
+                pane.last_geometry,
+                pane.terminal_fonts.clone(),
+                pane.cell_width,
+            )
+        });
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.terminal.scheme = crate::appearance::SchemeSelection::Fixed {
+            id: crate::appearance::SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
+            appearance: crate::appearance::Appearance::Light,
+        };
+        publish_terminal_preferences(preferences, cx);
+        pane.update(cx, |pane, cx| {
+            pane.refresh_appearance(window, cx);
+            assert_eq!(pane.last_geometry, geometry);
+            assert_eq!(pane.terminal_fonts, fonts);
+            assert_eq!(pane.cell_width, width);
+        });
+    });
+}
+
 #[gpui::test]
 fn font_size_changes_notify_accessibility_when_terminal_text_is_static(cx: &mut TestAppContext) {
     let (pane, cx) = terminal_pane(cx);
@@ -2198,6 +2331,59 @@ fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
             .commands()
             .iter()
             .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+    );
+}
+
+#[gpui::test]
+fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, _) = connected_terminal_pane(cx);
+    cx.update(|_, cx| {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.chrome.typography.base_size = 24.0;
+        preferences.chrome.density = crate::appearance::ChromeDensity::Comfortable;
+        publish_terminal_preferences(preferences, cx);
+        let resolved = super::super::appearance_runtime::current(cx);
+        let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        spaceterm_ui::replace_control_theme_catalog(
+            cx,
+            super::super::control_theme_catalog::catalog(&chrome),
+        )
+        .unwrap();
+        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(chrome)));
+    });
+    cx.simulate_resize(gpui::size(px(130.0), px(420.0)));
+    cx.dispatch_action(OpenTerminalFind);
+    cx.simulate_keystrokes("sample");
+    cx.run_until_parked();
+    let bar = cx.debug_bounds("terminal-find-bar").unwrap();
+    assert!(
+        bar.size.height > px(60.0),
+        "narrow Find must wrap into multiple rows"
+    );
+    for selector in [
+        "terminal-find-input",
+        "terminal-find-result-label",
+        "terminal-find-previous",
+        "terminal-find-next",
+        "terminal-find-close",
+    ] {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        assert!(bounds.size.width > px(0.0));
+        assert!(
+            bounds.origin.x >= bar.origin.x && bounds.right() <= bar.right(),
+            "{selector} escapes horizontally: {bounds:?} outside {bar:?}"
+        );
+        assert!(
+            bounds.origin.y >= bar.origin.y && bounds.bottom() <= bar.bottom(),
+            "{selector} escapes vertically"
+        );
+    }
+    let label = cx.debug_bounds("terminal-find-result-label").unwrap();
+    assert!(
+        label.size.height < px(70.0),
+        "result words must not wrap one character per line"
     );
 }
 
@@ -4870,6 +5056,7 @@ fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) 
             TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(test_local_directory(
                 PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
             ))),
+            crate::terminal::test_terminal_appearance_update(),
         )
         .expect("the test terminal session should start");
     let screen =
@@ -5104,6 +5291,64 @@ fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
     });
 
     assert_ne!(candidate, fallback);
+}
+
+#[gpui::test]
+fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let events = records.last_event_sender().unwrap();
+    let mut retained = blinking_cursor_screen(true, true);
+    Arc::make_mut(&mut retained).generation = crate::terminal::PresentationGeneration::test(1);
+    events.try_send(SessionEvent::Screen(retained)).unwrap();
+    cx.run_until_parked();
+
+    let paints_before = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.grid_presentation.cursor_storage().is_some()
+    }));
+    pane.update(cx, |pane, _| {
+        pane.present_failure_at(
+            TerminalFailure::presentation("retain-current-frame"),
+            true,
+            Some(RecoveryAction::Presentation),
+            pane.screen.generation,
+        );
+    });
+
+    cx.update(|window, cx| {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.terminal.scheme = crate::appearance::SchemeSelection::Fixed {
+            id: crate::appearance::SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
+            appearance: crate::appearance::Appearance::Light,
+        };
+        publish_terminal_preferences(preferences, cx);
+        pane.update(cx, |pane, cx| pane.refresh_appearance(window, cx));
+    });
+    cx.run_until_parked();
+
+    let expected = cx.update(|_, cx| {
+        super::super::appearance_runtime::current(cx)
+            .terminal
+            .colors
+            .background
+    });
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.surface_background()),
+        expected,
+        "the Pane Caption and terminal padding must match the reprojected retained frame"
+    );
+    let paints_after = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(
+        paints_after > paints_before,
+        "the retained cursor scene must rebuild under the new terminal appearance"
+    );
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+        paints_after,
+        "cursor blink must resume retained-scene reuse after the appearance rebuild"
+    );
 }
 
 #[gpui::test]
