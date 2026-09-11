@@ -8,9 +8,9 @@ use super::workspace_sidebar::{
     WorkspaceSidebar, remote_connection_color, remote_connection_status,
 };
 use super::workspace_sidebar::{
-    SIDEBAR_TOGGLE_INSET, TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP, WORKSPACE_CHIP_ICON_SIZE,
-    WORKSPACE_CHIP_PIN_SIZE, WORKSPACE_CHIP_TEXT_SIZE, WORKSPACE_SWITCHER_PADDING,
-    collapsed_top_chrome_width, top_chrome_trailing_inset,
+    SIDEBAR_TOGGLE_INSET, TOP_CHROME_ACTION_GAP, TRAFFIC_LIGHT_CLEARANCE, WORKSPACE_CHIP_GAP,
+    WORKSPACE_CHIP_ICON_SIZE, WORKSPACE_CHIP_PIN_SIZE, WORKSPACE_CHIP_TEXT_SIZE,
+    WORKSPACE_SWITCHER_PADDING, collapsed_top_chrome_width,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
@@ -3085,6 +3085,12 @@ impl WorkspaceManager {
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         });
+        // The visible control owns clicks where it meets the sidebar resize target.
+        let chooser = div()
+            .min_w_0()
+            .when(!sidebar_visible, |chooser| chooser.w_full())
+            .occlude()
+            .child(chooser);
         let content = div()
             .relative()
             .size_full()
@@ -3104,9 +3110,10 @@ impl WorkspaceManager {
                     .absolute()
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                    .right(top_chrome_trailing_inset())
+                    .right(px(CHROME_DIVIDER_SIZE / 2.0))
                     .flex()
                     .items_center()
+                    .gap(px(TOP_CHROME_ACTION_GAP))
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
                             Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
@@ -3160,7 +3167,6 @@ impl WorkspaceManager {
             } else {
                 ACTIVE_THEME.title_bar_inactive_background
             }))
-            .occlude()
             .child(drag_region)
             .into_any_element()
     }
@@ -3282,7 +3288,6 @@ impl Render for WorkspaceManager {
             .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.remote_pin_picker.iter().cloned())
-            .child(self.render_top_left_chrome(manager.clone(), window, cx))
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
             })
@@ -3290,7 +3295,8 @@ impl Render for WorkspaceManager {
                 self.sidebar
                     .read(cx)
                     .render_resize_handle(self.sidebar.downgrade(), window),
-            );
+            )
+            .child(self.render_top_left_chrome(manager.clone(), window, cx));
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))
     }
