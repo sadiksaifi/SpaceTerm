@@ -28,18 +28,22 @@ Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, and `#RRGGBBAA`, with red, green, blue
 ordering. Canonical output is lowercase `#RRGGBBAA`. Terminal foreground, background, cursor,
 normal/bright/dim ANSI arrays, default bright/dim foregrounds, and optional interaction
 foregrounds must be opaque. Chrome root, panel, popup, title, Tab, and text-input
-surfaces and list highlights must be opaque. Text selection, Find, other hover, scrim, shadow,
+surfaces must be opaque. List hover/selection, text selection, Find, scrim, shadow,
 and visual-bell overlays may use alpha.
 
 Pane Captions share their terminal's displayed background, including terminal-program changes.
 Their text, typography, controls, and symmetric density-scaled padding remain Chrome-owned.
 
-Chrome lists use one `list_item_background` for hovered, selected, and selected-plus-hovered
-items across the sidebar, pickers, context menus, ComboBox rows, and active-window Tabs.
-The default is the former sidebar selection color: `#252530` in Vague Pro Dark and `#e4e5ea`
-in SpaceTerm Light. Inactive-window Tabs retain their uniform inactive band. This shared role
-replaces separate sidebar hover/selection and active-Tab background roles; Zed imports derive it
-from `element.selected`. Buttons and terminal text selection retain their own roles.
+Chrome lists use separate `ghost_element_hover` and `ghost_element_selected` roles across the
+sidebar, pickers, context menus, and ComboBox rows. Hover takes precedence while a selected row
+is hovered. The built-ins assign matching values (`#252530` in Vague Pro Dark and `#e4e5ea` in
+SpaceTerm Light), but native overrides and imported themes may distinguish them. There is no
+forced equality rule or shared `list_item_background` role. Active Tabs retain the independent
+`tab_active_background` role; inactive-window Tabs retain their uniform inactive band.
+
+Zed imports preserve `ghost_element.hover`, `ghost_element.selected`, and `tab.active_background`
+independently. This follows [Zed's list-state roles](https://github.com/zed-industries/zed/blob/main/crates/ui/src/components/list/list_item.rs),
+not an assumption that all themes use equal colors. Terminal text selection remains independent.
 
 ## Chrome roles
 
@@ -48,8 +52,8 @@ the same surface, text, border, element, status, and input roles rather than acc
 component-specific colors.
 
 - Surfaces: `background`, `panel_background`, `elevated_surface_background`,
-  `title_bar_background`, `title_bar_inactive_background`, `tab_inactive_background`,
-  `list_item_background`.
+  `title_bar_background`, `title_bar_inactive_background`, `tab_active_background`,
+  `tab_inactive_background`.
 - Text and icons: `text`, `text_secondary`, `text_muted`, `text_placeholder`, `text_disabled`,
   `text_accent`, `link_text`, `link_text_hover`, `icon`, `icon_muted`, `icon_disabled`,
   `icon_accent`.
@@ -59,9 +63,10 @@ component-specific colors.
   `element_selected_hover`, `element_disabled` and the corresponding `element_foreground`,
   `element_hover_foreground`, `element_active_foreground`, `element_selected_foreground`,
   `element_selected_hover_foreground`, `element_disabled_foreground`.
-- Ghost controls: the same six states prefixed by `ghost_element_`, with paired foreground roles.
+- Ghost controls: `ghost_element_background`, `ghost_element_hover`, `ghost_element_active`,
+  `ghost_element_selected`, `ghost_element_disabled`, with corresponding foreground roles.
 - Navigation: `navigation_selection`, `sidebar_focus`. Active/inactive text and icons reuse the
-  primary/muted roles; list-row backgrounds use `list_item_background`.
+  primary/muted roles; list-row backgrounds use the separate ghost hover/selected roles.
 - Status: `info`, `info_background`, `success`, `warning`, `warning_background`,
   `warning_border`, `error`, `error_background`, and `error_border`.
 - Inputs: `input_text`, `input_placeholder`, `input_disabled_text`, `input_caret`,

@@ -11,13 +11,14 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
             gpui_color(colors.text),
             gpui_color(colors.text_muted),
             gpui_color(colors.text_disabled),
-            gpui_color(colors.list_item_background),
-            gpui_color(colors.element_selected_foreground),
+            gpui_color(colors.ghost_element_selected),
+            gpui_color(colors.ghost_element_selected_foreground),
             gpui_color(colors.ghost_element_background),
             gpui_color(colors.ghost_element_hover),
             gpui_color(colors.border_transparent),
             gpui_color(colors.border_focused),
-        ),
+        )
+        .hover_background(gpui_color(colors.ghost_element_hover)),
         ComboBoxMetrics::new(px(240.0), px(40.0))
             .icon_trigger_size(px(28.0))
             .geometry(px(260.0), px(28.0), px(30.0), px(46.0))

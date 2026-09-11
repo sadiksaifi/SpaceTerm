@@ -35,18 +35,19 @@ fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
 }
 
 #[test]
-fn list_highlight_must_be_opaque_to_match_on_different_chrome_surfaces() {
-    let translucent = Color::rgba(0x25253080);
-    let colors = ChromeColors {
-        list_item_background: translucent,
-        ..ChromeColors::default()
-    };
-    let overrides = ChromeColorOverrides {
-        list_item_background: Some(translucent),
-        ..ChromeColorOverrides::default()
-    };
-    assert_eq!(colors.validate(), Err(CatalogError::UnsupportedAlpha));
-    assert_eq!(overrides.validate(), Err(CatalogError::UnsupportedAlpha));
+fn builtin_list_hover_and_selection_match_without_aliasing_the_roles() {
+    for appearance in [Appearance::Dark, Appearance::Light] {
+        let mut colors = super::builtin::chrome_base(appearance);
+        let selected = colors.ghost_element_selected;
+        assert_eq!(colors.ghost_element_hover, selected);
+        colors.apply(&ChromeColorOverrides {
+            ghost_element_hover: Some(Color::rgba(0x12345680)),
+            ..ChromeColorOverrides::default()
+        });
+        assert_eq!(colors.ghost_element_hover, Color::rgba(0x12345680));
+        assert_eq!(colors.ghost_element_selected, selected);
+        assert!(colors.validate().is_ok());
+    }
 }
 
 #[test]
@@ -103,8 +104,8 @@ fn dark_defaults_match_the_consumed_vague_pro_values() {
             legacy.title_bar_inactive_background,
         ),
         (
-            "list_item_background",
-            chrome.list_item_background,
+            "tab_active_background",
+            chrome.tab_active_background,
             legacy.tab_active_background,
         ),
         (
@@ -913,6 +914,52 @@ fn zed_import_uses_explicit_candidate_and_deterministic_kind_ids() {
     }"##;
     assert!(list_zed_candidates(duplicate).is_err());
     assert!(import_zed(duplicate, 0, &[ZedImportKind::Chrome]).is_err());
+}
+
+#[test]
+fn zed_list_states_remain_distinct_through_native_export_and_resolution() {
+    let bytes = br##"{"themes":[{"name":"Distinct states","appearance":"dark","style":{
+        "ghost_element.hover":"#12345680",
+        "ghost_element.selected":"#abcdefcc",
+        "tab.active_background":"#334455"
+    }}]}"##;
+    let schemes = import_zed(bytes, 0, &[ZedImportKind::Chrome]).unwrap();
+    let id = schemes[0].id().clone();
+    let mut catalog = SchemeCatalog::default();
+    catalog
+        .install_batch(&schemes, 0, &BTreeSet::new())
+        .unwrap();
+    let output = export_schemes(&catalog, &[(SchemeKind::Chrome, id.clone())]).unwrap();
+    let exported = parse_color_document(output.as_bytes()).unwrap();
+    let mut reloaded = SchemeCatalog::default();
+    reloaded
+        .install_batch(&exported.schemes, 0, &BTreeSet::new())
+        .unwrap();
+    let mut preferences = AppearancePreferences::default();
+    preferences.chrome.scheme = SchemeSelection::Fixed {
+        id,
+        appearance: Appearance::Dark,
+    };
+    let resolved = reloaded
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.chrome.colors.ghost_element_hover,
+        Color::rgba(0x12345680)
+    );
+    assert_eq!(
+        resolved.chrome.colors.ghost_element_selected,
+        Color::rgba(0xabcdefcc)
+    );
+    assert_eq!(
+        resolved.chrome.colors.tab_active_background,
+        Color::rgb(0x334455)
+    );
 }
 
 #[test]

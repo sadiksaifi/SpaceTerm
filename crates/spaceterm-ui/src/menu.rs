@@ -225,6 +225,7 @@ pub struct MenuPaint {
     muted: Rgba,
     disabled: Rgba,
     selected_background: Rgba,
+    hover_background: Rgba,
     selected_foreground: Rgba,
     destructive: Rgba,
     separator: Rgba,
@@ -258,6 +259,7 @@ impl MenuPaint {
             muted,
             disabled,
             selected_background,
+            hover_background: selected_background,
             selected_foreground,
             destructive,
             separator,
@@ -266,6 +268,12 @@ impl MenuPaint {
             trigger_border: border,
             focus_border: selected_background,
         }
+    }
+
+    /// Sets row hover independently of keyboard selection.
+    pub fn hover_background(mut self, color: Rgba) -> Self {
+        self.hover_background = color;
+        self
     }
 
     /// Sets the trigger's normal, hovered, and border colors.
@@ -2997,11 +3005,12 @@ fn render_row(
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))
         .when(!disabled, |row| {
-            row.on_hover(move |hovered, _, cx| {
-                let _ = hover_state.update(cx, |state, cx| {
-                    state.pointer_hover(depth, index, *hovered, cx)
-                });
-            })
+            row.hover(|row| row.bg(style.paint.hover_background))
+                .on_hover(move |hovered, _, cx| {
+                    let _ = hover_state.update(cx, |state, cx| {
+                        state.pointer_hover(depth, index, *hovered, cx)
+                    });
+                })
         });
     let mut leading = div()
         .w(style.metrics.indicator_width)
@@ -3240,6 +3249,19 @@ mod tests {
         );
         let metrics = MenuMetrics::new(px(160.0), px(28.0));
         MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
+    }
+
+    #[test]
+    fn row_hover_paint_should_not_replace_selection_paint() {
+        let original = test_theme().paint;
+        let hovered = rgba(0xabcdef80);
+        let paint = original.hover_background(hovered);
+        assert_eq!(paint.hover_background, hovered);
+        assert_eq!(paint.selected_background, original.selected_background);
+        assert_eq!(
+            paint.trigger_hover_background,
+            original.trigger_hover_background
+        );
     }
 
     fn inert(label: &str, disabled: bool) -> InternalEntry {

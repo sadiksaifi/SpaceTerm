@@ -10,11 +10,12 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
         gpui_color(colors.text),
         gpui_color(colors.icon),
         gpui_color(colors.text_disabled),
-        gpui_color(colors.list_item_background),
-        gpui_color(colors.element_hover_foreground),
+        gpui_color(colors.ghost_element_selected),
+        gpui_color(colors.ghost_element_selected_foreground),
         gpui_color(colors.error),
         gpui_color(colors.border),
     )
+    .hover_background(gpui_color(colors.ghost_element_hover))
     .trigger(
         gpui_color(colors.ghost_element_background),
         gpui_color(colors.ghost_element_hover),

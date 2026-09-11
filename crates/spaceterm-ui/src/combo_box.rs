@@ -432,6 +432,7 @@ pub struct ComboBoxPaint {
     muted: Rgba,
     disabled: Rgba,
     selected_background: Rgba,
+    hover_background: Rgba,
     selected_foreground: Rgba,
     trigger_background: Rgba,
     trigger_hover_background: Rgba,
@@ -465,12 +466,19 @@ impl ComboBoxPaint {
             muted,
             disabled,
             selected_background,
+            hover_background: selected_background,
             selected_foreground,
             trigger_background,
             trigger_hover_background,
             trigger_border,
             focus_border,
         }
+    }
+
+    /// Sets row hover independently of the provisional selection.
+    pub fn hover_background(mut self, color: Rgba) -> Self {
+        self.hover_background = color;
+        self
     }
 }
 
@@ -2296,9 +2304,10 @@ fn render_row<I: Clone + Eq + 'static>(
         .when(provisional, |row| row.bg(theme.paint.selected_background))
         .when(!item.disabled, |row| {
             let id = id.clone();
-            row.on_mouse_move(move |_, _, cx| {
-                let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
-            })
+            row.hover(|row| row.bg(theme.paint.hover_background))
+                .on_mouse_move(move |_, _, cx| {
+                    let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
+                })
         });
     let mut leading = div()
         .w(theme.metrics.leading_width)
@@ -2424,6 +2433,20 @@ fn render_row<I: Clone + Eq + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_hover_paint_should_not_replace_selection_paint() {
+        let base = gpui::rgba(0x111111ff);
+        let selected = gpui::rgba(0x222222ff);
+        let hovered = gpui::rgba(0xabcdef80);
+        let paint = ComboBoxPaint::new(
+            base, base, base, base, base, selected, base, base, base, base, base,
+        )
+        .hover_background(hovered);
+        assert_eq!(paint.hover_background, hovered);
+        assert_eq!(paint.selected_background, selected);
+        assert_eq!(paint.trigger_hover_background, base);
+    }
 
     #[test]
     fn filtering_should_match_unicode_case_without_slicing_text() {

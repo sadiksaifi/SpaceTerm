@@ -396,7 +396,7 @@ fn zed_chrome(style: &serde_json::Map<String, Value>) -> Result<ChromeColorOverr
         elevated_surface_background => "elevated_surface.background",
         title_bar_background => "title_bar.background",
         title_bar_inactive_background => "title_bar.inactive_background",
-        list_item_background => "element.selected", tab_inactive_background => "tab.inactive_background",
+        tab_active_background => "tab.active_background", tab_inactive_background => "tab.inactive_background",
         text => "text", text_muted => "text.muted", text_placeholder => "text.placeholder",
         text_disabled => "text.disabled", text_accent => "text.accent", link_text_hover => "link_text.hover",
         icon => "icon", icon_muted => "icon.muted", icon_disabled => "icon.disabled", icon_accent => "icon.accent",

@@ -11,14 +11,14 @@ pub(super) fn theme(colors: &ChromeColors) -> CommandPaletteTheme {
             gpui_color(colors.text),
             gpui_color(colors.text_muted),
             gpui_color(colors.text_disabled),
-            gpui_color(colors.list_item_background),
+            gpui_color(colors.ghost_element_selected),
             gpui_color(colors.ghost_element_selected_foreground),
             gpui_color(colors.text_accent),
         )
         .icons(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .separator(gpui_color(colors.border_variant))
-        .hover_background(gpui_color(colors.list_item_background))
-        .hover_foreground(gpui_color(colors.ghost_element_selected_hover_foreground))
+        .hover_background(gpui_color(colors.ghost_element_hover))
+        .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
         .section_foreground(gpui_color(colors.text_muted))
         .footer(gpui_color(colors.text_muted), gpui_color(colors.text_muted)),
         CommandPaletteMetrics::new(px(600.0), px(48.0))

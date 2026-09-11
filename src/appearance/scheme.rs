@@ -158,7 +158,7 @@ macro_rules! define_chrome_colors {
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
                 for color in [self.background, self.panel_background,
                     self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.list_item_background,
+                    self.title_bar_inactive_background, self.tab_active_background,
                     self.tab_inactive_background,
                     self.input_background]
                 {
@@ -172,7 +172,7 @@ macro_rules! define_chrome_colors {
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
                 for color in [self.background, self.panel_background,
                     self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.list_item_background,
+                    self.title_bar_inactive_background, self.tab_active_background,
                     self.tab_inactive_background,
                     self.input_background].into_iter().flatten()
                 {

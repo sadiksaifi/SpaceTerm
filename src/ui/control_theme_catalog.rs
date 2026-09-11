@@ -32,37 +32,26 @@ mod tests {
     use crate::appearance::{ChromeColors, Color};
 
     #[test]
-    fn list_themes_should_share_one_background_role() {
+    fn list_themes_should_consume_hover_and_selection_independently() {
         let base = ChromeColors::default();
-        let changed = ChromeColors {
-            list_item_background: Color::rgb(0x123456),
+        let hovered = ChromeColors {
+            ghost_element_hover: Color::rgb(0x123456),
             ..base.clone()
         };
-        assert_ne!(menu_theme::theme(&base), menu_theme::theme(&changed));
-        assert_ne!(
-            combo_box_theme::theme(&base),
-            combo_box_theme::theme(&changed)
-        );
-        assert_ne!(
-            command_palette_theme::theme(&base),
-            command_palette_theme::theme(&changed)
-        );
-
-        let unrelated = ChromeColors {
-            element_hover: Color::rgb(0xff0000),
-            element_selected: Color::rgb(0x00ff00),
-            ghost_element_selected: Color::rgb(0x0000ff),
-            ghost_element_selected_hover: Color::rgb(0xffff00),
-            ..changed.clone()
+        let selected = ChromeColors {
+            ghost_element_selected: Color::rgb(0xabcdef),
+            ..base.clone()
         };
-        assert_eq!(menu_theme::theme(&changed), menu_theme::theme(&unrelated));
-        assert_eq!(
-            combo_box_theme::theme(&changed),
-            combo_box_theme::theme(&unrelated)
-        );
-        assert_eq!(
-            command_palette_theme::theme(&changed),
-            command_palette_theme::theme(&unrelated)
-        );
+        for changed in [hovered, selected] {
+            assert_ne!(menu_theme::theme(&base), menu_theme::theme(&changed));
+            assert_ne!(
+                combo_box_theme::theme(&base),
+                combo_box_theme::theme(&changed)
+            );
+            assert_ne!(
+                command_palette_theme::theme(&base),
+                command_palette_theme::theme(&changed)
+            );
+        }
     }
 }
