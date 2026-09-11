@@ -126,10 +126,6 @@ run = "cargo test --package spaceterm --package spaceterm-directories --package 
 description = "Run shared tests without native features"
 run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
-[tasks."test:windows:directories"]
-description = "Run the application-directory module tests on Windows"
-run = "cargo test --package spaceterm-directories --locked"
-
 [tasks."test:one"]
 description = "Run tests matching a filter"
 usage = '''
