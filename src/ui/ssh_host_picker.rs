@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, px};
+use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
@@ -28,7 +28,6 @@ const DISCOVERY_WARNING_SELECTOR: &str = "ssh-host-picker-discovery-warning";
 const HOST_ROW_SELECTOR: &str = "ssh-host-picker-row";
 const MAXIMUM_DISCOVERY_WARNING_BYTES: usize = 256;
 const HOST_DISCOVERY_ISSUE_CLASS_COUNT: usize = 4;
-const HOST_ICON_SIZE: f32 = 14.0;
 
 pub(super) trait HostDiscoveryProvider: Send + Sync {
     fn discover(&self) -> HostDiscovery;
@@ -121,9 +120,8 @@ impl HostDiscoveryDiagnostic {
             .description(self.description)
             .section("SSH Config Warning")
             .disabled(true)
-            .leading_icon(|foreground| {
-                Icon::new(IconName::TriangleAlert, px(HOST_ICON_SIZE), foreground)
-                    .into_any_element()
+            .leading_icon(|foreground, size| {
+                Icon::new(IconName::TriangleAlert, size, foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Status("Action needed".into()))
             .debug_selector(DISCOVERY_WARNING_SELECTOR)
@@ -170,8 +168,8 @@ impl HostPickerRow {
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
-            .leading_icon(|foreground| {
-                Icon::new(IconName::Server, px(HOST_ICON_SIZE), foreground).into_any_element()
+            .leading_icon(|foreground, size| {
+                Icon::new(IconName::Server, size, foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Status(status.into()))
             .debug_selector(HOST_ROW_SELECTOR)

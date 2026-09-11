@@ -32,7 +32,6 @@ use crate::local_path::{
     DirectoryPathFormatError, LocalPathSemantics, ParsedDirectoryPath,
     display_directory_with_style, parse_directory_path,
 };
-const ROW_ICON_SIZE: f32 = 14.0;
 const DIRECTORY_SELECTION_ACTION: &str = "directory-picker-directory-selection";
 const RETRY_ACTION: &str = "directory-picker-retry";
 const SYSTEM_SETTINGS_ACTION: &str = "directory-picker-open-system-settings";
@@ -498,12 +497,11 @@ impl DirectoryPicker {
             return;
         }
         self.rows = filter_directory_picker_rows(parsed, &snapshot.entries);
-        let icon_size = super::appearance::chrome(cx).spacing(ROW_ICON_SIZE);
         let items = self
             .rows
             .iter()
             .cloned()
-            .map(|entry| directory_palette_item(self.paths, entry, icon_size))
+            .map(|entry| directory_palette_item(self.paths, entry))
             .collect();
         self.palette
             .update(cx, |palette, cx| palette.set_items(items, cx));
@@ -910,15 +908,14 @@ impl Render for DirectoryPicker {
 fn directory_palette_item(
     paths: LocalPathSemantics,
     entry: DirectoryPickerDirectoryEntry,
-    icon_size: gpui::Pixels,
 ) -> CommandPaletteItem<PathBuf> {
     let selector = format!("directory-picker-row-{}", entry.name());
     CommandPaletteItem::new(
         entry.path().to_path_buf(),
         format!("{}{}", entry.name(), paths.separator()),
     )
-    .leading_icon(move |foreground| {
-        Icon::new(IconName::Folder, icon_size, foreground).into_any_element()
+    .leading_icon(move |foreground, size| {
+        Icon::new(IconName::Folder, size, foreground).into_any_element()
     })
     .debug_selector(selector)
 }

@@ -550,7 +550,8 @@ pub enum CommandPaletteAccessory {
     Checkmark,
 }
 
-type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type ActionIconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 
 /// One control rendered at the trailing edge of the command-palette search line.
 ///
@@ -560,7 +561,7 @@ type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 pub struct CommandPaletteAction {
     id: SharedString,
     accessibility_name: SharedString,
-    icon: IconBuilder,
+    icon: ActionIconBuilder,
     disabled: bool,
     debug_selector: Option<String>,
 }
@@ -706,7 +707,7 @@ pub struct CommandPaletteItem<I> {
     section: Option<SharedString>,
     keywords: Vec<SharedString>,
     disabled: bool,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<RowIconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
 }
@@ -774,8 +775,8 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Adds a bounded leading icon built with the resolved row foreground color.
-    pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    /// Adds a bounded leading icon built with the resolved row foreground color and live size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
     }
@@ -1305,6 +1306,7 @@ impl CommandPaletteMetrics {
     fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
+        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
         Self {
             panel_width: self.panel_width * width_scale,
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
@@ -1350,7 +1352,8 @@ impl CommandPaletteMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale),
+            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
+                .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
             corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
             border_width: self.border_width,
@@ -1367,7 +1370,7 @@ impl CommandPaletteMetrics {
             ),
             accessory_radius: crate::appearance::scale_metric(self.accessory_radius, spacing_scale),
             line_height: crate::appearance::scale_metric(self.line_height, text_scale),
-            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+            icon_size,
         }
     }
 
@@ -3444,11 +3447,14 @@ fn render_row<I: Clone + Eq + 'static>(
             .items_center()
             .justify_center();
         if let Some(icon) = item.leading_icon.clone() {
-            leading = leading.child(icon(if item.disabled {
-                paint.disabled_icon_foreground
-            } else {
-                paint.icon_foreground
-            }));
+            leading = leading.child(icon(
+                if item.disabled {
+                    paint.disabled_icon_foreground
+                } else {
+                    paint.icon_foreground
+                },
+                metrics.icon_size,
+            ));
         }
         row = row.child(leading);
     }

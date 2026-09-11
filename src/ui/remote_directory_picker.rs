@@ -2,7 +2,7 @@ use std::{cmp::Ordering, fmt, sync::Arc};
 
 use gpui::prelude::*;
 use gpui::{Action, App};
-use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div, px};
+use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
@@ -24,7 +24,6 @@ use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceVal
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
 const HOME_DISPLAY: &str = "~/";
-const ROW_ICON_SIZE: f32 = 14.0;
 const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
@@ -1141,8 +1140,8 @@ fn remote_directory_palette_item(
     let selector = format!("remote-directory-picker-row-{}", item.row.name());
     let label = format!("{}/", item.row.name());
     let palette_item = CommandPaletteItem::new(item, label)
-        .leading_icon(move |foreground| {
-            Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
+        .leading_icon(move |foreground, size| {
+            Icon::new(IconName::Folder, size, foreground).into_any_element()
         })
         .debug_selector(selector);
     if show_truncation_notice {

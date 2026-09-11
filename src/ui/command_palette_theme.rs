@@ -32,7 +32,8 @@ pub(super) fn theme(colors: &ChromeColors) -> CommandPaletteTheme {
             .section_spacing(px(22.0), px(9.0))
             .footer_height(px(30.0))
             .panel_shape(px(8.0), px(1.0))
-            .font_sizes(px(14.0), px(13.0), px(12.0)),
+            .font_sizes(px(14.0), px(13.0), px(12.0))
+            .text_geometry(px(16.0), px(14.0)),
     )
     .shadow(super::appearance::control_shadow(colors, true))
 }

@@ -51,6 +51,13 @@ fn items() -> Vec<CommandPaletteItem<u8>> {
         CommandPaletteItem::new(1, "Open Workspace")
             .description("Choose a directory")
             .keywords(["project"])
+            .leading_icon(|foreground, size| {
+                div()
+                    .debug_selector(|| "row-open-icon".to_owned())
+                    .size(size)
+                    .bg(foreground)
+                    .into_any_element()
+            })
             .debug_selector("row-open"),
         CommandPaletteItem::new(2, "Disabled Command")
             .disabled(true)
@@ -419,6 +426,31 @@ fn open_palette(
     });
     cx.run_until_parked();
     prior
+}
+
+#[gpui::test]
+fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
+    let (root, palette, _events, _underlay, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    let default_theme = test_theme();
+    let default_size = default_theme.metrics.icon_size;
+    let default_icon = cx
+        .debug_bounds("row-open-icon")
+        .expect("the default custom row icon was not rendered");
+
+    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
+    let scaled_size = scaled_theme.metrics.icon_size;
+    cx.update(|window, cx| {
+        cx.set_global(scaled_theme);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let scaled_icon = cx
+        .debug_bounds("row-open-icon")
+        .expect("the open custom row icon was not refreshed");
+    assert_eq!(default_icon.size, gpui::size(default_size, default_size));
+    assert_eq!(scaled_icon.size, gpui::size(scaled_size, scaled_size));
 }
 
 #[gpui::test]
