@@ -17,8 +17,9 @@ const EXPANDED_TRAILING_GAP: f32 = 2.0;
 const COLLAPSED_ACTION_GAP: f32 = 0.0;
 const COLLAPSED_TRAILING_GAP: f32 = 4.0;
 const SWITCHER_HORIZONTAL_PADDING: f32 = 12.0;
+const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_SIZE: f32 = 12.0;
-const IDENTITY_GAP: f32 = 5.0;
+const PIN_NAME_GAP: f32 = 5.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
 // Name and optional pin share this budget. Outer spacing never consumes label room.
 const NAME_AND_PIN_MAXIMUM_WIDTH: f32 = 58.0;
@@ -57,10 +58,11 @@ impl WorkspaceChromeLayout {
                 None,
             )
             .width;
-        let pin_width = if pinned { PIN_SIZE + IDENTITY_GAP } else { 0.0 };
+        let pin_width = if pinned { PIN_SIZE + PIN_NAME_GAP } else { 0.0 };
         let identity_width = (name_width + px(pin_width)).min(px(NAME_AND_PIN_MAXIMUM_WIDTH));
-        let content_width =
-            px(SWITCHER_HORIZONTAL_PADDING * 2.0) + px(ICON_SIZE + IDENTITY_GAP) + identity_width;
+        let content_width = px(SWITCHER_HORIZONTAL_PADDING * 2.0)
+            + px(ICON_SIZE + SWITCHER_IDENTITY_GAP)
+            + identity_width;
         (px(TRAFFIC_LIGHT_CLEARANCE + COLLAPSED_ACTION_GAP + COLLAPSED_TRAILING_GAP)
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
@@ -123,7 +125,7 @@ impl WorkspaceChromeIdentity {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(IDENTITY_GAP))
+            .gap(px(PIN_NAME_GAP))
             .flex_1()
             .min_w_0()
             .when(self.pinned, |chip| {
@@ -149,7 +151,7 @@ impl WorkspaceChromeIdentity {
             .w_full()
             .min_w_0()
             .px(px(SWITCHER_HORIZONTAL_PADDING))
-            .gap(px(IDENTITY_GAP))
+            .gap(px(SWITCHER_IDENTITY_GAP))
             .child(
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
