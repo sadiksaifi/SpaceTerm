@@ -13,8 +13,9 @@ use gpui::{
     FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
-    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
-    canvas, deferred, div, list, prelude::FluentBuilder as _, px, size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, WeakFocusHandle,
+    Window, WindowId, actions, anchored, canvas, deferred, div, list, prelude::FluentBuilder as _,
+    px, size,
 };
 
 use crate::{
@@ -435,6 +436,7 @@ pub struct ComboBoxPaint {
     disabled: Rgba,
     selected_background: Rgba,
     hover_background: Rgba,
+    hover_foreground: Rgba,
     selected_foreground: Rgba,
     trigger_background: Rgba,
     trigger_hover_background: Rgba,
@@ -471,6 +473,7 @@ impl ComboBoxPaint {
             disabled,
             selected_background,
             hover_background: selected_background,
+            hover_foreground: selected_foreground,
             selected_foreground,
             trigger_background,
             trigger_hover_background,
@@ -482,6 +485,12 @@ impl ComboBoxPaint {
     /// Sets row hover independently of the provisional selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
+        self
+    }
+
+    /// Sets the foreground paired with the row hover background.
+    pub fn hover_foreground(mut self, color: Rgba) -> Self {
+        self.hover_foreground = color;
         self
     }
 
@@ -1069,6 +1078,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     ordinary_match_count: usize,
     matches: Rc<[usize]>,
     provisional: Option<I>,
+    hovered_row: Option<I>,
     query: String,
     disabled: bool,
     busy: bool,
@@ -1207,6 +1217,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             ordinary_match_count: 0,
             matches: Vec::new().into(),
             provisional: None,
+            hovered_row: None,
             query: String::new(),
             disabled: true,
             busy: false,
@@ -1412,6 +1423,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         let menu_predecessor = crate::menu::dismiss_active_menu_for_replacement(window, cx)
             .and_then(|replacement| replacement.0);
         self.open = true;
+        self.hovered_row = None;
         self.pointer_press = None;
         self.result_viewport_size = None;
         if let Some(query) = query {
@@ -1463,6 +1475,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             return false;
         }
         self.open = false;
+        self.hovered_row = None;
         self.pointer_press = None;
         self.provisional = None;
         if let Some(registration) = self.registration.take() {
@@ -1488,6 +1501,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             return None;
         }
         self.open = false;
+        self.hovered_row = None;
         self.pointer_press = None;
         self.provisional = None;
         self.input_context_menu_open = false;
@@ -2077,6 +2091,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let matches = Rc::clone(&state.read(cx).matches);
     let items = Rc::clone(&state.read(cx).presented_items);
     let provisional = state.read(cx).provisional.clone();
+    let hovered_row = state.read(cx).hovered_row.clone();
     let busy = state.read(cx).busy;
     let copy = state.read(cx).copy.clone();
     let list_state = state.read(cx).list.clone();
@@ -2130,6 +2145,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                         position,
                         item,
                         provisional.as_ref() == Some(&item.id),
+                        hovered_row.as_ref() == Some(&item.id),
                         theme,
                     )
                 })
@@ -2286,10 +2302,13 @@ fn render_row<I: Clone + Eq + 'static>(
     position: usize,
     item: &ComboBoxItem<I>,
     provisional: bool,
+    hovered: bool,
     theme: ComboBoxTheme,
 ) -> AnyElement {
     let foreground = if item.disabled {
         theme.paint.disabled
+    } else if hovered {
+        theme.paint.hover_foreground
     } else if provisional {
         theme.paint.selected_foreground
     } else {
@@ -2297,6 +2316,8 @@ fn render_row<I: Clone + Eq + 'static>(
     };
     let secondary = if item.disabled {
         theme.paint.disabled
+    } else if hovered {
+        theme.paint.hover_foreground
     } else {
         theme.paint.muted
     };
@@ -2304,6 +2325,7 @@ fn render_row<I: Clone + Eq + 'static>(
     let logical_name = item.label.clone();
     let debug_selector = item.debug_selector.clone();
     let hover_state = state.clone();
+    let hover_tracking_state = state.clone();
     let mut row = div()
         .id(("combo-box-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
@@ -2318,12 +2340,27 @@ fn render_row<I: Clone + Eq + 'static>(
         .text_color(foreground)
         .cursor_default()
         .when(provisional, |row| row.bg(theme.paint.selected_background))
+        .when(hovered && !item.disabled, |row| {
+            row.bg(theme.paint.hover_background)
+        })
         .when(!item.disabled, |row| {
             let id = id.clone();
-            row.hover(|row| row.bg(theme.paint.hover_background))
-                .on_mouse_move(move |_, _, cx| {
-                    let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
-                })
+            let hover_id = id.clone();
+            row.on_hover(move |hovered, _, cx| {
+                let _ = hover_tracking_state.update(cx, |state, cx| {
+                    if *hovered {
+                        state.hovered_row = Some(hover_id.clone());
+                    } else if state.hovered_row.as_ref() == Some(&hover_id) {
+                        state.hovered_row = None;
+                    } else {
+                        return;
+                    }
+                    cx.notify();
+                });
+            })
+            .on_mouse_move(move |_, _, cx| {
+                let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
+            })
         });
     let mut leading = div()
         .w(theme.metrics.leading_width)
@@ -2383,15 +2420,38 @@ fn render_row<I: Clone + Eq + 'static>(
         );
     }
     if !item.disabled {
+        let hover_state = state.clone();
         let down_state = state.clone();
         let up_state = state.clone();
         let move_state = state;
+        let hover_id = item.id.clone();
         let down_id = item.id.clone();
         let up_id = item.id.clone();
         row = row.child(
             canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-                move |_, hitbox, window, _| {
+                move |_, hitbox, window, cx| {
+                    // A model or layout change can replace the row under a stationary pointer.
+                    let actually_hovered = hitbox.is_hovered(window);
+                    if actually_hovered != hovered {
+                        let hover_state = hover_state.clone();
+                        let hover_id = hover_id.clone();
+                        cx.defer(move |cx| {
+                            let _ = hover_state.update(cx, |state, cx| {
+                                if !state.open {
+                                    return;
+                                }
+                                if actually_hovered {
+                                    state.hovered_row = Some(hover_id);
+                                } else if state.hovered_row.as_ref() == Some(&hover_id) {
+                                    state.hovered_row = None;
+                                } else {
+                                    return;
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
                     let down_hitbox = hitbox.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
@@ -2475,11 +2535,15 @@ mod tests {
         let base = gpui::rgba(0x111111ff);
         let selected = gpui::rgba(0x222222ff);
         let hovered = gpui::rgba(0xabcdef80);
+        let hover_foreground = gpui::rgba(0x123456ff);
         let paint = ComboBoxPaint::new(
             base, base, base, base, base, selected, base, base, base, base, base,
         )
-        .hover_background(hovered);
+        .hover_background(hovered)
+        .hover_foreground(hover_foreground);
         assert_eq!(paint.hover_background, hovered);
+        assert_eq!(paint.hover_foreground, hover_foreground);
+        assert_eq!(paint.selected_foreground, base);
         assert_eq!(paint.selected_background, selected);
         assert_eq!(paint.trigger_hover_background, base);
     }

@@ -19,7 +19,8 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
             gpui_color(colors.border_focused),
         )
         .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
-        .hover_background(gpui_color(colors.ghost_element_hover)),
+        .hover_background(gpui_color(colors.ghost_element_hover))
+        .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
         ComboBoxMetrics::new(px(240.0), px(40.0))
             .icon_trigger_size(px(28.0))
             .geometry(px(260.0), px(28.0), px(30.0), px(46.0))
@@ -45,6 +46,7 @@ mod tests {
             text: Color::rgb(0x112233),
             icon: Color::rgb(0x44aa88),
             icon_disabled: Color::rgb(0x6655aa),
+            ghost_element_hover_foreground: Color::rgb(0x778899),
             ..ChromeColors::default()
         };
 
@@ -63,7 +65,8 @@ mod tests {
                 gpui_color(colors.border_focused),
             )
             .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
-            .hover_background(gpui_color(colors.ghost_element_hover)),
+            .hover_background(gpui_color(colors.ghost_element_hover))
+            .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
             ComboBoxMetrics::new(px(240.0), px(40.0))
                 .icon_trigger_size(px(28.0))
                 .geometry(px(260.0), px(28.0), px(30.0), px(46.0))

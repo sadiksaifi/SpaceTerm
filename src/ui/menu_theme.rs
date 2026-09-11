@@ -16,6 +16,7 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
         gpui_color(colors.border),
     )
     .hover_background(gpui_color(colors.ghost_element_hover))
+    .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(
         gpui_color(colors.ghost_element_background),
         gpui_color(colors.ghost_element_hover),

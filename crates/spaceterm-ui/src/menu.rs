@@ -226,6 +226,7 @@ pub struct MenuPaint {
     disabled: Rgba,
     selected_background: Rgba,
     hover_background: Rgba,
+    hover_foreground: Rgba,
     selected_foreground: Rgba,
     destructive: Rgba,
     separator: Rgba,
@@ -260,6 +261,7 @@ impl MenuPaint {
             disabled,
             selected_background,
             hover_background: selected_background,
+            hover_foreground: selected_foreground,
             selected_foreground,
             destructive,
             separator,
@@ -273,6 +275,12 @@ impl MenuPaint {
     /// Sets row hover independently of keyboard selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
+        self
+    }
+
+    /// Sets the foreground paired with the row hover background.
+    pub fn hover_foreground(mut self, color: Rgba) -> Self {
+        self.hover_foreground = color;
         self
     }
 
@@ -1846,6 +1854,7 @@ struct MenuState {
     restore_focus: Option<WeakFocusHandle>,
     active_path: Vec<usize>,
     highlighted: Vec<Option<usize>>,
+    hovered_row: Option<(usize, usize)>,
     panel_scroll: Vec<MenuPanelScroll>,
     typeahead: String,
     last_typeahead: Option<Instant>,
@@ -1926,6 +1935,7 @@ impl MenuState {
             restore_focus: None,
             active_path: Vec::new(),
             highlighted: vec![None],
+            hovered_row: None,
             panel_scroll: Vec::new(),
             typeahead: String::new(),
             last_typeahead: None,
@@ -2028,6 +2038,7 @@ impl MenuState {
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
         self.open = true;
+        self.hovered_row = None;
         self.open_generation = self.open_generation.wrapping_add(1);
         self.reservation = reservation;
         self.awaiting_context_snapshot = self.freeze_entries_while_open;
@@ -2258,6 +2269,10 @@ impl MenuState {
         cx: &mut gpui::Context<Self>,
     ) {
         if !hovered {
+            if self.hovered_row == Some((depth, index)) {
+                self.hovered_row = None;
+                cx.notify();
+            }
             if depth > 0 {
                 self.schedule_submenu_close(depth - 1, cx);
             } else if self.active_path.get(depth) == Some(&index) {
@@ -2273,6 +2288,7 @@ impl MenuState {
             return;
         }
         self.invalidate_submenu_task();
+        self.hovered_row = Some((depth, index));
         self.highlighted.truncate(depth + 1);
         while self.highlighted.len() <= depth {
             self.highlighted.push(None);
@@ -2626,6 +2642,7 @@ fn activate_menu(
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
     let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
+    let hovered_row = state.read(cx).hovered_row;
     let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
         let menu = state.read(cx);
         (
@@ -2743,6 +2760,9 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             bounds,
             entries,
             highlighted,
+            hovered_row
+                .filter(|(hover_depth, _)| *hover_depth == depth)
+                .map(|(_, index)| index),
             style,
             scroll,
             &typography,
@@ -2842,6 +2862,7 @@ fn render_panel(
     bounds: Bounds<Pixels>,
     entries: Vec<InternalEntry>,
     highlighted: Option<usize>,
+    hovered: Option<usize>,
     style: MenuStyle,
     scroll: ScrollHandle,
     typography: &crate::ControlTypography,
@@ -2930,6 +2951,7 @@ fn render_panel(
                     false,
                     Some(activate),
                     highlighted == Some(index),
+                    hovered == Some(index),
                     style,
                 ));
             }
@@ -2956,6 +2978,7 @@ fn render_panel(
                     true,
                     None,
                     highlighted == Some(index),
+                    hovered == Some(index),
                     style,
                 ));
             }
@@ -2982,11 +3005,19 @@ fn render_row(
     submenu: bool,
     activation: Option<InternalActivation>,
     highlighted: bool,
+    hovered: bool,
     style: MenuStyle,
 ) -> AnyElement {
-    let foreground = row_foreground(style.paint, disabled, destructive, highlighted);
-    let secondary_foreground =
-        row_secondary_foreground(style.paint, disabled, destructive, highlighted);
+    let foreground = if hovered && !disabled && !destructive {
+        style.paint.hover_foreground
+    } else {
+        row_foreground(style.paint, disabled, destructive, highlighted)
+    };
+    let secondary_foreground = if hovered && !disabled && !destructive {
+        style.paint.hover_foreground
+    } else {
+        row_secondary_foreground(style.paint, disabled, destructive, highlighted)
+    };
     let hover_state = state.clone();
     let pointer_state = state;
     let logical_name = label.clone();
@@ -3004,13 +3035,15 @@ fn render_row(
         .text_color(foreground)
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))
+        .when(hovered && !disabled, |row| {
+            row.bg(style.paint.hover_background)
+        })
         .when(!disabled, |row| {
-            row.hover(|row| row.bg(style.paint.hover_background))
-                .on_hover(move |hovered, _, cx| {
-                    let _ = hover_state.update(cx, |state, cx| {
-                        state.pointer_hover(depth, index, *hovered, cx)
-                    });
-                })
+            row.on_hover(move |hovered, _, cx| {
+                let _ = hover_state.update(cx, |state, cx| {
+                    state.pointer_hover(depth, index, *hovered, cx)
+                });
+            })
         });
     let mut leading = div()
         .w(style.metrics.indicator_width)
@@ -3042,12 +3075,33 @@ fn render_row(
             ))
         });
     if !disabled {
+        let hover_state = pointer_state.clone();
         let down_state = pointer_state.clone();
         let move_state = pointer_state.clone();
         let up_state = pointer_state;
         let pointer_tracker = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, _| {
+            move |_, hitbox, window, cx| {
+                // Layout or submenu replacement can move a row without a pointer event.
+                let actually_hovered = hitbox.is_hovered(window);
+                if actually_hovered != hovered {
+                    let hover_state = hover_state.clone();
+                    cx.defer(move |cx| {
+                        let _ = hover_state.update(cx, |state, cx| {
+                            if !state.open {
+                                return;
+                            }
+                            if actually_hovered {
+                                state.hovered_row = Some((depth, index));
+                            } else if state.hovered_row == Some((depth, index)) {
+                                state.hovered_row = None;
+                            } else {
+                                return;
+                            }
+                            cx.notify();
+                        });
+                    });
+                }
                 let down_hitbox = hitbox.clone();
                 let move_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
@@ -3255,8 +3309,13 @@ mod tests {
     fn row_hover_paint_should_not_replace_selection_paint() {
         let original = test_theme().paint;
         let hovered = rgba(0xabcdef80);
-        let paint = original.hover_background(hovered);
+        let hover_foreground = rgba(0x123456ff);
+        let paint = original
+            .hover_background(hovered)
+            .hover_foreground(hover_foreground);
         assert_eq!(paint.hover_background, hovered);
+        assert_eq!(paint.hover_foreground, hover_foreground);
+        assert_eq!(paint.selected_foreground, original.selected_foreground);
         assert_eq!(paint.selected_background, original.selected_background);
         assert_eq!(
             paint.trigger_hover_background,
@@ -3607,10 +3666,12 @@ mod tests {
     struct TestRoot {
         events: Rc<RefCell<Vec<MenuActivation<&'static str>>>>,
         other_focus: FocusHandle,
+        icon_color: Rc<Cell<Rgba>>,
     }
     impl Render for TestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let events = self.events.clone();
+            let icon_color = self.icon_color.clone();
             div()
                 .size_full()
                 .child(div().track_focus(&self.other_focus).child("Other"))
@@ -3623,7 +3684,8 @@ mod tests {
                                 .disabled(true)
                                 .debug_selector("disabled-entry"),
                             MenuEntry::action("Open", "open")
-                                .icon(|foreground, size| {
+                                .icon(move |foreground, size| {
+                                    icon_color.set(foreground);
                                     div()
                                         .debug_selector(|| "open-entry-icon".to_owned())
                                         .size(size)
@@ -3655,10 +3717,75 @@ mod tests {
         let (root, cx) = cx.add_window_view(move |_, cx| TestRoot {
             events: root_events,
             other_focus: cx.focus_handle().tab_stop(true),
+            icon_color: Rc::new(Cell::new(rgba(0))),
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    #[gpui::test]
+    fn menu_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
+        let (root, events, cx) = menu_window(cx);
+        let mut theme = test_theme();
+        theme.paint = theme
+            .paint
+            .hover_background(rgba(0xffffffff))
+            .hover_foreground(rgba(0x000000ff));
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        let trigger = cx.debug_bounds("menu-trigger").unwrap().center();
+        cx.simulate_click(trigger, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff)
+        );
+        let row = cx.debug_bounds("open-entry").unwrap().center();
+        cx.simulate_mouse_move(row, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x000000ff)
+        );
+        theme.paint = theme.paint.hover_foreground(rgba(0x004400ff));
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x004400ff)
+        );
+        theme = theme.scaled_metrics(2.0, 2.0);
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let moved_row = cx.debug_bounds("open-entry").unwrap();
+        assert!(!moved_row.contains(&row));
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff),
+            "a row moved away from a stationary pointer must lose hover paint",
+        );
+        cx.simulate_mouse_move(moved_row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0x004400ff)
+        );
+        cx.simulate_mouse_move(trigger, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |root, _| root.icon_color.get()),
+            rgba(0xffffffff)
+        );
+        assert!(events.borrow().is_empty());
     }
 
     #[gpui::test]

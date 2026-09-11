@@ -2152,6 +2152,135 @@ fn repeated_end_should_reveal_the_active_last_result_after_manual_scrolling(
 }
 
 #[gpui::test]
+fn combo_box_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let observed = Rc::new(Cell::new(rgba(0)));
+    let icon_color = observed.clone();
+    root.update(cx, |root, cx| {
+        root.items = vec![
+            ComboBoxItem::new(1, "Contrast row")
+                .leading_icon(move |foreground, size| {
+                    icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("contrast-row"),
+        ];
+        cx.notify();
+    });
+    let white = rgba(0xffffffff);
+    let black = rgba(0x000000ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(black),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    assert_eq!(observed.get(), white);
+    let row = cx.debug_bounds("contrast-row").unwrap().center();
+    cx.simulate_mouse_move(row, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(observed.get(), black);
+    let green = rgba(0x004400ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(green),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    assert_eq!(observed.get(), green);
+    let trigger = trigger_center(cx);
+    cx.simulate_mouse_move(trigger, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(observed.get(), white);
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+}
+
+#[gpui::test]
+fn combo_box_hover_should_follow_replaced_rows_under_a_stationary_pointer(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let first_color = Rc::new(Cell::new(rgba(0)));
+    let second_color = Rc::new(Cell::new(rgba(0)));
+    let first_icon_color = first_color.clone();
+    let second_icon_color = second_color.clone();
+    root.update(cx, |root, cx| {
+        root.items = vec![
+            ComboBoxItem::new(1, "First")
+                .leading_icon(move |foreground, size| {
+                    first_icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("first-hover-row"),
+            ComboBoxItem::new(2, "Second")
+                .leading_icon(move |foreground, size| {
+                    second_icon_color.set(foreground);
+                    div().size(size).bg(foreground).into_any_element()
+                })
+                .debug_selector("second-hover-row"),
+        ];
+        cx.notify();
+    });
+    let white = rgba(0xffffffff);
+    let black = rgba(0x000000ff);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                black, black, white, white, white, black, white, black, black, black, black,
+            )
+            .hover_background(white)
+            .hover_foreground(black),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    let pointer = cx.debug_bounds("first-hover-row").unwrap().center();
+    cx.simulate_mouse_move(pointer, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!((first_color.get(), second_color.get()), (black, white));
+
+    root.update(cx, |root, cx| {
+        root.items.swap(0, 1);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.debug_bounds("second-hover-row").unwrap().center(),
+        pointer
+    );
+    assert_eq!(
+        (first_color.get(), second_color.get()),
+        (white, black),
+        "hover paint must follow the current hitbox, not the old item or reused row element",
+    );
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+    );
+}
+
+#[gpui::test]
 fn trigger_icons_should_use_live_icon_colors_instead_of_text_colors(cx: &mut TestAppContext) {
     let (root, _, cx) = icon_trigger_window(cx, false);
     let text = rgba(0x11_22_33_ff);

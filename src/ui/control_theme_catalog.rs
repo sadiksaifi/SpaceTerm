@@ -42,7 +42,15 @@ mod tests {
             ghost_element_selected: Color::rgb(0xabcdef),
             ..base.clone()
         };
-        for changed in [hovered, selected] {
+        let hover_foreground = ChromeColors {
+            ghost_element_hover_foreground: Color::rgb(0x123456),
+            ..base.clone()
+        };
+        let selected_foreground = ChromeColors {
+            ghost_element_selected_foreground: Color::rgb(0xabcdef),
+            ..base.clone()
+        };
+        for changed in [hovered, selected, hover_foreground, selected_foreground] {
             assert_ne!(menu_theme::theme(&base), menu_theme::theme(&changed));
             assert_ne!(
                 combo_box_theme::theme(&base),
