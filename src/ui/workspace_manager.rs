@@ -88,9 +88,9 @@ const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (CustomIconName, &'static str) {
     if sidebar_visible {
-        (CustomIconName::PanelLeft, "Close Sidebar")
+        (CustomIconName::PanelLeft, "Hide Sidebar")
     } else {
-        (CustomIconName::PanelRight, "Open Sidebar")
+        (CustomIconName::PanelRight, "Show Sidebar")
     }
 }
 
@@ -3033,9 +3033,11 @@ impl WorkspaceManager {
                     })
                     .variant(ButtonVariant::Ghost)
                     .size(TOGGLE_SIZE)
+                    .preserve_ancestor_hover()
                     .debug_selector("toggle-sidebar-button")
                     .tooltip(
                         Tooltip::new("toggle-sidebar-tooltip", toggle_label)
+                            .keyboard_equivalent(presentation.shortcut(&ToggleSidebar))
                             .debug_selector("toggle-sidebar-tooltip"),
                     )
                     .on_activate(move |_, window, cx| {

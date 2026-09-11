@@ -354,12 +354,12 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
     let (visible_icon, visible_label) = sidebar_toggle_presentation(true);
     assert_eq!(
         (visible_icon, visible_label),
-        (CustomIconName::PanelLeft, "Close Sidebar")
+        (CustomIconName::PanelLeft, "Hide Sidebar")
     );
     let (hidden_icon, hidden_label) = sidebar_toggle_presentation(false);
     assert_eq!(
         (hidden_icon, hidden_label),
-        (CustomIconName::PanelRight, "Open Sidebar")
+        (CustomIconName::PanelRight, "Show Sidebar")
     );
 }
 
@@ -7909,6 +7909,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     for (button, tooltip) in [
+        ("toggle-sidebar-button", "toggle-sidebar-tooltip"),
         (
             "new-remote-workspace-button",
             "new-remote-workspace-tooltip",
@@ -7929,6 +7930,26 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
         cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
         cx.run_until_parked();
     }
+}
+
+#[gpui::test]
+fn collapsed_sidebar_toggle_should_show_its_tooltip_over_the_icon(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    click("toggle-sidebar-button", cx);
+    cx.simulate_mouse_move(point(px(500.0), px(300.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    let center = cx.debug_bounds("toggle-sidebar-button").unwrap().center();
+    cx.simulate_mouse_move(center, None, Modifiers::default());
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("toggle-sidebar-tooltip").is_some());
+    assert_eq!(
+        crate::desktop_profile::testing_presentation().shortcut(&ToggleSidebar),
+        "Primary+B"
+    );
 }
 
 #[gpui::test]

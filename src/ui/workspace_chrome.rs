@@ -77,6 +77,9 @@ impl WorkspaceChromeLayout {
         cx: &App,
     ) -> AnyElement {
         let appearance = chrome(cx);
+        // Keep drag-region occlusion outside the tooltip target so the toggle cannot
+        // block its own help. Its button preserves hover within this control container.
+        let toggle = div().flex_none().block_mouse_except_scroll().child(toggle);
         // The visible control owns clicks where it meets the sidebar resize target.
         let switcher = div()
             .min_w_0()
