@@ -5560,10 +5560,8 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
     let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
     assert_eq!(toggle.left(), chrome.left() + px(TRAFFIC_LIGHT_CLEARANCE));
     assert!(toggle.right() < chooser.left());
-    let divider = cx
-        .debug_bounds("workspace-sidebar-resize-handle-divider")
-        .unwrap();
-    assert_eq!(divider.left() - chooser.right(), px(TOP_CHROME_ACTION_GAP));
+    let tabs = cx.debug_bounds("tab-bar").unwrap();
+    assert_eq!(tabs.left() - chooser.right(), px(2.0));
 
     click("workspace-switcher", cx);
 
@@ -5962,7 +5960,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     );
     assert!(switcher_icon.right() <= workspace_icon.left());
     assert!(workspace_icon.right() <= label.left());
-    assert_eq!(chooser.right(), tabs.left() - px(CHROME_DIVIDER_SIZE / 2.0));
+    assert_eq!(tabs.left() - chooser.right(), px(4.0));
 
     for position in [
         switcher_icon.center(),

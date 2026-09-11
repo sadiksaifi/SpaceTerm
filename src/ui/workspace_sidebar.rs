@@ -640,11 +640,10 @@ pub(super) fn collapsed_top_chrome_width(name: &str, pinned: bool, window: &Wind
         .width;
     let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
         + TOP_CHROME_ACTION_SIZE
-        + TOP_CHROME_ACTION_GAP
+        + TOP_CHROME_ACTION_GAP * 2.0
         + WORKSPACE_CHIP_ICON_SIZE * 2.0
         + WORKSPACE_CHIP_GAP * 2.0
         + WORKSPACE_SWITCHER_PADDING * 2.0
-        + CHROME_DIVIDER_SIZE / 2.0
         + 2.0);
     let pin_width = if pinned {
         px(WORKSPACE_CHIP_PIN_SIZE + WORKSPACE_CHIP_GAP)

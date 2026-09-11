@@ -3110,13 +3110,14 @@ impl WorkspaceManager {
                     .absolute()
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                    .right(px(CHROME_DIVIDER_SIZE / 2.0))
+                    .right(px(if sidebar_visible {
+                        TOP_CHROME_ACTION_GAP / 2.0
+                    } else {
+                        TOP_CHROME_ACTION_GAP
+                    }))
                     .flex()
                     .items_center()
                     .gap(px(TOP_CHROME_ACTION_GAP))
-                    .when(sidebar_visible, |controls| {
-                        controls.pr(px(TOP_CHROME_ACTION_GAP))
-                    })
                     .child(
                         IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
                             Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
