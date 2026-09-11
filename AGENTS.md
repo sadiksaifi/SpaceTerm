@@ -23,6 +23,8 @@ Put task plans and validation reports in issues or PRs.
 - Select replaceable capabilities through constructor injection and keep ownership explicit.
 - Expose intentional operations and typed recoverable failures.
 - Create structural boundaries when they provide durable replaceability, Leverage, or Locality.
+- Application-directory changes: read ADR 0004, consume semantic paths from
+  `platform::app_directories`, and create directories only at write boundaries.
 
 ## Safety
 
