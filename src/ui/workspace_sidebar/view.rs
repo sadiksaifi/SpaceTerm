@@ -361,7 +361,7 @@ impl WorkspaceSidebar {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px(px(SIDEBAR_TOGGLE_INSET))
+                    .px(px(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
                     .child(
                         IconButton::new(
                             "new-remote-workspace-button",
@@ -433,15 +433,10 @@ impl WorkspaceSidebar {
     pub(in crate::ui) fn render_resize_handle(
         &self,
         sidebar: WeakEntity<Self>,
-        window: &Window,
+        handle_width: Pixels,
     ) -> AnyElement {
         let pointer_guard = Self::pointer_guard(sidebar.clone());
         let selector = "workspace-sidebar-resize-handle";
-        let handle_width = if self.layout.visible {
-            self.layout.width
-        } else {
-            collapsed_top_chrome_width(self.active_name(), window)
-        };
         let current_width = f32::from(handle_width);
         let handle = ResizeHandle::new(
             selector,

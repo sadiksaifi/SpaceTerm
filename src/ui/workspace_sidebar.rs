@@ -3,6 +3,7 @@
 mod text;
 mod view;
 
+use super::workspace_chrome::WorkspaceChromeLayout;
 use super::{
     NewRemoteWorkspace, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
     WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
@@ -11,9 +12,9 @@ use crate::domain::{RemoteConnectionPhase, WorkspaceId};
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle, Font,
+    AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
     KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle,
-    SharedString, TextRun, WeakEntity, Window, canvas, div, point, px, rgba,
+    SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, ContextMenu, CustomIconName, Icon, IconButton, IconName, MenuEntry,
@@ -24,6 +25,7 @@ use spaceterm_ui::{
 };
 
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
+const SIDEBAR_FOOTER_HORIZONTAL_PADDING: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) enum SidebarEvent {
@@ -440,11 +442,14 @@ impl WorkspaceSidebar {
         self.remote_unavailable = remote_unavailable;
         cx.notify();
     }
-    fn active_name(&self) -> &str {
-        self.rows
-            .iter()
-            .find(|row| row.active)
-            .map_or("", |row| row.name.as_ref())
+    fn collapsed_top_chrome_width(&self, window: &Window, cx: &App) -> Pixels {
+        let active = self.rows.iter().find(|row| row.active);
+        WorkspaceChromeLayout::collapsed_width(
+            active.map_or("", |row| row.name.as_ref()),
+            active.is_some_and(|row| row.pinned),
+            window,
+            cx,
+        )
     }
 }
 impl Render for WorkspaceSidebar {
@@ -524,7 +529,8 @@ impl WorkspaceSidebar {
             } => {
                 let should_resize = self.layout.visible
                     || px(requested_value)
-                        >= collapsed_top_chrome_width(self.active_name(), window)
+                        >= self
+                            .collapsed_top_chrome_width(window, cx)
                             .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
                 if should_resize {
                     self.resize(px(requested_value), window, cx);
@@ -598,49 +604,6 @@ fn secondary_text_color() -> Color {
         channel(muted.g, text.g),
         channel(muted.b, text.b),
     )
-}
-
-pub(super) const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
-pub(super) const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
-pub(super) const TOP_CHROME_ACTION_CLEARANCE: f32 =
-    SIDEBAR_TOGGLE_INSET + TOP_CHROME_ACTION_SIZE * 2.0 + 4.0;
-pub(super) const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 220.0;
-pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
-pub(super) const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
-pub(super) const WORKSPACE_CHIP_GAP: f32 = 5.0;
-pub(super) const WORKSPACE_CHIP_TEXT_SIZE: f32 = 12.0;
-pub(super) fn collapsed_top_chrome_width(name: &str, window: &Window) -> Pixels {
-    let text_style = window.text_style();
-    let run = TextRun {
-        len: name.len(),
-        font: Font {
-            family: text_style.font_family,
-            features: text_style.font_features,
-            fallbacks: text_style.font_fallbacks,
-            weight: text_style.font_weight,
-            style: text_style.font_style,
-        },
-        color: text_style.color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let name_width = window
-        .text_system()
-        .shape_line(
-            name.to_owned().into(),
-            px(WORKSPACE_CHIP_TEXT_SIZE),
-            &[run],
-            None,
-        )
-        .width;
-    let fixed_width = px(TRAFFIC_LIGHT_CLEARANCE
-        + WORKSPACE_CHIP_ICON_SIZE
-        + WORKSPACE_CHIP_GAP
-        + TOP_CHROME_ACTION_CLEARANCE);
-    (fixed_width + name_width)
-        .ceil()
-        .min(px(COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH))
 }
 
 impl WorkspaceSidebar {

@@ -7,7 +7,8 @@ use std::{
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement as _,
     Keystroke, Modifiers, MouseButton, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent,
-    Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div, point, px, rgba,
+    Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div, point,
+    prelude::FluentBuilder as _, px, rgba,
 };
 
 use crate::{
@@ -152,6 +153,7 @@ struct WheelContainmentRoot {
 
 struct IconTriggerRoot {
     disabled: bool,
+    custom: bool,
     before_focus: FocusHandle,
     after_focus: FocusHandle,
     events: Rc<RefCell<Vec<ComboBoxLifecycleEvent>>>,
@@ -181,6 +183,10 @@ impl Render for IconTriggerRoot {
                             .size(px(12.0))
                             .bg(foreground)
                             .into_any_element()
+                    })
+                    .when(self.custom, |combo| {
+                        combo
+                            .custom_trigger(div().w_full().px(px(12.0)).child("Workspace identity"))
                     })
                     .full_width(true)
                     .disabled(self.disabled)
@@ -648,6 +654,7 @@ fn icon_trigger_window(cx: &mut TestAppContext, disabled: bool) -> IconTriggerWi
     let root_events = Rc::clone(&events);
     let (root, cx) = cx.add_window_view(move |_, cx| IconTriggerRoot {
         disabled,
+        custom: false,
         before_focus: cx.focus_handle().tab_stop(true),
         after_focus: cx.focus_handle().tab_stop(true),
         events: root_events,
@@ -2179,6 +2186,71 @@ fn icon_trigger_should_open_with_keyboard_and_restore_focus_on_escape(cx: &mut T
             ComboBoxLifecycleEvent::Closed(ComboBoxCloseReason::Escape),
         ]
     );
+}
+
+#[gpui::test]
+fn custom_trigger_should_open_from_padding_across_its_full_width(cx: &mut TestAppContext) {
+    let (root, events, cx) = icon_trigger_window(cx, false);
+    root.update(cx, |root, cx| {
+        root.custom = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let trigger = cx.debug_bounds("combo-box-trigger").unwrap();
+    assert_eq!(trigger.size.height, px(28.0));
+    assert!(trigger.size.width > px(100.0));
+    assert!(cx.debug_bounds("combo-box-trigger-label").is_none());
+    for x in [trigger.left() + px(2.0), trigger.right() - px(2.0)] {
+        cx.simulate_mouse_move(point(x, trigger.center().y), None, Modifiers::none());
+        cx.simulate_click(point(x, trigger.center().y), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+        let panel = cx.debug_bounds("combo-box-panel").unwrap();
+        assert_eq!(panel.top(), trigger.bottom() + px(4.0));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+    }
+    assert_eq!(events.borrow().len(), 4);
+}
+
+#[gpui::test]
+fn custom_trigger_should_keep_keyboard_focus_when_its_presentation_changes(
+    cx: &mut TestAppContext,
+) {
+    let (root, _, cx) = icon_trigger_window(cx, false);
+    focus_trigger(cx);
+    let focus = cx.update(|window, cx| window.focused(cx)).unwrap();
+    root.update(cx, |root, cx| {
+        root.custom = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.update(|window, _| focus.is_focused(window)));
+    cx.simulate_keystrokes("space");
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    cx.simulate_keystrokes("escape");
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn disabled_custom_trigger_should_ignore_pointer_and_keyboard(cx: &mut TestAppContext) {
+    let (root, events, cx) = icon_trigger_window(cx, true);
+    root.update(cx, |root, cx| {
+        root.custom = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
+    cx.update(|window, _| before_focus.focus(window));
+    open_by_pointer(cx);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| before_focus.is_focused(window)));
+    cx.update(|window, _| window.focus_next());
+    let after_focus = root.read_with(cx, |root, _| root.after_focus.clone());
+    assert!(cx.update(|window, _| after_focus.is_focused(window)));
+    cx.simulate_keystrokes("space down");
+    assert!(events.borrow().is_empty());
 }
 
 #[gpui::test]
