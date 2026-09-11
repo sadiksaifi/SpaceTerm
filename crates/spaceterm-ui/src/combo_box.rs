@@ -202,7 +202,8 @@ impl Default for ComboBoxCopy {
     }
 }
 
-type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+type IconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type InputIconBuilder = Rc<dyn Fn(Pixels) -> AnyElement>;
 
 /// One typed semantic ComboBox item.
 ///
@@ -255,8 +256,8 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Adds a bounded leading icon built with the resolved row foreground color.
-    pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    /// Adds a bounded leading icon built with the resolved row foreground color and live size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
     }
@@ -580,6 +581,7 @@ impl ComboBoxMetrics {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
         let label_size = crate::appearance::scale_metric(self.label_size, text_scale);
+        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
         Self {
             panel_width: self.panel_width * width_scale,
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
@@ -618,14 +620,15 @@ impl ComboBoxMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale),
+            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
+                .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
             corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
             border_width: self.border_width,
             label_size,
             secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
             line_height: crate::appearance::scale_metric(self.line_height, text_scale),
-            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+            icon_size,
         }
     }
 
@@ -711,7 +714,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     panel_width: Option<Pixels>,
     full_width: bool,
     trigger_leading: Option<IconBuilder>,
-    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
+    input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
@@ -814,14 +817,14 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
-    /// Adds decorative content before the popup filter editor. The caller supplies its tint.
-    pub fn input_leading(mut self, build: impl Fn() -> AnyElement + 'static) -> Self {
+    /// Adds decorative content before the popup filter editor using the resolved live icon size.
+    pub fn input_leading(mut self, build: impl Fn(Pixels) -> AnyElement + 'static) -> Self {
         self.input_leading = Some(Rc::new(build));
         self
     }
 
     /// Adds optional leading trigger content using the resolved foreground color.
-    pub fn leading(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn leading(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.trigger_leading = Some(Rc::new(build));
         self
     }
@@ -830,7 +833,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     ///
     /// The icon replaces the visible prompt, selected label, and disclosure chevron. Its square
     /// target size comes from [`ComboBoxMetrics::icon_trigger_size`].
-    pub fn icon_trigger(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon_trigger(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.trigger_leading = Some(Rc::new(build));
         self.trigger = ComboBoxTrigger::Icon;
         self
@@ -1823,11 +1826,14 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 self.trigger_leading
                     .filter(|_| !custom_trigger)
                     .map(|leading| {
-                        leading(if enabled {
-                            paint.foreground
-                        } else {
-                            paint.disabled
-                        })
+                        leading(
+                            if enabled {
+                                paint.foreground
+                            } else {
+                                paint.disabled
+                            },
+                            metrics.icon_size,
+                        )
                     }),
             )
             .children(custom_content)
@@ -1966,7 +1972,7 @@ fn filter_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<usize> {
 
 fn render_overlay<I: Clone + Eq + 'static>(
     state: Entity<ComboBoxState<I>>,
-    input_leading: Option<Rc<dyn Fn() -> AnyElement>>,
+    input_leading: Option<InputIconBuilder>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -2145,7 +2151,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(leading()),
+                            .child(leading(theme.metrics.icon_size)),
                     )
                 })
                 .child(div().flex_1().min_w_0().child(input)),
@@ -2301,7 +2307,7 @@ fn render_row<I: Clone + Eq + 'static>(
         .items_center()
         .justify_center();
     if let Some(icon) = &item.leading_icon {
-        leading = leading.child(icon(foreground));
+        leading = leading.child(icon(foreground, theme.metrics.icon_size));
     }
     row = row.child(leading).child(
         div()

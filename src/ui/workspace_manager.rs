@@ -750,12 +750,12 @@ impl WorkspaceManager {
                     workspace.name().to_owned(),
                 )
                 .keywords([path, directory_identity])
-                .leading_icon(move |foreground| {
+                .leading_icon(move |foreground, size| {
                     div()
                         .when(active, |icon| {
                             icon.debug_selector(|| "workspace-switcher-active-marker".to_owned())
                         })
-                        .child(Icon::new(icon, px(14.0), foreground))
+                        .child(Icon::new(icon, size, foreground))
                         .into_any_element()
                 })
                 .debug_selector(format!(
@@ -2903,7 +2903,6 @@ impl WorkspaceManager {
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
         let chrome_icon_size = appearance.spacing(WORKSPACE_CHROME_ICON_SIZE);
-        let fallback_icon_size = appearance.spacing(16.0);
         let placeholder_color = gpui_color(appearance.colors.text_placeholder);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let (toggle_icon, toggle_label) =
@@ -2926,13 +2925,8 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
-        .input_leading(move || {
-            Icon::custom(
-                CustomIconName::FilterCircle,
-                chrome_icon_size,
-                placeholder_color,
-            )
-            .into_any_element()
+        .input_leading(move |size| {
+            Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
         .copy(ComboBoxCopy::new(
             "Workspace name",
@@ -2946,22 +2940,17 @@ impl WorkspaceManager {
                 WorkspaceSwitcherChoice::Local(name.clone()),
                 "Local Workspace",
             )
-            .leading_icon(move |foreground| {
-                Icon::custom(
-                    CustomIconName::RectangleStackBadgePlus,
-                    fallback_icon_size,
-                    foreground,
-                )
-                .into_any_element()
+            .leading_icon(move |foreground, size| {
+                Icon::custom(CustomIconName::RectangleStackBadgePlus, size, foreground)
+                    .into_any_element()
             })
             .shortcut(new_workspace_shortcut)
             .debug_selector("workspace-switcher-create-local");
             let mut remote =
                 ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
                     .shortcut(new_remote_workspace_shortcut)
-                    .leading_icon(move |foreground| {
-                        Icon::custom(CustomIconName::GlobePlus, fallback_icon_size, foreground)
-                            .into_any_element()
+                    .leading_icon(move |foreground, size| {
+                        Icon::custom(CustomIconName::GlobePlus, size, foreground).into_any_element()
                     })
                     .debug_selector("workspace-switcher-create-remote");
             if let Some(reason) = &remote_unavailable_reason {
@@ -2972,9 +2961,8 @@ impl WorkspaceManager {
             }
             vec![local, remote]
         }))
-        .icon_trigger(move |foreground| {
-            Icon::custom(CustomIconName::RectangleStack, chrome_icon_size, foreground)
-                .into_any_element()
+        .icon_trigger(move |foreground, size| {
+            Icon::custom(CustomIconName::RectangleStack, size, foreground).into_any_element()
         })
         .placement(AnchoredPlacementConfig::new(
             AnchoredPlacement::Bottom,

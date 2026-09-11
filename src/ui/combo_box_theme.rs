@@ -23,7 +23,8 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
             .geometry(px(260.0), px(28.0), px(30.0), px(46.0))
             .spacing(px(4.0), px(10.0), px(18.0), px(8.0))
             .shape(px(7.0), px(1.0))
-            .font_sizes(px(12.0), px(11.0)),
+            .font_sizes(px(12.0), px(11.0))
+            .text_geometry(px(16.0), px(14.0)),
     )
     .shadow(super::appearance::control_shadow(colors, false))
 }

@@ -177,10 +177,10 @@ impl Render for IconTriggerRoot {
                         "Choose Workspace",
                         items(),
                     )
-                    .icon_trigger(|foreground| {
+                    .icon_trigger(|foreground, size| {
                         div()
                             .debug_selector(|| "combo-box-trigger-icon".to_owned())
-                            .size(px(12.0))
+                            .size(size)
                             .bg(foreground)
                             .into_any_element()
                     })
@@ -436,6 +436,13 @@ fn items() -> Vec<ComboBoxItem<u8>> {
             .debug_selector("combo-row-disabled"),
         ComboBoxItem::new(3, "Remote Workspace")
             .keywords(["ssh"])
+            .leading_icon(|foreground, size| {
+                div()
+                    .debug_selector(|| "combo-row-remote-icon".to_owned())
+                    .size(size)
+                    .bg(foreground)
+                    .into_any_element()
+            })
             .debug_selector("combo-row-remote"),
         ComboBoxItem::new(4, "Zellij Session").debug_selector("combo-row-zellij"),
     ]
@@ -2151,6 +2158,54 @@ fn icon_trigger_should_remain_a_centered_square_without_the_prompt(cx: &mut Test
     assert_eq!(trigger.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(icon.center(), trigger.center());
     assert!(cx.debug_bounds("combo-box-trigger-label").is_none());
+}
+
+#[gpui::test]
+fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
+    let (_root, _events, cx) = icon_trigger_window(cx, false);
+    open_by_pointer(cx);
+    cx.simulate_input("ssh");
+    cx.run_until_parked();
+
+    let default_theme = cx.update(|_, cx| *cx.global::<ComboBoxTheme>());
+    let default_size = px(12.0);
+    let default_trigger_icon = cx
+        .debug_bounds("combo-box-trigger-icon")
+        .expect("the default trigger icon was not rendered");
+    let default_row_icon = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the filtered row icon was not rendered");
+
+    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
+    let scaled_size = px(24.0);
+    cx.update(|window, cx| {
+        cx.set_global(scaled_theme);
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let scaled_trigger_icon = cx
+        .debug_bounds("combo-box-trigger-icon")
+        .expect("the open ComboBox trigger icon was not refreshed");
+    let scaled_row_icon = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the open filtered row icon was not refreshed");
+    assert_eq!(
+        (default_trigger_icon.size, default_row_icon.size),
+        (
+            gpui::size(default_size, default_size),
+            gpui::size(default_size, default_size),
+        )
+    );
+    assert_eq!(
+        (scaled_trigger_icon.size, scaled_row_icon.size),
+        (
+            gpui::size(scaled_size, scaled_size),
+            gpui::size(scaled_size, scaled_size),
+        )
+    );
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
+    assert!(cx.debug_bounds("combo-row-remote").is_some());
 }
 
 #[gpui::test]
