@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{
     App, ClickEvent, ElementId, FocusHandle, Global, InteractiveElement as _, IntoElement,
     KeyDownEvent, KeyUpEvent, MouseButton, ParentElement as _, Pixels, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
 
@@ -593,10 +593,13 @@ impl ToggleCore {
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             ToggleControlState::new(window, cx)
         });
+        let focus_handle = state.read(cx).focus_handle.clone();
+        if !enabled && focus_handle.is_focused(window) {
+            window.blur();
+        }
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);
         });
-        let focus_handle = state.read(cx).focus_handle.clone();
         let (keyboard_pressed, focus_visible) =
             state.read_with(cx, |state, _| (state.keyboard_pressed, state.focus_visible));
         let focused = focus_handle.is_focused(window) && focus_visible;
@@ -613,6 +616,7 @@ impl ToggleCore {
         let indicator_selector = format!("{selector}-indicator");
         let thumb_selector = format!("{selector}-thumb");
         let focus_selector = format!("{selector}-keyboard-focus");
+        let label_state_id = format!("{selector}-label-state");
         let indicator = match kind {
             ToggleKind::Checkbox(value) => checkbox_indicator(
                 value,
@@ -637,13 +641,21 @@ impl ToggleCore {
                 focus_selector,
             ),
         };
+        let hovered = TogglePaintRefinement(style.hovered);
+        let pressed = TogglePaintRefinement(style.pressed);
         let label = div()
+            .id(SharedString::from(label_state_id))
             .min_w_0()
             .text_color(paint.label)
             .text_size(style.metrics.font_size)
             .line_height(gpui::relative(style.metrics.line_height))
             .font(crate::control_typography(cx).regular().clone())
-            .child(self.label.clone());
+            .child(self.label.clone())
+            .when(enabled && !keyboard_pressed, |label| {
+                label
+                    .group_hover(INTERACTION_GROUP, move |style| hovered.label(style))
+                    .group_active(INTERACTION_GROUP, move |style| pressed.label(style))
+            });
         let is_switch = matches!(kind, ToggleKind::Switch);
         let content = if is_switch {
             vec![label.into_any_element(), indicator]
@@ -681,36 +693,38 @@ impl ToggleCore {
             .when(self.right_to_left, |row| row.flex_row_reverse())
             .cursor_default()
             .block_mouse_except_scroll()
-            .track_focus(&focus_handle)
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                pointer_state.update(cx, |state, cx| state.pointer_focus(cx));
-            })
-            .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key != "space" || event.keystroke.modifiers.modified() {
-                    return;
-                }
-                window.prevent_default();
-                if !event.is_held {
-                    key_down_state.update(cx, |state, cx| state.keyboard_down(cx));
-                }
-                cx.stop_propagation();
-            })
-            .on_key_up(move |event: &KeyUpEvent, window, cx| {
-                if event.keystroke.key != "space" || !key_up_state.read(cx).keyboard_pressed {
-                    return;
-                }
-                let may_activate =
-                    !event.keystroke.modifiers.modified() && keyboard_focus.is_focused(window);
-                let activate =
-                    key_up_state.update(cx, |state, cx| state.keyboard_up(may_activate, cx));
-                if activate && let Some(handler) = &keyboard_handler {
-                    handler(ToggleActivationSource::Space, window, cx);
-                }
-                window.prevent_default();
-                cx.stop_propagation();
-            })
             .when(enabled, |row| {
-                row.group(INTERACTION_GROUP).on_click(click_handler)
+                row.track_focus(&focus_handle)
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        pointer_state.update(cx, |state, cx| state.pointer_focus(cx));
+                    })
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key != "space" || event.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        window.prevent_default();
+                        if !event.is_held {
+                            key_down_state.update(cx, |state, cx| state.keyboard_down(cx));
+                        }
+                        cx.stop_propagation();
+                    })
+                    .on_key_up(move |event: &KeyUpEvent, window, cx| {
+                        if event.keystroke.key != "space" || !key_up_state.read(cx).keyboard_pressed
+                        {
+                            return;
+                        }
+                        let may_activate = !event.keystroke.modifiers.modified()
+                            && keyboard_focus.is_focused(window);
+                        let activate = key_up_state
+                            .update(cx, |state, cx| state.keyboard_up(may_activate, cx));
+                        if activate && let Some(handler) = &keyboard_handler {
+                            handler(ToggleActivationSource::Space, window, cx);
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .group(INTERACTION_GROUP)
+                    .on_click(click_handler)
             })
             .children(content);
 
@@ -735,6 +749,27 @@ struct ToggleStyle {
     focus_border: Rgba,
 }
 
+#[derive(Clone, Copy)]
+struct TogglePaintRefinement(TogglePaint);
+
+impl TogglePaintRefinement {
+    fn indicator(self, style: StyleRefinement) -> StyleRefinement {
+        style.bg(self.0.background).border_color(self.0.border)
+    }
+
+    fn foreground_fill(self, style: StyleRefinement) -> StyleRefinement {
+        style.bg(self.0.foreground)
+    }
+
+    fn foreground_text(self, style: StyleRefinement) -> StyleRefinement {
+        style.text_color(self.0.foreground)
+    }
+
+    fn label(self, style: StyleRefinement) -> StyleRefinement {
+        style.text_color(self.0.label)
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the indicator consumes one resolved control state"
@@ -750,7 +785,10 @@ fn checkbox_indicator(
     focus_selector: String,
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
+    let hovered = TogglePaintRefinement(style.hovered);
+    let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
+    let mark_state_id = SharedString::from(format!("{selector}-mark-state"));
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
@@ -766,34 +804,44 @@ fn checkbox_indicator(
         .bg(paint.background)
         .when(enabled && !keyboard_pressed, |indicator| {
             indicator
-                .group_hover(INTERACTION_GROUP, move |indicator| {
-                    indicator
-                        .bg(style.hovered.background)
-                        .border_color(style.hovered.border)
-                })
-                .group_active(INTERACTION_GROUP, move |indicator| {
-                    indicator
-                        .bg(style.pressed.background)
-                        .border_color(style.pressed.border)
-                })
+                .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
+                .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
         })
         .when(value == CheckboxState::Checked, |indicator| {
             indicator.child(
                 div()
+                    .id(mark_state_id.clone())
                     .text_color(paint.foreground)
                     .text_size(metrics.checkbox_extent * 0.8)
                     .line_height(metrics.checkbox_extent)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("✓"),
+                    .child("✓")
+                    .when(enabled && !keyboard_pressed, |mark| {
+                        mark.group_hover(INTERACTION_GROUP, move |style| {
+                            hovered.foreground_text(style)
+                        })
+                        .group_active(INTERACTION_GROUP, move |style| {
+                            pressed.foreground_text(style)
+                        })
+                    }),
             )
         })
         .when(value == CheckboxState::Mixed, |indicator| {
             indicator.child(
                 div()
+                    .id(mark_state_id)
                     .w(metrics.checkbox_extent * 0.5)
                     .h(metrics.border_width * 2.0)
                     .rounded(metrics.border_width)
-                    .bg(paint.foreground),
+                    .bg(paint.foreground)
+                    .when(enabled && !keyboard_pressed, |mark| {
+                        mark.group_hover(INTERACTION_GROUP, move |style| {
+                            hovered.foreground_fill(style)
+                        })
+                        .group_active(INTERACTION_GROUP, move |style| {
+                            pressed.foreground_fill(style)
+                        })
+                    }),
             )
         })
         .when(focused, |indicator| {
@@ -824,7 +872,10 @@ fn switch_indicator(
     focus_selector: String,
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
+    let hovered = TogglePaintRefinement(style.hovered);
+    let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
+    let thumb_state_id = SharedString::from(format!("{thumb_selector}-state"));
     let thumb_extent = (metrics.switch_height - metrics.switch_inset * 2.0).max(px(1.0));
     let content_inset = (metrics.switch_inset - metrics.border_width).max(px(0.0));
     let off_offset = px(0.0);
@@ -852,25 +903,27 @@ fn switch_indicator(
         .bg(paint.background)
         .when(enabled && !keyboard_pressed, |indicator| {
             indicator
-                .group_hover(INTERACTION_GROUP, move |indicator| {
-                    indicator
-                        .bg(style.hovered.background)
-                        .border_color(style.hovered.border)
-                })
-                .group_active(INTERACTION_GROUP, move |indicator| {
-                    indicator
-                        .bg(style.pressed.background)
-                        .border_color(style.pressed.border)
-                })
+                .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
+                .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
         })
         .child(
             div()
+                .id(thumb_state_id)
                 .debug_selector(move || thumb_selector)
                 .relative()
                 .left(thumb_offset)
                 .size(thumb_extent)
                 .rounded(thumb_extent / 2.0)
-                .bg(paint.foreground),
+                .bg(paint.foreground)
+                .when(enabled && !keyboard_pressed, |thumb| {
+                    thumb
+                        .group_hover(INTERACTION_GROUP, move |style| {
+                            hovered.foreground_fill(style)
+                        })
+                        .group_active(INTERACTION_GROUP, move |style| {
+                            pressed.foreground_fill(style)
+                        })
+                }),
         )
         .when(focused, |indicator| {
             indicator.child(focus_outline(
@@ -1014,6 +1067,36 @@ mod tests {
         assert_eq!(
             CheckboxState::Checked.after_activation(),
             CheckboxState::Unchecked
+        );
+    }
+
+    #[test]
+    fn interaction_paint_should_refine_every_rendered_part() {
+        let paint = TogglePaint::new(
+            rgba(0x111111ff),
+            rgba(0x121212ff),
+            rgba(0x131313ff),
+            rgba(0x141414ff),
+        );
+        let refinement = TogglePaintRefinement(paint);
+
+        assert_eq!(
+            refinement.indicator(StyleRefinement::default()),
+            StyleRefinement::default()
+                .bg(paint.background)
+                .border_color(paint.border)
+        );
+        assert_eq!(
+            refinement.foreground_fill(StyleRefinement::default()),
+            StyleRefinement::default().bg(paint.foreground)
+        );
+        assert_eq!(
+            refinement.foreground_text(StyleRefinement::default()),
+            StyleRefinement::default().text_color(paint.foreground)
+        );
+        assert_eq!(
+            refinement.label(StyleRefinement::default()),
+            StyleRefinement::default().text_color(paint.label)
         );
     }
 
@@ -1220,6 +1303,37 @@ mod tests {
 
         assert_eq!(checkbox_changes.get(), 0);
         assert_eq!(switch_changes.get(), 0);
+    }
+
+    #[gpui::test]
+    fn disabled_toggle_pointer_should_preserve_existing_focus(cx: &mut TestAppContext) {
+        let (root, _, _, _, _, cx) = toggle_window(cx, true);
+        let other = root.read_with(cx, |root, _| root.other_focus.clone());
+        cx.update(|window, _| other.focus(window));
+        let bounds = cx
+            .debug_bounds("test-checkbox")
+            .expect("checkbox should render");
+
+        cx.simulate_click(bounds.center(), Modifiers::none());
+
+        assert!(cx.update(|window, _| other.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn disabling_focused_toggle_should_release_focus(cx: &mut TestAppContext) {
+        let (root, _, _, _, _, cx) = toggle_window(cx, false);
+        cx.update(|window, _| {
+            window.focus_next();
+            window.focus_next();
+        });
+
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| window.focused(cx).is_none()));
     }
 
     #[gpui::test]
