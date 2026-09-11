@@ -5563,7 +5563,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
     let divider = cx
         .debug_bounds("workspace-sidebar-resize-handle-divider")
         .unwrap();
-    assert_eq!(chooser.right(), divider.left());
+    assert_eq!(divider.left() - chooser.right(), px(TOP_CHROME_ACTION_GAP));
 
     click("workspace-switcher", cx);
 
