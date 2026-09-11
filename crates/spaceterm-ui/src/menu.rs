@@ -387,6 +387,7 @@ impl MenuMetrics {
     fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
+        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
         Self {
             panel_width: self.panel_width * width_scale,
             row_height: crate::appearance::scale_line_box(
@@ -412,7 +413,8 @@ impl MenuMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale),
+            indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale)
+                .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
             corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
             border_width: self.border_width,
@@ -423,7 +425,7 @@ impl MenuMetrics {
             ),
             panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
             submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
-            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+            icon_size,
             separator_thickness: self.separator_thickness,
         }
     }
@@ -513,7 +515,8 @@ struct MenuStyle {
     shadow: ControlShadow,
 }
 
-type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
+type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type TriggerIconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 type InternalActivation = Rc<dyn Fn(MenuActivationSource, &mut Window, &mut App)>;
 type PickerChangeHandler<T> = Rc<dyn Fn(&PickerChange<T>, &mut Window, &mut App)>;
 type MenuLifecycleHandler = Rc<dyn Fn(&MenuLifecycleEvent, &mut App)>;
@@ -546,7 +549,7 @@ struct MenuItem<A> {
     disabled: bool,
     destructive: bool,
     shortcut: Option<SharedString>,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     mark: EntryMark,
     debug_selector: Option<String>,
 }
@@ -591,10 +594,10 @@ impl<A> MenuRadioOption<A> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// The selected radio mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.item.icon = Some(Rc::new(build));
         self
     }
@@ -743,10 +746,10 @@ impl<A> MenuEntry<A> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// A selected checkbox or radio mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         match &mut self.kind {
             MenuEntryKind::Item(item) => item.icon = Some(Rc::new(build)),
             MenuEntryKind::Submenu { item, .. } => item.icon = Some(Rc::new(build)),
@@ -805,7 +808,7 @@ pub(crate) struct PlainMenuAction<'entry, A> {
 pub struct Menu<A: Clone + 'static> {
     core: MenuControl<A>,
     label: SharedString,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<TriggerIconBuilder>,
     icon_trigger: bool,
 }
 
@@ -946,7 +949,7 @@ pub struct PickerOption<T> {
     value: T,
     label: SharedString,
     disabled: bool,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     debug_selector: Option<String>,
 }
 
@@ -968,10 +971,10 @@ impl<T> PickerOption<T> {
         self
     }
 
-    /// Adds a leading icon built with the resolved row foreground color.
+    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
     /// The selected option mark replaces the icon within the shared leading slot.
-    pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.icon = Some(Rc::new(build));
         self
     }
@@ -1005,7 +1008,7 @@ impl std::error::Error for PickerBuildError {}
 pub struct Picker<T: Clone + PartialEq + 'static> {
     core: MenuControl<T>,
     selected_label: SharedString,
-    leading_icon: Option<IconBuilder>,
+    leading_icon: Option<TriggerIconBuilder>,
     on_change: Option<PickerChangeHandler<T>>,
 }
 
@@ -1048,7 +1051,7 @@ impl<T: Clone + PartialEq + 'static> Picker<T> {
                 )
                 .disabled(option.disabled);
                 if let Some(icon) = option.icon {
-                    entry = entry.icon(move |color| icon(color));
+                    entry = entry.icon(move |color, size| icon(color, size));
                 }
                 if let Some(selector) = option.debug_selector {
                     entry = entry.debug_selector(selector);
@@ -1505,7 +1508,7 @@ enum InternalEntryKind {
         disabled: bool,
         destructive: bool,
         shortcut: Option<SharedString>,
-        icon: Option<IconBuilder>,
+        icon: Option<RowIconBuilder>,
         mark: EntryMark,
         debug_selector: Option<String>,
         activate: InternalActivation,
@@ -1517,7 +1520,7 @@ enum InternalEntryKind {
         disabled: bool,
         destructive: bool,
         shortcut: Option<SharedString>,
-        icon: Option<IconBuilder>,
+        icon: Option<RowIconBuilder>,
         debug_selector: Option<String>,
         entries: Vec<InternalEntry>,
     },
@@ -2965,7 +2968,7 @@ fn render_row(
     disabled: bool,
     destructive: bool,
     shortcut: Option<SharedString>,
-    icon: Option<IconBuilder>,
+    icon: Option<RowIconBuilder>,
     mark: EntryMark,
     debug_selector: Option<String>,
     submenu: bool,
@@ -3009,7 +3012,7 @@ fn render_row(
     if let Some(indicator) = mark_icon(mark) {
         leading = leading.child(Icon::new(indicator, style.metrics.icon_size, foreground));
     } else if let Some(icon) = icon {
-        leading = leading.child(icon(foreground));
+        leading = leading.child(icon(foreground, style.metrics.icon_size));
     }
     row = row
         .child(leading)
@@ -3597,7 +3600,15 @@ mod tests {
                             MenuEntry::action("Disabled", "disabled")
                                 .disabled(true)
                                 .debug_selector("disabled-entry"),
-                            MenuEntry::action("Open", "open").debug_selector("open-entry"),
+                            MenuEntry::action("Open", "open")
+                                .icon(|foreground, size| {
+                                    div()
+                                        .debug_selector(|| "open-entry-icon".to_owned())
+                                        .size(size)
+                                        .bg(foreground)
+                                        .into_any_element()
+                                })
+                                .debug_selector("open-entry"),
                             MenuEntry::action("Close", "close"),
                             MenuEntry::action("Inspect", "inspect"),
                         ],
@@ -3626,6 +3637,32 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    #[gpui::test]
+    fn custom_row_icon_should_follow_the_resolved_live_menu_metric(cx: &mut TestAppContext) {
+        let (_root, _events, cx) = menu_window(cx);
+        let default_size = test_theme().resolve(MenuSize::Regular).metrics.icon_size;
+        let trigger = cx.debug_bounds("menu-trigger").expect("menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let default_icon = cx
+            .debug_bounds("open-entry-icon")
+            .expect("the default custom row icon was not rendered");
+
+        let theme = test_theme().scaled_metrics(2.0, 1.25);
+        let expected_size = theme.resolve(MenuSize::Regular).metrics.icon_size;
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let scaled_icon = cx
+            .debug_bounds("open-entry-icon")
+            .expect("the open custom row icon was not refreshed");
+        assert_eq!(default_icon.size, size(default_size, default_size));
+        assert_eq!(scaled_icon.size, size(expected_size, expected_size));
     }
 
     struct ScrollTestRoot {

@@ -817,7 +817,7 @@ fn lone_decorated_footer_entries_should_stay_behind_a_disclosure(cx: &mut TestAp
         ),
         (
             "icon",
-            MenuEntry::action("Finder", "icon".into()).icon(|_| div().into_any_element()),
+            MenuEntry::action("Finder", "icon".into()).icon(|_, _| div().into_any_element()),
         ),
     ];
 

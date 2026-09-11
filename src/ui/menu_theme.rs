@@ -39,6 +39,7 @@ fn metrics(width: f32) -> MenuMetrics {
         .border_width(px(1.0))
         .font_sizes(px(12.0), px(11.0))
         .panel_spacing(px(3.0), px(2.0))
+        .decoration_metrics(px(14.0), px(1.0))
 }
 
 fn gpui_color(color: Color) -> Rgba {

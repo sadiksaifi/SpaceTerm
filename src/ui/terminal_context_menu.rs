@@ -1,5 +1,4 @@
 use gpui::prelude::*;
-use gpui::px;
 use spaceterm_ui::{Icon, IconName, MenuEntry};
 
 use crate::terminal::NativeContextActions;
@@ -72,7 +71,7 @@ fn menu_entry(
     let icon = command_icon(command);
     MenuEntry::action(label, command)
         .disabled(!enabled)
-        .icon(move |foreground| Icon::new(icon, px(14.0), foreground).into_any_element())
+        .icon(move |foreground, size| Icon::new(icon, size, foreground).into_any_element())
         .debug_selector(format!(
             "terminal-context-menu-row-{}-{}",
             command.debug_name(),

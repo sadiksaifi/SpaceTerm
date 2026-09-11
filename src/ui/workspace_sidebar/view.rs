@@ -499,10 +499,14 @@ fn workspace_menu_entries(
             RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
         )
         .shortcut(shortcut)
-        .icon(|foreground| Icon::new(IconName::SquarePlus, px(14.0), foreground).into_any_element())
+        .icon(|foreground, size| {
+            Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
+        })
         .debug_selector("workspace-menu-row-new-tab"),
         MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
-            .icon(|foreground| Icon::new(IconName::Pencil, px(14.0), foreground).into_any_element())
+            .icon(|foreground, size| {
+                Icon::new(IconName::Pencil, size, foreground).into_any_element()
+            })
             .debug_selector("workspace-menu-row-rename"),
     ];
     entries.push(
@@ -514,7 +518,7 @@ fn workspace_menu_entries(
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
-        .icon(|foreground| Icon::new(IconName::Pin, px(14.0), foreground).into_any_element())
+        .icon(|foreground, size| Icon::new(IconName::Pin, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-pin-directory"),
     );
     if pinned {
@@ -535,8 +539,8 @@ fn workspace_menu_entries(
                 "Reconnect",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::Reconnect),
             )
-            .icon(|foreground| {
-                Icon::new(IconName::RotateCw, px(14.0), foreground).into_any_element()
+            .icon(|foreground, size| {
+                Icon::new(IconName::RotateCw, size, foreground).into_any_element()
             })
             .debug_selector("workspace-menu-row-reconnect"),
         );
@@ -548,7 +552,7 @@ fn workspace_menu_entries(
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
         )
         .destructive(true)
-        .icon(|foreground| Icon::new(IconName::X, px(14.0), foreground).into_any_element())
+        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
     ]);
     entries
