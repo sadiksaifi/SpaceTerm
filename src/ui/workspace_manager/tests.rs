@@ -5957,7 +5957,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     assert_eq!(chooser.left() - expanded_toggle.right(), px(8.0));
     assert!(switcher_icon.right() <= workspace_icon.left());
     assert!(workspace_icon.right() <= label.left());
-    assert_eq!(tabs.left() - chooser.right(), px(8.0));
+    assert_eq!(tabs.left() - chooser.right(), px(4.0));
 
     for position in [
         switcher_icon.center(),
