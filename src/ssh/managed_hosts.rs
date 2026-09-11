@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::destination::SshHostAlias;
 use super::host_config::{DiscoveredSshHost, HostConfigSource};
-use crate::platform::app_directories::AppDirectoryRoot;
+use crate::platform::app_directories::AppDirectoryFile;
 use crate::platform::app_paths::{AppPaths, AppPathsError};
 use crate::platform::secure_filesystem::{
     PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory, SecureEntryIdentity,
@@ -180,9 +180,10 @@ impl<'a> ManagedHostsStore<'a> {
                     .map(|_| ())
                     .map_err(|_| ManagedHostsError::NonCanonical);
             }
-            let directory = self.paths.ensure_secure_root(AppDirectoryRoot::Config)?;
+            let target = self.paths.managed_ssh_config_file();
+            let directory = self.paths.ensure_secure_root(target.root())?;
             let bytes = serialize_managed_hosts(&[]);
-            match self.commit(&directory, bytes.as_bytes(), None)? {
+            match self.commit(&directory, &target, bytes.as_bytes(), None)? {
                 SecureCommitOutcome::Committed => return Ok(()),
                 SecureCommitOutcome::CommittedButUnsynced => {
                     return Err(ManagedHostsError::CommittedButUnsynced);
@@ -279,46 +280,42 @@ impl<'a> ManagedHostsStore<'a> {
         hosts: &[ManagedSshHost],
         expected: Option<&SecureEntryIdentity>,
     ) -> Result<SecureCommitOutcome, ManagedHostsError> {
-        let directory = self.paths.ensure_secure_root(AppDirectoryRoot::Config)?;
+        let target = self.paths.managed_ssh_config_file();
+        let directory = self.paths.ensure_secure_root(target.root())?;
         let bytes = serialize_managed_hosts(hosts);
         if bytes.len() > MANAGED_CONFIG_BYTES {
             return Err(ManagedHostsError::StorageUnavailable);
         }
-        self.commit(&directory, bytes.as_bytes(), expected)
+        self.commit(&directory, &target, bytes.as_bytes(), expected)
     }
 
     fn read_snapshot(&self) -> Result<Option<PrivateFileSnapshot>, ManagedHostsError> {
-        let Some(directory) = self.paths.open_secure_root(AppDirectoryRoot::Config)? else {
+        let target = self.paths.managed_ssh_config_file();
+        let Some(directory) = self.paths.open_secure_root(target.root())? else {
             return Ok(None);
         };
-        let target = self.paths.managed_ssh_config();
-        let name = target
-            .file_name()
-            .ok_or(ManagedHostsError::StorageUnavailable)?;
         self.paths
             .filesystem()
-            .read_private_file(&directory, name, MANAGED_CONFIG_BYTES)
+            .read_private_file(&directory, target.file_name(), MANAGED_CONFIG_BYTES)
             .map_err(map_filesystem_error)
     }
 
     fn commit(
         &self,
         directory: &SecureDirectory,
+        target: &AppDirectoryFile,
         bytes: &[u8],
         expected: Option<&SecureEntryIdentity>,
     ) -> Result<SecureCommitOutcome, ManagedHostsError> {
-        let target = self.paths.managed_ssh_config();
-        let name = target
-            .file_name()
-            .ok_or(ManagedHostsError::StorageUnavailable)?;
         for _ in 0..TEMP_CREATION_ATTEMPTS {
             let mut nonce = [0_u8; 16];
             getrandom::fill(&mut nonce).map_err(|_| ManagedHostsError::StorageUnavailable)?;
-            match self
-                .paths
-                .filesystem()
-                .prepare_private_file(directory, name, bytes, nonce)
-            {
+            match self.paths.filesystem().prepare_private_file(
+                directory,
+                target.file_name(),
+                bytes,
+                nonce,
+            ) {
                 Ok(prepared) => {
                     return self
                         .paths
@@ -610,7 +607,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_directories::{APP_DIR_NAME, AppDirectories, AppDirectoryEnvironment};
     use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::secure_filesystem::{
         PreparedPrivateFile, SecureCommitResult, SecureFilesystem,
@@ -822,6 +819,20 @@ mod tests {
         AppPaths::resolve(&environment, &host, filesystem).unwrap()
     }
 
+    fn windows_policy_paths(filesystem: Arc<RecordingFilesystem>) -> AppPaths {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("spaceterm-windows-storage-policy");
+        let directories = AppDirectories::resolve_windows(
+            APP_DIR_NAME,
+            root.join("Roaming"),
+            root.join("Local"),
+            Some(root.join("Temp")),
+        )
+        .unwrap();
+        AppPaths::from_directories(directories, 200, filesystem).unwrap()
+    }
+
     fn host(alias: &str, host_name: &str) -> ManagedSshHost {
         ManagedSshHost::new(alias.into(), host_name.into(), None, None, None).unwrap()
     }
@@ -923,6 +934,26 @@ mod tests {
         store.ensure_exists().unwrap();
 
         assert!(store.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn windows_policy_storage_and_command_path_should_share_the_data_root() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = windows_policy_paths(filesystem.clone());
+        let command_path = paths.managed_ssh_config();
+        let store = ManagedHostsStore::new(&paths);
+
+        store.ensure_exists().unwrap();
+
+        let directory = command_path.parent().unwrap().to_path_buf();
+        let name = command_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let state = filesystem.state.lock().unwrap();
+        assert!(state.directories.contains(&directory));
+        assert!(state.files.contains_key(&(directory, name)));
     }
 
     #[test]

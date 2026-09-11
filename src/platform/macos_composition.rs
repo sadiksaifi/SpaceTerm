@@ -25,16 +25,11 @@ fn capture_startup_dependencies() -> Result<
     StartupDependenciesError,
 > {
     let path_environment = super::app_directories::AppDirectoryEnvironment::capture();
-    #[cfg(feature = "appearance-exerciser")]
-    let mut directories =
-        super::app_directories::AppDirectories::resolve(super::app_directories::APP_DIR_NAME)
-            .map_err(|_| StartupDependenciesError::Paths)?;
-    #[cfg(not(feature = "appearance-exerciser"))]
     let directories =
         super::app_directories::AppDirectories::resolve(super::app_directories::APP_DIR_NAME)
             .map_err(|_| StartupDependenciesError::Paths)?;
     #[cfg(feature = "appearance-exerciser")]
-    isolate_appearance_exerciser_config(&mut directories)?;
+    let directories = isolate_appearance_exerciser_config(directories)?;
     let secure_filesystem: Arc<dyn super::secure_filesystem::SecureFilesystem> =
         Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem);
     let paths = super::app_paths::AppPaths::from_directories(
@@ -62,17 +57,27 @@ fn capture_startup_dependencies() -> Result<
 
 #[cfg(feature = "appearance-exerciser")]
 fn isolate_appearance_exerciser_config(
-    directories: &mut super::app_directories::AppDirectories,
-) -> Result<(), StartupDependenciesError> {
+    directories: super::app_directories::AppDirectories,
+) -> Result<super::app_directories::AppDirectories, StartupDependenciesError> {
     use std::ffi::OsStr;
-    use std::path::Component;
 
     if std::env::var_os("SPACETERM_APPEARANCE_EXERCISER").as_deref() != Some(OsStr::new("1")) {
-        return Ok(());
+        return Ok(directories);
     }
     let requested = std::env::var_os("SPACETERM_APPEARANCE_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("spaceterm-appearance-exerciser"));
+    isolate_appearance_exerciser_directories(directories, requested)
+}
+
+#[cfg(feature = "appearance-exerciser")]
+fn isolate_appearance_exerciser_directories(
+    directories: super::app_directories::AppDirectories,
+    requested: PathBuf,
+) -> Result<super::app_directories::AppDirectories, StartupDependenciesError> {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
     let normal = requested.is_absolute()
         && requested
             .components()
@@ -85,8 +90,7 @@ fn isolate_appearance_exerciser_config(
     let root = std::fs::canonicalize(parent)
         .map_err(|_| StartupDependenciesError::Paths)?
         .join("spaceterm-appearance-exerciser");
-    directories.config = root.join(super::app_directories::APP_DIR_NAME);
-    Ok(())
+    Ok(directories.with_config_directory(root.join(super::app_directories::APP_DIR_NAME)))
 }
 
 fn desktop_profile(
@@ -247,6 +251,36 @@ fn compose(
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "appearance-exerciser")]
+    #[test]
+    fn appearance_exerciser_should_rebind_every_config_semantic_path() {
+        let directories = super::super::app_directories::AppDirectories::resolve_xdg(
+            super::super::app_directories::APP_DIR_NAME,
+            &super::super::app_directories::AppDirectoryEnvironment {
+                home: Some("/Users/test".into()),
+                ..Default::default()
+            },
+            Some("/temporary".into()),
+        )
+        .unwrap();
+        let temporary = std::env::temp_dir();
+        let directories = isolate_appearance_exerciser_directories(
+            directories,
+            temporary.join("spaceterm-appearance-exerciser"),
+        )
+        .unwrap();
+        let config = std::fs::canonicalize(temporary)
+            .unwrap()
+            .join("spaceterm-appearance-exerciser")
+            .join(super::super::app_directories::APP_DIR_NAME);
+
+        assert_eq!(directories.config_file(), config.join("settings.json"));
+        assert_eq!(
+            directories.managed_ssh_config().path(),
+            config.join("ssh_config")
+        );
+    }
 
     #[test]
     fn macos_shell_capture_preserves_mode_compatibility_and_inherited_values() {

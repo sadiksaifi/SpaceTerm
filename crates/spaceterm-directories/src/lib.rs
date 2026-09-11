@@ -66,6 +66,51 @@ pub enum AppDirectoryRoot {
     Cache,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct AppDirectoryFile {
+    root: AppDirectoryRoot,
+    path: PathBuf,
+    name: &'static str,
+}
+
+impl AppDirectoryFile {
+    fn new(root: AppDirectoryRoot, directory: &Path, name: &'static str) -> Self {
+        Self {
+            root,
+            path: directory.join(name),
+            name,
+        }
+    }
+
+    pub fn root(&self) -> AppDirectoryRoot {
+        self.root
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file_name(&self) -> &OsStr {
+        OsStr::new(self.name)
+    }
+
+    pub fn into_path(self) -> PathBuf {
+        self.path
+    }
+}
+
+impl std::fmt::Debug for AppDirectoryFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AppDirectoryFile(..)")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectoryLayout {
+    Xdg,
+    Windows,
+}
+
 /// Semantic storage locations shared by every platform adapter.
 ///
 /// Resolution is side-effect free. Callers create a directory only when they are about to write
@@ -77,8 +122,7 @@ pub struct AppDirectories {
     pub state: PathBuf,
     pub cache: PathBuf,
     pub runtime: Option<PathBuf>,
-    logs: PathBuf,
-    managed_ssh_config: PathBuf,
+    layout: DirectoryLayout,
     temporary: Option<PathBuf>,
 }
 
@@ -155,16 +199,13 @@ impl AppDirectories {
             .configured_runtime_root()
             .or_else(|| temporary.clone())
             .map(|root| root.join(app_name));
-        let logs = state.join("logs");
-        let managed_ssh_config = config.join(MANAGED_SSH_CONFIG_NAME);
         Ok(Self {
             config,
             data,
             state,
             cache,
             runtime,
-            logs,
-            managed_ssh_config,
+            layout: DirectoryLayout::Xdg,
             temporary,
         })
     }
@@ -194,12 +235,11 @@ impl AppDirectories {
         });
         Ok(Self {
             config: roaming_application,
-            managed_ssh_config: data.join(MANAGED_SSH_CONFIG_NAME),
             data,
             state: local_application.join("State"),
             cache: local_application.join("Cache"),
             runtime,
-            logs: local_application.join("Logs"),
+            layout: DirectoryLayout::Windows,
             temporary,
         })
     }
@@ -208,12 +248,24 @@ impl AppDirectories {
         self.config.join(SETTINGS_DOCUMENT_NAME)
     }
 
-    pub fn managed_ssh_config(&self) -> PathBuf {
-        self.managed_ssh_config.clone()
+    pub fn managed_ssh_config(&self) -> AppDirectoryFile {
+        let root = match self.layout {
+            DirectoryLayout::Xdg => AppDirectoryRoot::Config,
+            DirectoryLayout::Windows => AppDirectoryRoot::Data,
+        };
+        AppDirectoryFile::new(root, self.root(root), MANAGED_SSH_CONFIG_NAME)
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        self.logs.clone()
+        match self.layout {
+            DirectoryLayout::Xdg => self.state.join("logs"),
+            DirectoryLayout::Windows => self.state.parent().unwrap_or(&self.state).join("Logs"),
+        }
+    }
+
+    pub fn with_config_directory(mut self, config: PathBuf) -> Self {
+        self.config = config;
+        self
     }
 
     pub fn session_file(&self) -> PathBuf {
@@ -627,12 +679,16 @@ mod tests {
             local.join("sadiksaifi").join("spaceterm").join("Logs")
         );
         assert_eq!(
-            directories.managed_ssh_config(),
+            directories.managed_ssh_config().path(),
             local
                 .join("sadiksaifi")
                 .join("spaceterm")
                 .join("Data")
                 .join("ssh_config")
+        );
+        assert_eq!(
+            directories.managed_ssh_config().root(),
+            AppDirectoryRoot::Data
         );
         let expected_runtime = temporary
             .join("sadiksaifi")
@@ -657,8 +713,12 @@ mod tests {
             Path::new("/home/test/.config/spaceterm/settings.json")
         );
         assert_eq!(
-            directories.managed_ssh_config(),
+            directories.managed_ssh_config().path(),
             Path::new("/home/test/.config/spaceterm/ssh_config")
+        );
+        assert_eq!(
+            directories.managed_ssh_config().root(),
+            AppDirectoryRoot::Config
         );
         assert_eq!(
             directories.logs_dir(),
@@ -671,6 +731,24 @@ mod tests {
         assert_eq!(
             directories.window_state_file(),
             Path::new("/home/test/.local/state/spaceterm/window-state.json")
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn config_rebinding_should_keep_every_config_semantic_path_together() {
+        let directories =
+            AppDirectories::resolve_xdg(APP_DIR_NAME, &environment(), Some("/temporary".into()))
+                .unwrap()
+                .with_config_directory("/isolated/spaceterm".into());
+
+        assert_eq!(
+            directories.config_file(),
+            Path::new("/isolated/spaceterm/settings.json")
+        );
+        assert_eq!(
+            directories.managed_ssh_config().path(),
+            Path::new("/isolated/spaceterm/ssh_config")
         );
     }
 

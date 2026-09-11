@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::app_directories::{APP_DIR_NAME, AppDirectoryEnvironment};
-use super::app_directories::{AppDirectories, AppDirectoryRoot, DirectoryError};
+use super::app_directories::{AppDirectories, AppDirectoryFile, AppDirectoryRoot, DirectoryError};
 use super::secure_filesystem::{
     SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
 };
@@ -126,6 +126,10 @@ impl AppPaths {
     }
 
     pub(crate) fn managed_ssh_config(&self) -> PathBuf {
+        self.directories.managed_ssh_config().into_path()
+    }
+
+    pub(crate) fn managed_ssh_config_file(&self) -> AppDirectoryFile {
         self.directories.managed_ssh_config()
     }
 
