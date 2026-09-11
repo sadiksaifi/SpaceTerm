@@ -78,6 +78,7 @@ struct AccessibilityElementState {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg(any(not(test), feature = "macos-native-tests"))]
 struct AccessibilityFontMetadata {
+    requested_descriptor: crate::appearance::ResolvedFontDescriptor,
     requested_family: String,
     requested_point_size: f32,
     name: String,
@@ -228,14 +229,14 @@ mod native {
         pub(crate) fn new(
             window: &Window,
             model: TerminalAccessibilityModel,
-            font_family: &str,
+            font: &crate::appearance::ResolvedFontDescriptor,
             font_size: Pixels,
         ) -> Self {
             let parent = native_view(window).unwrap_or(nil);
             retain(parent);
             let mut state = Box::new(AccessibilityElementState {
                 model,
-                font: resolve_font_metadata(font_family, f32::from(font_size)),
+                font: resolve_font_metadata(font, f32::from(font_size)),
                 frame: ScreenRect::default(),
                 grid: ScreenRect::default(),
                 cell_width: 1.0,
@@ -294,7 +295,7 @@ mod native {
                 bounds,
                 cell_width,
                 line_height,
-                font_family,
+                font,
                 font_size,
                 focused,
                 notifications,
@@ -320,12 +321,17 @@ mod native {
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
             let point_size = f32::from(font_size);
-            let requested_family = normalized_font_family(font_family);
+            let requested_family = normalized_font_family(&font.primary_family);
             if self
                 .state
                 .font_request_changed(requested_family, point_size)
+                || self
+                    .state
+                    .font
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.requested_descriptor != *font)
             {
-                self.state.font = resolve_font_metadata(requested_family, point_size);
+                self.state.font = resolve_font_metadata(font, point_size);
             }
             let bounds = bounds.and_then(|bounds| screen_rect(parent, bounds));
             self.state.visible = self.state.presented && bounds.is_some();
@@ -776,10 +782,10 @@ mod native {
     }
 
     fn resolve_font_metadata(
-        requested_family: &str,
+        descriptor: &crate::appearance::ResolvedFontDescriptor,
         point_size: f32,
     ) -> Option<AccessibilityFontMetadata> {
-        let requested_family = normalized_font_family(requested_family);
+        let requested_family = normalized_font_family(&descriptor.primary_family);
         let point_size = normalized_font_point_size(point_size);
         // SAFETY: This path runs with the other synchronous AppKit updates on the main thread.
         // Every borrowed NSFont name is copied into Rust before the local pool is drained.
@@ -789,11 +795,25 @@ mod native {
                 .init_str(requested_family)
                 .autorelease();
             let manager: id = msg_send![class!(NSFontManager), sharedFontManager];
-            let upright_regular = 0x0100_0004_u64 as NSUInteger;
+            let traits = match descriptor.style {
+                crate::appearance::FontStyle::Normal => 0x0100_0000_u64,
+                crate::appearance::FontStyle::Italic => 0x0000_0001_u64,
+            } as NSUInteger;
+            let weight = match descriptor.weight {
+                100..=199 => 1,
+                200..=299 => 2,
+                300..=399 => 3,
+                400..=499 => 5,
+                500..=599 => 6,
+                600..=699 => 8,
+                700..=799 => 9,
+                800..=899 => 10,
+                _ => 12,
+            } as NSInteger;
             let mut font: id = msg_send![manager,
                 fontWithFamily:requested
-                traits:upright_regular
-                weight:5 as NSInteger
+                traits:traits
+                weight:weight
                 size:f64::from(point_size)
             ];
             if font == nil {
@@ -803,8 +823,8 @@ mod native {
                 let menlo = NSString::alloc(nil).init_str("Menlo").autorelease();
                 font = msg_send![manager,
                     fontWithFamily:menlo
-                    traits:upright_regular
-                    weight:5 as NSInteger
+                    traits:traits
+                    weight:weight
                     size:f64::from(point_size)
                 ];
             }
@@ -823,6 +843,7 @@ mod native {
                 let visible_name: id = msg_send![font, displayName];
                 let resolved_size: f64 = msg_send![font, pointSize];
                 copy_ns_string(name).map(|name| AccessibilityFontMetadata {
+                    requested_descriptor: descriptor.clone(),
                     requested_family: requested_family.to_owned(),
                     requested_point_size: point_size,
                     name,
@@ -1020,26 +1041,19 @@ impl TerminalAccessibilityAdapterFactory for MacosTerminalAccessibilityAdapterFa
         &self,
         window: &Window,
         model: TerminalAccessibilityModel,
-        font_family: &str,
+        font: &crate::appearance::ResolvedFontDescriptor,
         font_size: Pixels,
     ) -> Box<dyn TerminalAccessibilityAdapter> {
         #[cfg(not(test))]
         {
             Box::new(native::MacosAccessibilityElement::new(
-                window,
-                model,
-                font_family,
-                font_size,
+                window, model, font, font_size,
             ))
         }
         #[cfg(test)]
         {
-            super::terminal_accessibility::testing::RecordingAccessibilityFactory::default().create(
-                window,
-                model,
-                font_family,
-                font_size,
-            )
+            super::terminal_accessibility::testing::RecordingAccessibilityFactory::default()
+                .create(window, model, font, font_size)
         }
     }
 }
@@ -1073,6 +1087,11 @@ mod tests {
                 Some((0, 3)),
             ),
             font: Some(AccessibilityFontMetadata {
+                requested_descriptor: crate::terminal::test_terminal_appearance_update()
+                    .appearance
+                    .typography
+                    .regular
+                    .clone(),
                 requested_family: "JetBrainsMono Nerd Font".to_owned(),
                 requested_point_size: 14.0,
                 name: "JetBrainsMonoNF-Regular".to_owned(),

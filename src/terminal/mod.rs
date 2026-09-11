@@ -39,7 +39,7 @@ pub(crate) use attention::AttentionFacts;
 pub(crate) use emulator::{
     ActiveScreenSnapshot, CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot,
     CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor,
-    TerminalColorsSnapshot, TerminalUnderlineSnapshot,
+    TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
@@ -81,11 +81,12 @@ pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender
 #[cfg(test)]
 pub(crate) use session::{
     LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, SessionExit,
-    TerminalLaunchPlan,
+    TerminalLaunchPlan, test_terminal_appearance_update,
 };
 pub(crate) use session::{
     NativeTerminalSessionFactory, SelectionCopyError, SessionDirectorySnapshot, SessionEvent,
-    StartedTerminalSession, TerminalSessionFactory, TerminalSessionHandle,
+    StartedTerminalSession, TerminalAppearanceUpdate, TerminalSessionFactory,
+    TerminalSessionHandle,
 };
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,

@@ -7,12 +7,18 @@ use gpui::{
     px,
 };
 
-const THUMB_WIDTH: f32 = 7.0;
-const HITBOX_HORIZONTAL_PADDING: f32 = 4.0;
-const HITBOX_WIDTH: f32 = THUMB_WIDTH + HITBOX_HORIZONTAL_PADDING * 2.0;
-const THUMB_RIGHT_INSET: f32 = 4.0;
-const MINIMUM_THUMB_HEIGHT: f32 = 24.0;
-const OVERLAY_SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
+const DEFAULT_THUMB_WIDTH: f32 = 7.0;
+const DEFAULT_HITBOX_HORIZONTAL_PADDING: f32 = 4.0;
+const DEFAULT_THUMB_RIGHT_INSET: f32 = 4.0;
+const DEFAULT_MINIMUM_THUMB_HEIGHT: f32 = 24.0;
+const DEFAULT_HIDE_DELAY: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+const MINIMUM_THUMB_HEIGHT: f32 = DEFAULT_MINIMUM_THUMB_HEIGHT;
+#[cfg(test)]
+const HITBOX_WIDTH: f32 = DEFAULT_THUMB_WIDTH + DEFAULT_HITBOX_HORIZONTAL_PADDING * 2.0;
+#[cfg(test)]
+const OVERLAY_SCROLLBAR_HIDE_DELAY: Duration = DEFAULT_HIDE_DELAY;
 
 mod sealed {
     pub trait Sealed {}
@@ -174,9 +180,13 @@ struct ThumbGeometry {
 }
 
 impl ThumbGeometry {
-    fn for_metrics<O: ScrollOffset>(metrics: ScrollMetrics<O>) -> Self {
+    fn for_metrics<O: ScrollOffset>(
+        metrics: ScrollMetrics<O>,
+        minimum_thumb_height: Pixels,
+    ) -> Self {
         let track_height = f64::from(metrics.track_height_px);
-        let minimum_height = f64::from(MINIMUM_THUMB_HEIGHT.min(metrics.track_height_px));
+        let minimum_height =
+            f64::from(f32::from(minimum_thumb_height).min(metrics.track_height_px));
         let height = (metrics.viewport_fraction * track_height).clamp(minimum_height, track_height);
         let maximum_offset = metrics.maximum_offset.as_f64();
         let progress = if maximum_offset > 0.0 {
@@ -195,6 +205,54 @@ impl ThumbGeometry {
     }
 }
 
+/// Bounded geometry and lifecycle timing for every overlay scrollbar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarMetrics {
+    thumb_width: Pixels,
+    hitbox_horizontal_padding: Pixels,
+    thumb_right_inset: Pixels,
+    minimum_thumb_height: Pixels,
+    hide_delay: Duration,
+}
+
+impl ScrollbarMetrics {
+    /// Creates the compact scrollbar metrics preserved by the default catalog.
+    pub fn compact() -> Self {
+        Self {
+            thumb_width: px(DEFAULT_THUMB_WIDTH),
+            hitbox_horizontal_padding: px(DEFAULT_HITBOX_HORIZONTAL_PADDING),
+            thumb_right_inset: px(DEFAULT_THUMB_RIGHT_INSET),
+            minimum_thumb_height: px(DEFAULT_MINIMUM_THUMB_HEIGHT),
+            hide_delay: DEFAULT_HIDE_DELAY,
+        }
+    }
+
+    /// Sets visible thumb width, horizontal hit padding, and trailing inset.
+    pub fn geometry(mut self, width: Pixels, hit_padding: Pixels, right_inset: Pixels) -> Self {
+        self.thumb_width = width.max(px(1.0));
+        self.hitbox_horizontal_padding = hit_padding.max(px(0.0));
+        self.thumb_right_inset = right_inset.max(px(0.0));
+        self
+    }
+
+    /// Sets the minimum thumb height and idle hide delay.
+    pub fn behavior(mut self, minimum_height: Pixels, hide_delay: Duration) -> Self {
+        self.minimum_thumb_height = minimum_height.max(px(1.0));
+        self.hide_delay = hide_delay;
+        self
+    }
+
+    fn hitbox_width(self) -> Pixels {
+        self.thumb_width + self.hitbox_horizontal_padding * 2.0
+    }
+}
+
+impl Default for ScrollbarMetrics {
+    fn default() -> Self {
+        Self::compact()
+    }
+}
+
 /// Application-owned colors installed for every overlay scrollbar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollbarTheme {
@@ -203,6 +261,8 @@ pub struct ScrollbarTheme {
     dragging_thumb: Rgba,
     thumb_border: Rgba,
     track_border: Rgba,
+    track_background: Rgba,
+    metrics: ScrollbarMetrics,
 }
 
 impl ScrollbarTheme {
@@ -214,6 +274,8 @@ impl ScrollbarTheme {
             dragging_thumb,
             thumb_border: Rgba { a: 0.0, ..thumb },
             track_border: Rgba { a: 0.0, ..thumb },
+            track_background: Rgba { a: 0.0, ..thumb },
+            metrics: ScrollbarMetrics::default(),
         }
     }
 
@@ -222,6 +284,32 @@ impl ScrollbarTheme {
         self.thumb_border = thumb;
         self.track_border = track;
         self
+    }
+
+    /// Sets the track fill independently of its border and the scrolling thumb.
+    pub fn track_background(mut self, color: Rgba) -> Self {
+        self.track_background = color;
+        self
+    }
+
+    /// Sets complete bounded scrollbar geometry and lifecycle timing.
+    pub fn metrics(mut self, metrics: ScrollbarMetrics) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+        let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
+        Self {
+            metrics: ScrollbarMetrics {
+                thumb_width: self.metrics.thumb_width * spacing_scale,
+                hitbox_horizontal_padding: self.metrics.hitbox_horizontal_padding * spacing_scale,
+                thumb_right_inset: self.metrics.thumb_right_inset * spacing_scale,
+                minimum_thumb_height: self.metrics.minimum_thumb_height * spacing_scale,
+                hide_delay: self.metrics.hide_delay,
+            },
+            ..self
+        }
     }
 
     fn resolve(self, dragging: bool) -> (Rgba, Rgba) {
@@ -365,10 +453,12 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         }
 
         let generation = self.visibility_generation;
+        let hide_delay = cx
+            .try_global::<ScrollbarTheme>()
+            .map_or_else(ScrollbarMetrics::default, |theme| theme.metrics)
+            .hide_delay;
         self._hide_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(OVERLAY_SCROLLBAR_HIDE_DELAY)
-                .await;
+            cx.background_executor().timer(hide_delay).await;
             let _ = this.update(cx, |this, cx| {
                 if this.visibility_generation == generation && this.drag.is_none() && !this.hovered
                 {
@@ -435,7 +525,12 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         if !drag.offset_valid {
             return true;
         }
-        let geometry = ThumbGeometry::for_metrics(metrics.with_offset(drag.target_offset));
+        let minimum_height = cx
+            .try_global::<ScrollbarTheme>()
+            .map_or_else(ScrollbarMetrics::default, |theme| theme.metrics)
+            .minimum_thumb_height;
+        let geometry =
+            ThumbGeometry::for_metrics(metrics.with_offset(drag.target_offset), minimum_height);
         let movable_height = (drag.track_height_px - geometry.height_px).max(0.0);
         if movable_height <= f32::EPSILON {
             return true;
@@ -477,16 +572,19 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         true
     }
 
-    fn geometry(&self) -> Option<ThumbGeometry> {
+    fn geometry(&self, theme_metrics: ScrollbarMetrics) -> Option<ThumbGeometry> {
         if !self.visible {
             return None;
         }
         let metrics = self.metrics?;
-        Some(ThumbGeometry::for_metrics(match self.drag {
-            Some(drag) if drag.offset_valid => metrics.with_offset(drag.target_offset),
-            None => metrics,
-            Some(_) => metrics,
-        }))
+        Some(ThumbGeometry::for_metrics(
+            match self.drag {
+                Some(drag) if drag.offset_valid => metrics.with_offset(drag.target_offset),
+                None => metrics,
+                Some(_) => metrics,
+            },
+            theme_metrics.minimum_thumb_height,
+        ))
     }
 
     fn render_thumb(&self, geometry: ThumbGeometry, cx: &mut Context<Self>) -> AnyElement {
@@ -512,7 +610,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             .absolute()
             .top(px(geometry.track_top_px + geometry.top_px))
             .right_0()
-            .w(px(HITBOX_WIDTH))
+            .w(theme.metrics.hitbox_width())
             .h(px(geometry.height_px))
             .block_mouse_except_scroll()
             .cursor_default()
@@ -526,10 +624,10 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     .id(thumb_id)
                     .debug_selector(move || thumb_debug.to_string())
                     .absolute()
-                    .right(px(THUMB_RIGHT_INSET))
-                    .w(px(THUMB_WIDTH))
+                    .right(theme.metrics.thumb_right_inset)
+                    .w(theme.metrics.thumb_width)
                     .h_full()
-                    .rounded(px(THUMB_WIDTH / 2.0))
+                    .rounded(theme.metrics.thumb_width / 2.0)
                     .border_1()
                     .border_color(theme.thumb_border)
                     .bg(thumb_color)
@@ -589,7 +687,8 @@ impl<O: ScrollOffset> EventEmitter<OverlayScrollbarEvent<O>> for OverlayScrollba
 
 impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.geometry() {
+        let theme = *cx.global::<ScrollbarTheme>();
+        match self.geometry(theme.metrics) {
             Some(geometry) => div()
                 .absolute()
                 .inset_0()
@@ -598,10 +697,11 @@ impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
                         .absolute()
                         .right_0()
                         .top(px(geometry.track_top_px))
-                        .w(px(HITBOX_WIDTH))
+                        .w(theme.metrics.hitbox_width())
                         .h(px(geometry.track_height_px))
+                        .bg(theme.track_background)
                         .border_l_1()
-                        .border_color(cx.global::<ScrollbarTheme>().track_border),
+                        .border_color(theme.track_border),
                 )
                 .child(self.render_thumb(geometry, cx))
                 .into_any_element(),
@@ -635,9 +735,9 @@ mod tests {
 
         assert_eq!(
             (
-                ThumbGeometry::for_metrics(top),
-                ThumbGeometry::for_metrics(middle),
-                ThumbGeometry::for_metrics(bottom),
+                ThumbGeometry::for_metrics(top, px(MINIMUM_THUMB_HEIGHT)),
+                ThumbGeometry::for_metrics(middle, px(MINIMUM_THUMB_HEIGHT)),
+                ThumbGeometry::for_metrics(bottom, px(MINIMUM_THUMB_HEIGHT)),
             ),
             (
                 ThumbGeometry {
@@ -665,7 +765,7 @@ mod tests {
     #[test]
     fn pixel_metrics_should_enforce_the_minimum_thumb_height() {
         let metrics = ScrollMetrics::for_pixels(0.0, 200.0, 9_800.0, 4_000.0).unwrap();
-        let geometry = ThumbGeometry::for_metrics(metrics);
+        let geometry = ThumbGeometry::for_metrics(metrics, px(MINIMUM_THUMB_HEIGHT));
 
         assert_eq!(geometry.height_px, MINIMUM_THUMB_HEIGHT);
         assert!(geometry.top_px > 0.0);
@@ -721,7 +821,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let metrics = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(metrics, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),
@@ -743,7 +843,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let initial = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(initial, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),
@@ -770,7 +870,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let metrics = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(metrics, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),
@@ -788,7 +888,7 @@ mod tests {
             assert!(scrollbar.move_drag(px(120.0), cx));
             assert!(scrollbar.finish_drag(cx));
             assert!(scrollbar.metrics.is_none());
-            assert!(scrollbar.geometry().is_none());
+            assert!(scrollbar.geometry(ScrollbarMetrics::default()).is_none());
         });
     }
 
@@ -798,7 +898,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let metrics = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(metrics, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),
@@ -825,7 +925,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let metrics = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(metrics, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),
@@ -847,7 +947,7 @@ mod tests {
         scrollbar.update(cx, |scrollbar, cx| {
             let metrics = ScrollMetrics::for_rows(0.0, 10.0, 100, 20, 40);
             scrollbar.reveal(metrics, cx);
-            let geometry = scrollbar.geometry().unwrap();
+            let geometry = scrollbar.geometry(ScrollbarMetrics::default()).unwrap();
             let thumb_bounds = gpui::bounds(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(HITBOX_WIDTH), px(geometry.height_px)),

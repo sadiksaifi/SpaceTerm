@@ -19,7 +19,7 @@ pub(crate) trait TerminalAccessibilityAdapterFactory {
         &self,
         window: &Window,
         model: TerminalAccessibilityModel,
-        font_family: &str,
+        font: &crate::appearance::ResolvedFontDescriptor,
         font_size: Pixels,
     ) -> Box<dyn TerminalAccessibilityAdapter>;
 }
@@ -30,7 +30,7 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) bounds: Option<Bounds<Pixels>>,
     pub(crate) cell_width: Pixels,
     pub(crate) line_height: Pixels,
-    pub(crate) font_family: &'a str,
+    pub(crate) font: &'a crate::appearance::ResolvedFontDescriptor,
     pub(crate) font_size: Pixels,
     pub(crate) focused: bool,
     pub(crate) notifications: AccessibilityNotifications,
@@ -52,6 +52,7 @@ pub(crate) mod testing {
     pub(crate) struct AccessibilityRecord {
         pub(crate) model: TerminalAccessibilityModel,
         pub(crate) font_family: String,
+        pub(crate) font: crate::appearance::ResolvedFontDescriptor,
         pub(crate) font_size: Pixels,
         pub(crate) bounds: Option<Bounds<Pixels>>,
         pub(crate) cell_width: Pixels,
@@ -71,12 +72,13 @@ pub(crate) mod testing {
             &self,
             _: &Window,
             model: TerminalAccessibilityModel,
-            font_family: &str,
+            font: &crate::appearance::ResolvedFontDescriptor,
             font_size: Pixels,
         ) -> Box<dyn TerminalAccessibilityAdapter> {
             let record = Rc::new(RefCell::new(AccessibilityRecord {
                 model,
-                font_family: font_family.to_owned(),
+                font_family: font.primary_family.clone(),
+                font: font.clone(),
                 font_size,
                 bounds: None,
                 cell_width: gpui::px(1.0),
@@ -118,7 +120,8 @@ pub(crate) mod testing {
             let mut record = self.0.borrow_mut();
             let was_focused = record.focused;
             record.model = update.model.clone();
-            record.font_family = update.font_family.to_owned();
+            record.font_family = update.font.primary_family.clone();
+            record.font = update.font.clone();
             record.font_size = update.font_size;
             record.bounds = update.bounds;
             record.cell_width = update.cell_width;

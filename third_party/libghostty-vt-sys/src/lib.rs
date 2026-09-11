@@ -75,6 +75,10 @@ mod abi_tests {
         assert_eq!(TerminalOption::HYPERLINK_RESOLVE, 1000);
         assert_eq!(TerminalOption::SEMANTIC_PROMPT, 1001);
         assert_eq!(TerminalOption::PROGRESS_REPORT, 30);
+        assert_eq!(TerminalData::COLOR_FOREGROUND_OVERRIDDEN, 41);
+        assert_eq!(TerminalData::COLOR_BACKGROUND_OVERRIDDEN, 42);
+        assert_eq!(TerminalData::COLOR_CURSOR_OVERRIDDEN, 43);
+        assert_eq!(TerminalData::COLOR_PALETTE_OVERRIDES, 44);
         assert_eq!(HyperlinkResolution::PASSTHROUGH, 0);
         assert_eq!(HyperlinkResolution::REPLACE, 1);
         assert_eq!(HyperlinkResolution::SUPPRESS, 2);

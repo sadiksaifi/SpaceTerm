@@ -4,7 +4,10 @@
 //! colors and surrounding chrome from its canonical theme.
 
 mod anchored_placement;
+mod appearance;
 mod button;
+#[cfg(test)]
+mod catalog_tests;
 mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
@@ -24,6 +27,7 @@ use gpui::App;
 pub use anchored_placement::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
 };
+pub use appearance::{ControlShadow, ControlShadowLayer, ControlTypography};
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
@@ -71,7 +75,8 @@ pub use modal::{
     install_portable_modal_keybindings, window_modal_is_open,
 };
 pub use overlay_scrollbar::{
-    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarTheme,
+    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarMetrics,
+    ScrollbarTheme,
 };
 pub use resize_handle::{
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,
@@ -99,7 +104,10 @@ pub use window_drag_region::{
 ///
 /// The catalog keeps initialization stable as the library gains cohesive control families and
 /// does not expose an arbitrary style map or call-site paint escape hatch.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ControlThemeCatalog {
+    generation: ControlThemeGeneration,
+    typography: ControlTypography,
     button: ButtonTheme,
     scrollbar: ScrollbarTheme,
     resize_handle: ResizeHandleTheme,
@@ -110,6 +118,45 @@ pub struct ControlThemeCatalog {
     tooltip: TooltipTheme,
     modal: ModalTheme,
 }
+
+impl gpui::Global for ControlThemeCatalog {}
+
+/// The application-issued generation shared by every family in one control catalog.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ControlThemeGeneration(u64);
+
+impl ControlThemeGeneration {
+    /// Creates a generation from the application appearance revision.
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric appearance generation.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// The result of replacing the installed reusable-control presentation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlThemeReplacement {
+    /// A different complete catalog was installed and windows were refreshed.
+    Applied,
+    /// The supplied catalog was identical to the installed catalog.
+    Unchanged,
+}
+
+/// Replacement was requested before reusable controls were initialized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlThemeReplacementError;
+
+impl std::fmt::Display for ControlThemeReplacementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("reusable controls are not initialized")
+    }
+}
+
+impl std::error::Error for ControlThemeReplacementError {}
 
 impl ControlThemeCatalog {
     /// Creates the complete catalog required by [`init`].
@@ -129,6 +176,8 @@ impl ControlThemeCatalog {
         modal: ModalTheme,
     ) -> Self {
         Self {
+            generation: ControlThemeGeneration::default(),
+            typography: ControlTypography::default(),
             button,
             scrollbar,
             resize_handle,
@@ -139,6 +188,48 @@ impl ControlThemeCatalog {
             tooltip,
             modal,
         }
+    }
+
+    /// Sets the generation shared by every family in this complete catalog.
+    pub fn generation(mut self, generation: ControlThemeGeneration) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    /// Sets complete resolved typography shared by every text-bearing control family.
+    pub fn typography(mut self, typography: ControlTypography) -> Self {
+        self.typography = typography;
+        self
+    }
+
+    /// Returns the catalog's application-issued generation.
+    pub fn installed_generation(&self) -> ControlThemeGeneration {
+        self.generation
+    }
+
+    /// Returns the complete resolved typography used by this catalog.
+    pub fn installed_typography(&self) -> &ControlTypography {
+        &self.typography
+    }
+
+    /// Scales every control family's text and spacing metrics as one complete catalog.
+    ///
+    /// Text-bearing control heights grow from their scaled line box plus scaled padding. Stable
+    /// hairlines, interaction timing, paint, typography, and the application generation remain
+    /// unchanged.
+    pub fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
+        self.button = self.button.scaled_metrics(text_scale, spacing_scale);
+        self.scrollbar = self.scrollbar.scaled_metrics(text_scale, spacing_scale);
+        self.resize_handle = self.resize_handle.scaled_metrics(text_scale, spacing_scale);
+        self.menu = self.menu.scaled_metrics(text_scale, spacing_scale);
+        self.command_palette = self
+            .command_palette
+            .scaled_metrics(text_scale, spacing_scale);
+        self.combo_box = self.combo_box.scaled_metrics(text_scale, spacing_scale);
+        self.text_input = self.text_input.scaled_metrics(text_scale, spacing_scale);
+        self.tooltip = self.tooltip.scaled_metrics(text_scale, spacing_scale);
+        self.modal = self.modal.scaled_metrics(text_scale, spacing_scale);
+        self
     }
 }
 
@@ -155,6 +246,39 @@ impl ControlThemeCatalog {
 /// [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     icon::register_font(cx)?;
+    install_control_theme_catalog(cx, catalog);
+    button::init(cx);
+    text_input::init(cx);
+    menu::init(cx);
+    command_palette::init(cx);
+    combo_box::init(cx);
+    tooltip::init(cx);
+    modal::init_core(cx);
+    Ok(())
+}
+
+/// Replaces all reusable-control presentation without reinstalling fonts, coordinators, or
+/// keybindings.
+///
+/// Existing control entities and open overlays retain their interaction state. Changed catalogs
+/// refresh every Operating-System Window so custom text shaping and deferred overlay content use
+/// the new generation on the next frame.
+pub fn replace_control_theme_catalog(
+    cx: &mut App,
+    catalog: ControlThemeCatalog,
+) -> Result<ControlThemeReplacement, ControlThemeReplacementError> {
+    if !cx.has_global::<ControlThemeCatalog>() {
+        return Err(ControlThemeReplacementError);
+    }
+    if cx.global::<ControlThemeCatalog>() == &catalog {
+        return Ok(ControlThemeReplacement::Unchanged);
+    }
+    install_control_theme_catalog(cx, catalog);
+    cx.refresh_windows();
+    Ok(ControlThemeReplacement::Applied)
+}
+
+fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.button);
     cx.set_global(catalog.scrollbar);
     cx.set_global(catalog.resize_handle);
@@ -164,12 +288,11 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     cx.set_global(catalog.text_input);
     cx.set_global(catalog.tooltip);
     cx.set_global(catalog.modal);
-    button::init(cx);
-    text_input::init(cx);
-    menu::init(cx);
-    command_palette::init(cx);
-    combo_box::init(cx);
-    tooltip::init(cx);
-    modal::init_core(cx);
-    Ok(())
+    cx.set_global(catalog);
+}
+
+fn control_typography(cx: &App) -> ControlTypography {
+    cx.try_global::<ControlThemeCatalog>()
+        .map(|catalog| catalog.typography.clone())
+        .unwrap_or_default()
 }

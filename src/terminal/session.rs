@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use crate::appearance::{AppearanceGeneration, ResolvedTerminalAppearance};
 use crate::platform::native_pty::{
     NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyOperationFailure,
     NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
@@ -81,6 +82,41 @@ pub(crate) enum SessionEvent {
     HiddenInputChanged(bool),
     Exited(SessionExit),
     Failed(SessionFailure),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TerminalAppearanceUpdate {
+    pub(crate) generation: AppearanceGeneration,
+    pub(crate) appearance: Arc<ResolvedTerminalAppearance>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_terminal_appearance_update() -> TerminalAppearanceUpdate {
+    use crate::appearance::{
+        AppearancePreferences, AvailableFonts, SchemeCatalog, SystemAppearance,
+    };
+
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &AppearancePreferences::default(),
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .expect("built-in terminal appearance must resolve");
+    TerminalAppearanceUpdate::new(resolved.generation, resolved.terminal)
+}
+
+impl TerminalAppearanceUpdate {
+    pub(crate) fn new(
+        generation: AppearanceGeneration,
+        appearance: Arc<ResolvedTerminalAppearance>,
+    ) -> Self {
+        Self {
+            generation,
+            appearance,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -344,6 +380,7 @@ pub(crate) trait TerminalSessionHandle {
         None
     }
     fn set_presentable(&self, _presentable: bool) {}
+    fn update_appearance(&self, update: TerminalAppearanceUpdate);
 }
 
 /// Starts one Terminal Session by consuming typed Local or Remote launch authority.
@@ -356,6 +393,7 @@ pub(crate) trait TerminalSessionFactory {
         &self,
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
+        initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, SessionError>;
 
     fn fallback_title(&self) -> String {
@@ -611,6 +649,17 @@ impl TerminalSessionHandle for TerminalSession {
             eprintln!("terminal presentation state was dropped because the worker has stopped");
         }
     }
+
+    fn update_appearance(&self, update: TerminalAppearanceUpdate) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        if self.schedule_input.enqueue_terminal_appearance(update)
+            && commands.send(Command::AppearanceChanged).is_err()
+        {
+            eprintln!("terminal appearance update was dropped because the worker has stopped");
+        }
+    }
 }
 
 impl Drop for TerminalSession {
@@ -691,6 +740,7 @@ enum Command {
     GraphicsAnimationTick,
     GraphicsBudgetAvailable,
     SetPresentable(bool),
+    AppearanceChanged,
     ReaderReady,
     Shutdown,
     PollHiddenInput,
@@ -738,6 +788,7 @@ impl fmt::Debug for Command {
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
+            Self::AppearanceChanged => "AppearanceChanged",
             Self::ReaderReady => "ReaderReady",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
@@ -768,6 +819,7 @@ struct TerminalWorkerContext {
     metadata_context: TerminalMetadataContext,
     fallback_title: String,
     terminal_name: &'static str,
+    initial_appearance: TerminalAppearanceUpdate,
 }
 
 struct TerminalWorkerPublishers {
@@ -901,6 +953,7 @@ impl TerminalWorker {
             fallback_title,
             terminal_name,
             local_filesystem,
+            initial_appearance,
         } = context;
         let TerminalWorkerPublishers {
             directory_state,
@@ -919,6 +972,7 @@ impl TerminalWorker {
             terminal_name,
             Instant::now(),
             local_filesystem,
+            initial_appearance,
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
@@ -1206,6 +1260,25 @@ impl TerminalWorker {
                     self.publish_screen()
                 } else {
                     true
+                }
+            }
+            Command::AppearanceChanged => {
+                let Some(update) = self.schedules.take_terminal_appearance() else {
+                    return true;
+                };
+                match self.emulator.apply_appearance(update) {
+                    Ok(()) => {
+                        if !self.write_pending_pty_responses() {
+                            return false;
+                        }
+                        self.publish_screen()
+                    }
+                    Err(error) => {
+                        self.send_runtime_failure(format!(
+                            "failed to apply terminal appearance: {error}"
+                        ));
+                        false
+                    }
                 }
             }
             Command::Shutdown => false,

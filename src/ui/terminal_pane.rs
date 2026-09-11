@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::appearance::chrome;
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 #[cfg(test)]
@@ -30,6 +31,7 @@ use super::{
     OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
     TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
+use crate::appearance::Color;
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
 use crate::platform::terminal_accessibility::{
@@ -63,7 +65,8 @@ use crate::terminal::{
     TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionHandle,
     UnhandledKeyDiagnostic, WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
-use crate::theme::{ACTIVE_THEME, Color};
+#[cfg(test)]
+use crate::theme::VAGUE_PRO as ACTIVE_THEME;
 #[cfg(test)]
 use gpui::ClipboardItem;
 use gpui::prelude::*;
@@ -71,8 +74,7 @@ use gpui::{
     AnyElement, App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
     FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, TextRun, UTF16Selection, Window, div, font, point, px, relative, rgba,
-    size,
+    SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, rgba, size,
 };
 use spaceterm_ui::{
     Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, Icon,
@@ -81,8 +83,8 @@ use spaceterm_ui::{
     window_modal_is_open,
 };
 
+#[cfg(test)]
 const DEFAULT_FONT_SIZE: f32 = 18.0;
-const DEFAULT_LINE_HEIGHT: f32 = 20.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
@@ -96,6 +98,15 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
+
+#[derive(Clone, Copy, Default)]
+enum StatusIntent {
+    #[default]
+    Information,
+    Success,
+    Warning,
+    Error,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurfaceActivity {
@@ -114,6 +125,7 @@ pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
     CaptionChanged,
+    SurfaceBackgroundChanged,
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -124,6 +136,7 @@ impl std::fmt::Debug for TerminalPaneEvent {
             Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
             Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
             Self::CaptionChanged => "TerminalPaneEvent::CaptionChanged",
+            Self::SurfaceBackgroundChanged => "TerminalPaneEvent::SurfaceBackgroundChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
         })
@@ -357,6 +370,7 @@ impl PaneSessionLifecycle {
     fn start(
         &mut self,
         geometry: TerminalGeometry,
+        appearance: crate::terminal::TerminalAppearanceUpdate,
     ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneSessionStartFailure>> {
         if self.session_start_attempted {
             return None;
@@ -377,7 +391,7 @@ impl PaneSessionLifecycle {
         };
         let result = self
             .session_factory
-            .start(geometry, prepared)
+            .start(geometry, prepared, appearance)
             .map_err(|_| operation);
         self.remote_restart_start_pending = false;
         Some(result)
@@ -415,6 +429,7 @@ pub(crate) struct TerminalPane {
     scene_submission_attempts: Vec<crate::terminal::PresentationGeneration>,
     diagnostics: DiagnosticBundle,
     status: Option<String>,
+    status_intent: StatusIntent,
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
@@ -434,6 +449,11 @@ pub(crate) struct TerminalPane {
     lifecycle_dependencies: PaneLifecycleDependencies,
     operating_system_window_key: bool,
     font_family: SharedString,
+    appearance: Arc<crate::appearance::ResolvedAppearance>,
+    requested_terminal_generation: crate::appearance::AppearanceGeneration,
+    surface_background: Color,
+    terminal_fonts: super::appearance::TerminalFonts,
+    zoom_delta: f32,
     font_size: f32,
     line_height: f32,
     cell_width: Pixels,
@@ -559,8 +579,13 @@ impl TerminalPane {
             }
         });
         let focus_handle = cx.focus_handle();
-        let font_family = terminal_font(cx);
-        let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
+        let appearance = super::appearance_runtime::current(cx);
+        let terminal_fonts =
+            super::appearance::TerminalFonts::prepare(&appearance.terminal.typography);
+        let font_family = terminal_fonts.regular.family.clone();
+        let font_size = appearance.terminal.typography.cell_size;
+        let line_height = appearance.terminal.typography.line_height;
+        let cell_width = measure_prepared_cell_width(window, &terminal_fonts.regular, font_size);
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
@@ -573,13 +598,19 @@ impl TerminalPane {
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         })
         .detach();
-        let screen = ScreenSnapshot::empty(native_service_adapters.file_insertion.paths);
+        let screen = ScreenSnapshot::empty_with_appearance(
+            native_service_adapters.file_insertion.paths,
+            &crate::terminal::TerminalAppearanceUpdate::new(
+                appearance.generation,
+                Arc::clone(&appearance.terminal),
+            ),
+        );
         let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
         let accessibility_element = accessibility_adapter_factory.create(
             window,
             accessibility.as_ref().clone(),
-            font_family.as_ref(),
-            px(DEFAULT_FONT_SIZE),
+            &appearance.terminal.typography.regular,
+            px(font_size),
         );
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
@@ -616,6 +647,13 @@ impl TerminalPane {
             cx.notify();
         })
         .detach();
+        cx.observe_global_in::<super::appearance_runtime::InstalledAppearance>(
+            window,
+            |pane, window, cx| {
+                pane.refresh_appearance(window, cx);
+            },
+        )
+        .detach();
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
             pane.refresh_surface(window, cx);
             cx.notify();
@@ -634,6 +672,7 @@ impl TerminalPane {
             screen_session_epoch: 0,
             last_valid_screen: Arc::clone(&screen),
             last_valid_screen_session_epoch: 0,
+            surface_background: screen.background,
             screen,
             accessibility,
             pending_accessibility: None,
@@ -652,6 +691,7 @@ impl TerminalPane {
             scene_submission_attempts: Vec::new(),
             diagnostics: DiagnosticBundle::default(),
             status: None,
+            status_intent: StatusIntent::Information,
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
@@ -671,8 +711,12 @@ impl TerminalPane {
             lifecycle_dependencies,
             operating_system_window_key: window.is_window_active(),
             font_family,
-            font_size: DEFAULT_FONT_SIZE,
-            line_height: DEFAULT_LINE_HEIGHT,
+            requested_terminal_generation: appearance.generation,
+            appearance,
+            terminal_fonts,
+            zoom_delta: 0.0,
+            font_size,
+            line_height,
             cell_width,
             backing_scale,
             last_geometry: None,
@@ -1138,6 +1182,10 @@ impl TerminalPane {
 
     pub(crate) fn current_directory(&self) -> Option<crate::terminal::metadata::CurrentDirectory> {
         self.terminal_session.current_directory.clone()
+    }
+
+    pub(crate) fn surface_background(&self) -> Color {
+        self.surface_background
     }
 
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
@@ -1706,7 +1754,11 @@ impl TerminalPane {
     }
 
     fn start_session(&mut self, geometry: TerminalGeometry, cx: &mut Context<Self>) {
-        let Some(result) = self.terminal_session.start(geometry) else {
+        let update = crate::terminal::TerminalAppearanceUpdate::new(
+            self.appearance.generation,
+            Arc::clone(&self.appearance.terminal),
+        );
+        let Some(result) = self.terminal_session.start(geometry, update) else {
             return;
         };
         match result {
@@ -1809,7 +1861,7 @@ impl TerminalPane {
                     bounds: self.grid_bounds,
                     cell_width: self.cell_width,
                     line_height: px(self.line_height),
-                    font_family: self.font_family.as_ref(),
+                    font: &self.appearance.terminal.typography.regular,
                     font_size: px(self.font_size),
                     focused,
                     notifications,
@@ -1855,10 +1907,11 @@ impl TerminalPane {
         match event {
             SessionEvent::CurrentDirectoryChanged => {}
             SessionEvent::Screen(screen) => {
-                if self
-                    .terminal_session
-                    .accepted_screen_generation
-                    .is_some_and(|generation| screen.generation <= generation)
+                if screen.appearance_generation < self.requested_terminal_generation
+                    || self
+                        .terminal_session
+                        .accepted_screen_generation
+                        .is_some_and(|generation| screen.generation <= generation)
                 {
                     return false;
                 }
@@ -2144,7 +2197,11 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_font_size(self.font_size + FONT_SIZE_STEP, window, cx);
+        self.set_font_size(
+            self.appearance.terminal.typography.cell_size + self.zoom_delta + FONT_SIZE_STEP,
+            window,
+            cx,
+        );
     }
 
     fn decrease_font_size(
@@ -2153,7 +2210,11 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_font_size(self.font_size - FONT_SIZE_STEP, window, cx);
+        self.set_font_size(
+            self.appearance.terminal.typography.cell_size + self.zoom_delta - FONT_SIZE_STEP,
+            window,
+            cx,
+        );
     }
 
     fn reset_font_size(
@@ -2162,22 +2223,58 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_font_size(DEFAULT_FONT_SIZE, window, cx);
+        self.set_font_size(self.appearance.terminal.typography.cell_size, window, cx);
     }
 
     fn set_font_size(&mut self, font_size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_delta = font_size - self.appearance.terminal.typography.cell_size;
         let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         if self.font_size == font_size {
             return;
         }
 
         self.font_size = font_size;
-        self.line_height = line_height_for_font_size(font_size);
-        self.cell_width = measure_cell_width(window, &self.font_family, font_size);
-        self.last_geometry = None;
+        self.line_height = font_size * self.appearance.terminal.typography.line_height
+            / self.appearance.terminal.typography.cell_size;
+        self.cell_width =
+            measure_prepared_cell_width(window, &self.terminal_fonts.regular, font_size);
         self.sync_scrollbar(cx);
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
+        cx.notify();
+    }
+
+    fn refresh_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = super::appearance_runtime::current(cx);
+        let changes = crate::appearance::AppearanceChangeSet::between(&self.appearance, &next);
+        self.appearance = next;
+        if changes.terminal_typography {
+            self.terminal_fonts =
+                super::appearance::TerminalFonts::prepare(&self.appearance.terminal.typography);
+            self.font_family = self.terminal_fonts.regular.family.clone();
+            self.font_size = (self.appearance.terminal.typography.cell_size + self.zoom_delta)
+                .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+            self.line_height = self.font_size * self.appearance.terminal.typography.line_height
+                / self.appearance.terminal.typography.cell_size;
+            self.cell_width =
+                measure_prepared_cell_width(window, &self.terminal_fonts.regular, self.font_size);
+            self.pending_accessibility_notifications
+                .insert(AccessibilityNotification::Value);
+            self.sync_scrollbar(cx);
+        }
+        if changes.terminal_protocol_colors
+            || changes.terminal_interaction_colors
+            || changes.terminal_rendering
+            || changes.terminal_typography
+        {
+            self.requested_terminal_generation = self.appearance.generation;
+            if let Some(session) = &self.terminal_session.session {
+                session.update_appearance(crate::terminal::TerminalAppearanceUpdate::new(
+                    self.appearance.generation,
+                    Arc::clone(&self.appearance.terminal),
+                ));
+            }
+        }
         cx.notify();
     }
 
@@ -2210,7 +2307,8 @@ impl TerminalPane {
         }
 
         self.backing_scale = backing_scale;
-        self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        self.cell_width =
+            measure_prepared_cell_width(window, &self.terminal_fonts.regular, self.font_size);
         self.last_geometry = None;
         let scale_change = self.render_lifecycle.update_scale(factor);
         if force_resources || scale_change == ScaleChange::ScaleResources {
@@ -2599,6 +2697,7 @@ impl TerminalPane {
             Ok(None) => return,
             Err(message) => {
                 self.status = Some(format!("File drop rejected: {message}"));
+                self.status_intent = StatusIntent::Warning;
                 cx.notify();
                 return;
             }
@@ -2838,12 +2937,14 @@ impl TerminalPane {
                     }
                     Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
                         this.status = Some(format!("Paste rejected: {rejection}"));
+                        this.status_intent = StatusIntent::Warning;
                         cx.notify();
                     }
                     Ok(Err(_)) | Err(_) => {
                         this.status = Some(
                             "Paste request failed before any terminal input was written".to_owned(),
                         );
+                        this.status_intent = StatusIntent::Error;
                         cx.notify();
                     }
                 }
@@ -2935,6 +3036,7 @@ impl TerminalPane {
             }
             if matches!(self.pane_state, PaneTerminalState::Running) {
                 self.status = Some(format!("Diagnostics exported to {}", path.display()));
+                self.status_intent = StatusIntent::Success;
             }
         } else {
             self.present_failure_at(
@@ -2993,6 +3095,7 @@ impl TerminalPane {
                     this.status = Some(
                         "Paste confirmation expired without writing terminal input".to_owned(),
                     );
+                    this.status_intent = StatusIntent::Warning;
                     cx.notify();
                 });
             }
@@ -3001,6 +3104,7 @@ impl TerminalPane {
                     this.status = Some(
                         "Paste confirmation was lost without writing terminal input".to_owned(),
                     );
+                    this.status_intent = StatusIntent::Error;
                     cx.notify();
                 });
             }
@@ -3043,7 +3147,8 @@ impl TerminalPane {
         Some((cell, link.as_ref().clone()))
     }
 
-    fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_find_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let appearance = chrome(cx).clone();
         let input = self.find_input.as_ref()?.clone();
         let snapshot = self
             .screen
@@ -3078,23 +3183,26 @@ impl TerminalPane {
         Some(
             div()
                 .id("terminal-find-bar")
+                .font(appearance.regular.clone())
                 .debug_selector(|| "terminal-find-bar".to_owned())
                 .absolute()
-                .top(px(8.0))
-                .right(px(8.0))
-                .w(px(360.0))
+                .top(appearance.spacing(8.0))
+                .right(appearance.spacing(8.0))
+                .w(appearance.text_size(360.0))
                 .max_w(relative(0.94))
-                .h(px(32.0))
+                .min_h(appearance.height(32.0, 13.0))
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
-                .gap(px(4.0))
-                .px(px(5.0))
+                .gap(appearance.spacing(4.0))
+                .px(appearance.spacing(5.0))
+                .py(appearance.spacing(3.0))
                 .rounded(px(7.0))
                 .border_1()
-                .border_color(gpui_color(ACTIVE_THEME.border))
-                .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-                .shadow_md()
+                .border_color(gpui_color(appearance.colors.border))
+                .bg(gpui_color(appearance.colors.elevated_surface_background))
+                .shadow(appearance.shadow())
                 .block_mouse_except_scroll()
                 .key_context(TERMINAL_FIND_KEY_CONTEXT)
                 .tab_group()
@@ -3110,33 +3218,38 @@ impl TerminalPane {
                     div()
                         .id("terminal-find-field")
                         .relative()
-                        .h(px(24.0))
-                        .min_w(px(60.0))
+                        .h(appearance.height(24.0, 13.0))
+                        .w(appearance.text_size(120.0))
+                        .max_w_full()
+                        .min_w(px(0.0))
                         .flex_grow()
                         .overflow_hidden()
                         .flex()
                         .items_center()
-                        .px(px(5.0))
+                        .px(appearance.spacing(5.0))
                         .rounded(px(4.0))
-                        .bg(gpui_color(ACTIVE_THEME.element_background))
-                        .text_size(px(13.0))
-                        .text_color(gpui_color(ACTIVE_THEME.text))
+                        .bg(gpui_color(appearance.colors.element_background))
+                        .text_size(appearance.text_size(13.0))
+                        .text_color(gpui_color(appearance.colors.text))
                         .whitespace_nowrap()
                         .child(input),
                 )
                 .child(
                     div()
                         .debug_selector(|| "terminal-find-result-label".to_owned())
-                        .min_w(px(42.0))
+                        .w(appearance.measure(&result_label, 11.0, window))
+                        .max_w_full()
                         .flex_shrink_0()
-                        .text_size(px(11.0))
-                        .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                        .whitespace_normal()
+                        .text_size(appearance.text_size(11.0))
+                        .text_color(gpui_color(appearance.colors.text_muted))
                         .child(result_label),
                 )
                 .child(find_icon_button(
                     "terminal-find-previous",
                     "Find Previous",
                     IconName::ChevronUp,
+                    appearance.text_size(12.0),
                     has_results,
                     move |window, cx| {
                         let _ = previous_pane.update(cx, |pane, cx| {
@@ -3148,6 +3261,7 @@ impl TerminalPane {
                     "terminal-find-next",
                     "Find Next",
                     IconName::ChevronDown,
+                    appearance.text_size(12.0),
                     has_results,
                     move |window, cx| {
                         let _ = next_pane.update(cx, |pane, cx| {
@@ -3159,6 +3273,7 @@ impl TerminalPane {
                     "terminal-find-close",
                     "Close Find",
                     IconName::X,
+                    appearance.text_size(12.0),
                     true,
                     move |window, cx| {
                         let _ = close_pane.update(cx, |pane, cx| {
@@ -3175,11 +3290,12 @@ fn find_icon_button(
     id: &'static str,
     accessibility_name: &'static str,
     icon: IconName,
+    icon_size: Pixels,
     enabled: bool,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     IconButton::new(id, accessibility_name, move |foreground| {
-        Icon::new(icon, px(12.0), foreground).into_any_element()
+        Icon::new(icon, icon_size, foreground).into_any_element()
     })
     .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Small)
@@ -3372,6 +3488,7 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = chrome(cx).clone();
         let native_activity = self.current_activity(window, cx);
         self.update_application_activity(native_activity, cx);
         let pane = cx.entity().downgrade();
@@ -3493,6 +3610,10 @@ impl Render for TerminalPane {
             self.fallback_render_cache.clone()
         };
         let background = gpui_color(display_screen.background);
+        if self.surface_background != display_screen.background {
+            self.surface_background = display_screen.background;
+            cx.emit(TerminalPaneEvent::SurfaceBackgroundChanged);
+        }
         let active_hovered_link = displaying_current
             .then(|| {
                 active_hovered_link(
@@ -3525,12 +3646,17 @@ impl Render for TerminalPane {
             .and_then(|_| display_screen.find.as_ref())
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
-        let find_bar = self.render_find_bar(cx);
+        let find_bar = self.render_find_bar(window, cx);
         let status = self.authoritative_status();
         let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => (ACTIVE_THEME.error, IconName::TriangleAlert),
-            PaneTerminalState::Exited(_) => (ACTIVE_THEME.text_muted, IconName::Square),
-            PaneTerminalState::Running => (ACTIVE_THEME.info, IconName::Info),
+            PaneTerminalState::Failed { .. } => (appearance.colors.error, IconName::TriangleAlert),
+            PaneTerminalState::Exited(_) => (appearance.colors.text_muted, IconName::Square),
+            PaneTerminalState::Running => match self.status_intent {
+                StatusIntent::Information => (appearance.colors.info, IconName::Info),
+                StatusIntent::Success => (appearance.colors.success, IconName::Check),
+                StatusIntent::Warning => (appearance.colors.warning, IconName::TriangleAlert),
+                StatusIntent::Error => (appearance.colors.error, IconName::TriangleAlert),
+            },
         };
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
@@ -3551,6 +3677,8 @@ impl Render for TerminalPane {
             display_render_cache,
             TerminalGridConfiguration {
                 terminal_input_focused,
+                terminal_fonts: self.terminal_fonts.clone(),
+                terminal_appearance: Arc::clone(&self.appearance.terminal),
                 font_family: self.font_family.clone(),
                 font_size: px(self.font_size),
                 line_height: px(self.line_height),
@@ -3656,6 +3784,7 @@ impl Render for TerminalPane {
                 });
             })
             .id("terminal-pane")
+            .font(appearance.regular.clone())
             .relative()
             .size_full()
             .overflow_hidden()
@@ -3705,7 +3834,7 @@ impl Render for TerminalPane {
                         .absolute()
                         .inset_0()
                         .border_2()
-                        .border_color(gpui_color(ACTIVE_THEME.warning)),
+                        .border_color(gpui_color(display_screen.configured_colors.visual_bell)),
                 )
             })
             .when_some(
@@ -3718,14 +3847,14 @@ impl Render for TerminalPane {
                             .left(px(8.0))
                             .bottom(px(8.0))
                             .max_w(px(520.0))
-                            .px(px(6.0))
-                            .py(px(3.0))
+                            .px(appearance.spacing(6.0))
+                            .py(appearance.spacing(3.0))
                             .rounded(px(4.0))
                             .border_1()
-                            .border_color(gpui_color(ACTIVE_THEME.border))
-                            .bg(gpui_color(ACTIVE_THEME.element_active))
-                            .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                            .text_sm()
+                            .border_color(gpui_color(appearance.colors.border))
+                            .bg(gpui_color(appearance.colors.element_active))
+                            .text_color(gpui_color(appearance.colors.text_muted))
+                            .text_size(appearance.text_size(13.0))
                             .overflow_hidden()
                             .child(div().truncate().child(link.target.value)),
                     )
@@ -3735,6 +3864,7 @@ impl Render for TerminalPane {
                 root.child(render_paste_confirmation(
                     confirmation,
                     cx.entity().downgrade(),
+                    appearance.clone(),
                 ))
             })
             .when_some(
@@ -3747,22 +3877,22 @@ impl Render for TerminalPane {
                             .right(px(HORIZONTAL_PADDING))
                             .bottom(px(BOTTOM_PADDING))
                             .max_w(relative(0.94))
-                            .px(px(10.0))
-                            .py(px(6.0))
+                            .px(appearance.spacing(10.0))
+                            .py(appearance.spacing(6.0))
                             .rounded(px(6.0))
                             .border_1()
                             .border_color(gpui_color(status_color))
-                            .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-                            .text_color(gpui_color(ACTIVE_THEME.text))
-                            .text_sm()
+                            .bg(gpui_color(appearance.colors.elevated_surface_background))
+                            .text_color(gpui_color(appearance.colors.text))
+                            .text_size(appearance.text_size(13.0))
                             .flex()
                             .flex_col()
-                            .gap(px(6.0))
+                            .gap(appearance.spacing(6.0))
                             .child(
                                 div()
                                     .flex()
                                     .items_start()
-                                    .gap(px(8.0))
+                                    .gap(appearance.spacing(8.0))
                                     .child(Icon::new(
                                         status_icon,
                                         px(14.0),
@@ -3824,6 +3954,7 @@ impl Render for TerminalPane {
 fn render_paste_confirmation(
     confirmation: PasteConfirmation,
     pane: gpui::WeakEntity<TerminalPane>,
+    appearance: super::appearance::ChromeAppearance,
 ) -> impl IntoElement {
     let cancel_pane = pane.clone();
     let explanation = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
@@ -3834,6 +3965,7 @@ fn render_paste_confirmation(
 
     div()
         .debug_selector(|| "unsafe-paste-confirmation".to_owned())
+        .font(appearance.regular.clone())
         .absolute()
         .left(px(16.0))
         .right(px(16.0))
@@ -3841,15 +3973,15 @@ fn render_paste_confirmation(
         .flex()
         .flex_col()
         .items_start()
-        .gap(px(10.0))
-        .px(px(12.0))
-        .py(px(10.0))
+        .gap(appearance.spacing(10.0))
+        .px(appearance.spacing(12.0))
+        .py(appearance.spacing(10.0))
         .rounded(px(8.0))
         .border_1()
-        .border_color(gpui_color(ACTIVE_THEME.warning_border))
-        .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-        .text_color(gpui_color(ACTIVE_THEME.text))
-        .text_sm()
+        .border_color(gpui_color(appearance.colors.warning_border))
+        .bg(gpui_color(appearance.colors.elevated_surface_background))
+        .text_color(gpui_color(appearance.colors.text))
+        .text_size(appearance.text_size(13.0))
         .occlude()
         .child(div().w_full().whitespace_normal().child(format!(
             "Paste {} bytes across {} lines? {explanation}",
@@ -3860,7 +3992,7 @@ fn render_paste_confirmation(
                 .w_full()
                 .flex()
                 .justify_end()
-                .gap(px(8.0))
+                .gap(appearance.spacing(8.0))
                 .child(
                     Button::new("cancel-unsafe-paste", "Cancel")
                         .variant(ButtonVariant::Secondary)
@@ -3887,11 +4019,7 @@ fn render_paste_confirmation(
         )
 }
 
-fn terminal_font(cx: &App) -> SharedString {
-    let font_names = cx.text_system().all_font_names();
-    select_terminal_font(&font_names).into()
-}
-
+#[cfg(test)]
 fn select_terminal_font(font_names: &[String]) -> &'static str {
     [
         "JetBrainsMono Nerd Font",
@@ -3908,11 +4036,15 @@ fn select_terminal_font(font_names: &[String]) -> &'static str {
     .unwrap_or("Menlo")
 }
 
-fn measure_cell_width(window: &mut Window, family: &SharedString, font_size: f32) -> Pixels {
+fn measure_prepared_cell_width(
+    window: &mut Window,
+    prepared_font: &gpui::Font,
+    font_size: f32,
+) -> Pixels {
     let run = TextRun {
         len: 1,
-        font: font(family.clone()),
-        color: gpui_color(ACTIVE_THEME.terminal_foreground).into(),
+        font: prepared_font.clone(),
+        color: gpui::black(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -3921,10 +4053,6 @@ fn measure_cell_width(window: &mut Window, family: &SharedString, font_size: f32
         .text_system()
         .shape_line("M".into(), px(font_size), &[run], None)
         .width
-}
-
-fn line_height_for_font_size(font_size: f32) -> f32 {
-    font_size * DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE
 }
 
 fn terminal_geometry(

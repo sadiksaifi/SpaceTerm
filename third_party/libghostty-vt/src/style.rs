@@ -340,6 +340,10 @@ impl Palette {
 pub struct PaletteMask(ffi::ColorPaletteMask);
 
 impl PaletteMask {
+    pub(crate) const fn from_raw(raw: ffi::ColorPaletteMask) -> Self {
+        Self(raw)
+    }
+
     /// Create an empty palette mask.
     #[must_use]
     pub fn new() -> Self {

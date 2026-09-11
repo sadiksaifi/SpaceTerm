@@ -1,31 +1,32 @@
 use gpui::{Rgba, px, rgba};
 use spaceterm_ui::{MenuMetrics, MenuPaint, MenuSizes, MenuTheme};
 
-use crate::theme::{ACTIVE_THEME, Color};
+use crate::appearance::{ChromeColors, Color};
 
-pub(super) fn theme() -> MenuTheme {
+pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
     let paint = MenuPaint::new(
-        gpui_color(ACTIVE_THEME.elevated_surface_background),
-        gpui_color(ACTIVE_THEME.border),
-        gpui_color(ACTIVE_THEME.text),
-        gpui_color(ACTIVE_THEME.icon),
-        gpui_color(ACTIVE_THEME.text_disabled),
-        gpui_color(ACTIVE_THEME.element_hover),
-        gpui_color(ACTIVE_THEME.text),
-        gpui_color(ACTIVE_THEME.error),
-        gpui_color(ACTIVE_THEME.border),
+        gpui_color(colors.elevated_surface_background),
+        gpui_color(colors.border),
+        gpui_color(colors.text),
+        gpui_color(colors.icon),
+        gpui_color(colors.text_disabled),
+        gpui_color(colors.element_hover),
+        gpui_color(colors.element_hover_foreground),
+        gpui_color(colors.error),
+        gpui_color(colors.border),
     )
     .trigger(
-        gpui_color(ACTIVE_THEME.ghost_element_background),
-        gpui_color(ACTIVE_THEME.ghost_element_hover),
-        gpui_color(ACTIVE_THEME.border_transparent),
+        gpui_color(colors.ghost_element_background),
+        gpui_color(colors.ghost_element_hover),
+        gpui_color(colors.border_transparent),
     )
-    .focus_border(gpui_color(ACTIVE_THEME.border_focused));
+    .focus_border(gpui_color(colors.border_focused));
 
     MenuTheme::new(
         paint,
         MenuSizes::new(metrics(196.0), metrics(208.0), metrics(240.0)),
     )
+    .shadow(super::appearance::control_shadow(colors, false))
 }
 
 fn metrics(width: f32) -> MenuMetrics {

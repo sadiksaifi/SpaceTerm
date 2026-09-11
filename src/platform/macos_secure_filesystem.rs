@@ -8,8 +8,8 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 
 use super::secure_filesystem::{
-    PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory,
-    SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
+    PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome, SecureCommitResult,
+    SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
 };
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -209,7 +209,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
         &self,
         prepared: PreparedPrivateFile,
         expected: Option<&SecureEntryIdentity>,
-    ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
+    ) -> Result<SecureCommitResult, SecureFilesystemError> {
         let mut prepared = prepared
             .0
             .downcast::<NativePreparedFile>()
@@ -227,7 +227,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
         let actual = file_identity_at(&prepared.directory.file, &prepared.target_name)?;
         let expected = expected.map(identity).transpose()?.copied();
         if actual != expected {
-            return Ok(SecureCommitOutcome::Conflict);
+            return Ok(SecureCommitResult::conflict());
         }
         if let Some(expected) = expected {
             validate_prepared_file(&prepared)?;
@@ -261,7 +261,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 Ok(Some(displaced)) if displaced == expected => {}
                 Ok(_) => {
                     rollback_prepared_swap(&mut prepared)?;
-                    return Ok(SecureCommitOutcome::Conflict);
+                    return Ok(SecureCommitResult::conflict());
                 }
                 Err(error) => {
                     rollback_prepared_swap(&mut prepared)?;
@@ -288,7 +288,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             match rename_exclusive_at(&prepared.directory.file, temporary_name, &target_name) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    return Ok(SecureCommitOutcome::Conflict);
+                    return Ok(SecureCommitResult::conflict());
                 }
                 Err(error) => return Err(classify(error)),
             }
@@ -313,11 +313,13 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 return Err(error);
             }
         }
+        let published_identity = SecureEntryIdentity(Arc::new(prepared.identity));
         prepared.active = false;
-        match prepared.directory.file.sync_all() {
-            Ok(()) => Ok(SecureCommitOutcome::Committed),
-            Err(_) => Ok(SecureCommitOutcome::CommittedButUnsynced),
-        }
+        let outcome = match prepared.directory.file.sync_all() {
+            Ok(()) => SecureCommitOutcome::Committed,
+            Err(_) => SecureCommitOutcome::CommittedButUnsynced,
+        };
+        Ok(SecureCommitResult::committed(outcome, published_identity))
     }
 
     fn register_socket(
@@ -403,6 +405,7 @@ fn directory(handle: &SecureDirectory) -> Result<Arc<NativeDirectory>, SecureFil
 fn identity(handle: &SecureEntryIdentity) -> Result<&NativeIdentity, SecureFilesystemError> {
     handle
         .0
+        .as_any()
         .downcast_ref::<NativeIdentity>()
         .ok_or(SecureFilesystemError::Unsafe)
 }
@@ -1150,7 +1153,7 @@ mod tests {
             .prepare_private_file(&directory, OsStr::new("config"), b"first", [1; 16])
             .unwrap();
         assert_eq!(
-            filesystem.commit_private_file(first, None).unwrap(),
+            filesystem.commit_private_file(first, None).unwrap().outcome,
             SecureCommitOutcome::Committed
         );
         let snapshot = filesystem
@@ -1166,7 +1169,8 @@ mod tests {
         assert_eq!(
             filesystem
                 .commit_private_file(replacement, Some(&snapshot.identity))
-                .unwrap(),
+                .unwrap()
+                .outcome,
             SecureCommitOutcome::Committed
         );
 
@@ -1174,7 +1178,7 @@ mod tests {
             .commit_private_file(stale, Some(&snapshot.identity))
             .unwrap();
 
-        assert_eq!(result, SecureCommitOutcome::Conflict);
+        assert_eq!(result.outcome, SecureCommitOutcome::Conflict);
         assert_eq!(fs::read(root.join("config")).unwrap(), b"replacement");
         let _ = fs::remove_dir_all(root);
     }
@@ -1237,8 +1241,14 @@ mod tests {
             excluded,
             "publication must retain exclusion through validation"
         );
-        assert_eq!(first_result.unwrap(), SecureCommitOutcome::Committed);
-        assert_eq!(second_result.unwrap(), SecureCommitOutcome::Committed);
+        assert_eq!(
+            first_result.unwrap().outcome,
+            SecureCommitOutcome::Committed
+        );
+        assert_eq!(
+            second_result.unwrap().outcome,
+            SecureCommitOutcome::Committed
+        );
         assert_eq!(fs::read(root.join("config")).unwrap(), b"first+second");
         let _ = fs::remove_dir_all(root);
     }
@@ -1338,7 +1348,10 @@ mod tests {
             .prepare_private_file(&directory, OsStr::new("config"), b"original", [5; 16])
             .unwrap();
         assert_eq!(
-            filesystem.commit_private_file(original, None).unwrap(),
+            filesystem
+                .commit_private_file(original, None)
+                .unwrap()
+                .outcome,
             SecureCommitOutcome::Committed
         );
         let snapshot = filesystem

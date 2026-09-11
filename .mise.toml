@@ -81,9 +81,23 @@ run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 description = "Run SpaceTerm from source"
 run = "cargo run --locked"
 
+[tasks."dev:appearance"]
+description = "Run the appearance exerciser with isolated retained settings"
+run = '''
+set -eu
+root="${TMPDIR:-/tmp}/spaceterm-appearance-exerciser"
+SPACETERM_APPEARANCE_EXERCISER=1 \
+SPACETERM_APPEARANCE_CONFIG="$root" \
+cargo run --features appearance-exerciser --locked
+'''
+
 [tasks.check]
 description = "Check every target and feature"
 run = "cargo check --package spaceterm --package spaceterm-ui --all-targets --all-features --locked"
+
+[tasks."dev:appearance:macos"]
+description = "Run the source appearance exerciser as a separate inspectable macOS app"
+run = "bash scripts/dev-appearance-macos.sh"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
@@ -249,10 +263,11 @@ run = "cargo test --package spaceterm --all-targets --features macos-native-test
 description = "Check macOS scripts and package metadata"
 run = '''
 set -eu
-bash -n scripts/package-macos.sh scripts/verify-macos-package.sh
-shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh
+bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/dev-appearance-macos.sh
+shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/dev-appearance-macos.sh
 python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py
 plutil -lint packaging/macos/Info.plist
+plutil -lint packaging/macos/AppearanceExerciser-Info.plist
 '''
 
 [tasks."validate:macos"]

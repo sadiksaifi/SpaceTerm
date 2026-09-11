@@ -1,25 +1,27 @@
 use gpui::{Pixels, Rgba, px, rgba};
 use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme};
 
-use crate::theme::{ACTIVE_THEME, Color};
+use crate::appearance::{ChromeColors, Color};
 
 pub(super) const VISIBLE_THICKNESS: f32 = 1.0;
 
-pub(super) fn theme() -> ResizeHandleTheme {
+pub(super) fn theme(colors: &ChromeColors) -> ResizeHandleTheme {
     ResizeHandleTheme::new(
         ResizeHandlePaint::new(
-            gpui_color(ACTIVE_THEME.border),
-            gpui_color(ACTIVE_THEME.border_focused),
-            gpui_color(ACTIVE_THEME.border_selected),
-            gpui_color(ACTIVE_THEME.border_focused),
-            gpui_color(ACTIVE_THEME.border_disabled),
+            gpui_color(colors.resize_idle),
+            gpui_color(colors.resize_focused),
+            gpui_color(colors.resize_hovered),
+            gpui_color(colors.resize_dragged),
+            gpui_color(colors.resize_disabled),
         ),
         ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0)),
     )
 }
 
-pub(super) fn spacious_target_half_thickness() -> Pixels {
-    let thickness = theme().pointer_target_thickness(ResizeHandleTarget::Spacious);
+pub(super) fn spacious_target_half_thickness(cx: &gpui::App) -> Pixels {
+    let thickness = cx
+        .global::<ResizeHandleTheme>()
+        .pointer_target_thickness(ResizeHandleTarget::Spacious);
     px(f32::from(thickness) / 2.0)
 }
 

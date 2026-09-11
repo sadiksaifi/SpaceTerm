@@ -702,6 +702,10 @@ pub struct ModalPaint {
     warning_background: Rgba,
     critical: Rgba,
     critical_background: Rgba,
+    suppression_selected: Rgba,
+    suppression_unselected: Rgba,
+    suppression_focused: Rgba,
+    suppression_disabled: Rgba,
 }
 
 impl ModalPaint {
@@ -741,7 +745,26 @@ impl ModalPaint {
             warning_background,
             critical,
             critical_background,
+            suppression_selected: progress_fill,
+            suppression_unselected: secondary_text,
+            suppression_focused: progress_fill,
+            suppression_disabled: secondary_text,
         }
+    }
+
+    /// Sets the complete semantic paint catalog for the Alert suppression checkbox.
+    pub fn suppression_checkbox(
+        mut self,
+        selected: Rgba,
+        unselected: Rgba,
+        focused: Rgba,
+        disabled: Rgba,
+    ) -> Self {
+        self.suppression_selected = selected;
+        self.suppression_unselected = unselected;
+        self.suppression_focused = focused;
+        self.suppression_disabled = disabled;
+        self
     }
 }
 
@@ -892,6 +915,76 @@ impl ModalMetrics {
         }
     }
 
+    fn scaled_for_catalog(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let text_scale = crate::appearance::normalized_scale(text_scale);
+        let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
+        let extent_scale = text_scale.max(spacing_scale);
+        Self {
+            compact_width: bounded_metric(self.compact_width * extent_scale, 280.0, 720.0, 360.0),
+            regular_width: bounded_metric(self.regular_width * extent_scale, 360.0, 960.0, 480.0),
+            wide_width: bounded_metric(self.wide_width * extent_scale, 480.0, 1200.0, 640.0),
+            maximum_height: bounded_metric(
+                self.maximum_height * extent_scale,
+                320.0,
+                1200.0,
+                620.0,
+            ),
+            alert_height_cap: bounded_metric(
+                self.alert_height_cap * extent_scale,
+                200.0,
+                720.0,
+                360.0,
+            ),
+            dialog_height_cap: bounded_metric(
+                self.dialog_height_cap * extent_scale,
+                240.0,
+                1040.0,
+                520.0,
+            ),
+            progress_height_cap: bounded_metric(
+                self.progress_height_cap * extent_scale,
+                180.0,
+                600.0,
+                300.0,
+            ),
+            viewport_margin: self.viewport_margin * spacing_scale,
+            top_offset: self.top_offset * spacing_scale,
+            surface_padding: self.surface_padding * spacing_scale,
+            section_gap: self.section_gap * spacing_scale,
+            action_gap: self.action_gap * spacing_scale,
+            accessory_extent: crate::appearance::scale_line_box(
+                self.accessory_extent,
+                self.body_size,
+                text_scale,
+                spacing_scale,
+            ),
+            horizontal_action_threshold: self.horizontal_action_threshold * extent_scale,
+            minimum_action_width: self.minimum_action_width * extent_scale,
+            corner_radius: self.corner_radius * spacing_scale,
+            border_width: self.border_width,
+            progress_track_thickness: self.progress_track_thickness * spacing_scale,
+            progress_track_radius: self.progress_track_radius * spacing_scale,
+            progress_status_region_height: crate::appearance::scale_line_box(
+                self.progress_status_region_height,
+                self.body_size,
+                text_scale,
+                spacing_scale,
+            ),
+            progress_detail_region_height: crate::appearance::scale_line_box(
+                self.progress_detail_region_height,
+                self.detail_size,
+                text_scale,
+                spacing_scale,
+            ),
+            header_maximum_fraction: self.header_maximum_fraction,
+            footer_maximum_fraction: self.footer_maximum_fraction,
+            indeterminate_segment_fraction: self.indeterminate_segment_fraction,
+            title_size: self.title_size * text_scale,
+            body_size: self.body_size * text_scale,
+            detail_size: self.detail_size * text_scale,
+        }
+    }
+
     pub(super) const fn action_gap(self) -> Pixels {
         self.action_gap
     }
@@ -984,6 +1077,13 @@ impl ModalTheme {
     /// Creates the complete modal theme. Shared surfaces are intentionally animation-free.
     pub fn new(paint: ModalPaint, metrics: ModalMetrics) -> Self {
         Self { paint, metrics }
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            metrics: self.metrics.scaled_for_catalog(text_scale, spacing_scale),
+            ..self
+        }
     }
 }
 

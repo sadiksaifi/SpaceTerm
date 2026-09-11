@@ -1,7 +1,9 @@
 mod app;
+mod appearance;
 mod close_confirmation;
 mod domain;
 mod platform;
+mod settings;
 mod ssh;
 mod terminal;
 mod theme;

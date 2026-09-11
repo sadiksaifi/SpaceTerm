@@ -7,6 +7,7 @@ impl WorkspaceSidebar {
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
     ) -> AnyElement {
         let WorkspaceRowViewModel {
             workspace_id,
@@ -23,11 +24,12 @@ impl WorkspaceSidebar {
         } = row;
         let click_sidebar = sidebar.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let remote_color = remote_connection_phase.map(remote_connection_color);
+        let remote_color =
+            remote_connection_phase.map(|phase| remote_connection_color(phase, &appearance.colors));
         let (detail, detail_color, detail_selector) = if !available {
             (
                 "Directory unavailable".into(),
-                Some(ACTIVE_THEME.warning),
+                Some(appearance.colors.warning),
                 Some(format!(
                     "workspace-row-directory-unavailable-{}",
                     workspace_id.get()
@@ -60,18 +62,19 @@ impl WorkspaceSidebar {
             div()
                 .id(("workspace-rename-input", workspace_id.get()))
                 .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-                .h(px(22.0))
+                .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
                 .w_full()
-                .px(px(5.0))
+                .px(appearance.spacing(5.0))
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .rounded(px(4.0))
+                .rounded(appearance.spacing(4.0))
                 .border(px(1.0))
-                .border_color(gpui_color(ACTIVE_THEME.border_focused))
-                .bg(gpui_color(ACTIVE_THEME.element_background))
-                .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(ACTIVE_THEME.text))
+                .border_color(gpui_color(appearance.colors.border_focused))
+                .bg(gpui_color(appearance.colors.element_background))
+                .font(appearance.regular.clone())
+                .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
+                .text_color(gpui_color(appearance.colors.text))
                 .on_click(move |_, window, cx| {
                     focus_handle.focus(window);
                     cx.stop_propagation();
@@ -84,11 +87,12 @@ impl WorkspaceSidebar {
                 .debug_selector(move || format!("workspace-row-name-{}", workspace_id.get()))
                 .w_full()
                 .truncate()
-                .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
+                .font(appearance.emphasis.clone())
+                .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
                 .text_color(gpui_color(if active {
-                    ACTIVE_THEME.text_accent
+                    appearance.colors.text_accent
                 } else {
-                    ACTIVE_THEME.text
+                    appearance.colors.text
                 }))
                 .child(name.clone())
                 .into_any_element()
@@ -119,18 +123,24 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(px(SIDEBAR_ROW_HEIGHT))
+            .h(appearance.height(SIDEBAR_ROW_HEIGHT, SIDEBAR_NAME_TEXT_SIZE))
             .flex_shrink_0()
-            .px(px(SIDEBAR_ROW_HORIZONTAL_PADDING))
+            .px(appearance.spacing(SIDEBAR_ROW_HORIZONTAL_PADDING))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
+            .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
             .when(active, |row| {
-                row.bg(gpui_color(ACTIVE_THEME.element_selected))
+                row.bg(gpui_color(appearance.colors.sidebar_selection))
             })
-            .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
+            .hover(|row| {
+                row.bg(gpui_color(if active {
+                    appearance.colors.sidebar_selection_hover
+                } else {
+                    appearance.colors.sidebar_hover
+                }))
+            })
             .on_click(move |_, _, cx| {
                 let _ = click_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Activate {
@@ -142,7 +152,7 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
-                    .w(px(18.0))
+                    .w(appearance.spacing(18.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -156,25 +166,25 @@ impl WorkspaceSidebar {
                                 } else {
                                     IconName::Terminal
                                 },
-                                px(SIDEBAR_ROW_ICON_SIZE),
+                                appearance.spacing(SIDEBAR_ROW_ICON_SIZE),
                                 gpui_color(if let Some(color) = remote_color {
                                     color
                                 } else if available {
                                     if active {
-                                        ACTIVE_THEME.icon_accent
+                                        appearance.colors.icon_accent
                                     } else {
-                                        ACTIVE_THEME.icon
+                                        appearance.colors.icon
                                     }
                                 } else {
-                                    ACTIVE_THEME.warning
+                                    appearance.colors.warning
                                 }),
                             ))
                             .when(!available, |icon| {
                                 icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
                                     Icon::new(
                                         IconName::TriangleAlert,
-                                        px(10.0),
-                                        gpui_color(ACTIVE_THEME.warning),
+                                        appearance.spacing(10.0),
+                                        gpui_color(appearance.colors.warning),
                                     ),
                                 ))
                             }),
@@ -186,12 +196,13 @@ impl WorkspaceSidebar {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(appearance.spacing(2.0))
                     .child(text::title(
                         name,
                         first_line,
                         if renaming { None } else { machine },
                         workspace_id.get(),
+                        appearance.clone(),
                     ))
                     .child(text::detail(
                         detail,
@@ -200,6 +211,7 @@ impl WorkspaceSidebar {
                         detail_color,
                         detail_selector,
                         workspace_id.get(),
+                        appearance.clone(),
                     )),
             )
             .child(
@@ -211,7 +223,7 @@ impl WorkspaceSidebar {
                     .left_0()
                     .w_full()
                     .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border_variant)),
+                    .bg(gpui_color(appearance.colors.border_variant)),
             )
             .when(active && self.focus.is_focused(window), |row| {
                 row.child(
@@ -219,7 +231,7 @@ impl WorkspaceSidebar {
                         .absolute()
                         .inset_0()
                         .border(px(1.0))
-                        .border_color(gpui_color(ACTIVE_THEME.border_focused))
+                        .border_color(gpui_color(appearance.colors.sidebar_focus))
                         .debug_selector(|| "workspace-sidebar-focus-indicator".to_owned()),
                 )
             });
@@ -294,7 +306,9 @@ impl WorkspaceSidebar {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
+        let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let creation_icon_size = appearance.spacing(WORKSPACE_CREATION_ICON_SIZE);
         let shortcuts = presentation.shortcut(&crate::ui::NewWorkspace);
         let scroll_sidebar = sidebar.clone();
         let mut rows = div()
@@ -319,6 +333,7 @@ impl WorkspaceSidebar {
                 sidebar.clone(),
                 presentation,
                 window,
+                appearance,
             ));
         }
 
@@ -332,7 +347,7 @@ impl WorkspaceSidebar {
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
             .absolute()
-            .top(px(TOP_CHROME_HEIGHT))
+            .top(appearance.top_height())
             .bottom_0()
             .left_0()
             .w(self.layout.width)
@@ -347,7 +362,8 @@ impl WorkspaceSidebar {
                         sidebar.update(cx, |sidebar, cx| sidebar.on_key_down(event, window, cx));
                 }
             })
-            .bg(gpui_color(ACTIVE_THEME.panel_background))
+            .font(appearance.regular.clone())
+            .bg(gpui_color(appearance.colors.panel_background))
             .occlude()
             .child(rows)
             .child(
@@ -356,23 +372,23 @@ impl WorkspaceSidebar {
                     .debug_selector(|| "workspace-sidebar-footer".to_owned())
                     .relative()
                     .w_full()
-                    .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
+                    .h(appearance.height(NEW_WORKSPACE_BUTTON_HEIGHT, SIDEBAR_NAME_TEXT_SIZE))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px(px(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
+                    .px(appearance.spacing(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
                     .child(
                         IconButton::new(
                             "new-remote-workspace-button",
                             "New Remote Workspace",
-                            |foreground| {
+                            move |foreground| {
                                 div()
                                     .debug_selector(|| "new-remote-workspace-icon".to_owned())
                                     .flex()
                                     .child(Icon::custom(
                                         CustomIconName::GlobePlus,
-                                        px(WORKSPACE_CREATION_ICON_SIZE),
+                                        creation_icon_size,
                                         foreground,
                                     ))
                                     .into_any_element()
@@ -399,13 +415,13 @@ impl WorkspaceSidebar {
                         IconButton::new(
                             "new-local-workspace-button",
                             "New Local Workspace",
-                            |foreground| {
+                            move |foreground| {
                                 div()
                                     .debug_selector(|| "new-local-workspace-icon".to_owned())
                                     .flex()
                                     .child(Icon::custom(
                                         CustomIconName::RectangleStackBadgePlus,
-                                        px(WORKSPACE_CREATION_ICON_SIZE),
+                                        creation_icon_size,
                                         foreground,
                                     ))
                                     .into_any_element()

@@ -19,7 +19,7 @@ pub use crate::anchored_placement::{
     AnchoredPlacementConfig as MenuPlacementConfig,
 };
 use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
-use crate::{Icon, IconName};
+use crate::{ControlShadow, Icon, IconName};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
@@ -300,6 +300,8 @@ pub struct MenuMetrics {
     shortcut_font_size: Pixels,
     panel_padding: Pixels,
     submenu_gap: Pixels,
+    icon_size: Pixels,
+    separator_thickness: Pixels,
 }
 
 impl MenuMetrics {
@@ -320,6 +322,8 @@ impl MenuMetrics {
             shortcut_font_size: px(11.0),
             panel_padding: px(4.0),
             submenu_gap: px(2.0),
+            icon_size: px(12.0),
+            separator_thickness: px(1.0),
         }
     }
 
@@ -372,6 +376,57 @@ impl MenuMetrics {
         self.submenu_gap = submenu_gap;
         self
     }
+
+    /// Sets the shared glyph size and visible separator thickness.
+    pub fn decoration_metrics(mut self, icon_size: Pixels, separator_thickness: Pixels) -> Self {
+        self.icon_size = icon_size;
+        self.separator_thickness = separator_thickness;
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(text_scale)
+            .max(crate::appearance::normalized_scale(spacing_scale));
+        Self {
+            panel_width: self.panel_width * width_scale,
+            row_height: crate::appearance::scale_line_box(
+                self.row_height,
+                self.font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            section_height: crate::appearance::scale_line_box(
+                self.section_height,
+                self.shortcut_font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
+            trigger_height: crate::appearance::scale_line_box(
+                self.trigger_height,
+                self.font_size,
+                text_scale,
+                spacing_scale,
+            ),
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale),
+            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
+            shortcut_font_size: crate::appearance::scale_metric(
+                self.shortcut_font_size,
+                text_scale,
+            ),
+            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
+            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+            separator_thickness: self.separator_thickness,
+        }
+    }
 }
 
 /// Complete metric catalog for menu densities.
@@ -399,6 +454,14 @@ impl MenuSizes {
             MenuSize::Wide => self.wide,
         }
     }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            small: self.small.scaled(text_scale, spacing_scale),
+            regular: self.regular.scaled(text_scale, spacing_scale),
+            wide: self.wide.scaled(text_scale, spacing_scale),
+        }
+    }
 }
 
 /// Application-owned menu colors and bounded metrics.
@@ -406,18 +469,37 @@ impl MenuSizes {
 pub struct MenuTheme {
     paint: MenuPaint,
     sizes: MenuSizes,
+    shadow: ControlShadow,
 }
 
 impl MenuTheme {
     /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
-        Self { paint, sizes }
+        Self {
+            paint,
+            sizes,
+            shadow: ControlShadow::medium_default(),
+        }
+    }
+
+    /// Sets the semantic elevation used by every menu panel.
+    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            ..self
+        }
     }
 
     fn resolve(self, size: MenuSize) -> MenuStyle {
         MenuStyle {
             paint: self.paint,
             metrics: self.sizes.resolve(size),
+            shadow: self.shadow,
         }
     }
 }
@@ -428,6 +510,7 @@ impl Global for MenuTheme {}
 struct MenuStyle {
     paint: MenuPaint,
     metrics: MenuMetrics,
+    shadow: ControlShadow,
 }
 
 type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
@@ -776,7 +859,7 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
                     .child(self.label)
                     .child(div().ml_auto().child(Icon::new(
                         IconName::ChevronDown,
-                        px(12.0),
+                        style.metrics.icon_size,
                         disclosure_foreground,
                     )))
             })
@@ -1034,7 +1117,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
             .child(div().flex_grow().child(self.selected_label))
             .child(Icon::new(
                 IconName::ChevronDown,
-                px(12.0),
+                style.metrics.icon_size,
                 disclosure_foreground,
             ))
             .into_any_element();
@@ -1157,6 +1240,7 @@ impl<A> MenuControl<A> {
 impl<A: Clone + 'static> MenuControl<A> {
     fn render(self, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
         let style = cx.global::<MenuTheme>().resolve(self.size);
+        let font = crate::control_typography(cx).regular().clone();
         let enabled = self.is_enabled();
         let handler = self.on_activate;
         let lifecycle = self.on_lifecycle;
@@ -1385,6 +1469,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                     paint.disabled
                 })
                 .text_size(style.metrics.font_size)
+                .font(font)
                 .when(enabled && !open, |trigger| {
                     trigger.hover(move |style| style.bg(paint.trigger_hover_background))
                 });
@@ -1815,6 +1900,7 @@ impl MenuState {
                     Rgba::default(),
                 ),
                 metrics: MenuMetrics::new(px(0.0), px(0.0)),
+                shadow: ControlShadow::none(),
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
@@ -2527,6 +2613,7 @@ fn activate_menu(
 }
 
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
     let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
         let menu = state.read(cx);
@@ -2635,6 +2722,7 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
         .w(viewport.width)
         .h(viewport.height)
         .key_context(KEY_CONTEXT)
+        .font(typography.regular().clone())
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
     for (depth, bounds, entries, highlighted, scroll) in panels {
@@ -2646,6 +2734,7 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             highlighted,
             style,
             scroll,
+            &typography,
         ));
     }
 
@@ -2732,6 +2821,10 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
     .into_any_element()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one recursive overlay renderer consumes placement, state, style, and typography"
+)]
 fn render_panel(
     state: WeakEntity<MenuState>,
     depth: usize,
@@ -2740,6 +2833,7 @@ fn render_panel(
     highlighted: Option<usize>,
     style: MenuStyle,
     scroll: ScrollHandle,
+    typography: &crate::ControlTypography,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -2753,7 +2847,7 @@ fn render_panel(
         .h(bounds.size.height)
         .overflow_hidden()
         .rounded(style.metrics.corner_radius)
-        .shadow_md()
+        .shadow(style.shadow.layers())
         .border(style.metrics.border_width)
         .border_color(style.paint.border)
         .bg(style.paint.background)
@@ -2779,7 +2873,12 @@ fn render_panel(
                         .mx(style.metrics.panel_padding)
                         .flex()
                         .items_center()
-                        .child(div().h(px(1.0)).w_full().bg(style.paint.separator)),
+                        .child(
+                            div()
+                                .h(style.metrics.separator_thickness)
+                                .w_full()
+                                .bg(style.paint.separator),
+                        ),
                 );
             }
             InternalEntryKind::Heading(label) => {
@@ -2792,6 +2891,7 @@ fn render_panel(
                         .items_center()
                         .text_color(style.paint.muted)
                         .text_size(style.metrics.shortcut_font_size)
+                        .font(typography.emphasis().clone())
                         .child(label),
                 );
             }
@@ -2907,7 +3007,7 @@ fn render_row(
         .items_center()
         .justify_center();
     if let Some(indicator) = mark_icon(mark) {
-        leading = leading.child(Icon::new(indicator, px(12.0), foreground));
+        leading = leading.child(Icon::new(indicator, style.metrics.icon_size, foreground));
     } else if let Some(icon) = icon {
         leading = leading.child(icon(foreground));
     }
@@ -2925,7 +3025,7 @@ fn render_row(
         .when(submenu, |row| {
             row.child(Icon::new(
                 IconName::ChevronRight,
-                px(12.0),
+                style.metrics.icon_size,
                 secondary_foreground,
             ))
         });

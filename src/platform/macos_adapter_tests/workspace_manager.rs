@@ -171,6 +171,13 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_sessions(
                 .pinned_directory()
                 .is_some()
         }));
+        let modal_action = if action == "cmd-t" {
+            "modal-action-tab-start-error-ok"
+        } else {
+            "modal-action-pane-start-error-ok"
+        };
+        click(modal_action, cx);
+        cx.run_until_parked();
     }
     fs::remove_dir(&project).unwrap();
     fs::rename(&parked, &project).unwrap();

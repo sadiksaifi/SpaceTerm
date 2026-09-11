@@ -12,11 +12,12 @@ use spaceterm_ui::{
     TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
 };
 
+use super::appearance::{ChromeAppearance, chrome};
+use crate::appearance::Color;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::managed_hosts::{
     ManagedSshHost, ManagedSshHostField, ManagedSshHostValidationError, ManagedSshHostValueError,
 };
-use crate::theme::{ACTIVE_THEME, Color};
 
 const FORM_MODAL_ID: &str = "managed-ssh-host-form";
 const SAVE_ACTION_SELECTOR: &str = "managed-ssh-host-save";
@@ -652,11 +653,15 @@ impl SaveSettlement {
 
 impl Render for SshHostForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = chrome(cx).clone();
         div()
+            .font(appearance.regular.clone())
             .flex()
             .flex_col()
-            .gap(px(16.0))
+            .gap(appearance.spacing(16.0))
             .child(form_field(
+                &appearance,
+                !self.pending,
                 "Alias",
                 true,
                 self.alias.clone(),
@@ -666,6 +671,8 @@ impl Render for SshHostForm {
                 "managed-ssh-host-alias-error",
             ))
             .child(form_field(
+                &appearance,
+                !self.pending,
                 "Host name",
                 true,
                 self.host_name.clone(),
@@ -679,8 +686,10 @@ impl Render for SshHostForm {
                     .flex()
                     .flex_row()
                     .items_start()
-                    .gap(px(12.0))
+                    .gap(appearance.spacing(12.0))
                     .child(div().min_w_0().flex_1().child(form_field(
+                        &appearance,
+                        !self.pending,
                         "User",
                         false,
                         self.user.clone(),
@@ -689,17 +698,26 @@ impl Render for SshHostForm {
                         self.visible_error(SshHostFormField::User),
                         "managed-ssh-host-user-error",
                     )))
-                    .child(div().w(px(144.0)).flex_shrink_0().child(form_field(
-                        "Port",
-                        false,
-                        self.port.clone(),
-                        self.port.read(cx).focus_handle(),
-                        self.port.read(cx).is_focused(),
-                        self.visible_error(SshHostFormField::Port),
-                        "managed-ssh-host-port-error",
-                    ))),
+                    .child(
+                        div()
+                            .w(appearance.text_size(144.0))
+                            .flex_shrink_0()
+                            .child(form_field(
+                                &appearance,
+                                !self.pending,
+                                "Port",
+                                false,
+                                self.port.clone(),
+                                self.port.read(cx).focus_handle(),
+                                self.port.read(cx).is_focused(),
+                                self.visible_error(SshHostFormField::Port),
+                                "managed-ssh-host-port-error",
+                            )),
+                    ),
             )
             .child(form_field(
+                &appearance,
+                !self.pending,
                 "Identity file",
                 false,
                 self.identity_file.clone(),
@@ -722,8 +740,8 @@ impl Render for SshHostForm {
                 form.child(
                     div()
                         .debug_selector(|| "managed-ssh-host-backend-error".to_owned())
-                        .text_size(px(12.0))
-                        .text_color(gpui_color(ACTIVE_THEME.error))
+                        .text_size(appearance.text_size(12.0))
+                        .text_color(gpui_color(appearance.colors.error))
                         .child(error),
                 )
             })
@@ -748,7 +766,13 @@ fn text_input(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A field composes its prepared presentation, editor state, and validation semantics"
+)]
 fn form_field(
+    appearance: &ChromeAppearance,
+    enabled: bool,
     label: &'static str,
     required: bool,
     input: Entity<TextInput>,
@@ -758,29 +782,30 @@ fn form_field(
     error_selector: &'static str,
 ) -> impl IntoElement {
     let border_color = if error.is_some() {
-        ACTIVE_THEME.error_border
+        appearance.colors.input_invalid_border
     } else if focused {
-        ACTIVE_THEME.border_focused
+        appearance.colors.input_focused_border
     } else {
-        ACTIVE_THEME.border
+        appearance.colors.input_border
     };
     div()
+        .font(appearance.regular.clone())
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(appearance.spacing(6.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .text_size(px(12.0))
-                .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                .text_size(appearance.text_size(12.0))
+                .text_color(gpui_color(appearance.colors.text_muted))
                 .child(label)
                 .when(required, |label| {
                     label.child(
                         div()
                             .ml(px(3.0))
-                            .text_color(gpui_color(ACTIVE_THEME.error))
+                            .text_color(gpui_color(appearance.colors.error))
                             .child("*"),
                     )
                 }),
@@ -788,20 +813,24 @@ fn form_field(
         .child(
             div()
                 .id(error_selector)
-                .h(px(28.0))
+                .h(appearance.height(28.0, 13.0))
                 .w_full()
                 .min_w_0()
                 .flex_shrink_0()
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .px(px(8.0))
+                .px(appearance.spacing(8.0))
                 .rounded(px(4.0))
                 .border(px(1.0))
                 .border_color(gpui_color(border_color))
-                .bg(gpui_color(ACTIVE_THEME.element_background))
-                .text_size(px(13.0))
-                .text_color(gpui_color(ACTIVE_THEME.text))
+                .bg(gpui_color(if enabled {
+                    appearance.colors.input_background
+                } else {
+                    appearance.colors.input_disabled_background
+                }))
+                .text_size(appearance.text_size(13.0))
+                .text_color(gpui_color(appearance.colors.text))
                 .on_click(move |_, window, cx| {
                     input_focus.focus(window);
                     cx.stop_propagation();
@@ -812,8 +841,8 @@ fn form_field(
             field.child(
                 div()
                     .debug_selector(move || error_selector.to_owned())
-                    .text_size(px(12.0))
-                    .text_color(gpui_color(ACTIVE_THEME.error))
+                    .text_size(appearance.text_size(12.0))
+                    .text_color(gpui_color(appearance.colors.error))
                     .child(error),
             )
         })

@@ -40,9 +40,10 @@ use super::{
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewRemoteWorkspace, NewWorkspace,
     OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace,
-    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
+use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
 #[cfg(test)]
 use crate::directory_selection::GpuiDirectorySelection;
@@ -67,7 +68,6 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
     TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
 };
-use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
@@ -1056,7 +1056,15 @@ impl WorkspaceManager {
     }
 
     fn show_pin_error(window: &mut Window, cx: &mut Context<Self>) {
-        drop(window.prompt(gpui::PromptLevel::Warning, "Directory Unavailable", Some("The directory could not be pinned. Check that it exists and is accessible, then try again."), &[gpui::PromptButton::ok("OK")], cx));
+        let _ = Alert::new(
+            ModalId::new("workspace-pin-directory-unavailable"),
+            "Directory unavailable",
+            "Directory Unavailable",
+            "The directory could not be pinned. Check that it exists and is accessible, then try again.",
+            vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-pin-error-ok")],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
     }
 
     fn open_remote_pin_picker(
@@ -2161,13 +2169,15 @@ impl WorkspaceManager {
     }
 
     fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
-        drop(window.prompt(
-            gpui::PromptLevel::Warning,
+        let _ = Alert::new(
+            ModalId::new("workspace-home-directory-unavailable"),
+            "Home directory unavailable",
             "Home Directory Unavailable",
-            Some("A workspace could not be created. Check that your home directory exists and is accessible, then try again."),
-            &[gpui::PromptButton::ok("OK")],
-            cx,
-        ));
+            "A workspace could not be created. Check that your home directory exists and is accessible, then try again.",
+            vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-home-error-ok")],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
     }
 
     fn activate_workspace(
@@ -2842,7 +2852,8 @@ impl WorkspaceManager {
     ///
     /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
     /// chip would be duplicate chrome; with it closed nothing on screen does.
-    fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
+    fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
+        let appearance = super::appearance::chrome(cx);
         let workspace = self.workspaces.active_workspace();
         let available = workspace.availability().is_available();
         let remote_connection_phase = workspace
@@ -2857,14 +2868,14 @@ impl WorkspaceManager {
             &self.local_home_directory_path,
         );
         let foreground = gpui_color(if available {
-            ACTIVE_THEME.text
+            appearance.colors.text
         } else {
-            ACTIVE_THEME.warning
+            appearance.colors.warning
         });
         let icon_color = gpui_color(if !available {
-            ACTIVE_THEME.warning
+            appearance.colors.warning
         } else {
-            ACTIVE_THEME.icon
+            appearance.colors.icon
         });
         let tooltip_detail = remote_status
             .map(|status| format!("{path}: {status}"))
@@ -2890,6 +2901,10 @@ impl WorkspaceManager {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
+        let appearance = super::appearance::chrome(cx);
+        let chrome_icon_size = appearance.spacing(WORKSPACE_CHROME_ICON_SIZE);
+        let fallback_icon_size = appearance.spacing(16.0);
+        let placeholder_color = gpui_color(appearance.colors.text_placeholder);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let (toggle_icon, toggle_label) =
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
@@ -2911,11 +2926,11 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
-        .input_leading(|| {
+        .input_leading(move || {
             Icon::custom(
                 CustomIconName::FilterCircle,
-                px(WORKSPACE_CHROME_ICON_SIZE),
-                gpui_color(ACTIVE_THEME.text_placeholder),
+                chrome_icon_size,
+                placeholder_color,
             )
             .into_any_element()
         })
@@ -2931,10 +2946,10 @@ impl WorkspaceManager {
                 WorkspaceSwitcherChoice::Local(name.clone()),
                 "Local Workspace",
             )
-            .leading_icon(|foreground| {
+            .leading_icon(move |foreground| {
                 Icon::custom(
                     CustomIconName::RectangleStackBadgePlus,
-                    px(16.0),
+                    fallback_icon_size,
                     foreground,
                 )
                 .into_any_element()
@@ -2944,8 +2959,8 @@ impl WorkspaceManager {
             let mut remote =
                 ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
                     .shortcut(new_remote_workspace_shortcut)
-                    .leading_icon(|foreground| {
-                        Icon::custom(CustomIconName::GlobePlus, px(16.0), foreground)
+                    .leading_icon(move |foreground| {
+                        Icon::custom(CustomIconName::GlobePlus, fallback_icon_size, foreground)
                             .into_any_element()
                     })
                     .debug_selector("workspace-switcher-create-remote");
@@ -2957,20 +2972,17 @@ impl WorkspaceManager {
             }
             vec![local, remote]
         }))
-        .icon_trigger(|foreground| {
-            Icon::custom(
-                CustomIconName::RectangleStack,
-                px(WORKSPACE_CHROME_ICON_SIZE),
-                foreground,
-            )
-            .into_any_element()
+        .icon_trigger(move |foreground| {
+            Icon::custom(CustomIconName::RectangleStack, chrome_icon_size, foreground)
+                .into_any_element()
         })
         .placement(AnchoredPlacementConfig::new(
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
         .panel_width(
-            self.sidebar.read(cx).layout().width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0),
+            self.sidebar.read(cx).layout().width
+                - appearance.spacing(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0),
         )
         .debug_selector("workspace-switcher")
         .tooltip(
@@ -2979,9 +2991,9 @@ impl WorkspaceManager {
                 .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
         )
         .when(!sidebar_visible, |chooser| {
-            let (identity, tooltip) = self.workspace_chrome_identity();
+            let (identity, tooltip) = self.workspace_chrome_identity(cx);
             chooser
-                .custom_trigger(identity.render(gpui_color(ACTIVE_THEME.text)))
+                .custom_trigger(identity.render(gpui_color(appearance.colors.text), appearance))
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
@@ -3023,14 +3035,13 @@ impl WorkspaceManager {
                     .bottom_0()
                     .left_0()
                     .w_full()
-                    .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
+                    .h(appearance.spacing(CHROME_DIVIDER_SIZE))
+                    .bg(gpui_color(appearance.colors.border)),
             )
             .child(
                 layout.render_controls(
                     IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
-                        Icon::new(toggle_icon, px(WORKSPACE_CHROME_ICON_SIZE), foreground)
-                            .into_any_element()
+                        Icon::new(toggle_icon, chrome_icon_size, foreground).into_any_element()
                     })
                     .variant(ButtonVariant::Ghost)
                     .size(TOGGLE_SIZE)
@@ -3045,6 +3056,7 @@ impl WorkspaceManager {
                         });
                     }),
                     chooser,
+                    cx,
                 ),
             );
         let drag_region = WindowDragRegion::new(
@@ -3054,7 +3066,7 @@ impl WorkspaceManager {
         )
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
-            right: super::resize_handle_theme::spacious_target_half_thickness(),
+            right: super::resize_handle_theme::spacious_target_half_thickness(cx),
             ..Edges::default()
         })
         .debug_selector("workspace-top-chrome-drag-region")
@@ -3074,11 +3086,11 @@ impl WorkspaceManager {
             .top_0()
             .left_0()
             .w(layout.width)
-            .h(px(TOP_CHROME_HEIGHT))
+            .h(appearance.top_height())
             .bg(gpui_color(if window.is_window_active() {
-                ACTIVE_THEME.title_bar_background
+                appearance.colors.title_bar_background
             } else {
-                ACTIVE_THEME.title_bar_inactive_background
+                appearance.colors.title_bar_inactive_background
             }))
             .child(drag_region)
             .into_any_element()
@@ -3175,7 +3187,8 @@ impl Render for WorkspaceManager {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .font(super::appearance::chrome(cx).regular.clone())
+            .bg(gpui_color(super::appearance::chrome(cx).colors.background))
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))

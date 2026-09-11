@@ -258,9 +258,10 @@ impl WorkspaceTerminalSessionFactory {
         &self,
         geometry: TerminalGeometry,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
+        initial_appearance: super::TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, SessionError> {
         self.session_factory
-            .start(geometry, prepared_launch.launch_plan)
+            .start(geometry, prepared_launch.launch_plan, initial_appearance)
     }
 
     pub(crate) fn fallback_title(&self) -> String {
@@ -394,6 +395,7 @@ mod tests {
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
+    use crate::terminal::test_terminal_appearance_update;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
 
     struct TestRemoteChannelProvider {
@@ -505,7 +507,9 @@ mod tests {
         );
 
         let launch = factory.prepare_child_launch().unwrap();
-        let _started = factory.start(geometry, launch).unwrap();
+        let _started = factory
+            .start(geometry, launch, test_terminal_appearance_update())
+            .unwrap();
 
         let starts = records.starts();
         assert!(matches!(
@@ -541,8 +545,12 @@ mod tests {
 
         let first = factory.prepare_child_launch().unwrap();
         let second = factory.prepare_child_launch().unwrap();
-        let _first = factory.start(geometry, first).unwrap();
-        let _second = factory.start(geometry, second).unwrap();
+        let _first = factory
+            .start(geometry, first, test_terminal_appearance_update())
+            .unwrap();
+        let _second = factory
+            .start(geometry, second, test_terminal_appearance_update())
+            .unwrap();
 
         assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
         assert_eq!(factory.local_working_directory(), None);
@@ -598,7 +606,9 @@ mod tests {
                 }))
                 .unwrap();
             let prepared = selected.prepare_child_launch().unwrap();
-            let _started = selected.start(geometry, prepared).unwrap();
+            let _started = selected
+                .start(geometry, prepared, test_terminal_appearance_update())
+                .unwrap();
             let starts = records.starts();
             let plan = starts.last().unwrap().remote_launch_plan().unwrap();
             let expected = RemoteTerminalMetadataContext::new(

@@ -32,6 +32,14 @@ impl Color {
     pub(crate) const fn rgba_hex(self) -> u32 {
         (self.r as u32) << 24 | (self.g as u32) << 16 | (self.b as u32) << 8 | self.a as u32
     }
+
+    pub(crate) const fn is_opaque(self) -> bool {
+        self.a == 0xff
+    }
+
+    pub(crate) fn canonical_hex(self) -> String {
+        format!("#{:08x}", self.rgba_hex())
+    }
 }
 
 impl Color {
@@ -57,5 +65,24 @@ impl Color {
             8 => Ok(Self::rgba(number)),
             _ => Err(()),
         }
+    }
+}
+
+impl serde::Serialize for Color {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.canonical_hex())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Color {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&value).map_err(|()| serde::de::Error::custom("invalid color"))
     }
 }

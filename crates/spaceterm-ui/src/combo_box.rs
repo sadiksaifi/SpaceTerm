@@ -18,8 +18,8 @@ use gpui::{
 };
 
 use crate::{
-    Icon, IconName, TextInput, TextInputEvent, TextInputHomeEndBehavior, TextInputTabBehavior,
-    TextInputVariant,
+    ControlShadow, Icon, IconName, TextInput, TextInputEvent, TextInputHomeEndBehavior,
+    TextInputTabBehavior, TextInputVariant,
     anchored_placement::{
         AnchoredPlacementConfig, AnchoredTextDirection, constrain_anchored_size, place_anchored,
     },
@@ -491,6 +491,8 @@ pub struct ComboBoxMetrics {
     border_width: Pixels,
     label_size: Pixels,
     secondary_size: Pixels,
+    line_height: Pixels,
+    icon_size: Pixels,
 }
 
 impl ComboBoxMetrics {
@@ -512,6 +514,8 @@ impl ComboBoxMetrics {
             border_width: px(1.0),
             label_size: px(12.0),
             secondary_size: px(11.0),
+            line_height: px(16.0),
+            icon_size: px(12.0),
         }
     }
 
@@ -565,6 +569,66 @@ impl ComboBoxMetrics {
         self
     }
 
+    /// Sets the shared text line height and chrome glyph size.
+    pub fn text_geometry(mut self, line_height: Pixels, icon_size: Pixels) -> Self {
+        self.line_height = line_height;
+        self.icon_size = icon_size;
+        self
+    }
+
+    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(text_scale)
+            .max(crate::appearance::normalized_scale(spacing_scale));
+        let label_size = crate::appearance::scale_metric(self.label_size, text_scale);
+        Self {
+            panel_width: self.panel_width * width_scale,
+            maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
+            trigger_height: crate::appearance::scale_line_box(
+                self.trigger_height,
+                self.label_size,
+                text_scale,
+                spacing_scale,
+            ),
+            icon_trigger_size: crate::appearance::scale_line_box(
+                self.icon_trigger_size,
+                self.icon_size,
+                text_scale,
+                spacing_scale,
+            ),
+            input_height: crate::appearance::scale_line_box(
+                self.input_height,
+                self.line_height,
+                text_scale,
+                spacing_scale,
+            ),
+            row_height: crate::appearance::scale_line_box(
+                self.row_height,
+                self.line_height,
+                text_scale,
+                spacing_scale,
+            ),
+            described_row_height: crate::appearance::scale_line_box(
+                self.described_row_height,
+                self.line_height * 2.0,
+                text_scale,
+                spacing_scale,
+            ),
+            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            horizontal_padding: crate::appearance::scale_metric(
+                self.horizontal_padding,
+                spacing_scale,
+            ),
+            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale),
+            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            border_width: self.border_width,
+            label_size,
+            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
+            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
+            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+        }
+    }
+
     fn row_height(self, described: bool) -> Pixels {
         if described {
             self.described_row_height
@@ -583,12 +647,30 @@ impl ComboBoxMetrics {
 pub struct ComboBoxTheme {
     paint: ComboBoxPaint,
     metrics: ComboBoxMetrics,
+    shadow: ControlShadow,
 }
 
 impl ComboBoxTheme {
     /// Creates a complete ComboBox theme.
     pub fn new(paint: ComboBoxPaint, metrics: ComboBoxMetrics) -> Self {
-        Self { paint, metrics }
+        Self {
+            paint,
+            metrics,
+            shadow: ControlShadow::large_default(),
+        }
+    }
+
+    /// Sets the semantic elevation used by the open popup.
+    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            ..self
+        }
     }
 
     /// Measures a custom trigger's outer width, including its themed borders.
@@ -1623,6 +1705,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             window.refresh();
         }
         let theme = *cx.global::<ComboBoxTheme>();
+        let font = crate::control_typography(cx).regular().clone();
         let snapshot = state.read(cx);
         let open = snapshot.open;
         let enabled = !snapshot.disabled;
@@ -1730,6 +1813,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 paint.disabled
             })
             .text_size(metrics.label_size)
+            .font(font)
             .cursor_default()
             .when(enabled, |trigger| trigger.track_focus(&focus))
             .when(enabled && !open, |trigger| {
@@ -1757,7 +1841,11 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                             .truncate()
                             .child(label),
                     )
-                    .child(Icon::new(IconName::ChevronDown, px(12.0), paint.muted))
+                    .child(Icon::new(
+                        IconName::ChevronDown,
+                        metrics.icon_size,
+                        paint.muted,
+                    ))
             })
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -1883,6 +1971,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     cx: &mut App,
 ) -> AnyElement {
     let theme = *cx.global::<ComboBoxTheme>();
+    let font = crate::control_typography(cx).regular().clone();
     let snapshot = state.read(cx);
     let Some(target) = snapshot.trigger_bounds else {
         return div().into_any_element();
@@ -2031,12 +2120,13 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .flex_col()
         .overflow_hidden()
         .rounded(theme.metrics.corner_radius)
-        .shadow_lg()
+        .shadow(theme.shadow.layers())
         .border(theme.metrics.border_width)
         .border_color(theme.paint.border)
         .bg(theme.paint.background)
         .text_size(theme.metrics.label_size)
-        .line_height(theme.metrics.label_size * (4.0 / 3.0))
+        .line_height(theme.metrics.line_height)
+        .font(font)
         .block_mouse_except_scroll()
         .child(
             div()

@@ -15,6 +15,7 @@ pub(super) struct ScheduleInput {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
     accessibility_demand: AccessibilityDemandMailbox,
+    terminal_appearance: TerminalAppearanceMailbox,
 }
 
 impl ScheduleInput {
@@ -42,6 +43,10 @@ impl ScheduleInput {
     pub(super) fn set_accessibility_demand_enabled(&self, enabled: bool) {
         self.accessibility_demand.set_enabled(enabled);
     }
+
+    pub(super) fn enqueue_terminal_appearance(&self, update: TerminalAppearanceUpdate) -> bool {
+        self.terminal_appearance.replace(update)
+    }
 }
 
 pub(super) struct WorkerSchedules {
@@ -56,6 +61,10 @@ pub(super) struct WorkerSchedules {
 }
 
 impl WorkerSchedules {
+    pub(super) fn take_terminal_appearance(&mut self) -> Option<TerminalAppearanceUpdate> {
+        self.input.terminal_appearance.take()
+    }
+
     pub(super) fn take_resize(&mut self) -> Option<TerminalGeometry> {
         self.input.resizes.take()
     }
@@ -620,6 +629,29 @@ mod tests {
         assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
         assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
     }
+
+    #[test]
+    fn terminal_appearance_mailbox_retains_only_the_latest_update() {
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(Instant::now(), input.clone());
+        let mut update = crate::terminal::test_terminal_appearance_update();
+        update.generation = AppearanceGeneration::new(1);
+        assert!(input.enqueue_terminal_appearance(update));
+
+        for generation in 2..=3 {
+            let mut update = crate::terminal::test_terminal_appearance_update();
+            update.generation = AppearanceGeneration::new(generation);
+            assert!(!input.enqueue_terminal_appearance(update));
+        }
+
+        assert_eq!(
+            schedules.take_terminal_appearance().unwrap().generation,
+            AppearanceGeneration::new(3)
+        );
+        let mut next = crate::terminal::test_terminal_appearance_update();
+        next.generation = AppearanceGeneration::new(4);
+        assert!(input.enqueue_terminal_appearance(next));
+    }
 }
 
 struct AccessibilityPresentationSchedule {
@@ -911,6 +943,31 @@ pub(super) enum FindQueryUpdate {
 #[derive(Clone, Default)]
 struct FindQueryMailbox {
     pending: Arc<Mutex<Option<FindQueryUpdate>>>,
+}
+
+#[derive(Clone, Default)]
+struct TerminalAppearanceMailbox {
+    pending: Arc<Mutex<Option<TerminalAppearanceUpdate>>>,
+}
+
+impl TerminalAppearanceMailbox {
+    fn replace(&self, update: TerminalAppearanceUpdate) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(update);
+        should_notify
+    }
+
+    fn take(&self) -> Option<TerminalAppearanceUpdate> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<TerminalAppearanceUpdate>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal appearance mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
 }
 
 impl FindQueryMailbox {

@@ -1,0 +1,96 @@
+diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
+--- a/include/ghostty/vt/terminal.h
++++ b/include/ghostty/vt/terminal.h
+@@ -1951,5 +1951,29 @@ typedef enum GHOSTTY_ENUM_TYPED {
+    * Output type: size_t *
+    */
+   GHOSTTY_TERMINAL_DATA_CLIPBOARD_WRITE_MAX_BYTES = 40,
++
++  /**
++   * Whether the effective foreground is an OSC override.
++   * Output type: bool *
++   */
++  GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND_OVERRIDDEN = 41,
++
++  /**
++   * Whether the effective background is an OSC override.
++   * Output type: bool *
++   */
++  GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_OVERRIDDEN = 42,
++
++  /**
++   * Whether the effective cursor color is an OSC override.
++   * Output type: bool *
++   */
++  GHOSTTY_TERMINAL_DATA_COLOR_CURSOR_OVERRIDDEN = 43,
++
++  /**
++   * Palette indices whose effective values are OSC overrides.
++   * Output type: GhosttyColorPaletteMask *
++   */
++  GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_OVERRIDES = 44,
+   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+ } GhosttyTerminalData;
+diff --git a/src/terminal/c/color.zig b/src/terminal/c/color.zig
+--- a/src/terminal/c/color.zig
++++ b/src/terminal/c/color.zig
+@@ -17,4 +17,15 @@ pub const PaletteMask = extern struct {
+         }
+         return result;
+     }
++
++    /// Convert from the Zig PaletteMask (std.StaticBitSet(256)).
++    pub fn fromZig(mask: color.PaletteMask) PaletteMask {
++        var result: PaletteMask = .{ .bits = .{ 0, 0, 0, 0 } };
++        for (0..256) |i| {
++            if (mask.isSet(i)) {
++                result.bits[i >> 6] |= @as(u64, 1) << @as(u6, @intCast(i & 63));
++            }
++        }
++        return result;
++    }
+ };
+diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
+--- a/src/terminal/c/terminal.zig
++++ b/src/terminal/c/terminal.zig
+@@ -25,6 +25,7 @@ const search_c = @import("search.zig");
+ const selection_c = @import("selection.zig");
+ const style_c = @import("style.zig");
+ const color = @import("../color.zig");
++const color_c = @import("color.zig");
+ const clipboard = @import("../clipboard.zig");
+ const kitty_clipboard = @import("../kitty/clipboard.zig");
+ const c_io = @import("io.zig");
+@@ -1592,6 +1592,10 @@ pub const TerminalData = enum(c_int) {
+     vt_ground = 38,
+     cursor_at_prompt = 39,
+     clipboard_write_max_bytes = 40,
++    color_foreground_overridden = 41,
++    color_background_overridden = 42,
++    color_cursor_overridden = 43,
++    color_palette_overrides = 44,
+ 
+     /// Output type expected for querying the data of the given kind.
+     pub fn OutType(comptime self: TerminalData) type {
+@@ -1609,4 +1613,7 @@ pub const TerminalData = enum(c_int) {
+             .vt_processing_error,
+             .vt_ground,
+             .cursor_at_prompt,
++            .color_foreground_overridden,
++            .color_background_overridden,
++            .color_cursor_overridden,
+             => bool,
+@@ -1626,3 +1633,4 @@ pub const TerminalData = enum(c_int) {
+             => color.RGB.C,
+             .color_palette, .color_palette_default => color.PaletteC,
++            .color_palette_overrides => color_c.PaletteMask,
+             .kitty_image_storage_limit => u64,
+@@ -1725,4 +1733,8 @@ pub fn get(
+         .color_cursor_default => out.* = (t.colors.cursor.default orelse return .no_value).cval(),
+         .color_palette => out.* = color.paletteCval(&t.colors.palette.current),
+         .color_palette_default => out.* = color.paletteCval(t.colors.palette.original),
++        .color_foreground_overridden => out.* = t.colors.foreground.override != null,
++        .color_background_overridden => out.* = t.colors.background.override != null,
++        .color_cursor_overridden => out.* = t.colors.cursor.override != null,
++        .color_palette_overrides => out.* = color_c.PaletteMask.fromZig(t.colors.palette.mask),
+         .kitty_image_storage_limit => {

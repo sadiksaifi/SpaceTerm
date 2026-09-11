@@ -124,7 +124,7 @@ impl TerminalGridPresentation {
                 previous.cursor_layer.is_some()
                     && Arc::ptr_eq(&previous.presentation, screen)
                     && previous.cache == cache
-                    && previous.font_family == configuration.font_family
+                    && previous.terminal_fonts == configuration.terminal_fonts
                     && previous.font_size == configuration.font_size
                     && previous.line_height == configuration.line_height
                     && previous.cell_width == configuration.cell_width

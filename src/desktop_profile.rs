@@ -250,6 +250,11 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(TogglePaneZoom, "Primary+Shift+Enter"),
             ActionShortcut::new(ClosePane, "Primary+W"),
             ActionShortcut::new(CloseTab, "Primary+Shift+W"),
+            #[cfg(feature = "appearance-exerciser")]
+            ActionShortcut::new(
+                crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                "Primary+Alt+C",
+            ),
         ],
     )
 }
@@ -311,6 +316,21 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        #[cfg(feature = "appearance-exerciser")]
+        let expected = {
+            let mut expected = expected;
+            expected.extend([
+                format!(
+                    "alt-cmd-a\tNone\t{}",
+                    crate::ui::appearance_exerciser::ShowAppearanceExerciser.name()
+                ),
+                format!(
+                    "alt-cmd-c\tNone\t{}",
+                    crate::ui::appearance_exerciser::ToggleAppearancePreview.name()
+                ),
+            ]);
+            expected
+        };
         assert_eq!(actual, expected);
     }
 

@@ -1,6 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::ui::WORKSPACE_SIDEBAR_MINIMUM_WIDTH;
+use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
@@ -4130,6 +4130,19 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
             .pinned_directory()
             .is_some()
     }));
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    click("modal-action-tab-start-error-ok", cx);
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
 
     fs::rename(&parked, &project).unwrap();
     cx.simulate_keystrokes("cmd-t");
@@ -7312,7 +7325,7 @@ fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &m
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
-    assert!(cx.has_pending_prompt());
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(
@@ -7338,7 +7351,7 @@ fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
     });
     cx.run_until_parked();
 
-    assert!(cx.has_pending_prompt());
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(
@@ -7364,7 +7377,7 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     });
     cx.run_until_parked();
 
-    assert!(!cx.has_pending_prompt());
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
         assert_eq!(

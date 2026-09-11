@@ -1,4 +1,88 @@
 //! Structural regression gates for the shared application and UI boundary.
+
+#[test]
+fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let groups: &[(&str, &[&str])] = &[
+        (
+            "src/appearance",
+            &[
+                "use gpui",
+                "gpui::",
+                "cocoa::",
+                "objc::",
+                "std::env::",
+                "crate::ui::",
+            ],
+        ),
+        (
+            "src/settings",
+            &["gpui::", "cocoa::", "objc::", "std::env::", "crate::ui::"],
+        ),
+        (
+            "src/terminal",
+            &[
+                "crate::settings",
+                "appearance_runtime",
+                "InstalledAppearance",
+                "InstalledChrome",
+            ],
+        ),
+        (
+            "crates/spaceterm-ui/src",
+            &[
+                "crate::appearance::Scheme",
+                "crate::settings",
+                "spaceterm::",
+                "ACTIVE_THEME",
+                "VAGUE_PRO",
+            ],
+        ),
+    ];
+    for (directory, forbidden) in groups {
+        let mut files = Vec::new();
+        collect_rust_sources(&root.join(directory), &mut files);
+        for path in files {
+            if is_test_source(&path)
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("_tests.rs"))
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for token in *forbidden {
+                assert!(
+                    !source.contains(token),
+                    "{} crosses the appearance boundary with {token}",
+                    path.display()
+                );
+            }
+        }
+    }
+    let renderer = include_str!("ui/terminal_element.rs");
+    for token in [
+        "appearance_runtime",
+        "InstalledAppearance",
+        "InstalledChrome",
+        "crate::settings",
+    ] {
+        assert!(
+            !renderer.contains(token),
+            "terminal rendering must receive resolved appearance, not discover {token}"
+        );
+    }
+    for source in [include_str!("appearance.rs"), include_str!("settings.rs")] {
+        for token in ["gpui::", "cocoa::", "objc::", "std::env::", "crate::ui::"] {
+            assert!(
+                !source.contains(token),
+                "portable appearance policy imports {token}"
+            );
+        }
+    }
+}
+
 #[test]
 fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

@@ -66,7 +66,11 @@ fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels()
     let _consumed = prepared.take().unwrap();
 
     let error = native_terminal_session_factory()
-        .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
+        .start(
+            test_geometry(),
+            TerminalLaunchPlan::Remote(Box::new(plan)),
+            test_terminal_appearance_update(),
+        )
         .err();
 
     assert!(matches!(
@@ -88,7 +92,9 @@ fn native_factory_routes_local_launches_through_injected_factory() {
         ),
     ));
 
-    let started = factory.start(test_geometry(), plan).unwrap();
+    let started = factory
+        .start(test_geometry(), plan, test_terminal_appearance_update())
+        .unwrap();
     let construction = constructions
         .recv_timeout(Duration::from_secs(1))
         .expect("Local construction should reach the injected factory");
@@ -142,7 +148,9 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
         context.prepare_pane_channel(remote_pane_command(&remote_directory)),
     )));
 
-    let started = factory.start(test_geometry(), plan).unwrap();
+    let started = factory
+        .start(test_geometry(), plan, test_terminal_appearance_update())
+        .unwrap();
     let construction = constructions
         .recv_timeout(Duration::from_secs(1))
         .expect("Remote construction should reach the injected factory");
@@ -1023,6 +1031,7 @@ fn native_factory_should_report_pty_spawn_failures_through_session_events() {
                     crate::domain::LocalDirectoryIdentity::for_test(0),
                 ),
             )),
+            test_terminal_appearance_update(),
         )
         .unwrap();
 
@@ -1072,7 +1081,11 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
         events,
         accessibility: _,
     } = native_terminal_session_factory()
-        .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
+        .start(
+            test_geometry(),
+            TerminalLaunchPlan::Remote(Box::new(plan)),
+            test_terminal_appearance_update(),
+        )
         .unwrap();
 
     let event = receive_event(&events, "the remote local HOME failure", |event| {

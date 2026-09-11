@@ -35,6 +35,7 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
     tab_id: TabId,
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
+use crate::appearance::Color;
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
@@ -43,22 +44,21 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
     WorkspaceTerminalSessionFactory,
 };
-use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    PromptButton, PromptLevel, Render, Window, div, px, relative, rgba,
+    Render, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, Icon, IconButton, IconName, ResizeAxis, ResizeHandle,
-    ResizeHandleEvent, ResizeInputSource, Tooltip,
+    Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
+    ModalActionRole, ModalId, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
+    Tooltip,
 };
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
-/// The Pane Caption's outer height, which its top padding sits inside.
+/// The Pane Caption's outer height, including its symmetric vertical padding.
 const PANE_CAPTION_HEIGHT: f32 = 32.0;
-/// Space held above the caption row, so the header breathes away from the chrome above it.
-const PANE_CAPTION_TOP_PADDING: f32 = 8.0;
+const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
 const PANE_CAPTION_TEXT_SIZE: f32 = 12.65;
@@ -140,30 +140,35 @@ struct CaptionMetrics {
 }
 
 impl CaptionMetrics {
-    fn measure(text: &PaneCaptionText, window: &Window) -> Self {
-        let host = measure_caption_segment(&text.origin.host, window);
+    fn measure(
+        text: &PaneCaptionText,
+        window: &Window,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> Self {
+        let host = measure_caption_segment(&text.origin.host, window, appearance);
         Self {
             origin_icon: if text.origin.is_empty() {
                 px(0.0)
             } else {
-                px(PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP)
+                appearance.spacing(PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP)
             },
             user: if text.origin.user.is_empty() {
                 px(0.0)
             } else {
-                measure_caption_segment(&origin_account(&text.origin.user), window)
+                measure_caption_segment(&origin_account(&text.origin.user), window, appearance)
             },
             host: if host > px(0.0) {
-                host + px(PANE_ORIGIN_SEPARATOR_WIDTH)
+                host + appearance.spacing(PANE_ORIGIN_SEPARATOR_WIDTH)
             } else {
                 host
             },
-            directory: measure_caption_segment(&text.directory, window),
-            name: measure_caption_segment(&text.name, window),
+            directory: measure_caption_segment(&text.directory, window, appearance),
+            name: measure_caption_segment(&text.name, window, appearance),
             label: if text.label.is_empty() {
                 px(0.0)
             } else {
-                measure_caption_segment(&text.label, window) + px(PANE_CAPTION_SEPARATOR_WIDTH)
+                measure_caption_segment(&text.label, window, appearance)
+                    + appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
             },
         }
     }
@@ -181,12 +186,18 @@ impl CaptionMetrics {
 }
 
 impl CaptionLayout {
-    fn resolve(caption: &PaneCaption, width: Pixels, window: &Window) -> Self {
+    fn resolve(
+        caption: &PaneCaption,
+        width: Pixels,
+        window: &Window,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> Self {
         Self::from_metrics(
             caption.attention,
             caption.has_multiple_panes,
             width,
-            CaptionMetrics::measure(&caption.text, window),
+            CaptionMetrics::measure(&caption.text, window, appearance),
+            appearance.spacing_scale,
         )
     }
 
@@ -195,21 +206,25 @@ impl CaptionLayout {
         has_multiple_panes: bool,
         width: Pixels,
         metrics: CaptionMetrics,
+        spacing_scale: f32,
     ) -> Self {
         let full_control_count = if has_multiple_panes { 4 } else { 2 };
-        let fixed_width = PANE_CAPTION_LEFT_PADDING
+        let fixed_width = (PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
-            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 };
+            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 })
+            * spacing_scale;
         let show_splits = width
-            >= px(fixed_width + PANE_CONTROL_LEADING_GAP + controls_width(full_control_count));
+            >= px(fixed_width
+                + (PANE_CONTROL_LEADING_GAP + controls_width(full_control_count)) * spacing_scale);
         let control_count = usize::from(show_splits) * 2 + usize::from(has_multiple_panes) * 2;
         let leading_gap = if control_count == 0 {
             0.0
         } else {
-            PANE_CONTROL_LEADING_GAP
+            PANE_CONTROL_LEADING_GAP * spacing_scale
         };
-        let available =
-            (width - px(fixed_width + leading_gap + controls_width(control_count))).max(px(0.0));
+        let available = (width
+            - px(fixed_width + leading_gap + controls_width(control_count) * spacing_scale))
+        .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
         let mut claimed = metrics.name;
@@ -251,28 +266,30 @@ const fn controls_width(count: usize) -> f32 {
     count as f32 * PANE_CONTROL_SIZE + (count - 1) as f32 * PANE_CONTROL_GAP
 }
 
-fn measure_caption_segment(text: &gpui::SharedString, window: &Window) -> Pixels {
+fn measure_caption_segment(
+    text: &gpui::SharedString,
+    window: &Window,
+    appearance: &super::appearance::ChromeAppearance,
+) -> Pixels {
     if text.is_empty() {
         return px(0.0);
     }
-    let style = window.text_style();
     let run = gpui::TextRun {
         len: text.len(),
-        font: gpui::Font {
-            family: style.font_family,
-            features: style.font_features,
-            fallbacks: style.font_fallbacks,
-            weight: style.font_weight,
-            style: style.font_style,
-        },
-        color: style.color,
+        font: appearance.emphasis.clone(),
+        color: gpui_color(appearance.colors.text).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
     };
     window
         .text_system()
-        .shape_line(text.clone(), px(PANE_CAPTION_TEXT_SIZE), &[run], None)
+        .shape_line(
+            text.clone(),
+            appearance.text_size(PANE_CAPTION_TEXT_SIZE),
+            &[run],
+            None,
+        )
         .width
 }
 
@@ -400,6 +417,7 @@ impl PaneHost {
             window,
             move |host, terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
+                TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
@@ -880,13 +898,26 @@ impl PaneHost {
                 let detail = format!(
                     "Cannot create a Pane because {error}. Restore the directory or change the pinned directory."
                 );
-                drop(window.prompt(
-                    PromptLevel::Warning,
+                let host = cx.weak_entity();
+                let window_handle = window.window_handle();
+                let _ = Alert::new(
+                    ModalId::new("pane-starting-directory-unavailable"),
+                    "Starting directory unavailable",
                     "Starting Directory Unavailable",
-                    Some(&detail),
-                    &[PromptButton::ok("OK")],
-                    cx,
-                ));
+                    detail,
+                    vec![ModalAction::new(
+                        (),
+                        "OK",
+                        ModalActionRole::Cancel,
+                        "pane-start-error-ok",
+                    )],
+                )
+                .intent(AlertIntent::Warning)
+                .present(window, cx, move |_, cx| {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        let _ = host.update(cx, |host, cx| host.focus(window, cx));
+                    });
+                });
                 return;
             }
         };
@@ -1333,24 +1364,34 @@ impl PaneHost {
         self.request_close_pane(self.terminal_tab.focused_pane_id(), cx);
     }
 
-    fn render_tree(&self, tree: PaneTreeRef<'_>, host: gpui::WeakEntity<Self>) -> AnyElement {
+    fn render_tree(
+        &self,
+        tree: PaneTreeRef<'_>,
+        host: gpui::WeakEntity<Self>,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host),
+            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, appearance),
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host),
+            } => self.render_split(split_id, axis, ratio, (first, second), host, appearance),
         }
     }
 
-    fn render_leaf(&self, pane_id: PaneId, host: gpui::WeakEntity<Self>) -> AnyElement {
+    fn render_leaf(
+        &self,
+        pane_id: PaneId,
+        host: gpui::WeakEntity<Self>,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
                 .size_full()
-                .bg(gpui_color(ACTIVE_THEME.terminal_background))
+                .bg(gpui_color(appearance.colors.background))
                 .into_any_element();
         };
         let focused = self.terminal_tab.focused_pane_id() == pane_id;
@@ -1389,9 +1430,11 @@ impl PaneHost {
             .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
             })
+            .bg(gpui_color(appearance.colors.background))
             .child(render_pane_caption(
                 PaneCaption {
                     pane_id,
+                    terminal: terminal.clone(),
                     text,
                     focused,
                     zoomed,
@@ -1400,6 +1443,7 @@ impl PaneHost {
                 },
                 &pane_group,
                 host.clone(),
+                appearance.clone(),
             ))
             .child(
                 div()
@@ -1419,10 +1463,11 @@ impl PaneHost {
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
+        appearance: &super::appearance::ChromeAppearance,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone());
-        let second = self.render_tree(second, host.clone());
+        let first = self.render_tree(first, host.clone(), appearance);
+        let second = self.render_tree(second, host.clone(), appearance);
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1500,6 +1545,7 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = super::appearance::chrome(cx).clone();
         self.sync_terminal_focus(cx);
         let host = cx.entity().downgrade();
         let zoom_state = self.terminal_tab.zoom_state();
@@ -1514,8 +1560,10 @@ impl Render for PaneHost {
             },
         };
         let content = match zoom_state {
-            ZoomState::Restored => self.render_tree(self.terminal_tab.root(), host.clone()),
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host),
+            ZoomState::Restored => {
+                self.render_tree(self.terminal_tab.root(), host.clone(), &appearance)
+            }
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, &appearance),
         };
 
         div()
@@ -1537,7 +1585,8 @@ impl Render for PaneHost {
             .min_w(px(minimum_size.width()))
             .min_h(px(minimum_size.height()))
             .overflow_hidden()
-            .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .font(appearance.regular.clone())
+            .bg(gpui_color(appearance.colors.background))
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
             .on_action(cx.listener(Self::on_focus_pane_left))
@@ -1604,6 +1653,7 @@ fn split_directory_leaf(directory: &str) -> (gpui::SharedString, gpui::SharedStr
 
 struct PaneCaption {
     pane_id: PaneId,
+    terminal: Entity<TerminalPane>,
     text: PaneCaptionText,
     focused: bool,
     zoomed: bool,
@@ -1615,19 +1665,37 @@ fn render_pane_caption(
     caption: PaneCaption,
     pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
+    appearance: super::appearance::ChromeAppearance,
 ) -> AnyElement {
+    let caption_height = appearance.caption_height();
     let pane_group = pane_group.to_owned();
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
-            let mut content = render_pane_caption_content(
+            let background = caption.terminal.read(cx).surface_background();
+            let pane_id = caption.pane_id;
+            let content = render_pane_caption_content(
                 caption,
                 &pane_group,
                 host,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 bounds.size.width,
                 window,
+                &appearance,
             );
+            // The caption shares the terminal surface, but its contents remain Chrome-owned.
+            let mut content = div()
+                .debug_selector(move || {
+                    format!(
+                        "pane-caption-surface-{}-{:08x}",
+                        pane_id.get(),
+                        background.rgba_hex()
+                    )
+                })
+                .size_full()
+                .bg(gpui_color(background))
+                .child(content)
+                .into_any_element();
             content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
             content.prepaint_at(bounds.origin, window, cx);
             content
@@ -1635,7 +1703,7 @@ fn render_pane_caption(
         |_, mut content, window, cx| content.paint(window, cx),
     )
     .w_full()
-    .h(px(PANE_CAPTION_HEIGHT))
+    .h(caption_height)
     .flex_shrink_0()
     .into_any_element()
 }
@@ -1647,17 +1715,19 @@ fn render_pane_caption_content(
     presentation: &crate::desktop_profile::DesktopPresentation,
     width: Pixels,
     window: &Window,
+    appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
-    let layout = CaptionLayout::resolve(&caption, width, window);
+    let layout = CaptionLayout::resolve(&caption, width, window, appearance);
     let PaneCaption {
         pane_id,
+        terminal: _,
         text,
         focused,
         zoomed,
         attention,
         has_multiple_panes,
     } = caption;
-    let color = caption_color(focused);
+    let color = caption_color(focused, &appearance.colors);
     let focus_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
@@ -1670,8 +1740,8 @@ fn render_pane_caption_content(
         })
         .flex()
         .items_center()
-        .gap(px(PANE_CONTROL_GAP))
-        .ml(px(PANE_CONTROL_LEADING_GAP))
+        .gap(appearance.spacing(PANE_CONTROL_GAP))
+        .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         .when(!focused, |controls| {
             controls
@@ -1722,14 +1792,14 @@ fn render_pane_caption_content(
         }
         let host = host.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
-        let icon_size = action.icon_size();
+        let icon_size = appearance.spacing(action.icon_size());
         controls = controls.child(
             IconButton::new(
                 gpui::SharedString::from(id.clone()),
                 name,
-                move |foreground| Icon::new(icon, px(icon_size), foreground).into_any_element(),
+                move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
             )
-            // The caption paints no surface, so its controls must not paint one either.
+            // Caption controls remain bare over the terminal surface.
             .variant(ButtonVariant::Bare)
             .size(ButtonSize::Compact)
             .preserve_ancestor_hover()
@@ -1754,18 +1824,18 @@ fn render_pane_caption_content(
                 if focused { "focused" } else { "unfocused" }
             )
         })
-        .h(px(PANE_CAPTION_HEIGHT))
+        .h(appearance.caption_height())
         .w_full()
         .flex_shrink_0()
         .flex()
         .items_center()
         .min_w_0()
         .overflow_hidden()
-        .pl(px(PANE_CAPTION_LEFT_PADDING))
-        .pr(px(PANE_CAPTION_RIGHT_PADDING))
-        .pt(px(PANE_CAPTION_TOP_PADDING))
-        // The caption paints no surface of its own: it reads as identity floating over the Pane.
-        .text_size(px(PANE_CAPTION_TEXT_SIZE))
+        .pl(appearance.spacing(PANE_CAPTION_LEFT_PADDING))
+        .pr(appearance.spacing(PANE_CAPTION_RIGHT_PADDING))
+        .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
+        .font(appearance.emphasis.clone())
+        .text_size(appearance.text_size(PANE_CAPTION_TEXT_SIZE))
         .text_color(gpui_color(color))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
@@ -1779,11 +1849,11 @@ fn render_pane_caption_content(
             caption.child(
                 div()
                     .debug_selector(move || format!("pane-attention-{}", pane_id.get()))
-                    .mr(px(7.0))
-                    .size(px(6.0))
+                    .mr(appearance.spacing(7.0))
+                    .size(appearance.spacing(6.0))
                     .flex_shrink_0()
                     .rounded_full()
-                    .bg(gpui_color(ACTIVE_THEME.warning)),
+                    .bg(gpui_color(appearance.colors.warning)),
             )
         })
         .child(
@@ -1794,7 +1864,13 @@ fn render_pane_caption_content(
                 .items_center()
                 .overflow_hidden()
                 .when(layout.show_origin && !text.origin.is_empty(), |row| {
-                    row.child(render_pane_origin(pane_id, &text.origin, layout, color))
+                    row.child(render_pane_origin(
+                        pane_id,
+                        &text.origin,
+                        layout,
+                        color,
+                        appearance,
+                    ))
                 })
                 .when(layout.show_directory && !text.directory.is_empty(), |row| {
                     row.child(
@@ -1818,7 +1894,7 @@ fn render_pane_caption_content(
                     row.child(
                         div()
                             .flex_shrink_0()
-                            .mx(px(5.0))
+                            .mx(appearance.spacing(5.0))
                             .text_color(gpui_color(color))
                             .child("·"),
                     )
@@ -1840,11 +1916,11 @@ fn render_pane_caption_content(
 ///
 /// The caption is one statement of identity, so its icon, account, machine, directory, label and
 /// controls all read at the same weight. Only focus changes the tier.
-fn caption_color(focused: bool) -> Color {
+fn caption_color(focused: bool, colors: &crate::appearance::ChromeColors) -> Color {
     if focused {
-        ACTIVE_THEME.text_muted
+        colors.text_secondary
     } else {
-        ACTIVE_THEME.text_placeholder
+        colors.icon_muted
     }
 }
 
@@ -1857,6 +1933,7 @@ fn render_pane_origin(
     origin: &PaneOrigin,
     layout: CaptionLayout,
     color: Color,
+    appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let (icon, location) = if origin.remote {
         (IconName::Globe, "remote")
@@ -1871,10 +1948,14 @@ fn render_pane_origin(
         .flex_shrink_0()
         .child(
             div()
-                .mr(px(PANE_ORIGIN_ICON_GAP))
+                .mr(appearance.spacing(PANE_ORIGIN_ICON_GAP))
                 .flex()
                 .items_center()
-                .child(Icon::new(icon, px(PANE_ORIGIN_ICON_SIZE), icon_tint)),
+                .child(Icon::new(
+                    icon,
+                    appearance.spacing(PANE_ORIGIN_ICON_SIZE),
+                    icon_tint,
+                )),
         )
         .when(layout.show_user && !origin.user.is_empty(), |row| {
             row.child(
@@ -1894,7 +1975,7 @@ fn render_pane_origin(
             .child(
                 div()
                     .flex_shrink_0()
-                    .mx(px(5.0))
+                    .mx(appearance.spacing(5.0))
                     .text_color(gpui_color(color))
                     .child("›"),
             )
@@ -2830,18 +2911,78 @@ mod tests {
     }
 
     #[gpui::test]
-    fn caption_top_padding_should_sit_inside_the_declared_caption_height(cx: &mut TestAppContext) {
+    fn caption_vertical_spacing_should_be_symmetric_in_both_densities(cx: &mut TestAppContext) {
         let (_, _, _, cx) = caption_host(cx);
+        for spacing_scale in [1.0, 1.25] {
+            let appearance = super::super::appearance::ChromeAppearance {
+                spacing_scale,
+                ..Default::default()
+            };
+            let expected_height = appearance.caption_height();
+            let padding = appearance.spacing(PANE_CAPTION_VERTICAL_PADDING);
+            cx.update(|window, cx| {
+                cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+                    appearance,
+                )));
+                window.refresh();
+            });
+            cx.run_until_parked();
+            let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+            let controls = cx.debug_bounds("pane-split-right-1").unwrap();
+            let top = controls.origin.y - caption.origin.y;
+            let bottom = caption.bottom_right().y - controls.bottom_right().y;
+            // GPUI rounds layout edges to device pixels.
+            assert!((caption.size.height - expected_height).abs() <= px(0.5));
+            assert!((top - bottom).abs() <= px(0.5), "top and bottom must match");
+            assert!(top >= padding && bottom >= padding);
+        }
+    }
 
-        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
-
-        // The header holds its own top space, so reserving it never pushes the terminal down.
-        assert_eq!(caption.size.height, px(PANE_CAPTION_HEIGHT));
-        let controls = cx.debug_bounds("pane-split-right-1").unwrap();
-        assert!(
-            controls.origin.y >= caption.origin.y + px(PANE_CAPTION_TOP_PADDING),
-            "caption content must start below its top padding"
-        );
+    #[gpui::test]
+    fn caption_background_should_follow_its_own_terminal_surface(cx: &mut TestAppContext) {
+        let (_, _, records, cx) = caption_host(cx);
+        click_caption_control("pane-split-right-1", cx);
+        let chrome_before = cx.update(|_, cx| super::super::appearance::chrome(cx).clone());
+        for (generation, first, second, selectors) in [
+            (
+                1,
+                Color::rgb(0xfafafa),
+                Color::rgb(0x111111),
+                [
+                    "pane-caption-surface-1-fafafaff",
+                    "pane-caption-surface-2-111111ff",
+                ],
+            ),
+            (
+                2,
+                Color::rgb(0x223344),
+                Color::rgb(0xeeddcc),
+                [
+                    "pane-caption-surface-1-223344ff",
+                    "pane-caption-surface-2-eeddccff",
+                ],
+            ),
+        ] {
+            for (pane_id, background) in [(1, first), (2, second)] {
+                let mut screen = ScreenSnapshot::from_test_parts_at(
+                    Arc::from([]),
+                    Default::default(),
+                    "zsh",
+                    generation,
+                );
+                Arc::make_mut(&mut screen).background = background;
+                records
+                    .event_sender(pane_id)
+                    .unwrap()
+                    .try_send(SessionEvent::Screen(screen))
+                    .unwrap();
+            }
+            cx.run_until_parked();
+            for selector in selectors {
+                assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+            }
+            cx.update(|_, cx| assert_eq!(super::super::appearance::chrome(cx), &chrome_before));
+        }
     }
 
     #[gpui::test]
@@ -2927,7 +3068,8 @@ mod tests {
             name: px(40.0),
             label: px(30.0),
         };
-        let resolve = |width: f32| CaptionLayout::from_metrics(false, false, px(width), metrics);
+        let resolve =
+            |width: f32| CaptionLayout::from_metrics(false, false, px(width), metrics, 1.0);
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
             + PANE_CONTROL_LEADING_GAP

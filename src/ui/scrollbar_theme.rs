@@ -1,18 +1,19 @@
 use gpui::{Rgba, rgba};
 use spaceterm_ui::ScrollbarTheme;
 
-use crate::theme::{ACTIVE_THEME, Color};
+use crate::appearance::{ChromeColors, Color};
 
-pub(super) fn theme() -> ScrollbarTheme {
+pub(super) fn theme(colors: &ChromeColors) -> ScrollbarTheme {
     ScrollbarTheme::new(
-        gpui_color(ACTIVE_THEME.scrollbar_thumb_background),
-        gpui_color(ACTIVE_THEME.scrollbar_thumb_hover_background),
-        gpui_color(ACTIVE_THEME.scrollbar_thumb_hover_background),
+        gpui_color(colors.scrollbar_thumb_background),
+        gpui_color(colors.scrollbar_thumb_hover_background),
+        gpui_color(colors.scrollbar_thumb_hover_background),
     )
     .borders(
-        gpui_color(ACTIVE_THEME.scrollbar_thumb_border),
-        gpui_color(ACTIVE_THEME.scrollbar_track_border),
+        gpui_color(colors.scrollbar_thumb_border),
+        gpui_color(colors.scrollbar_track_border),
     )
+    .track_background(gpui_color(colors.scrollbar_track))
 }
 
 fn gpui_color(color: Color) -> Rgba {

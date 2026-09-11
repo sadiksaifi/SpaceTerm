@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "schemes": [
+    {
+      "kind": "chrome",
+      "id": "example.solar.chrome",
+      "name": "Solar Chrome",
+      "appearance": "light",
+      "author": "Example author",
+      "colors": {
+        "background": "#fff",
+        "text": "#202124",
+        "text_accent": "#315f91"
+      }
+    },
+    {
+      "kind": "terminal",
+      "id": "example.solar.terminal",
+      "name": "Solar Terminal",
+      "appearance": "dark",
+      "colors": {
+        "background": "#141415",
+        "foreground": "#cdcdcd",
+        "cursor_text": null,
+        "selection_background": "#333738aa"
+      }
+    }
+  ]
+}

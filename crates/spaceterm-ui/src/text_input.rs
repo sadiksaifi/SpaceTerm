@@ -270,6 +270,15 @@ impl TextInputMetrics {
             autoscroll_max_step: autoscroll_max_step.clamp(px(1.0), px(64.0)),
         }
     }
+
+    fn scaled(self, spacing_scale: f32) -> Self {
+        Self::new(
+            self.caret_width,
+            crate::appearance::scale_metric(self.scroll_padding, spacing_scale),
+            self.autoscroll_interval,
+            crate::appearance::scale_metric(self.autoscroll_max_step, spacing_scale),
+        )
+    }
 }
 
 /// Application-global presentation for every [`TextInput`].
@@ -283,6 +292,13 @@ impl TextInputTheme {
     /// Creates a complete text-input theme.
     pub fn new(variants: TextInputVariants, metrics: TextInputMetrics) -> Self {
         Self { variants, metrics }
+    }
+
+    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+        Self {
+            metrics: self.metrics.scaled(spacing_scale),
+            ..self
+        }
     }
 }
 
@@ -2357,6 +2373,7 @@ impl EntityInputHandler for TextInput {
 
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let font = crate::control_typography(cx).regular().clone();
         self.initial_value_source = None;
         let entity = cx.entity();
         let has_selection = !self.buffer.selection.is_empty();
@@ -2387,6 +2404,7 @@ impl Render for TextInput {
             .id(self.id.clone())
             .debug_selector(move || selector.to_string())
             .size_full()
+            .font(font)
             .min_w_0()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
