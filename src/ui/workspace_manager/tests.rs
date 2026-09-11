@@ -5954,7 +5954,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let workspace_icon = cx.debug_bounds("workspace-chip-icon").unwrap();
     let label = cx.debug_bounds("workspace-chip-label").unwrap();
     let tabs = cx.debug_bounds("tab-bar").unwrap();
-    assert_eq!(chooser.left() - expanded_toggle.right(), px(4.0));
+    assert_eq!(chooser.left() - expanded_toggle.right(), px(2.0));
     assert!(switcher_icon.right() <= workspace_icon.left());
     assert!(workspace_icon.right() <= label.left());
     assert_eq!(tabs.left() - chooser.right(), px(4.0));

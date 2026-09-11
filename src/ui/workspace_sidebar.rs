@@ -606,11 +606,11 @@ fn secondary_text_color() -> Color {
 pub(super) const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 pub(super) const TOP_CHROME_ACTION_SIZE: f32 = 28.0;
 pub(super) const TOP_CHROME_ACTION_GAP: f32 = 4.0;
-pub(super) const COLLAPSED_SWITCHER_LEADING_GAP: f32 = 4.0;
+pub(super) const COLLAPSED_SWITCHER_LEADING_GAP: f32 = 2.0;
 pub(super) const COLLAPSED_SWITCHER_TRAILING_GAP: f32 = 4.0;
 pub(super) const EXPANDED_SWITCHER_TRAILING_GAP: f32 = 2.0;
 pub(super) const WORKSPACE_SWITCHER_PADDING: f32 = 12.0;
-pub(super) const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 236.0;
+pub(super) const COLLAPSED_TOP_CHROME_MAXIMUM_WIDTH: f32 = 234.0;
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
 pub(super) const WORKSPACE_CHIP_ICON_SIZE: f32 = 14.0;
 pub(super) const WORKSPACE_CHIP_PIN_SIZE: f32 = 12.0;
