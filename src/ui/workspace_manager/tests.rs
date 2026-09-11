@@ -5804,10 +5804,10 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             divider.center().x,
         ),
         (
-            px(216.0),
-            px(216.0),
-            root.origin.x + px(216.0),
-            root.origin.x + px(216.0),
+            px(212.0),
+            px(212.0),
+            root.origin.x + px(212.0),
+            root.origin.x + px(212.0),
         )
     );
 }
@@ -5837,7 +5837,7 @@ fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContex
     let tab_bar = cx
         .debug_bounds("tab-bar")
         .expect("the Tab bar was not rendered");
-    assert!(chrome.size.width < px(216.0));
+    assert!(chrome.size.width < px(212.0));
     assert_eq!(
         (spacer.size.width, tab_bar.origin.x),
         (chrome.size.width, root.origin.x + chrome.size.width)
@@ -5960,10 +5960,10 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     assert_eq!(expanded_toggle.left(), px(78.0));
     assert_eq!(expanded_toggle.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(chooser.left(), expanded_toggle.right());
-    // Twelve pixels of content padding inside the one-pixel trigger border.
-    assert_eq!(switcher_icon.left() - chooser.left(), px(13.0));
+    // Ten pixels of content padding inside the one-pixel trigger border.
+    assert_eq!(switcher_icon.left() - chooser.left(), px(11.0));
     let trailing_inset = chooser.right() - label.right();
-    assert!(trailing_inset >= px(13.0) && trailing_inset < px(14.0));
+    assert!(trailing_inset >= px(11.0) && trailing_inset < px(12.0));
     assert_eq!(label.left() - switcher_icon.right(), px(8.0));
     assert_eq!(tabs.left() - chooser.right(), px(4.0));
 
