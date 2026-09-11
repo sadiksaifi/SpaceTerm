@@ -154,6 +154,7 @@ struct WheelContainmentRoot {
 struct IconTriggerRoot {
     disabled: bool,
     custom: bool,
+    icon_color: Rc<Cell<gpui::Rgba>>,
     before_focus: FocusHandle,
     after_focus: FocusHandle,
     events: Rc<RefCell<Vec<ComboBoxLifecycleEvent>>>,
@@ -162,6 +163,7 @@ struct IconTriggerRoot {
 impl Render for IconTriggerRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let events = Rc::clone(&self.events);
+        let icon_color = Rc::clone(&self.icon_color);
         crate::TooltipLayer::new(
             div()
                 .relative()
@@ -177,7 +179,8 @@ impl Render for IconTriggerRoot {
                         "Choose Workspace",
                         items(),
                     )
-                    .icon_trigger(|foreground, size| {
+                    .icon_trigger(move |foreground, size| {
+                        icon_color.set(foreground);
                         div()
                             .debug_selector(|| "combo-box-trigger-icon".to_owned())
                             .size(size)
@@ -662,6 +665,7 @@ fn icon_trigger_window(cx: &mut TestAppContext, disabled: bool) -> IconTriggerWi
     let (root, cx) = cx.add_window_view(move |_, cx| IconTriggerRoot {
         disabled,
         custom: false,
+        icon_color: Rc::new(Cell::new(rgba(0))),
         before_focus: cx.focus_handle().tab_stop(true),
         after_focus: cx.focus_handle().tab_stop(true),
         events: root_events,
@@ -2145,6 +2149,40 @@ fn repeated_end_should_reveal_the_active_last_result_after_manual_scrolling(
     );
     cx.run_until_parked();
     assert_eq!(accepted.borrow().as_slice(), [64]);
+}
+
+#[gpui::test]
+fn trigger_icons_should_use_live_icon_colors_instead_of_text_colors(cx: &mut TestAppContext) {
+    let (root, _, cx) = icon_trigger_window(cx, false);
+    let text = rgba(0x11_22_33_ff);
+    let icon = rgba(0x44_aa_88_ff);
+    let disabled_icon = rgba(0x66_55_aa_ff);
+    let paint = ComboBoxPaint::new(
+        text, text, text, text, text, text, text, text, text, text, text,
+    )
+    .trigger_icon_colors(icon, disabled_icon);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            paint,
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    assert_eq!(root.read_with(cx, |root, _| root.icon_color.get()), icon);
+
+    open_by_pointer(cx);
+    assert_eq!(root.read_with(cx, |root, _| root.icon_color.get()), icon);
+    cx.simulate_keystrokes("escape");
+    root.update(cx, |root, cx| {
+        root.disabled = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        root.read_with(cx, |root, _| root.icon_color.get()),
+        disabled_icon
+    );
 }
 
 #[gpui::test]

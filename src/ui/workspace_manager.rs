@@ -86,11 +86,11 @@ use spaceterm_ui::{
 
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 
-fn sidebar_toggle_presentation(sidebar_visible: bool) -> (IconName, &'static str) {
+fn sidebar_toggle_presentation(sidebar_visible: bool) -> (CustomIconName, &'static str) {
     if sidebar_visible {
-        (IconName::PanelLeft, "Close Sidebar")
+        (CustomIconName::PanelLeft, "Close Sidebar")
     } else {
-        (IconName::PanelRight, "Open Sidebar")
+        (CustomIconName::PanelRight, "Open Sidebar")
     }
 }
 
@@ -2981,7 +2981,7 @@ impl WorkspaceManager {
         .when(!sidebar_visible, |chooser| {
             let (identity, tooltip) = self.workspace_chrome_identity(cx);
             chooser
-                .custom_trigger(identity.render(gpui_color(appearance.colors.text), appearance))
+                .custom_trigger(identity.render(gpui_color(appearance.colors.icon), appearance))
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
@@ -3029,7 +3029,7 @@ impl WorkspaceManager {
             .child(
                 layout.render_controls(
                     IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
-                        Icon::new(toggle_icon, chrome_icon_size, foreground).into_any_element()
+                        Icon::custom(toggle_icon, chrome_icon_size, foreground).into_any_element()
                     })
                     .variant(ButtonVariant::Ghost)
                     .size(TOGGLE_SIZE)

@@ -59,8 +59,8 @@ use gpui::{
     ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
-    ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
+    Alert, AlertIntent, ButtonSize, ButtonVariant, CustomIconName, Icon, IconButton, IconName,
+    ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
@@ -1184,7 +1184,6 @@ impl TabManager {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
-        let icon_presentation = presentation.clone();
         let create_icon_size = appearance.spacing(14.0);
         let mut items = div()
             .id("tab-items")
@@ -1238,12 +1237,8 @@ impl TabManager {
                     .justify_center()
                     .child(
                         IconButton::new("create-tab-button", "Create Tab", move |foreground| {
-                            Icon::new(
-                                IconName::Plus,
-                                create_icon_size,
-                                icon_presentation.resolved_icon_foreground(foreground),
-                            )
-                            .into_any_element()
+                            Icon::custom(CustomIconName::Plus, create_icon_size, foreground)
+                                .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
@@ -1487,9 +1482,15 @@ mod tests {
         )
     }
 
-    type InspectedGlyphStyles = Rc<RefCell<Vec<(Option<SharedString>, Option<Hsla>)>>>;
+    struct InspectedIconStyle {
+        family: Option<SharedString>,
+        color: Option<Hsla>,
+        size: gpui::Size<Pixels>,
+    }
 
-    fn inspect_lucide_glyph_foreground(
+    type InspectedGlyphStyles = Rc<RefCell<Vec<InspectedIconStyle>>>;
+
+    fn inspect_icon_foreground(
         selector: &'static str,
         pressed: bool,
         observed: &InspectedGlyphStyles,
@@ -1521,12 +1522,16 @@ mod tests {
 
         let mut foreground = None;
         for _ in 0..16 {
-            foreground = observed.borrow().iter().rev().find_map(|(family, color)| {
-                family
-                    .as_ref()
-                    .is_some_and(|family| family.as_ref() == "lucide")
-                    .then_some(*color)
-                    .flatten()
+            foreground = observed.borrow().iter().rev().find_map(|style| {
+                let is_icon = if selector == "create-tab-button" {
+                    style.family.is_none() && style.size == gpui::size(px(14.0), px(14.0))
+                } else {
+                    style
+                        .family
+                        .as_ref()
+                        .is_some_and(|family| family.as_ref() == "lucide")
+                };
+                is_icon.then_some(style.color).flatten()
             });
             if foreground.is_some() {
                 break;
@@ -1552,7 +1557,7 @@ mod tests {
             cx.run_until_parked();
         }
 
-        foreground.expect("the runtime Lucide glyph style was not inspectable")
+        foreground.expect("the runtime icon style was not inspectable")
     }
 
     #[gpui::test]
@@ -1566,14 +1571,15 @@ mod tests {
         cx.update(|window, cx| {
             cx.set_global(tab_icon_test_theme(normal, hovered, pressed));
             cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-                observed_styles.borrow_mut().push((
-                    state
+                observed_styles.borrow_mut().push(InspectedIconStyle {
+                    family: state
                         .base_style
                         .text
                         .as_ref()
                         .and_then(|text| text.font_family.clone()),
-                    state.base_style.text.as_ref().and_then(|text| text.color),
-                ));
+                    color: state.base_style.text.as_ref().and_then(|text| text.color),
+                    size: state.bounds.size,
+                });
                 gpui::Empty
             });
             cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
@@ -1587,16 +1593,28 @@ mod tests {
 
         for selector in ["create-tab-button", "tab-close-button-1"] {
             assert_eq!(
-                inspect_lucide_glyph_foreground(selector, false, &observed, cx),
+                inspect_icon_foreground(selector, false, &observed, cx),
                 Hsla::from(hovered),
                 "{selector} must paint its glyph with the hovered IconButton foreground"
             );
             assert_eq!(
-                inspect_lucide_glyph_foreground(selector, true, &observed, cx),
+                inspect_icon_foreground(selector, true, &observed, cx),
                 Hsla::from(pressed),
                 "{selector} must paint its glyph with the pressed IconButton foreground"
             );
         }
+
+        cx.update(|window, cx| {
+            cx.set_global(tab_icon_test_theme(normal, normal, normal));
+            window.refresh();
+        });
+        cx.deactivate_window();
+        cx.run_until_parked();
+        assert_eq!(
+            inspect_icon_foreground("create-tab-button", false, &observed, cx),
+            Hsla::from(normal),
+            "the new-tab SVG must retain the shared icon tint in an inactive window"
+        );
     }
     use crate::domain::PaneId;
     use crate::domain::ZoomState;

@@ -353,13 +353,13 @@ fn remote_directory_labels_should_preserve_an_explicit_destination_user() {
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
     let (visible_icon, visible_label) = sidebar_toggle_presentation(true);
     assert_eq!(
-        (visible_icon.unicode(), visible_label),
-        (IconName::PanelLeft.unicode(), "Close Sidebar")
+        (visible_icon, visible_label),
+        (CustomIconName::PanelLeft, "Close Sidebar")
     );
     let (hidden_icon, hidden_label) = sidebar_toggle_presentation(false);
     assert_eq!(
-        (hidden_icon.unicode(), hidden_label),
-        (IconName::PanelRight.unicode(), "Open Sidebar")
+        (hidden_icon, hidden_label),
+        (CustomIconName::PanelRight, "Open Sidebar")
     );
 }
 

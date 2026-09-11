@@ -429,6 +429,8 @@ pub struct ComboBoxPaint {
     background: Rgba,
     border: Rgba,
     foreground: Rgba,
+    trigger_icon_foreground: Rgba,
+    trigger_icon_disabled: Rgba,
     muted: Rgba,
     disabled: Rgba,
     selected_background: Rgba,
@@ -463,6 +465,8 @@ impl ComboBoxPaint {
             background,
             border,
             foreground,
+            trigger_icon_foreground: foreground,
+            trigger_icon_disabled: disabled,
             muted,
             disabled,
             selected_background,
@@ -479,6 +483,22 @@ impl ComboBoxPaint {
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
         self
+    }
+
+    /// Sets icon-only trigger colors independently of text and popup row foregrounds.
+    pub fn trigger_icon_colors(mut self, normal: Rgba, disabled: Rgba) -> Self {
+        self.trigger_icon_foreground = normal;
+        self.trigger_icon_disabled = disabled;
+        self
+    }
+
+    fn trigger_leading_foreground(&self, icon_only: bool, enabled: bool) -> Rgba {
+        match (icon_only, enabled) {
+            (true, true) => self.trigger_icon_foreground,
+            (true, false) => self.trigger_icon_disabled,
+            (false, true) => self.foreground,
+            (false, false) => self.disabled,
+        }
     }
 }
 
@@ -1835,11 +1855,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     .filter(|_| !custom_trigger)
                     .map(|leading| {
                         leading(
-                            if enabled {
-                                paint.foreground
-                            } else {
-                                paint.disabled
-                            },
+                            paint.trigger_leading_foreground(icon_trigger, enabled),
                             metrics.icon_size,
                         )
                     }),
@@ -2433,6 +2449,26 @@ fn render_row<I: Clone + Eq + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_icon_colors_should_not_replace_text_or_selection_colors() {
+        let text = gpui::rgba(0x111111ff);
+        let icon = gpui::rgba(0xabcdef80);
+        let disabled = gpui::rgba(0x123456ff);
+        let paint = ComboBoxPaint::new(
+            text, text, text, text, text, text, text, text, text, text, text,
+        )
+        .trigger_icon_colors(icon, disabled);
+        assert_eq!(paint.trigger_icon_foreground, icon);
+        assert_eq!(paint.trigger_icon_disabled, disabled);
+        assert_eq!(paint.foreground, text);
+        assert_eq!(paint.disabled, text);
+        assert_eq!(paint.selected_foreground, text);
+        assert_eq!(paint.trigger_leading_foreground(false, true), text);
+        assert_eq!(paint.trigger_leading_foreground(false, false), text);
+        assert_eq!(paint.trigger_leading_foreground(true, true), icon);
+        assert_eq!(paint.trigger_leading_foreground(true, false), disabled);
+    }
 
     #[test]
     fn row_hover_paint_should_not_replace_selection_paint() {
