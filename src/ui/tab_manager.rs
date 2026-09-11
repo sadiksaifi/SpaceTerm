@@ -55,7 +55,7 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
+    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render, Rgba,
     ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
@@ -75,6 +75,7 @@ const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
+    window_active: bool,
     background: Color,
     active_tab_background: Color,
     inactive_tab_background: Color,
@@ -90,6 +91,7 @@ impl TabChromePresentation {
     fn resolve(window_active: bool, colors: &ChromeColors) -> Self {
         if window_active {
             Self {
+                window_active,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 inactive_tab_background: colors.tab_inactive_background,
@@ -102,6 +104,7 @@ impl TabChromePresentation {
             }
         } else {
             Self {
+                window_active,
                 background: colors.title_bar_inactive_background,
                 active_tab_background: colors.title_bar_inactive_background,
                 inactive_tab_background: colors.title_bar_inactive_background,
@@ -128,6 +131,14 @@ impl TabChromePresentation {
             self.active_tab_foreground
         } else {
             self.inactive_tab_foreground
+        }
+    }
+
+    fn resolved_icon_foreground(&self, button_state_foreground: Rgba) -> Rgba {
+        if self.window_active {
+            button_state_foreground
+        } else {
+            gpui_color(self.icon_foreground)
         }
     }
 }
@@ -1029,7 +1040,7 @@ impl TabManager {
         let close_manager = manager;
         let background = presentation.tab_background(active);
         let foreground = presentation.tab_foreground(active);
-        let icon_foreground = gpui_color(presentation.icon_foreground);
+        let icon_presentation = presentation.clone();
         let hover_background = presentation.hover_background;
         let active_tab_underline = presentation.active_tab_underline;
         let divider = presentation.divider;
@@ -1101,9 +1112,13 @@ impl TabManager {
                         IconButton::new(
                             ("tab-close-button", tab_id.get()),
                             "Close Tab",
-                            move |_| {
-                                Icon::new(IconName::X, close_icon_size, icon_foreground)
-                                    .into_any_element()
+                            move |foreground| {
+                                Icon::new(
+                                    IconName::X,
+                                    close_icon_size,
+                                    icon_presentation.resolved_icon_foreground(foreground),
+                                )
+                                .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
@@ -1169,7 +1184,7 @@ impl TabManager {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
-        let icon_foreground = gpui_color(presentation.icon_foreground);
+        let icon_presentation = presentation.clone();
         let create_icon_size = appearance.spacing(14.0);
         let mut items = div()
             .id("tab-items")
@@ -1222,9 +1237,13 @@ impl TabManager {
                     .items_center()
                     .justify_center()
                     .child(
-                        IconButton::new("create-tab-button", "Create Tab", move |_| {
-                            Icon::new(IconName::Plus, create_icon_size, icon_foreground)
-                                .into_any_element()
+                        IconButton::new("create-tab-button", "Create Tab", move |foreground| {
+                            Icon::new(
+                                IconName::Plus,
+                                create_icon_size,
+                                icon_presentation.resolved_icon_foreground(foreground),
+                            )
+                            .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
@@ -1390,6 +1409,7 @@ mod tests {
         assert_eq!(
             presentation,
             TabChromePresentation {
+                window_active: true,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 inactive_tab_background: colors.tab_inactive_background,
@@ -1411,6 +1431,7 @@ mod tests {
         assert_eq!(
             presentation,
             TabChromePresentation {
+                window_active: false,
                 background: colors.title_bar_inactive_background,
                 active_tab_background: colors.title_bar_inactive_background,
                 inactive_tab_background: colors.title_bar_inactive_background,
@@ -1421,6 +1442,23 @@ mod tests {
                 active_tab_underline: colors.border,
                 divider: colors.border,
             }
+        );
+    }
+
+    #[test]
+    fn tab_icon_foreground_should_follow_button_state_only_while_window_active() {
+        let colors = ChromeColors::default();
+        let button_state_foreground = rgba(0x1234_56ff);
+
+        assert_eq!(
+            TabChromePresentation::resolve(true, &colors)
+                .resolved_icon_foreground(button_state_foreground),
+            button_state_foreground
+        );
+        assert_eq!(
+            TabChromePresentation::resolve(false, &colors)
+                .resolved_icon_foreground(button_state_foreground),
+            gpui_color(colors.text_muted)
         );
     }
     use crate::domain::PaneId;
