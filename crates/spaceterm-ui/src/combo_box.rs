@@ -2090,6 +2090,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let input = state.read(cx).input.clone();
     let matches = Rc::clone(&state.read(cx).matches);
     let items = Rc::clone(&state.read(cx).presented_items);
+    let selected = state.read(cx).selected.clone();
     let provisional = state.read(cx).provisional.clone();
     let hovered_row = state.read(cx).hovered_row.clone();
     let busy = state.read(cx).busy;
@@ -2144,6 +2145,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                         row_owner.clone(),
                         position,
                         item,
+                        selected.as_ref() == Some(&item.id),
                         provisional.as_ref() == Some(&item.id),
                         hovered_row.as_ref() == Some(&item.id),
                         theme,
@@ -2301,6 +2303,7 @@ fn render_row<I: Clone + Eq + 'static>(
     state: WeakEntity<ComboBoxState<I>>,
     position: usize,
     item: &ComboBoxItem<I>,
+    selected: bool,
     provisional: bool,
     hovered: bool,
     theme: ComboBoxTheme,
@@ -2368,8 +2371,19 @@ fn render_row<I: Clone + Eq + 'static>(
         .flex()
         .items_center()
         .justify_center();
+    // The leading slot marks the current value, the way a platform selector does. An item that
+    // carries its own icon keeps it: the caller's meaning outranks the mark, and the highlighted
+    // row still shows which value is current.
     if let Some(icon) = &item.leading_icon {
         leading = leading.child(icon(foreground, theme.metrics.icon_size));
+    } else if selected {
+        leading = leading
+            .debug_selector(move || format!("combo-box-row-{position}-check"))
+            .child(Icon::new(
+                IconName::Check,
+                theme.metrics.icon_size,
+                foreground,
+            ));
     }
     row = row.child(leading).child(
         div()
