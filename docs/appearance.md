@@ -41,6 +41,13 @@ SpaceTerm Light), but native overrides and imported themes may distinguish them.
 forced equality rule or shared `list_item_background` role. Active Tabs retain the independent
 `tab_active_background` role; inactive-window Tabs retain their uniform inactive band.
 
+`element_selected_hover` serves both a selected control, such as a segmented option, and an
+emphasized action button, so a scheme that equalized it with `element_selected` would leave every
+primary button without hover feedback. The built-ins author it one step beyond `raised` in their
+own surface family (`#2f2f3b` in Vague Pro Dark and `#dadbe2` in SpaceTerm Light). A built-in
+chrome interaction fill comes from that surface family: a role Zed does not carry is authored
+here, never borrowed from a terminal or selection color.
+
 Zed imports preserve `ghost_element.hover`, `ghost_element.selected`, and `tab.active_background`
 independently. This follows [Zed's list-state roles](https://github.com/zed-industries/zed/blob/main/crates/ui/src/components/list/list_item.rs),
 not an assumption that all themes use equal colors. Terminal text selection remains independent.

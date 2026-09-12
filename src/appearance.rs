@@ -73,6 +73,9 @@ pub(crate) use scheme::{
     SchemeSummary, TerminalColors,
 };
 
+/// The built-in chrome palettes, so a control theme can be asserted against what ships.
+#[cfg(test)]
+pub(crate) use builtin::chrome_base as builtin_chrome_base;
 pub(crate) use builtin::fallback_id as builtin_fallback_scheme;
 pub(crate) use resolution::AppearanceDiagnostic;
 

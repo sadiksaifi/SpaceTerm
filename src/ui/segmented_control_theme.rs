@@ -121,8 +121,13 @@ mod tests {
             ghost_element_hover: Color::rgb(0x654321),
             ..base.clone()
         };
+        // A selected option consumes its own hovered role, so a scheme can distinguish the two.
+        let selected_hovered = ChromeColors {
+            element_selected_hover: Color::rgb(0x654322),
+            ..base.clone()
+        };
 
-        for changed in [selected, unselected_label, hovered] {
+        for changed in [selected, unselected_label, hovered, selected_hovered] {
             assert_ne!(theme(&base), theme(&changed));
         }
     }
