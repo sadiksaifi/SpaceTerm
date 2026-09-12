@@ -751,6 +751,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     panel_width: Option<Pixels>,
     full_width: bool,
     hug: bool,
+    bezel: bool,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
@@ -784,6 +785,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             panel_width: None,
             full_width: false,
             hug: false,
+            bezel: false,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
@@ -853,6 +855,16 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Draws a text trigger as a bezeled field rather than as a ghost control.
+    ///
+    /// A ghost trigger belongs in chrome, where it reads as an action. In a form it reads as a
+    /// value with no edge, which puts it optically short of the bezeled controls beside it even
+    /// though the two occupy the same width. The bezel reuses the popup's own surface and border.
+    pub fn bezel(mut self, bezel: bool) -> Self {
+        self.bezel = bezel;
         self
     }
 
@@ -1825,6 +1837,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let text_trigger = !icon_trigger && !custom_trigger;
         let fill_parent = self.full_width && !icon_trigger;
         let hug = self.hug && !fill_parent;
+        let bezel = self.bezel && text_trigger;
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1862,11 +1875,15 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .border(metrics.border_width)
             .border_color(if focused {
                 paint.focus_border
+            } else if bezel {
+                paint.border
             } else {
                 paint.trigger_border
             })
             .bg(if open {
                 paint.trigger_hover_background
+            } else if bezel {
+                paint.background
             } else {
                 paint.trigger_background
             })

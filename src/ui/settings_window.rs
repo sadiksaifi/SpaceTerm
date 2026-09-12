@@ -1646,8 +1646,10 @@ fn settings_selector<I: Clone + Eq + 'static>(
         items,
     )
     // The trigger takes the width of the value it shows, so the value and its chevron stay
-    // together at the row's right edge instead of sitting at opposite ends of an empty bezel.
+    // together at the row's right edge, and it carries a bezel so it ends where the steppers and
+    // segmented controls beside it end rather than optically short of them.
     .hug(true)
+    .bezel(true)
     .input_leading(move |size| Icon::new(IconName::Search, size, glyph).into_any_element())
     .debug_selector(selector)
 }

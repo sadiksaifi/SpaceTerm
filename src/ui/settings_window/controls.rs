@@ -235,7 +235,7 @@ pub(super) fn section_header(
         .child(
             div()
                 .font(appearance.heading.clone())
-                .text_size(appearance.text_size(15.0))
+                .text_size(appearance.text_size(17.0))
                 .text_color(gpui_color(appearance.colors.text))
                 .child(title),
         )

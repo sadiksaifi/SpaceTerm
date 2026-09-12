@@ -991,6 +991,33 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     }
 }
 
+/// A selector is bezeled like the steppers and segmented controls beside it.
+///
+/// A ghost trigger occupies the same width but draws no edge, so it reads as ending short of its
+/// neighbours even when the geometry agrees. The page has one control treatment or it has none.
+#[gpui::test]
+fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Interface, cx);
+
+    let selector = cx
+        .debug_bounds("settings-row-chrome-regular-weight-control")
+        .expect("the weight selector should render");
+    let stepper = cx
+        .debug_bounds("settings-chrome-base-size")
+        .expect("the size stepper should render");
+
+    assert_eq!(
+        selector.right(),
+        stepper.right(),
+        "a selector and a stepper should end at one edge"
+    );
+    assert_eq!(
+        selector.size.height, stepper.size.height,
+        "a selector and a stepper should share one height"
+    );
+}
+
 /// A selector shows its value next to its chevron rather than at the far end of an empty bezel.
 ///
 /// A reserving trigger is as wide as its popup whatever it holds, which reads as an empty field
