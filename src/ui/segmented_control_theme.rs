@@ -59,9 +59,11 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
             ),
         ),
         SegmentedSizes::new(
-            SegmentedMetrics::new(px(22.0), px(0.0), px(56.0), px(0.0))
+            // The option height plus the track border and padding matches the shared 28 px control
+            // height, so a segmented control lines up with buttons, steppers, and selectors.
+            SegmentedMetrics::new(px(24.0), px(0.0), px(64.0), px(0.0))
                 .horizontal_padding(px(10.0))
-                .radius(px(4.0))
+                .radius(px(5.0))
                 .typography(px(12.0), 1.2),
             SegmentedMetrics::new(px(26.0), px(52.0), px(88.0), px(10.0))
                 .horizontal_padding(px(12.0))
