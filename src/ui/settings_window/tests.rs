@@ -991,6 +991,53 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     }
 }
 
+/// Grouping survives without a rule between every pair of rows.
+///
+/// Nothing is ruled off, so space is the only thing telling a reader where one group ends. Rows
+/// inside a group must therefore sit closer together than a group sits to the one after it, or the
+/// page becomes one undifferentiated list.
+#[gpui::test]
+fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
+    cx: &mut TestAppContext,
+) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let bounds = rows
+        .iter()
+        .map(|row| {
+            let descriptor = row.descriptor();
+            let bounds = cx
+                .debug_bounds(leaked(descriptor.selector))
+                .unwrap_or_else(|| panic!("{row:?} should render"));
+            (descriptor.group, bounds)
+        })
+        .collect::<Vec<_>>();
+
+    let mut within = Vec::new();
+    let mut between = Vec::new();
+    for pair in bounds.windows(2) {
+        let gap = pair[1].1.top() - pair[0].1.bottom();
+        if pair[0].0 == pair[1].0 {
+            within.push(gap);
+        } else {
+            between.push(gap);
+        }
+    }
+    assert!(!within.is_empty() && !between.is_empty());
+
+    let widest_within = within.iter().copied().fold(px(0.0), gpui::Pixels::max);
+    let narrowest_between = between
+        .iter()
+        .copied()
+        .fold(px(f32::MAX), gpui::Pixels::min);
+    assert!(
+        narrowest_between > widest_within,
+        "groups should separate more than their own rows do, got {between:?} against {within:?}"
+    );
+}
+
 /// A selector is bezeled like the steppers and segmented controls beside it.
 ///
 /// A ghost trigger occupies the same width but draws no edge, so it reads as ending short of its

@@ -769,7 +769,7 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(20.0))
+            .gap(appearance.spacing(26.0))
             .child(section_header(
                 section.selector(),
                 section.title(),

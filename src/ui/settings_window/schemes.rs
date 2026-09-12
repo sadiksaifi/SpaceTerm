@@ -58,11 +58,9 @@ impl SettingsWindow {
             .into_iter()
             .take(VISIBLE_SCHEMES)
             .collect::<Vec<_>>();
-        let last = visible.len().saturating_sub(1);
         let rows = visible
             .iter()
-            .enumerate()
-            .map(|(index, summary)| self.render_scheme_row(summary, index < last, appearance, cx))
+            .map(|summary| self.render_scheme_row(summary, appearance, cx))
             .collect::<Vec<_>>();
         let remaining = total - visible.len();
         let selector = match kind {
@@ -148,7 +146,6 @@ impl SettingsWindow {
     fn render_scheme_row(
         &self,
         summary: &SchemeSummary,
-        separated: bool,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -177,10 +174,6 @@ impl SettingsWindow {
             .w_full()
             .gap(appearance.spacing(10.0))
             .h(appearance.height(34.0, 12.0))
-            .when(separated, |row| {
-                row.border_b_1()
-                    .border_color(gpui_color(appearance.colors.border_variant))
-            })
             .child(swatch_strip(
                 format!("settings-scheme-swatches-{}", summary.id.as_str()),
                 &summary.swatches,

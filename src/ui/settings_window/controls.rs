@@ -44,11 +44,12 @@ pub(super) enum SettingsRowLayout {
 
 /// One titled run of related rows.
 ///
-/// Grouping is the structure a settings form is read by: a title names a handful of rows, and a
-/// hairline separates one row from the next. There is no frame around the run, because a frame
-/// would have to be drawn as a border: a scheme is free to resolve the window, panel, and elevated
-/// surfaces to one color, and the built-in dark scheme does exactly that, so a filled card would
-/// be invisible and only its outline would remain.
+/// Grouping is the structure a settings form is read by, and here it is carried entirely by space
+/// and by the title: rows within a run sit closer together than one run sits to the next. Nothing
+/// is ruled off. A frame would have to be drawn as a border, because a scheme is free to resolve
+/// the window, panel, and elevated surfaces to one color and the built-in dark scheme does exactly
+/// that; and a hairline between every pair of rows adds a line for every reading the eye already
+/// gets from the gap.
 pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
@@ -67,26 +68,12 @@ impl SettingsGroup {
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let selector = self.selector.clone();
         let title_selector = format!("{selector}-title");
-        let separator = |appearance: &ChromeAppearance| {
-            div()
-                .flex_none()
-                .h(px(1.0))
-                .w_full()
-                .bg(gpui_color(appearance.colors.border_variant))
-        };
-        let mut box_rows = Vec::with_capacity(self.rows.len() * 2);
-        for (index, row) in self.rows.into_iter().enumerate() {
-            if index > 0 {
-                box_rows.push(separator(appearance).into_any_element());
-            }
-            box_rows.push(row);
-        }
         div()
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(2.0))
+            .gap(appearance.spacing(4.0))
             .child(
                 div()
                     .debug_selector(move || title_selector.clone())
@@ -95,7 +82,7 @@ impl SettingsGroup {
                     .text_color(gpui_color(appearance.colors.text_secondary))
                     .child(self.title),
             )
-            .child(div().flex().flex_col().w_full().children(box_rows))
+            .child(div().flex().flex_col().w_full().children(self.rows))
     }
 }
 
@@ -209,7 +196,7 @@ impl SettingsRow {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(3.0))
-            .py(appearance.spacing(9.0))
+            .py(appearance.spacing(8.0))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(appearance.colors.info_background))
             })
