@@ -20,6 +20,9 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
 }
 
+/// The width every scheme's color strip takes, so the names beside them share one column.
+const SWATCH_WIDTH: f32 = 88.0;
+
 /// The least space between a label and the control it names, so the two never touch.
 const LABEL_GAP: f32 = 16.0;
 
@@ -395,24 +398,29 @@ impl Stepper {
 }
 
 /// A left-to-right strip of representative scheme colors.
+///
+/// Every strip is the same size whatever a scheme offers, so the names beside them line up in one
+/// column. A scheme with fewer colors shows wider bands rather than a shorter strip.
 pub(super) fn swatch_strip(
     selector: String,
     swatches: &[Color],
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
-    let extent = appearance.text_size(13.0);
     div()
         .debug_selector(move || selector.clone())
         .flex()
         .flex_row()
         .flex_none()
         .items_center()
+        .w(appearance.text_size(SWATCH_WIDTH))
+        .h(appearance.text_size(14.0))
         .rounded(px(4.0))
         .overflow_hidden()
+        .bg(gpui_color(appearance.colors.element_background))
         .children(
             swatches
                 .iter()
-                .map(|color| div().w(extent).h(extent).bg(gpui_color(*color))),
+                .map(|color| div().flex_1().h_full().bg(gpui_color(*color))),
         )
 }
 

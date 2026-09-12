@@ -65,12 +65,14 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                 .horizontal_padding(px(10.0))
                 .radius(px(5.0))
                 .typography(px(12.0), 1.2),
-            SegmentedMetrics::new(px(26.0), px(52.0), px(88.0), px(10.0))
-                .horizontal_padding(px(12.0))
-                .vertical_padding(px(8.0))
+            // A card is a thumbnail with its name under it, sized so a row of them reads beside a
+            // label rather than towering over it.
+            SegmentedMetrics::new(px(20.0), px(38.0), px(72.0), px(8.0))
+                .horizontal_padding(px(10.0))
+                .vertical_padding(px(7.0))
                 .radius(px(7.0))
-                .preview_gap(px(7.0))
-                .typography(px(12.0), 1.2),
+                .preview_gap(px(6.0))
+                .typography(px(11.0), 1.2),
         ),
         gpui_color(colors.element_background),
         gpui_color(colors.border),

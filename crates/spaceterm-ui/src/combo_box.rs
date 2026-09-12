@@ -750,6 +750,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     placement: AnchoredPlacementConfig,
     panel_width: Option<Pixels>,
     full_width: bool,
+    hug: bool,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
@@ -782,6 +783,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             placement: AnchoredPlacementConfig::default(),
             panel_width: None,
             full_width: false,
+            hug: false,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
@@ -851,6 +853,16 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Makes a text trigger take only the width its own value needs.
+    ///
+    /// A trigger otherwise reserves the popup's width, which leaves its value and its chevron at
+    /// opposite ends of an empty bezel. A hugging trigger keeps them together, so a row of them
+    /// reads as values rather than as fields. The popup keeps its own width either way.
+    pub fn hug(mut self, hug: bool) -> Self {
+        self.hug = hug;
         self
     }
 
@@ -1812,6 +1824,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let custom_trigger = custom_content.is_some();
         let text_trigger = !icon_trigger && !custom_trigger;
         let fill_parent = self.full_width && !icon_trigger;
+        let hug = self.hug && !fill_parent;
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1834,7 +1847,12 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 trigger
                     .h(metrics.trigger_height)
                     .when(fill_parent, |trigger| trigger.w_full())
-                    .when(!fill_parent, |trigger| trigger.min_w(metrics.panel_width))
+                    .when(!fill_parent && !hug, |trigger| {
+                        trigger.min_w(metrics.panel_width)
+                    })
+                    // A hugging trigger still stops where a reserving one would have, so one long
+                    // value cannot crowd out the label naming it.
+                    .when(hug, |trigger| trigger.max_w(metrics.panel_width))
                     .px(metrics.horizontal_padding)
                     .gap(metrics.gap)
             })
@@ -1881,7 +1899,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                         div()
                             .debug_selector(|| "combo-box-trigger-label".to_owned())
                             .min_w_0()
-                            .flex_1()
+                            .when(!hug, |value| value.flex_1())
                             .truncate()
                             .child(label),
                     )

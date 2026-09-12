@@ -991,6 +991,62 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     }
 }
 
+/// A selector shows its value next to its chevron rather than at the far end of an empty bezel.
+///
+/// A reserving trigger is as wide as its popup whatever it holds, which reads as an empty field
+/// with a stranded chevron. Hugging is what makes a column of them read as values.
+#[gpui::test]
+fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    let trigger = cx
+        .debug_bounds("settings-row-chrome-scheme-control")
+        .expect("the interface scheme selector should render");
+    let value = cx
+        .debug_bounds("combo-box-trigger-label")
+        .expect("the selector should show its value");
+
+    // Everything the trigger holds beyond its value is its own padding, its chevron, and the gap
+    // between them, which together are far narrower than the popup it would otherwise reserve.
+    let slack = trigger.size.width - value.size.width;
+    assert!(
+        slack < px(64.0),
+        "the trigger should hug its value, got {trigger:?} around {value:?}"
+    );
+}
+
+/// Every scheme's colors take one column width, so the names beside them line up.
+#[gpui::test]
+fn every_scheme_strip_shares_one_width(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::ColorSchemes, cx);
+
+    let ids = window.read_with(cx, |window, _| {
+        [SchemeKind::Chrome, SchemeKind::Terminal]
+            .into_iter()
+            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
+            .map(|summary| summary.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    });
+    assert!(ids.len() > 1, "the library should list several schemes");
+
+    let edges = ids
+        .iter()
+        .map(|id| {
+            cx.debug_bounds(leaked_owned(format!("settings-scheme-swatches-{id}")))
+                .unwrap_or_else(|| panic!("{id} should show its colors"))
+                .right()
+        })
+        .collect::<Vec<_>>();
+
+    // A scheme offering fewer colors shows wider bands rather than a shorter strip, so every name
+    // beside them starts at the same place.
+    assert!(
+        edges.windows(2).all(|pair| pair[0] == pair[1]),
+        "every strip should end at one edge, got {edges:?} for {ids:?}"
+    );
+}
+
 /// One appearance control exists at all, so no surface can be pointed at its own mode.
 #[gpui::test]
 fn no_surface_carries_an_appearance_mode_of_its_own(cx: &mut TestAppContext) {
