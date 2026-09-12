@@ -4,7 +4,7 @@
     not(any(test, feature = "appearance-exerciser")),
     allow(
         dead_code,
-        reason = "Settings mutation is exercised by the opt-in development surface; production startup only loads the document"
+        reason = "the Settings Window edits through a draft and the preview transaction, so the direct-commit, field-reset, and recoverable-candidate operations remain available but unused"
     )
 )]
 
@@ -396,10 +396,6 @@ impl UserSettings {
         ))
     }
 
-    #[allow(
-        dead_code,
-        reason = "custom scheme deletion is a foundation operation for the production settings UI"
-    )]
     pub(crate) fn remove_custom_scheme_preview(
         &self,
         token: &PreviewToken,
@@ -442,7 +438,7 @@ impl UserSettings {
 
     #[allow(
         dead_code,
-        reason = "catalog listing is available to future settings surfaces"
+        reason = "complete scheme listing remains available to interchange surfaces"
     )]
     pub(crate) fn list_schemes(&self) -> Result<Vec<CustomScheme>, SettingsError> {
         let snapshot = self.snapshot();

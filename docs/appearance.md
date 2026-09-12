@@ -41,6 +41,13 @@ SpaceTerm Light), but native overrides and imported themes may distinguish them.
 forced equality rule or shared `list_item_background` role. Active Tabs retain the independent
 `tab_active_background` role; inactive-window Tabs retain their uniform inactive band.
 
+`element_selected_hover` serves both a selected control, such as a segmented option, and an
+emphasized action button, so a scheme that equalized it with `element_selected` would leave every
+primary button without hover feedback. The built-ins author it one step beyond `raised` in their
+own surface family (`#2f2f3b` in Vague Pro Dark and `#dadbe2` in SpaceTerm Light). A built-in
+chrome interaction fill comes from that surface family: a role Zed does not carry is authored
+here, never borrowed from a terminal or selection color.
+
 Zed imports preserve `ghost_element.hover`, `ghost_element.selected`, and `tab.active_background`
 independently. This follows [Zed's list-state roles](https://github.com/zed-industries/zed/blob/main/crates/ui/src/components/list/list_item.rs),
 not an assumption that all themes use equal colors. Terminal text selection remains independent.
@@ -108,10 +115,41 @@ range is 10 through 24 px. Terminal defaults to 18 px monospace text, line heigh
 size ranges from 8 through 32 px and line height from 1 through 2. Unavailable font requests retain
 their requested family while resolution supplies a suitable system fallback and Apple Color Emoji.
 
-Reset is typed and independently targets every scheme-selection, font, size, weight, line-height,
-italic, bold-as-bright, and density field; one color override role for an exact scheme ID; each
+Reset is typed and independently targets every scheme-selection, per-domain scheme choice, font,
+size, weight, line-height, italic, bold-as-bright, and density field; both domains' scheme
+selections at once; one color override role for an exact scheme ID; each
 color, typography, density, or rendering group; or all appearance preferences. Resetting a role
 removes that override so it inherits again. No reset removes installed custom schemes.
+
+## Settings Window
+
+The Settings Window is the interface for everything above, across four sections: Appearance,
+Interface, Terminal, and Color Schemes. It opens from the application menu and its key equivalent,
+presents one navigation list beside a detail pane showing one section at a time, groups each
+section's rows under a title, and searches Settings Row labels, group titles, and keywords.
+
+One layout rule covers every row on every page: the label starts at the content's left edge, the
+control ends at its right edge, and guidance stacks under the label rather than taking a line of
+its own, so it stays with the setting it explains and stops where the control begins. A group is a title and a run of
+rows, separated from the next group by space alone. Nothing is framed or ruled off: a scheme may
+resolve the window, panel, and elevated surfaces to one color, as the built-in dark scheme does, so
+a card could only ever be drawn as an outline, and a hairline between every pair of rows adds a
+line for a reading the gap already gives. Rows within a group therefore sit closer together than
+one group sits to the next, which the suite asserts.
+
+Appearance Mode is presented once, not per domain. The document keeps a separate selection for each
+domain, and the one control writes Light, Dark, or Auto to both in a single edit, mapping onto a
+fixed selection with that appearance or a system light/dark pair. Each domain still chooses its own
+scheme within that mode, so an interface scheme and a terminal scheme remain independent; the scheme
+pickers are restricted to the appearance the mode selects. A domain's scheme reset restores that
+scheme and leaves the mode alone, because the mode belongs to the control that spans both. A
+hand-edited document whose two selections disagree is presented using the chrome selection, and the
+next change writes both back into agreement. Changes preview live and commit shortly after the last
+change, so there is no save action.
+See [ADR 0005](adr/0005-present-settings-in-a-separate-operating-system-window.md).
+
+Per-role color overrides are not editable from the Settings Window. They remain supported by the
+document and reachable through import and the settings file.
 
 ## Native boundary and development exerciser
 

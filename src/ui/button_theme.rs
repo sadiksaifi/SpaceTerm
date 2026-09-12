@@ -8,32 +8,7 @@ use crate::appearance::{ChromeColors, Color};
 pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
     ButtonTheme::new(
         ButtonVariants::new(
-            variant(
-                paint(
-                    colors.element_selected,
-                    colors.element_selected_foreground,
-                    colors.icon,
-                    colors.border_transparent,
-                ),
-                paint(
-                    colors.element_selected_hover,
-                    colors.element_selected_hover_foreground,
-                    colors.icon,
-                    colors.border_transparent,
-                ),
-                paint(
-                    colors.element_active,
-                    colors.element_active_foreground,
-                    colors.icon,
-                    colors.border_transparent,
-                ),
-                paint(
-                    colors.element_disabled,
-                    colors.element_disabled_foreground,
-                    colors.icon_disabled,
-                    colors.border_transparent,
-                ),
-            ),
+            primary(colors),
             variant(
                 paint(
                     colors.element_background,
@@ -171,6 +146,39 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
 ///
 /// Chrome that must read as floating uses this: nothing paints behind the glyph, so the control
 /// carries the same visual weight as the text beside it.
+/// The emphasized action variant.
+///
+/// It shares the selected element roles, so its hover paint must stay distinct from its normal
+/// paint for every scheme: an emphasized action is the one control a reader expects to respond.
+fn primary(colors: &ChromeColors) -> ButtonVariantStyle {
+    variant(
+        paint(
+            colors.element_selected,
+            colors.element_selected_foreground,
+            colors.icon,
+            colors.border_transparent,
+        ),
+        paint(
+            colors.element_selected_hover,
+            colors.element_selected_hover_foreground,
+            colors.icon,
+            colors.border_transparent,
+        ),
+        paint(
+            colors.element_active,
+            colors.element_active_foreground,
+            colors.icon,
+            colors.border_transparent,
+        ),
+        paint(
+            colors.element_disabled,
+            colors.element_disabled_foreground,
+            colors.icon_disabled,
+            colors.border_transparent,
+        ),
+    )
+}
+
 fn bare(colors: &ChromeColors) -> ButtonVariantStyle {
     variant(
         paint(
@@ -254,12 +262,28 @@ fn gpui_color(color: Color) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::{Appearance, builtin_chrome_base};
 
     #[test]
     fn outline_press_should_preserve_the_normal_border() {
         let outline = outline(&ChromeColors::default());
 
         assert_eq!(outline.normal().border(), outline.pressed().border());
+    }
+
+    #[test]
+    fn an_emphasized_action_should_keep_a_distinct_hover_in_every_built_in() {
+        // The selected element roles serve both persistent selection and emphasized actions, so a
+        // scheme that collapsed them would leave every primary button without hover feedback.
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let primary = primary(&builtin_chrome_base(appearance));
+
+            assert_ne!(
+                primary.normal().background(),
+                primary.hovered().background(),
+                "{appearance:?} should keep an emphasized action's hover visible"
+            );
+        }
     }
 
     #[test]

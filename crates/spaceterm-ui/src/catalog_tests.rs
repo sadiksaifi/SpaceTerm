@@ -4,6 +4,28 @@ use gpui::{Context, ParentElement as _, Render, TestAppContext, Window, div, px,
 
 use crate::*;
 
+fn segmented_control_theme(
+    surface: gpui::Rgba,
+    text: gpui::Rgba,
+    muted: gpui::Rgba,
+    accent: gpui::Rgba,
+) -> SegmentedControlTheme {
+    let values = SegmentedValuePaints::new(
+        SegmentedPaint::new(surface, muted, surface),
+        SegmentedPaint::new(accent, text, accent),
+    );
+    SegmentedControlTheme::new(
+        SegmentedPaints::new(values, values, values, values),
+        SegmentedSizes::new(
+            SegmentedMetrics::new(px(24.0), px(0.0), px(56.0), px(0.0)),
+            SegmentedMetrics::new(px(28.0), px(52.0), px(84.0), px(10.0)),
+        ),
+        surface,
+        muted,
+        accent,
+    )
+}
+
 fn catalog(generation: u64) -> ControlThemeCatalog {
     let clear = rgba(0x00000000);
     let text = rgba(0xffffffff);
@@ -63,6 +85,7 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
             ResizeHandlePaint::new(muted, text, accent, accent, muted),
             ResizeHandleMetrics::new(px(1.0), px(8.0)),
         ),
+        segmented_control_theme(surface, text, muted, accent),
         menu,
         CommandPaletteTheme::new(
             CommandPalettePaint::new(surface, surface, text, muted, muted, surface, text, accent),

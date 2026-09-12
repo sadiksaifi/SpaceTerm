@@ -5725,7 +5725,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         let row = cx
             .debug_bounds(selector)
             .expect("the compact Workspace source row should render");
-        assert_eq!(row.size.height, px(30.0));
+        // Selector rows share the chrome control height with the trigger and the filter above them.
+        assert_eq!(row.size.height, px(28.0));
         assert_eq!(
             row.left() - panel.left(),
             panel.right() - row.right(),

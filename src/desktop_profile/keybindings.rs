@@ -98,6 +98,24 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         ),
     ];
     bindings.extend([
+        KeyBinding::new("cmd-,", crate::ui::settings_window::OpenSettings, None),
+        // Scoped to the Settings Window so each shortcut means there what it means elsewhere:
+        // close this window rather than a Pane, and search Settings rather than terminal output.
+        KeyBinding::new(
+            "cmd-w",
+            crate::ui::settings_window::CloseSettingsWindow,
+            Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-f",
+            crate::ui::settings_window::FocusSettingsSearch,
+            Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "escape",
+            crate::ui::settings_window::ClearSettingsSearch,
+            Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT),
+        ),
         KeyBinding::new("cmd-q", QuitApplication, None),
         KeyBinding::new("cmd-h", HideApplication, None),
         KeyBinding::new("alt-cmd-h", HideOtherApplications, None),

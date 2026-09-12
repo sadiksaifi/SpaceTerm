@@ -2,7 +2,8 @@ use spaceterm_ui::ControlThemeCatalog;
 
 use super::{
     button_theme, combo_box_theme, command_palette_theme, menu_theme, modal_theme,
-    resize_handle_theme, scrollbar_theme, text_input_theme, toggle_theme, tooltip_theme,
+    resize_handle_theme, scrollbar_theme, segmented_control_theme, text_input_theme, toggle_theme,
+    tooltip_theme,
 };
 
 pub(super) fn catalog(appearance: &super::appearance::ChromeAppearance) -> ControlThemeCatalog {
@@ -12,6 +13,7 @@ pub(super) fn catalog(appearance: &super::appearance::ChromeAppearance) -> Contr
         toggle_theme::theme(colors),
         scrollbar_theme::theme(colors),
         resize_handle_theme::theme(colors),
+        segmented_control_theme::theme(colors),
         menu_theme::theme(colors),
         command_palette_theme::theme(colors),
         combo_box_theme::theme(colors),

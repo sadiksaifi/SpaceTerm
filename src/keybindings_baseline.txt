@@ -145,6 +145,10 @@ ctrl-8	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace8
 ctrl-9	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace9
 cmd-b	Some(Identifier("TerminalPane"))	terminal::ToggleSidebar
 cmd-shift-e	Some(Identifier("TerminalPane"))	terminal::ToggleSidebarFocus
+cmd-,	None	spaceterm::OpenSettings
+cmd-w	Some(Identifier("Settings"))	spaceterm::CloseSettingsWindow
+cmd-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
+escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch
 cmd-q	None	spaceterm::QuitApplication
 cmd-h	None	spaceterm::HideApplication
 alt-cmd-h	None	spaceterm::HideOtherApplications
