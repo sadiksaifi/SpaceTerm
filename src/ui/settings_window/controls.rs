@@ -144,16 +144,33 @@ impl SettingsRow {
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         // One rule for the whole form: the label starts at the content's left edge, the control
-        // ends at its right edge, and guidance sits under the label. Nothing is centered, and no
-        // row invents a column of its own.
+        // ends at its right edge, and nothing is centered.
+        let caption = |description: SharedString| {
+            div()
+                .text_size(appearance.text_size(11.0))
+                .text_color(gpui_color(appearance.colors.text_muted))
+                .whitespace_normal()
+                .child(description)
+        };
+        // Guidance belongs to the label, not to the row: under a tall control it would otherwise
+        // come to rest between two rows, reading as a stray sentence belonging to neither. Stacked
+        // with the label it stays anchored to the setting it explains, and it stops where the
+        // control begins instead of running the width of the page.
         let label = (!full).then(|| {
             div()
-                .debug_selector(move || label_selector.clone())
+                .flex()
+                .flex_col()
                 .min_w_0()
                 .flex_1()
-                .text_color(gpui_color(appearance.colors.text))
-                .whitespace_normal()
-                .child(self.label)
+                .gap(appearance.spacing(2.0))
+                .child(
+                    div()
+                        .debug_selector(move || label_selector.clone())
+                        .text_color(gpui_color(appearance.colors.text))
+                        .whitespace_normal()
+                        .child(self.label),
+                )
+                .children(self.description.clone().filter(|_| !above).map(&caption))
                 .into_any_element()
         });
         let (label_above, label_beside) = if above { (label, None) } else { (None, label) };
@@ -183,13 +200,9 @@ impl SettingsRow {
                     .justify_end()
                     .children(self.reset),
             );
-        let description = self.description.map(|description| {
-            div()
-                .text_size(appearance.text_size(11.0))
-                .text_color(gpui_color(appearance.colors.text_muted))
-                .whitespace_normal()
-                .child(description)
-        });
+        // A row whose content takes the whole width has no label column to stack guidance in, so
+        // it keeps its own line underneath.
+        let trailing_caption = self.description.filter(|_| above || full).map(caption);
         div()
             .debug_selector(move || selector.to_owned())
             .flex()
@@ -202,7 +215,7 @@ impl SettingsRow {
             })
             .children(label_above)
             .child(primary)
-            .children(description)
+            .children(trailing_caption)
     }
 }
 

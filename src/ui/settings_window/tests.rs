@@ -991,6 +991,44 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     }
 }
 
+/// Guidance stays with the setting it explains rather than coming to rest between two rows.
+///
+/// Under a tall control, a caption on the row's own line ends up nearer the row below it than the
+/// one it belongs to, and runs the width of the page on the way. Stacked under its label it stays
+/// anchored and it stops where the control begins.
+#[gpui::test]
+fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    let label = cx
+        .debug_bounds("settings-row-appearance-mode-label")
+        .expect("the appearance label should render");
+    let control = cx
+        .debug_bounds("settings-appearance-mode")
+        .expect("the appearance control should render");
+    let row = cx
+        .debug_bounds("settings-row-appearance-mode")
+        .expect("the appearance row should render");
+    let density = cx
+        .debug_bounds("settings-row-chrome-density")
+        .expect("the density row should render");
+
+    // The caption is the only thing in this row under the label, so the label column's own extent
+    // is what the assertions below measure.
+    assert!(
+        label.bottom() < control.bottom(),
+        "guidance should sit under the label, got {label:?} against {control:?}"
+    );
+    assert!(
+        row.bottom() <= density.top() + px(0.5),
+        "guidance should stay inside its own row, got {row:?} against {density:?}"
+    );
+    assert!(
+        control.left() >= label.left(),
+        "guidance should stop before the control, got {label:?} against {control:?}"
+    );
+}
+
 /// Grouping survives without a rule between every pair of rows.
 ///
 /// Nothing is ruled off, so space is the only thing telling a reader where one group ends. Rows

@@ -129,7 +129,8 @@ presents one navigation list beside a detail pane showing one section at a time,
 section's rows under a title, and searches Settings Row labels, group titles, and keywords.
 
 One layout rule covers every row on every page: the label starts at the content's left edge, the
-control ends at its right edge, and guidance sits under the label. A group is a title and a run of
+control ends at its right edge, and guidance stacks under the label rather than taking a line of
+its own, so it stays with the setting it explains and stops where the control begins. A group is a title and a run of
 rows, separated from the next group by space alone. Nothing is framed or ruled off: a scheme may
 resolve the window, panel, and elevated surfaces to one color, as the built-in dark scheme does, so
 a card could only ever be drawn as an outline, and a hairline between every pair of rows adds a
