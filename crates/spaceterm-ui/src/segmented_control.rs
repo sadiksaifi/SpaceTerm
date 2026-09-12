@@ -24,8 +24,6 @@ use crate::{
     tooltip::{Tooltip, TooltipTargetVisibility},
 };
 
-const INTERACTION_GROUP: &str = "spaceterm-segmented-control";
-
 /// The greatest number of options one segmented control may present.
 ///
 /// The control is for bounded choices that are all worth showing at once. Longer lists belong in a
@@ -649,10 +647,12 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
                     })
-                    .when(option_enabled && !selected, |segment| {
+                    // Pointer feedback belongs to the segment under the pointer. Reacting to the
+                    // track's hover instead would light every segment at once.
+                    .when(option_enabled, |segment| {
                         segment
-                            .group_hover(INTERACTION_GROUP, move |style| hovered.segment(style))
-                            .group_active(INTERACTION_GROUP, move |style| pressed.segment(style))
+                            .hover(move |style| hovered.segment(style))
+                            .active(move |style| pressed.segment(style))
                     })
                     .when(option_enabled, |segment| {
                         segment
@@ -721,10 +721,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .cursor_default()
             .block_mouse_except_scroll()
             .when(enabled, |track| {
-                track
-                    .track_focus(&focus_handle)
-                    .group(INTERACTION_GROUP)
-                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                track.track_focus(&focus_handle).on_key_down(
+                    move |event: &KeyDownEvent, window, cx| {
                         if event.keystroke.modifiers.modified() {
                             return;
                         }
@@ -761,7 +759,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                         if let Some(value) = target.and_then(|index| navigable[index].clone()) {
                             keyboard_request(value, source, window, cx);
                         }
-                    })
+                    },
+                )
             })
             .children(segments)
             .when(focused, |track| {
