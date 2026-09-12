@@ -3,10 +3,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px};
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, ChromeDensity, SchemeSelection, export_settings,
+    Appearance, AppearanceDocument, ChromeDensity, SchemeKind, SchemeSelection, export_settings,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
@@ -153,6 +153,16 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Selects one navigation entry, because each section is its own view.
+fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
+    let selector: &'static str = match section {
+        SettingsSectionId::Appearance => "settings-navigation-settings-section-appearance",
+        SettingsSectionId::Terminal => "settings-navigation-settings-section-terminal",
+        SettingsSectionId::ColorSchemes => "settings-navigation-settings-section-color-schemes",
+    };
+    click(selector, cx);
+}
+
 /// Runs the debounce out so a scheduled write happens.
 fn settle(cx: &mut VisualTestContext) {
     cx.executor().advance_clock(COMMIT_DELAY * 2);
@@ -217,6 +227,7 @@ fn an_edit_previews_at_once_and_writes_after_it_settles(cx: &mut TestAppContext)
 #[gpui::test]
 fn several_rapid_changes_produce_one_write_carrying_the_last_value(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
 
     click("settings-terminal-base-size-increase", cx);
     click("settings-terminal-base-size-increase", cx);
@@ -602,27 +613,39 @@ fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn every_section_and_its_rows_render_by_default(cx: &mut TestAppContext) {
+fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
     for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+
         assert!(
             cx.debug_bounds(leaked(section.selector())).is_some(),
             "{section:?} should render"
         );
+        for row in window.read_with(cx, |window, _| window.rows_for(section)) {
+            assert!(
+                cx.debug_bounds(leaked(row.descriptor().selector)).is_some(),
+                "{row:?} should render"
+            );
+        }
     }
-    let expected = window.read_with(cx, |window, _| {
-        SettingsSectionId::ALL
-            .iter()
-            .flat_map(|section| window.rows_for(*section))
-            .collect::<Vec<_>>()
-    });
-    for row in expected {
-        assert!(
-            cx.debug_bounds(leaked(row.descriptor().selector)).is_some(),
-            "{row:?} should render"
-        );
-    }
+}
+
+#[gpui::test]
+fn the_detail_pane_presents_only_the_selected_section(cx: &mut TestAppContext) {
+    // Sections are separate views rather than one scrolling document, so a section that was never
+    // selected has never been rendered.
+    let (window, _harness, cx) = open_settings(cx);
+
+    assert_eq!(
+        window.read_with(cx, |window, _| window.active_section),
+        SettingsSectionId::Appearance
+    );
+    assert!(cx.debug_bounds("settings-section-appearance").is_some());
+    assert!(cx.debug_bounds("settings-section-terminal").is_none());
+    assert!(cx.debug_bounds("settings-section-color-schemes").is_none());
+    assert!(cx.debug_bounds("settings-row-terminal-italic").is_none());
 }
 
 #[gpui::test]
@@ -745,6 +768,7 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
     let mut document = AppearanceDocument::default();
     document.preferences.terminal.typography.base_size = 8.0;
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Terminal, cx);
 
     // The decrement is disabled at the bottom of the range, so it cannot request a rejected value.
     click("settings-terminal-base-size-decrease", cx);
@@ -763,6 +787,7 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
 fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
+    select_section(SettingsSectionId::Terminal, cx);
     click("settings-terminal-line-height-increase", cx);
 
     let height = document_of(&window, cx)
@@ -779,8 +804,158 @@ fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_diagnostics_row_reports_nothing_when_every_choice_is_available(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::ColorSchemes, cx);
 
     assert!(cx.debug_bounds("settings-diagnostics-empty").is_some());
+}
+
+// Layout ---------------------------------------------------------------------------------------
+
+#[gpui::test]
+fn a_row_label_is_centered_against_the_control_it_names(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    // The interface font row pairs a short label with the tallest control in the form.
+    let label = cx
+        .debug_bounds("settings-row-chrome-font-family-label")
+        .expect("the interface font label should render");
+    let control = cx
+        .debug_bounds("settings-chrome-font-family")
+        .expect("the interface font control should render");
+
+    assert!(
+        (label.center().y - control.center().y).abs() < px(1.0),
+        "the label should sit on the control's line, got {label:?} and {control:?}"
+    );
+}
+
+#[gpui::test]
+fn a_control_hugs_its_content_rather_than_filling_the_row(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    let row = cx
+        .debug_bounds("settings-row-chrome-density")
+        .expect("the density row should render");
+    let control = cx
+        .debug_bounds("settings-chrome-density")
+        .expect("the density control should render");
+
+    assert!(
+        control.size.width * 2.0 < row.size.width,
+        "two densities should not span the row, got {control:?} in {row:?}"
+    );
+}
+
+#[gpui::test]
+fn a_switch_row_presents_the_switch_without_repeating_the_label(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let switch = cx
+        .debug_bounds("settings-terminal-italic")
+        .expect("the italic switch should render");
+    let indicator = cx
+        .debug_bounds("settings-terminal-italic-indicator")
+        .expect("the switch indicator should render");
+
+    assert_eq!(
+        switch.size.width, indicator.size.width,
+        "the row label already names the switch, so the switch carries no label of its own"
+    );
+}
+
+#[gpui::test]
+fn every_installed_scheme_row_keeps_one_line(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::ColorSchemes, cx);
+    let ids = window.read_with(cx, |window, _| {
+        [SchemeKind::Chrome, SchemeKind::Terminal]
+            .into_iter()
+            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
+            .map(|summary| summary.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    });
+    assert!(ids.len() > 1, "the built-in schemes should be installed");
+
+    let heights = ids
+        .iter()
+        .map(|id| {
+            let selector: &'static str =
+                Box::leak(format!("settings-scheme-row-{id}").into_boxed_str());
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should render"))
+                .size
+                .height
+        })
+        .collect::<Vec<_>>();
+
+    // A name that wrapped would grow its row, so equal heights are what keeps the list a list.
+    assert!(
+        heights.windows(2).all(|pair| pair[0] == pair[1]),
+        "scheme rows should share one height, got {heights:?}"
+    );
+}
+
+#[gpui::test]
+fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    let heights = [
+        "settings-row-chrome-scheme-control",
+        "settings-chrome-density",
+        "settings-chrome-font-family",
+        "settings-chrome-base-size",
+        "settings-row-chrome-regular-weight-control",
+    ]
+    .map(|selector| {
+        cx.debug_bounds(leaked(selector))
+            .unwrap_or_else(|| panic!("{selector} should render"))
+            .size
+            .height
+    });
+
+    assert!(
+        heights.windows(2).all(|pair| pair[0] == pair[1]),
+        "a selector, a segmented control, and a stepper should share one height, got {heights:?}"
+    );
+}
+
+#[gpui::test]
+fn an_open_selector_matches_its_filter_and_row_heights(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    click("settings-row-chrome-regular-weight-control", cx);
+
+    let filter = cx
+        .debug_bounds("combo-box-input-row")
+        .expect("the filter row should render");
+    let first = cx
+        .debug_bounds("settings-row-chrome-regular-weight-control-300")
+        .expect("the first weight should render");
+    let second = cx
+        .debug_bounds("settings-row-chrome-regular-weight-control-400")
+        .expect("the second weight should render");
+
+    assert_eq!(filter.size.height, first.size.height);
+    assert_eq!(first.size.height, second.size.height);
+}
+
+#[gpui::test]
+fn an_open_selector_shows_its_filter_glyph_and_marks_the_current_value(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    click("settings-row-chrome-regular-weight-control", cx);
+
+    assert!(
+        cx.debug_bounds("combo-box-input-leading").is_some(),
+        "the filter should carry the same search glyph as the window search field"
+    );
+    // The default regular weight is the second of the six offered weights.
+    assert!(
+        cx.debug_bounds("combo-box-row-1-check").is_some(),
+        "the current value should be marked"
+    );
+    assert_eq!(cx.debug_bounds("combo-box-row-0-check"), None);
 }
 
 // Helpers --------------------------------------------------------------------------------------

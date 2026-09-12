@@ -21,7 +21,22 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
 }
 
 /// The label column width, so every control in a section starts at the same offset.
-const LABEL_WIDTH: f32 = 176.0;
+const LABEL_WIDTH: f32 = 188.0;
+
+/// The gap between the label column and the control it names.
+const LABEL_GAP: f32 = 12.0;
+
+/// The trailing column reserved for the reset affordance, so controls never shift when it appears.
+const RESET_WIDTH: f32 = 28.0;
+
+/// How a row arranges its label and its content.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum SettingsRowLayout {
+    /// A right-aligned label beside its control, which is the form default.
+    Beside,
+    /// A label above content that needs the whole row, such as a list.
+    Above,
+}
 
 /// One labeled row: a right-aligned label, its control, and an optional reset affordance.
 pub(super) struct SettingsRow {
@@ -31,6 +46,7 @@ pub(super) struct SettingsRow {
     control: AnyElement,
     reset: Option<AnyElement>,
     highlighted: bool,
+    layout: SettingsRowLayout,
 }
 
 impl SettingsRow {
@@ -46,6 +62,7 @@ impl SettingsRow {
             control: control.into_any_element(),
             reset: None,
             highlighted: false,
+            layout: SettingsRowLayout::Beside,
         }
     }
 
@@ -67,53 +84,88 @@ impl SettingsRow {
         self
     }
 
+    /// Chooses where the label sits. Content that needs the whole row takes the label above it.
+    pub(super) fn layout(mut self, layout: SettingsRowLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let selector = self.selector;
+        let label_selector = format!("{selector}-label");
+        let label_width = appearance.text_size(LABEL_WIDTH);
+        let label_gap = appearance.spacing(LABEL_GAP);
+        let above = self.layout == SettingsRowLayout::Above;
+        let label = div()
+            .debug_selector(move || label_selector.clone())
+            .flex_none()
+            .text_color(gpui_color(appearance.colors.text_secondary))
+            .whitespace_normal()
+            .when(above, |label| label.font(appearance.emphasis.clone()))
+            .when(!above, |label| {
+                label.w(label_width).text_align(gpui::TextAlign::Right)
+            })
+            .child(self.label)
+            .into_any_element();
+        let (label_above, label_beside) = if above {
+            (Some(label), None)
+        } else {
+            (None, Some(label))
+        };
+        // A label beside its control is centered against it, so a tall control and a short one both
+        // read as one line. Guidance keeps its own line under the control column.
+        let primary = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .w_full()
+            .gap(label_gap)
+            .children(label_beside)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w_0()
+                    .flex_1()
+                    .child(self.control),
+            )
+            // The trailing column is reserved so a control never shifts when its reset appears. A
+            // row that cannot be reset, such as a list, keeps the width for its own content.
+            .when(!above || self.reset.is_some(), |line| {
+                line.child(
+                    div()
+                        .w(appearance.text_size(RESET_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .children(self.reset),
+                )
+            });
+        let description = self.description.map(|description| {
+            div()
+                .text_size(appearance.text_size(11.0))
+                .text_color(gpui_color(appearance.colors.text_muted))
+                .whitespace_normal()
+                .when(!above, |line| line.pl(label_width + label_gap))
+                .child(description)
+        });
         div()
             .debug_selector(move || selector.to_owned())
             .flex()
-            .flex_row()
-            .items_start()
+            .flex_col()
             .w_full()
-            .gap(appearance.spacing(12.0))
+            .gap(appearance.spacing(4.0))
             .px(appearance.spacing(8.0))
             .py(appearance.spacing(5.0))
             .rounded(px(6.0))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(appearance.colors.info_background))
             })
-            .child(
-                div()
-                    .w(appearance.text_size(LABEL_WIDTH))
-                    .flex_none()
-                    .pt(appearance.spacing(3.0))
-                    .text_align(gpui::TextAlign::Right)
-                    .text_color(gpui_color(appearance.colors.text_secondary))
-                    .whitespace_normal()
-                    .child(self.label),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .flex_1()
-                    .gap(appearance.spacing(4.0))
-                    .child(self.control)
-                    .children(self.description.map(|description| {
-                        div()
-                            .text_size(appearance.text_size(11.0))
-                            .text_color(gpui_color(appearance.colors.text_muted))
-                            .whitespace_normal()
-                            .child(description)
-                    })),
-            )
-            .child(
-                div()
-                    .w(appearance.text_size(22.0))
-                    .flex_none()
-                    .children(self.reset),
-            )
+            .children(label_above)
+            .child(primary)
+            .children(description)
     }
 }
 
@@ -158,7 +210,7 @@ pub(super) fn reset_button(
         Icon::new(IconName::RotateCcw, px(12.0), foreground).into_any_element()
     })
     .variant(ButtonVariant::Ghost)
-    .size(ButtonSize::Compact)
+    .size(ButtonSize::Small)
     .disabled(!enabled)
     .tab_stop(true)
     .debug_selector(selector.clone())
@@ -255,8 +307,8 @@ impl Stepper {
             .w(appearance.text_size(132.0))
             .gap(appearance.spacing(2.0))
             .px(appearance.spacing(2.0))
-            .h(appearance.height(24.0, 12.0))
-            .rounded(px(5.0))
+            .h(appearance.height(28.0, 12.0))
+            .rounded(px(6.0))
             .border_1()
             .border_color(gpui_color(appearance.colors.input_border))
             .bg(gpui_color(appearance.colors.input_background))
@@ -321,18 +373,25 @@ pub(super) fn swatch_strip(
 }
 
 /// A short labeled classification, such as a scheme's kind or appearance.
+///
+/// The fill comes from the raised element role rather than the plain element background, which a
+/// scheme may resolve to the window background and would leave the badge invisible.
 pub(super) fn badge(
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
     div()
         .flex_none()
-        .px(appearance.spacing(5.0))
-        .py(appearance.spacing(1.0))
-        .rounded(px(3.0))
-        .bg(gpui_color(appearance.colors.element_background))
+        .flex()
+        .items_center()
+        .h(appearance.text_size(16.0))
+        .px(appearance.spacing(6.0))
+        .rounded(px(4.0))
+        .bg(gpui_color(appearance.colors.element_active))
+        .border_1()
+        .border_color(gpui_color(appearance.colors.border_variant))
         .text_size(appearance.text_size(10.0))
-        .text_color(gpui_color(appearance.colors.text_muted))
+        .text_color(gpui_color(appearance.colors.text_secondary))
         .child(label.into())
 }
 
@@ -345,7 +404,7 @@ pub(super) fn action_button(
 ) -> impl IntoElement {
     Button::new(selector, label)
         .variant(ButtonVariant::Outline)
-        .size(ButtonSize::Small)
+        .size(ButtonSize::Regular)
         .disabled(!enabled)
         .tab_stop(true)
         .debug_selector(selector)

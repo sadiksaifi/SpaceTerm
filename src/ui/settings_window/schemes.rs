@@ -50,22 +50,34 @@ impl SettingsWindow {
         let chrome = self.scheme_summaries(SchemeKind::Chrome, cx);
         let terminal = self.scheme_summaries(SchemeKind::Terminal, cx);
         let total = chrome.len() + terminal.len();
+        let last = total.min(VISIBLE_SCHEMES).saturating_sub(1);
         let rows = chrome
             .into_iter()
             .chain(terminal)
             .take(VISIBLE_SCHEMES)
-            .map(|summary| self.render_scheme_row(&summary, appearance, cx))
+            .enumerate()
+            .map(|(index, summary)| self.render_scheme_row(&summary, index < last, appearance, cx))
             .collect::<Vec<_>>();
         let remaining = total.saturating_sub(rows.len());
+        // One bordered list reads as a single surface, so the rows line up instead of floating in
+        // the section.
         div()
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(3.0))
+            .rounded(px(7.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(gpui_color(appearance.colors.border))
+            .bg(gpui_color(appearance.colors.panel_background))
             .children(rows)
             .when(remaining > 0, |list| {
                 list.child(
                     div()
+                        .px(appearance.spacing(10.0))
+                        .py(appearance.spacing(6.0))
+                        .border_t_1()
+                        .border_color(gpui_color(appearance.colors.border))
                         .text_size(appearance.text_size(11.0))
                         .text_color(gpui_color(appearance.colors.text_muted))
                         .child(SharedString::from(format!(
@@ -79,6 +91,7 @@ impl SettingsWindow {
     fn render_scheme_row(
         &self,
         summary: &SchemeSummary,
+        separated: bool,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -86,45 +99,67 @@ impl SettingsWindow {
         let removable = !summary.builtin && self.editor.editable();
         let id = summary.id.clone();
         let name = summary.name.clone();
+        let row_selector = format!("settings-scheme-row-{}", summary.id.as_str());
         div()
+            .debug_selector(move || row_selector.clone())
             .flex()
             .flex_row()
             .items_center()
             .w_full()
             .gap(appearance.spacing(8.0))
-            .py(appearance.spacing(2.0))
+            .px(appearance.spacing(10.0))
+            .h(appearance.height(32.0, 12.0))
+            .when(separated, |row| {
+                row.border_b_1()
+                    .border_color(gpui_color(appearance.colors.border_variant))
+            })
             .child(swatch_strip(
                 format!("settings-scheme-swatches-{}", summary.id.as_str()),
                 &summary.swatches,
                 appearance,
             ))
             .child(
+                // The name takes one line and ends in an ellipsis. Wrapping it would let a long
+                // name grow the row and push the classifications out of their columns.
                 div()
                     .min_w_0()
                     .flex_1()
+                    .truncate()
                     .text_size(appearance.text_size(12.0))
                     .text_color(gpui_color(appearance.colors.text))
                     .child(SharedString::from(summary.name.clone())),
             )
-            .when(selected, |row| row.child(badge("In use", appearance)))
-            .child(badge(
-                match summary.kind {
-                    SchemeKind::Chrome => "Application",
-                    SchemeKind::Terminal => "Terminal",
-                },
-                appearance,
-            ))
-            .child(badge(
-                match summary.appearance {
-                    crate::appearance::Appearance::Light => "Light",
-                    crate::appearance::Appearance::Dark => "Dark",
-                },
-                appearance,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_none()
+                    .justify_end()
+                    .gap(appearance.spacing(4.0))
+                    .children(selected.then(|| badge("In use", appearance)))
+                    .child(badge(
+                        match summary.kind {
+                            SchemeKind::Chrome => "Application",
+                            SchemeKind::Terminal => "Terminal",
+                        },
+                        appearance,
+                    ))
+                    .child(badge(
+                        match summary.appearance {
+                            crate::appearance::Appearance::Light => "Light",
+                            crate::appearance::Appearance::Dark => "Dark",
+                        },
+                        appearance,
+                    )),
+            )
             .child(
                 div()
                     .w(appearance.text_size(72.0))
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
                     .when(!summary.builtin, |slot| {
                         slot.child(
                             spaceterm_ui::Button::new(

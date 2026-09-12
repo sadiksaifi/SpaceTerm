@@ -23,10 +23,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconButton, IconName, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, Picker,
-    PickerOption, SegmentedControl, SegmentedOption, SegmentedSize, Switch, TextInput,
-    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant, ToggleSize,
-    TooltipLayer,
+    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics, SegmentedControl, SegmentedOption, SegmentedSize, Switch,
+    TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
+    ToggleSize, TooltipLayer,
 };
 
 use crate::appearance::{
@@ -36,7 +36,10 @@ use crate::appearance::{
 use crate::ui::appearance::ChromeAppearance;
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
-use controls::{SettingsRow, Stepper, action_button, gpui_color, reset_button, section_header};
+use controls::{
+    SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color, reset_button,
+    section_header,
+};
 use editor::{SaveStatus, SettingsEditor};
 
 actions!(
@@ -53,12 +56,9 @@ actions!(
 pub(crate) const SETTINGS_KEY_CONTEXT: &str = "Settings";
 
 /// Fixed window geometry. Settings does not resize, so content scrolls inside a stable frame.
-const WINDOW_WIDTH: f32 = 820.0;
-const WINDOW_HEIGHT: f32 = 620.0;
+const WINDOW_WIDTH: f32 = 880.0;
+const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
-
-/// How far into the detail pane a section must reach before navigation selects it.
-const SCROLL_SPY_THRESHOLD: f32 = 96.0;
 
 /// The one Settings Window, so a second request activates the existing window.
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
@@ -235,9 +235,10 @@ pub(crate) struct SettingsWindow {
     search: Entity<TextInput>,
     query: SharedString,
     scroll: ScrollHandle,
+    /// The scroll affordance for the detail pane, so a long section is visibly scrollable.
+    scrollbar: Entity<OverlayScrollbar<f32>>,
+    /// The section the detail pane presents. Navigation selects one view at a time.
     active_section: SettingsSectionId,
-    /// The scroll offset the selection was last derived from, so a still pane keeps its selection.
-    spied_offset: gpui::Pixels,
     /// The row Settings Search revealed, highlighted so the eye lands on it.
     revealed: Option<SettingsRowId>,
     chrome_schemes: RememberedSchemes,
@@ -282,9 +283,31 @@ impl SettingsWindow {
             if matches!(event, TextInputEvent::ValueChanged(_)) {
                 settings.query = SharedString::from(search.read(cx).value().to_owned());
                 settings.revealed = catalog::matching_rows(&settings.query).first().copied();
+                // Each section is its own view, so a query that the visible one cannot answer
+                // moves to the first section that can.
+                if settings.rows_for(settings.active_section).is_empty()
+                    && let Some(section) = settings.section_for_query()
+                {
+                    settings.active_section = section;
+                    settings.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                }
                 cx.notify();
             }
         })
+        .detach();
+        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("settings-scrollbar"));
+        cx.subscribe(
+            &scrollbar,
+            |settings, _, event: &OverlayScrollbarEvent<f32>, cx| {
+                if let OverlayScrollbarEvent::OffsetRequested(offset) = event {
+                    let current = settings.scroll.offset();
+                    settings
+                        .scroll
+                        .set_offset(gpui::point(current.x, px(-*offset)));
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         // Another surface may commit while this window is open, and a preview repaints everything.
         cx.observe_global::<crate::ui::appearance_runtime::InstalledAppearance>(|settings, cx| {
@@ -297,8 +320,8 @@ impl SettingsWindow {
             search,
             query: SharedString::default(),
             scroll: ScrollHandle::new(),
+            scrollbar,
             active_section: SettingsSectionId::Appearance,
-            spied_offset: px(0.0),
             revealed: None,
             chrome_schemes,
             terminal_schemes,
@@ -344,32 +367,18 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Selects a section and scrolls the detail pane to it.
+    /// Presents one section. Each section is its own view, so the detail pane starts at its top.
     fn reveal_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
         self.active_section = section;
-        if let Some(index) = SettingsSectionId::ALL
-            .iter()
-            .position(|candidate| *candidate == section)
-        {
-            self.scroll.scroll_to_top_of_item(index);
-        }
-        self.spied_offset = self.scroll.offset().y;
+        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
 
-    /// The section the detail pane is showing, from the last painted frame's geometry.
-    fn scrolled_section(&self) -> SettingsSectionId {
-        let top = self.scroll.bounds().top() + px(SCROLL_SPY_THRESHOLD);
-        let mut active = SettingsSectionId::ALL[0];
-        for (index, section) in SettingsSectionId::ALL.iter().enumerate() {
-            let Some(bounds) = self.scroll.bounds_for_item(index) else {
-                continue;
-            };
-            if bounds.top() <= top {
-                active = *section;
-            }
-        }
-        active
+    /// The first section answering the current query, so search never lands on an empty view.
+    fn section_for_query(&self) -> Option<SettingsSectionId> {
+        SettingsSectionId::ALL
+            .into_iter()
+            .find(|section| !self.rows_for(*section).is_empty())
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
@@ -436,17 +445,33 @@ impl SettingsWindow {
     }
 }
 
+impl SettingsWindow {
+    fn scroll_metrics(&self) -> Option<ScrollMetrics<f32>> {
+        ScrollMetrics::for_pixels(
+            0.0,
+            f32::from(self.scroll.bounds().size.height),
+            f32::from(self.scroll.max_offset().height),
+            -f32::from(self.scroll.offset().y),
+        )
+    }
+
+    fn sync_scrollbar(&self, cx: &mut App) {
+        let metrics = self.scroll_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
+    }
+
+    fn reveal_scrollbar(&self, cx: &mut App) {
+        let metrics = self.scroll_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.reveal(metrics, cx));
+    }
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = crate::ui::appearance::chrome(cx).clone();
-        // Scroll-spy reads the previous frame's geometry. It speaks only when the reader scrolled:
-        // a deliberate selection must not be overwritten by a pane that has not moved, and an
-        // active query replaces navigation meaning entirely.
-        let offset = self.scroll.offset().y;
-        if self.query.is_empty() && offset != self.spied_offset {
-            self.spied_offset = offset;
-            self.active_section = self.scrolled_section();
-        }
+        self.sync_scrollbar(cx);
         let content = div()
             .key_context(SETTINGS_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -505,26 +530,38 @@ impl SettingsWindow {
                     .px(appearance.spacing(8.0))
                     .rounded(px(6.0))
                     .cursor_default()
+                    // A navigation row is a chrome list row: the selected row takes the ghost
+                    // selected fill and hover keeps precedence over it, as every other list in
+                    // SpaceTerm does. The accent role stays reserved for accents such as the
+                    // active Tab underline, which no scheme promises to be legible behind text.
                     .when(selected, |entry| {
                         entry
-                            .bg(gpui_color(appearance.colors.navigation_selection))
-                            .text_color(gpui_color(appearance.colors.element_selected_foreground))
+                            .bg(gpui_color(appearance.colors.ghost_element_selected))
+                            .font(appearance.emphasis.clone())
+                            .text_color(gpui_color(
+                                appearance.colors.ghost_element_selected_foreground,
+                            ))
                     })
                     .when(!selected && has_matches, |entry| {
+                        entry.text_color(gpui_color(appearance.colors.text_secondary))
+                    })
+                    .when(has_matches, |entry| {
                         entry
-                            .text_color(gpui_color(appearance.colors.text_secondary))
                             .hover(|entry| {
-                                entry.bg(gpui_color(appearance.colors.ghost_element_hover))
+                                entry
+                                    .bg(gpui_color(appearance.colors.ghost_element_hover))
+                                    .text_color(gpui_color(
+                                        appearance.colors.ghost_element_hover_foreground,
+                                    ))
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |settings, cx| {
+                                    settings.reveal_section(section, cx)
+                                });
                             })
                     })
                     .when(!has_matches, |entry| {
                         entry.text_color(gpui_color(appearance.colors.text_disabled))
-                    })
-                    .when(has_matches, |entry| {
-                        entry.on_click(move |_, _, cx| {
-                            let _ = owner
-                                .update(cx, |settings, cx| settings.reveal_section(section, cx));
-                        })
                     })
                     .child(div().flex_none().child(Icon::new(
                         match section {
@@ -533,8 +570,10 @@ impl SettingsWindow {
                             SettingsSectionId::ColorSchemes => IconName::SunMoon,
                         },
                         appearance.text_size(13.0),
-                        gpui_color(if selected {
-                            appearance.colors.element_selected_foreground
+                        gpui_color(if !has_matches {
+                            appearance.colors.icon_disabled
+                        } else if selected {
+                            appearance.colors.icon_accent
                         } else {
                             appearance.colors.icon_muted
                         }),
@@ -585,10 +624,12 @@ impl SettingsWindow {
             .items_center()
             .w_full()
             .gap(appearance.spacing(5.0))
-            .px(appearance.spacing(6.0))
-            .h(appearance.height(24.0, 12.0))
-            .mb(appearance.spacing(4.0))
-            .rounded(px(5.0))
+            .px(appearance.spacing(7.0))
+            .h(appearance.height(28.0, 12.0))
+            // The search field belongs to the window, not to the navigation list under it, so the
+            // break between them is wider than the spacing inside the list.
+            .mb(appearance.spacing(12.0))
+            .rounded(px(6.0))
             .border_1()
             .border_color(gpui_color(if focused {
                 appearance.colors.input_focused_border
@@ -627,13 +668,11 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let sections = SettingsSectionId::ALL
-            .iter()
-            .map(|section| self.render_section(*section, appearance, window, cx))
-            .collect::<Vec<_>>();
-        let empty = self.rows_for(SettingsSectionId::Appearance).is_empty()
-            && self.rows_for(SettingsSectionId::Terminal).is_empty()
-            && self.rows_for(SettingsSectionId::ColorSchemes).is_empty();
+        // One section at a time: navigation selects a view rather than a scroll destination, so
+        // nothing from a neighbouring section can scroll into this one.
+        let section = self.render_section(self.active_section, appearance, window, cx);
+        let empty = self.rows_for(self.active_section).is_empty();
+        let revealing = cx.weak_entity();
         div()
             .flex()
             .flex_col()
@@ -643,27 +682,38 @@ impl SettingsWindow {
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
-                    .id("settings-detail")
-                    .track_scroll(&self.scroll)
+                    .relative()
+                    .flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(appearance.spacing(18.0))
-                    .p(appearance.spacing(16.0))
-                    .children(sections)
-                    .when(empty, |detail| {
-                        detail.child(
-                            div()
-                                .debug_selector(|| "settings-no-results".to_owned())
-                                .text_color(gpui_color(appearance.colors.text_muted))
-                                .child(SharedString::from(format!(
-                                    "No settings match “{}”.",
-                                    self.query
-                                ))),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .id("settings-detail")
+                            .track_scroll(&self.scroll)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .p(appearance.spacing(16.0))
+                            .on_scroll_wheel(move |_, _, cx| {
+                                let _ = revealing.update(cx, |settings, cx| {
+                                    settings.reveal_scrollbar(cx);
+                                });
+                            })
+                            .child(section)
+                            .when(empty, |detail| {
+                                detail.child(
+                                    div()
+                                        .debug_selector(|| "settings-no-results".to_owned())
+                                        .text_color(gpui_color(appearance.colors.text_muted))
+                                        .child(SharedString::from(format!(
+                                            "No settings match “{}”.",
+                                            self.query
+                                        ))),
+                                )
+                            }),
+                    )
+                    .child(self.scrollbar.clone()),
             )
             .into_any_element()
     }
@@ -677,7 +727,6 @@ impl SettingsWindow {
     ) -> AnyElement {
         let rows = self.rows_for(section);
         if rows.is_empty() {
-            // The section keeps its place in the scroll order so navigation indices stay stable.
             return div()
                 .debug_selector(move || format!("{}-empty", section.selector()))
                 .into_any_element();
@@ -725,6 +774,7 @@ impl SettingsWindow {
         let descriptor = row.descriptor();
         let control = self.render_control(row, appearance, cx);
         let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
+            .layout(row_layout(row))
             .reset(self.row_reset(row, cx))
             .highlighted(!self.query.is_empty() && self.revealed == Some(row));
         if let Some(description) = row_description(row) {
@@ -747,26 +797,42 @@ impl SettingsWindow {
                 self.render_appearance_mode(SchemeKind::Terminal, appearance, cx)
             }
             SettingsRowId::ChromeScheme => {
-                self.render_scheme_picker(row, SchemeKind::Chrome, None, cx)
+                self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
             }
-            SettingsRowId::ChromeLightScheme => {
-                self.render_scheme_picker(row, SchemeKind::Chrome, Some(Appearance::Light), cx)
-            }
-            SettingsRowId::ChromeDarkScheme => {
-                self.render_scheme_picker(row, SchemeKind::Chrome, Some(Appearance::Dark), cx)
-            }
+            SettingsRowId::ChromeLightScheme => self.render_scheme_picker(
+                row,
+                SchemeKind::Chrome,
+                Some(Appearance::Light),
+                appearance,
+                cx,
+            ),
+            SettingsRowId::ChromeDarkScheme => self.render_scheme_picker(
+                row,
+                SchemeKind::Chrome,
+                Some(Appearance::Dark),
+                appearance,
+                cx,
+            ),
             SettingsRowId::TerminalScheme => {
-                self.render_scheme_picker(row, SchemeKind::Terminal, None, cx)
+                self.render_scheme_picker(row, SchemeKind::Terminal, None, appearance, cx)
             }
-            SettingsRowId::TerminalLightScheme => {
-                self.render_scheme_picker(row, SchemeKind::Terminal, Some(Appearance::Light), cx)
-            }
-            SettingsRowId::TerminalDarkScheme => {
-                self.render_scheme_picker(row, SchemeKind::Terminal, Some(Appearance::Dark), cx)
-            }
+            SettingsRowId::TerminalLightScheme => self.render_scheme_picker(
+                row,
+                SchemeKind::Terminal,
+                Some(Appearance::Light),
+                appearance,
+                cx,
+            ),
+            SettingsRowId::TerminalDarkScheme => self.render_scheme_picker(
+                row,
+                SchemeKind::Terminal,
+                Some(Appearance::Dark),
+                appearance,
+                cx,
+            ),
             SettingsRowId::ChromeDensity => self.render_density(appearance, cx),
-            SettingsRowId::ChromeFontFamily => self.render_chrome_font(cx),
-            SettingsRowId::TerminalFontFamily => self.render_terminal_font(cx),
+            SettingsRowId::ChromeFontFamily => self.render_chrome_font(appearance, cx),
+            SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::ChromeBaseSize => self.render_chrome_size(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
             SettingsRowId::TerminalLineHeight => self.render_line_height(appearance, cx),
@@ -774,7 +840,7 @@ impl SettingsWindow {
             | SettingsRowId::ChromeEmphasisWeight
             | SettingsRowId::ChromeHeadingWeight
             | SettingsRowId::TerminalRegularWeight
-            | SettingsRowId::TerminalBoldWeight => self.render_weight(row, cx),
+            | SettingsRowId::TerminalBoldWeight => self.render_weight(row, appearance, cx),
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledSchemes => self.render_installed_schemes(appearance, cx),
@@ -891,6 +957,7 @@ impl SettingsWindow {
         row: SettingsRowId,
         kind: SchemeKind,
         slot: Option<Appearance>,
+        appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preferences = &self.editor.document().preferences;
@@ -914,7 +981,8 @@ impl SettingsWindow {
             .into_iter()
             .filter(|summary| summary.appearance == restrict)
             .collect::<Vec<_>>();
-        let selector = row.descriptor().selector;
+        // The control carries its own selector so it never collides with its row's.
+        let selector = control_selector(row);
         let items = summaries
             .iter()
             .map(|summary| {
@@ -923,15 +991,15 @@ impl SettingsWindow {
             })
             .collect::<Vec<_>>();
         let owner = cx.weak_entity();
-        ComboBox::new(
+        settings_selector(
             selector,
             row.descriptor().label,
             Some(current),
             "Choose a color scheme",
             items,
+            appearance,
         )
         .disabled(!self.editor.editable())
-        .debug_selector(selector)
         .on_accept(move |acceptance, _, cx| {
             let Some(id) = Some(acceptance.item_id().clone()) else {
                 return;
@@ -1003,7 +1071,11 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    fn render_chrome_font(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chrome_font(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let fonts = crate::ui::appearance_runtime::available_fonts(cx);
         let current = match &self.editor.document().preferences.chrome.typography.family {
             ChromeFontFamily::SystemUi => None,
@@ -1018,15 +1090,15 @@ impl SettingsWindow {
             )
         }));
         let owner = cx.weak_entity();
-        ComboBox::new(
-            "settings-chrome-font-family",
+        settings_selector(
+            "settings-chrome-font-family".to_owned(),
             "Interface font",
             Some(current),
             "Choose an interface font",
             items,
+            appearance,
         )
         .disabled(!self.editor.editable())
-        .debug_selector("settings-chrome-font-family")
         .on_accept(move |acceptance, _, cx| {
             let Some(choice) = Some(acceptance.item_id().clone()) else {
                 return;
@@ -1046,7 +1118,11 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    fn render_terminal_font(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_terminal_font(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let fonts = crate::ui::appearance_runtime::available_fonts(cx);
         let current = match &self
             .editor
@@ -1069,15 +1145,15 @@ impl SettingsWindow {
                 .map(|family| ComboBoxItem::new(Some(family.clone()), SharedString::from(family))),
         );
         let owner = cx.weak_entity();
-        ComboBox::new(
-            "settings-terminal-font-family",
+        settings_selector(
+            "settings-terminal-font-family".to_owned(),
             "Terminal font",
             Some(current),
             "Choose a monospace font",
             items,
+            appearance,
         )
         .disabled(!self.editor.editable())
-        .debug_selector("settings-terminal-font-family")
         .on_accept(move |acceptance, _, cx| {
             let Some(choice) = Some(acceptance.item_id().clone()) else {
                 return;
@@ -1205,7 +1281,16 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    fn render_weight(&mut self, row: SettingsRowId, cx: &mut Context<Self>) -> AnyElement {
+    /// Renders one font-weight row.
+    ///
+    /// Weight uses the same selector family as the scheme and font rows. One dropdown family for
+    /// every "choose one" row keeps a single form from presenting two different control shapes.
+    fn render_weight(
+        &mut self,
+        row: SettingsRowId,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let typography = &self.editor.document().preferences;
         let current = match row {
             SettingsRowId::ChromeRegularWeight => typography.chrome.typography.regular_weight,
@@ -1214,48 +1299,50 @@ impl SettingsWindow {
             SettingsRowId::TerminalRegularWeight => typography.terminal.typography.regular_weight,
             _ => typography.terminal.typography.bold_weight,
         };
-        let selector = row.descriptor().selector;
-        let options = WEIGHTS
+        let selector = control_selector(row);
+        let items = WEIGHTS
             .iter()
             .map(|(weight, label)| {
-                PickerOption::new(*weight, *label).debug_selector(format!("{selector}-{weight}"))
+                ComboBoxItem::new(*weight, *label).debug_selector(format!("{selector}-{weight}"))
             })
             .collect::<Vec<_>>();
         let owner = cx.weak_entity();
-        let picker = Picker::new(selector, row.descriptor().label, current, options);
-        match picker {
-            Ok(picker) => picker
-                .disabled(!self.editor.editable())
-                .debug_selector(selector)
-                .on_change(move |change, _, cx| {
-                    let weight = *change.value();
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.edit(
-                            move |draft| {
-                                let preferences = &mut draft.preferences;
-                                match row {
-                                    SettingsRowId::ChromeRegularWeight => {
-                                        preferences.chrome.typography.regular_weight = weight
-                                    }
-                                    SettingsRowId::ChromeEmphasisWeight => {
-                                        preferences.chrome.typography.emphasis_weight = weight
-                                    }
-                                    SettingsRowId::ChromeHeadingWeight => {
-                                        preferences.chrome.typography.heading_weight = weight
-                                    }
-                                    SettingsRowId::TerminalRegularWeight => {
-                                        preferences.terminal.typography.regular_weight = weight
-                                    }
-                                    _ => preferences.terminal.typography.bold_weight = weight,
-                                }
-                            },
-                            cx,
-                        );
-                    });
-                })
-                .into_any_element(),
-            Err(_) => div().into_any_element(),
-        }
+        settings_selector(
+            selector,
+            row.descriptor().label,
+            Some(current),
+            "Choose a weight",
+            items,
+            appearance,
+        )
+        .disabled(!self.editor.editable())
+        .on_accept(move |acceptance, _, cx| {
+            let weight = *acceptance.item_id();
+            let _ = owner.update(cx, |settings, cx| {
+                settings.edit(
+                    move |draft| {
+                        let preferences = &mut draft.preferences;
+                        match row {
+                            SettingsRowId::ChromeRegularWeight => {
+                                preferences.chrome.typography.regular_weight = weight
+                            }
+                            SettingsRowId::ChromeEmphasisWeight => {
+                                preferences.chrome.typography.emphasis_weight = weight
+                            }
+                            SettingsRowId::ChromeHeadingWeight => {
+                                preferences.chrome.typography.heading_weight = weight
+                            }
+                            SettingsRowId::TerminalRegularWeight => {
+                                preferences.terminal.typography.regular_weight = weight
+                            }
+                            _ => preferences.terminal.typography.bold_weight = weight,
+                        }
+                    },
+                    cx,
+                );
+            });
+        })
+        .into_any_element()
     }
 
     fn render_italic(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1269,6 +1356,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         Switch::new("settings-terminal-italic", "Italic text", value)
             .size(ToggleSize::Regular)
+            .label_hidden(true)
             .disabled(!self.editor.editable())
             .debug_selector("settings-terminal-italic")
             .on_change(move |change, _, cx| {
@@ -1298,6 +1386,7 @@ impl SettingsWindow {
             value,
         )
         .size(ToggleSize::Regular)
+        .label_hidden(true)
         .disabled(!self.editor.editable())
         .debug_selector("settings-terminal-bold-as-bright")
         .on_change(move |change, _, cx| {
@@ -1518,6 +1607,51 @@ fn terminal_font_families(fonts: &crate::appearance::AvailableFonts) -> Vec<Stri
         .filter(|font| font.class == FontClass::Monospace)
         .map(|font| font.family.clone())
         .collect()
+}
+
+/// One settings selector, decorated the same way wherever the form offers a choice.
+///
+/// Every selector filters a list, so its popup carries the same search glyph as the window's own
+/// search field, and the control marks the current value in its list.
+fn settings_selector<I: Clone + Eq + 'static>(
+    selector: String,
+    accessibility_name: impl Into<SharedString>,
+    selected: Option<I>,
+    prompt: &'static str,
+    items: Vec<ComboBoxItem<I>>,
+    appearance: &ChromeAppearance,
+) -> ComboBox<I> {
+    let glyph = gpui_color(appearance.colors.icon_muted);
+    ComboBox::new(
+        SharedString::from(selector.clone()),
+        accessibility_name,
+        selected,
+        prompt,
+        items,
+    )
+    .input_leading(move |size| Icon::new(IconName::Search, size, glyph).into_any_element())
+    .debug_selector(selector)
+}
+
+/// The selector of the control inside one row.
+///
+/// A row and the control it holds are separate elements, so they carry separate selectors and a
+/// test can address either one.
+fn control_selector(row: SettingsRowId) -> String {
+    format!("{}-control", row.descriptor().selector)
+}
+
+/// Where a row's label sits.
+///
+/// The Color Schemes rows present lists and button groups rather than one control, so they take
+/// the whole row and carry their label above it.
+fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
+    match row {
+        SettingsRowId::InstalledSchemes
+        | SettingsRowId::SchemeInterchange
+        | SettingsRowId::AppearanceDiagnostics => SettingsRowLayout::Above,
+        _ => SettingsRowLayout::Beside,
+    }
 }
 
 /// One line of guidance for the rows that warrant it.
