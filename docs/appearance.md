@@ -126,7 +126,13 @@ removes that override so it inherits again. No reset removes installed custom sc
 The Settings Window is the interface for everything above, across four sections: Appearance,
 Interface, Terminal, and Color Schemes. It opens from the application menu and its key equivalent,
 presents one navigation list beside a detail pane showing one section at a time, groups each
-section's rows into titled boxes, and searches Settings Row labels, group titles, and keywords.
+section's rows under a title, and searches Settings Row labels, group titles, and keywords.
+
+One layout rule covers every row on every page: the label starts at the content's left edge, the
+control ends at its right edge, guidance sits under the label, and a hairline separates one row
+from the next. A group is a title and a run of rows, not a framed card: a scheme may resolve the
+window, panel, and elevated surfaces to one color, as the built-in dark scheme does, so a card
+could only ever be drawn as an outline.
 
 Appearance Mode is presented once, not per domain. The document keeps a separate selection for each
 domain, and the one control writes Light, Dark, or Auto to both in a single edit, mapping onto a

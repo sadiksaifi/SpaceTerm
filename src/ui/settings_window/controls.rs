@@ -20,14 +20,12 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
 }
 
-/// The label column width, so every control in a group starts at the same offset.
-const LABEL_WIDTH: f32 = 160.0;
+/// The least space between a label and the control it names, so the two never touch.
+const LABEL_GAP: f32 = 16.0;
 
-/// The gap between the label column and the control it names.
-const LABEL_GAP: f32 = 12.0;
-
-/// The trailing column reserved for the reset affordance, so controls never shift when it appears.
-const RESET_WIDTH: f32 = 28.0;
+/// The trailing column every row ends with, so a row action never shifts the control beside it and
+/// every control on every page shares one right edge.
+pub(super) const TRAILING_WIDTH: f32 = 28.0;
 
 /// How a row arranges its label and its content.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -41,11 +39,13 @@ pub(super) enum SettingsRowLayout {
     Full,
 }
 
-/// One titled box of related rows.
+/// One titled run of related rows.
 ///
-/// Grouping is the structure a settings form is read by: a title names a handful of rows, and the
-/// box tells the eye where those rows end. Rows inside one box are separated by a hairline rather
-/// than by space, so the box reads as one surface.
+/// Grouping is the structure a settings form is read by: a title names a handful of rows, and a
+/// hairline separates one row from the next. There is no frame around the run, because a frame
+/// would have to be drawn as a border: a scheme is free to resolve the window, panel, and elevated
+/// surfaces to one color, and the built-in dark scheme does exactly that, so a filled card would
+/// be invisible and only its outline would remain.
 pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
@@ -83,28 +83,16 @@ impl SettingsGroup {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(6.0))
+            .gap(appearance.spacing(2.0))
             .child(
                 div()
                     .debug_selector(move || title_selector.clone())
-                    .pl(appearance.spacing(2.0))
                     .font(appearance.emphasis.clone())
                     .text_size(appearance.text_size(11.0))
                     .text_color(gpui_color(appearance.colors.text_secondary))
                     .child(self.title),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .rounded(px(8.0))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(gpui_color(appearance.colors.border))
-                    .bg(gpui_color(appearance.colors.panel_background))
-                    .children(box_rows),
-            )
+            .child(div().flex().flex_col().w_full().children(box_rows))
     }
 }
 
@@ -163,32 +151,28 @@ impl SettingsRow {
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let selector = self.selector;
         let label_selector = format!("{selector}-label");
-        let label_width = appearance.text_size(LABEL_WIDTH);
-        let label_gap = appearance.spacing(LABEL_GAP);
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
+        // One rule for the whole form: the label starts at the content's left edge, the control
+        // ends at its right edge, and guidance sits under the label. Nothing is centered, and no
+        // row invents a column of its own.
         let label = (!full).then(|| {
             div()
                 .debug_selector(move || label_selector.clone())
-                .flex_none()
-                .text_color(gpui_color(appearance.colors.text_secondary))
+                .min_w_0()
+                .flex_1()
+                .text_color(gpui_color(appearance.colors.text))
                 .whitespace_normal()
-                .when(above, |label| label.font(appearance.emphasis.clone()))
-                .when(!above, |label| {
-                    label.w(label_width).text_align(gpui::TextAlign::Right)
-                })
                 .child(self.label)
                 .into_any_element()
         });
         let (label_above, label_beside) = if above { (label, None) } else { (None, label) };
-        // A label beside its control is centered against it, so a tall control and a short one both
-        // read as one line. Guidance keeps its own line under the control column.
         let primary = div()
             .flex()
             .flex_row()
             .items_center()
             .w_full()
-            .gap(label_gap)
+            .gap(appearance.spacing(LABEL_GAP))
             .children(label_beside)
             .child(
                 div()
@@ -196,28 +180,24 @@ impl SettingsRow {
                     .flex_row()
                     .items_center()
                     .min_w_0()
-                    .flex_1()
+                    .when(above || full, |content| content.flex_1())
+                    .when(!(above || full), |content| content.flex_none())
                     .child(self.control),
             )
-            // The trailing column is reserved so a control never shifts when its reset appears. A
-            // row that cannot be reset, such as a list, keeps the width for its own content.
-            .when(!(above || full) || self.reset.is_some(), |line| {
-                line.child(
-                    div()
-                        .w(appearance.text_size(RESET_WIDTH))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .children(self.reset),
-                )
-            });
+            .child(
+                div()
+                    .w(appearance.text_size(TRAILING_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .children(self.reset),
+            );
         let description = self.description.map(|description| {
             div()
                 .text_size(appearance.text_size(11.0))
                 .text_color(gpui_color(appearance.colors.text_muted))
                 .whitespace_normal()
-                .when(!(above || full), |line| line.pl(label_width + label_gap))
                 .child(description)
         });
         div()
@@ -225,9 +205,8 @@ impl SettingsRow {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(4.0))
-            .px(appearance.spacing(12.0))
-            .py(appearance.spacing(8.0))
+            .gap(appearance.spacing(3.0))
+            .py(appearance.spacing(9.0))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(appearance.colors.info_background))
             })
@@ -430,8 +409,6 @@ pub(super) fn swatch_strip(
         .items_center()
         .rounded(px(4.0))
         .overflow_hidden()
-        .border_1()
-        .border_color(gpui_color(appearance.colors.border_variant))
         .children(
             swatches
                 .iter()
@@ -439,9 +416,10 @@ pub(super) fn swatch_strip(
         )
 }
 
-/// A short labeled classification, such as a scheme's kind or appearance.
+/// A short status a row carries, such as a scheme being the one in use.
 ///
-/// The fill comes from the raised element role rather than the plain element background, which a
+/// It is filled rather than outlined, so it reads as a state rather than as one more frame. The
+/// fill comes from the raised element role rather than the plain element background, which a
 /// scheme may resolve to the window background and would leave the badge invisible.
 pub(super) fn badge(
     label: impl Into<SharedString>,
@@ -455,8 +433,6 @@ pub(super) fn badge(
         .px(appearance.spacing(6.0))
         .rounded(px(4.0))
         .bg(gpui_color(appearance.colors.element_active))
-        .border_1()
-        .border_color(gpui_color(appearance.colors.border_variant))
         .text_size(appearance.text_size(10.0))
         .text_color(gpui_color(appearance.colors.text_secondary))
         .child(label.into())

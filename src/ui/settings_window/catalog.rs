@@ -58,8 +58,8 @@ impl SettingsSectionId {
             }
             Self::Terminal => "Type and text rendering in terminal output.",
             Self::ColorSchemes => {
-                "Every scheme installed for the interface and the terminal, and where they come \
-                 from."
+                "Every scheme installed for the interface and the terminal. Built-in schemes are \
+                 always available; imported schemes can be removed."
             }
         }
     }
@@ -98,7 +98,8 @@ pub(super) enum SettingsRowId {
     TerminalBoldWeight,
     TerminalItalic,
     TerminalBoldAsBright,
-    InstalledSchemes,
+    InterfaceSchemes,
+    TerminalSchemes,
     SchemeInterchange,
 }
 
@@ -135,7 +136,9 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::InstalledSchemes | Self::SchemeInterchange => return None,
+            Self::InterfaceSchemes | Self::TerminalSchemes | Self::SchemeInterchange => {
+                return None;
+            }
         })
     }
 }
@@ -347,10 +350,10 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-terminal-bold-as-bright",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::InstalledSchemes,
+        id: SettingsRowId::InterfaceSchemes,
         section: SettingsSectionId::ColorSchemes,
-        group: "Installed",
-        label: "Installed schemes",
+        group: "Interface",
+        label: "Interface schemes",
         keywords: &[
             "builtin",
             "custom",
@@ -360,8 +363,27 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "unavailable",
             "fallback",
             "missing",
+            "chrome",
         ],
-        selector: "settings-row-installed-schemes",
+        selector: "settings-row-interface-schemes",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalSchemes,
+        section: SettingsSectionId::ColorSchemes,
+        group: "Terminal",
+        label: "Terminal schemes",
+        keywords: &[
+            "builtin",
+            "custom",
+            "remove",
+            "delete",
+            "list",
+            "unavailable",
+            "fallback",
+            "missing",
+            "ansi",
+        ],
+        selector: "settings-row-terminal-schemes",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::SchemeInterchange,
@@ -380,7 +402,7 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 22] = [
+    const EVERY_ROW: [SettingsRowId; 23] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::ChromeDensity,
         SettingsRowId::ChromeScheme,
@@ -401,7 +423,8 @@ mod tests {
         SettingsRowId::TerminalBoldWeight,
         SettingsRowId::TerminalItalic,
         SettingsRowId::TerminalBoldAsBright,
-        SettingsRowId::InstalledSchemes,
+        SettingsRowId::InterfaceSchemes,
+        SettingsRowId::TerminalSchemes,
         SettingsRowId::SchemeInterchange,
     ];
 
@@ -510,8 +533,8 @@ mod tests {
     /// words a person searches for when a scheme is missing still reach that page.
     #[test]
     fn a_missing_scheme_query_reaches_the_library() {
-        assert!(matching_rows("unavailable").contains(&SettingsRowId::InstalledSchemes));
-        assert!(matching_rows("fallback").contains(&SettingsRowId::InstalledSchemes));
+        assert!(matching_rows("unavailable").contains(&SettingsRowId::InterfaceSchemes));
+        assert!(matching_rows("fallback").contains(&SettingsRowId::TerminalSchemes));
     }
 
     #[test]
@@ -541,7 +564,9 @@ mod tests {
         for row in ROWS {
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::InstalledSchemes | SettingsRowId::SchemeInterchange
+                SettingsRowId::InterfaceSchemes
+                    | SettingsRowId::TerminalSchemes
+                    | SettingsRowId::SchemeInterchange
             );
             assert_eq!(
                 row.id.reset_target().is_some(),

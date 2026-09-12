@@ -14,7 +14,7 @@ use crate::settings::SchemeImport;
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use super::controls::{action_button, badge, gpui_color, swatch_strip};
+use super::controls::{TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip};
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
 
 /// The greatest number of scheme rows the section draws at once.
@@ -42,45 +42,39 @@ enum RemovalChoice {
 }
 
 impl SettingsWindow {
-    /// The scheme library: every installed scheme, grouped by the surface it dresses.
+    /// One surface's installed schemes.
     ///
-    /// The list draws no frame of its own. It is the only content of its box, and the box already
-    /// says where the library begins and ends.
+    /// The group's own title names the surface, so the list adds no heading of its own: it is a
+    /// run of rows separated by hairlines, like every other row on every other page.
     pub(super) fn render_installed_schemes(
         &mut self,
+        kind: SchemeKind,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chrome = self.scheme_summaries(SchemeKind::Chrome, cx);
-        let terminal = self.scheme_summaries(SchemeKind::Terminal, cx);
-        let total = chrome.len() + terminal.len();
-        let mut budget = VISIBLE_SCHEMES;
-        let mut shown = 0;
-        let mut children: Vec<AnyElement> = Vec::new();
-        for (kind, summaries) in [
-            (SchemeKind::Chrome, chrome),
-            (SchemeKind::Terminal, terminal),
-        ] {
-            let visible = summaries.into_iter().take(budget).collect::<Vec<_>>();
-            let Some(last) = visible.len().checked_sub(1) else {
-                continue;
-            };
-            budget -= visible.len();
-            shown += visible.len();
-            children.push(
-                scheme_kind_heading(kind, children.is_empty(), appearance).into_any_element(),
-            );
-            for (index, summary) in visible.iter().enumerate() {
-                children.push(self.render_scheme_row(summary, index < last, appearance, cx));
-            }
-        }
-        let remaining = total - shown;
+        let summaries = self.scheme_summaries(kind, cx);
+        let total = summaries.len();
+        let visible = summaries
+            .into_iter()
+            .take(VISIBLE_SCHEMES)
+            .collect::<Vec<_>>();
+        let last = visible.len().saturating_sub(1);
+        let rows = visible
+            .iter()
+            .enumerate()
+            .map(|(index, summary)| self.render_scheme_row(summary, index < last, appearance, cx))
+            .collect::<Vec<_>>();
+        let remaining = total - visible.len();
+        let selector = match kind {
+            SchemeKind::Chrome => "settings-installed-schemes-chrome",
+            SchemeKind::Terminal => "settings-installed-schemes-terminal",
+        };
         div()
-            .debug_selector(|| "settings-installed-schemes".to_owned())
+            .debug_selector(move || selector.to_owned())
             .flex()
             .flex_col()
             .w_full()
-            .children(children)
+            .children(rows)
             .when(remaining > 0, |list| {
                 list.child(
                     div()
@@ -147,6 +141,10 @@ impl SettingsWindow {
         )
     }
 
+    /// One installed scheme: its colors, its name, what it is, and what can be done with it.
+    ///
+    /// The classifications read as one dim line rather than a row of outlined pills, so only the
+    /// status worth noticing, the scheme actually in use, carries a fill.
     fn render_scheme_row(
         &self,
         summary: &SchemeSummary,
@@ -159,15 +157,26 @@ impl SettingsWindow {
         let id = summary.id.clone();
         let name = summary.name.clone();
         let row_selector = format!("settings-scheme-row-{}", summary.id.as_str());
+        let classification = format!(
+            "{} · {}",
+            match summary.appearance {
+                crate::appearance::Appearance::Light => "Light",
+                crate::appearance::Appearance::Dark => "Dark",
+            },
+            if summary.builtin {
+                "Built-in"
+            } else {
+                "Custom"
+            }
+        );
         div()
             .debug_selector(move || row_selector.clone())
             .flex()
             .flex_row()
             .items_center()
             .w_full()
-            .gap(appearance.spacing(8.0))
-            .px(appearance.spacing(10.0))
-            .h(appearance.height(32.0, 12.0))
+            .gap(appearance.spacing(10.0))
+            .h(appearance.height(34.0, 12.0))
             .when(separated, |row| {
                 row.border_b_1()
                     .border_color(gpui_color(appearance.colors.border_variant))
@@ -188,41 +197,42 @@ impl SettingsWindow {
                     .text_color(gpui_color(appearance.colors.text))
                     .child(SharedString::from(summary.name.clone())),
             )
+            .children(selected.then(|| badge("In use", appearance)))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
                     .flex_none()
-                    .justify_end()
-                    .gap(appearance.spacing(4.0))
-                    .children(selected.then(|| badge("In use", appearance)))
-                    .child(badge(
-                        match summary.appearance {
-                            crate::appearance::Appearance::Light => "Light",
-                            crate::appearance::Appearance::Dark => "Dark",
-                        },
-                        appearance,
-                    )),
+                    .text_size(appearance.text_size(11.0))
+                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .child(SharedString::from(classification)),
             )
             .child(
+                // Every row on every page ends with this column, so nothing shifts when an action
+                // is present on one row and absent on the next.
                 div()
-                    .w(appearance.text_size(72.0))
+                    .w(appearance.text_size(TRAILING_WIDTH))
                     .flex_none()
                     .flex()
                     .flex_row()
                     .justify_end()
                     .when(!summary.builtin, |slot| {
                         slot.child(
-                            spaceterm_ui::Button::new(
+                            spaceterm_ui::IconButton::new(
                                 SharedString::from(format!(
                                     "settings-scheme-remove-{}",
                                     summary.id.as_str()
                                 )),
-                                "Remove",
+                                SharedString::from(format!("Remove {}", summary.name)),
+                                |foreground| {
+                                    spaceterm_ui::Icon::new(
+                                        spaceterm_ui::IconName::Trash2,
+                                        px(12.0),
+                                        foreground,
+                                    )
+                                    .into_any_element()
+                                },
                             )
                             .variant(spaceterm_ui::ButtonVariant::Ghost)
-                            .size(spaceterm_ui::ButtonSize::Compact)
+                            .size(spaceterm_ui::ButtonSize::Small)
                             .disabled(!removable)
                             .tab_stop(true)
                             .debug_selector(format!(
@@ -239,14 +249,6 @@ impl SettingsWindow {
                                     );
                                 },
                             )),
-                        )
-                    })
-                    .when(summary.builtin, |slot| {
-                        slot.child(
-                            div()
-                                .text_size(appearance.text_size(10.0))
-                                .text_color(gpui_color(appearance.colors.text_muted))
-                                .child("Built-in"),
                         )
                     }),
             )
@@ -532,34 +534,6 @@ impl SettingsWindow {
         })
         .detach();
     }
-}
-
-/// The subhead naming the surface the schemes under it dress.
-fn scheme_kind_heading(
-    kind: SchemeKind,
-    leading: bool,
-    appearance: &ChromeAppearance,
-) -> impl IntoElement {
-    div()
-        .debug_selector(move || {
-            format!(
-                "settings-scheme-heading-{}",
-                match kind {
-                    SchemeKind::Chrome => "chrome",
-                    SchemeKind::Terminal => "terminal",
-                }
-            )
-        })
-        .w_full()
-        .pb(appearance.spacing(4.0))
-        .when(!leading, |heading| heading.pt(appearance.spacing(12.0)))
-        .font(appearance.emphasis.clone())
-        .text_size(appearance.text_size(10.0))
-        .text_color(gpui_color(appearance.colors.text_muted))
-        .child(match kind {
-            SchemeKind::Chrome => "Interface",
-            SchemeKind::Terminal => "Terminal",
-        })
 }
 
 fn installed_message(installed: usize) -> SharedString {

@@ -894,7 +894,8 @@ fn the_scheme_library_warns_only_when_something_could_not_be_resolved(cx: &mut T
 
     assert_eq!(cx.debug_bounds("settings-diagnostics-notice"), None);
     assert!(
-        cx.debug_bounds("settings-installed-schemes").is_some(),
+        cx.debug_bounds("settings-installed-schemes-chrome")
+            .is_some(),
         "the library lists what is installed"
     );
 }
@@ -921,8 +922,11 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
                 .debug_bounds(leaked(row.descriptor().selector))
                 .unwrap_or_else(|| panic!("{row:?} should render"));
 
+            // Half a pixel of slack, because the group's height and its rows' heights are each
+            // rounded from the same scaled spacing and can disagree in the last half pixel.
+            let slack = px(0.5);
             assert!(
-                bounds.top() >= frame.top() && bounds.bottom() <= frame.bottom(),
+                bounds.top() >= frame.top() - slack && bounds.bottom() <= frame.bottom() + slack,
                 "{row:?} should sit inside {group}, got {bounds:?} in {frame:?}"
             );
             assert!(
@@ -931,6 +935,59 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
                 "{group} should carry its title"
             );
         }
+    }
+}
+
+/// One alignment rule for the whole form: labels share a left edge, controls share a right edge.
+///
+/// This is the property that makes a settings page look designed rather than assembled. It is
+/// asserted numerically because it is the kind of thing that decays one row at a time.
+#[gpui::test]
+fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
+    cx: &mut TestAppContext,
+) {
+    let (window, _harness, cx) = open_settings(cx);
+
+    for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+
+        let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
+        let mut right: Option<(SettingsRowId, gpui::Pixels)> = None;
+        for row in window.read_with(cx, |window, _| window.rows_for(section)) {
+            let bounds = cx
+                .debug_bounds(leaked(row.descriptor().selector))
+                .unwrap_or_else(|| panic!("{row:?} should render"));
+            if let Some(label) =
+                cx.debug_bounds(leaked_owned(format!("{}-label", row.descriptor().selector)))
+            {
+                if let Some((first, edge)) = left {
+                    assert_eq!(
+                        label.left(),
+                        edge,
+                        "{row:?} starts its label at a different edge than {first:?}"
+                    );
+                } else {
+                    left = Some((row, label.left()));
+                }
+                assert_eq!(
+                    label.left(),
+                    bounds.left(),
+                    "{row:?} should start its label at the row's own left edge"
+                );
+            }
+            if let Some((first, edge)) = right {
+                assert_eq!(
+                    bounds.right(),
+                    edge,
+                    "{row:?} ends at a different edge than {first:?}"
+                );
+            } else {
+                right = Some((row, bounds.right()));
+            }
+        }
+        // The library's rows carry no label of their own: their group title names them. Every
+        // section still shares the one right edge, which is what the loop above checked.
+        assert!(right.is_some(), "{section:?} should present a row");
     }
 }
 
@@ -956,16 +1013,27 @@ fn the_scheme_library_separates_the_interface_from_the_terminal(cx: &mut TestApp
     select_section(SettingsSectionId::ColorSchemes, cx);
 
     let interface = cx
-        .debug_bounds("settings-scheme-heading-chrome")
-        .expect("the interface schemes should carry a heading");
+        .debug_bounds("settings-installed-schemes-chrome")
+        .expect("the interface schemes should render");
     let terminal = cx
-        .debug_bounds("settings-scheme-heading-terminal")
-        .expect("the terminal schemes should carry a heading");
+        .debug_bounds("settings-installed-schemes-terminal")
+        .expect("the terminal schemes should render");
 
     assert!(
         interface.bottom() <= terminal.top(),
         "the two kinds should not interleave, got {interface:?} and {terminal:?}"
     );
+    // Each kind is titled by its own group rather than by a heading inside a shared list, so the
+    // library reads the same way as every other page.
+    for group in [
+        "settings-section-color-schemes-group-interface-title",
+        "settings-section-color-schemes-group-terminal-title",
+    ] {
+        assert!(
+            cx.debug_bounds(leaked(group)).is_some(),
+            "{group} is absent"
+        );
+    }
 }
 
 #[gpui::test]

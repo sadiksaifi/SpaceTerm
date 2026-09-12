@@ -704,7 +704,8 @@ impl SettingsWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .p(appearance.spacing(16.0))
+                            .px(appearance.spacing(20.0))
+                            .py(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
                                 let _ = revealing.update(cx, |settings, cx| {
                                     settings.reveal_scrollbar(cx);
@@ -768,7 +769,7 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(16.0))
+            .gap(appearance.spacing(20.0))
             .child(section_header(
                 section.selector(),
                 section.title(),
@@ -867,7 +868,12 @@ impl SettingsWindow {
             | SettingsRowId::TerminalBoldWeight => self.render_weight(row, appearance, cx),
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
-            SettingsRowId::InstalledSchemes => self.render_installed_schemes(appearance, cx),
+            SettingsRowId::InterfaceSchemes => {
+                self.render_installed_schemes(SchemeKind::Chrome, appearance, cx)
+            }
+            SettingsRowId::TerminalSchemes => {
+                self.render_installed_schemes(SchemeKind::Terminal, appearance, cx)
+            }
             SettingsRowId::SchemeInterchange => self.render_scheme_interchange(appearance, cx),
         }
     }
@@ -1657,9 +1663,9 @@ fn control_selector(row: SettingsRowId) -> String {
 /// the only row in its box, so the group's own title names them and the content spans the row.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::InstalledSchemes | SettingsRowId::SchemeInterchange => {
-            SettingsRowLayout::Full
-        }
+        SettingsRowId::InterfaceSchemes
+        | SettingsRowId::TerminalSchemes
+        | SettingsRowId::SchemeInterchange => SettingsRowLayout::Full,
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -1672,9 +1678,6 @@ fn row_description(row: SettingsRowId) -> Option<&'static str> {
              dark setting.",
         ),
         SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
-        SettingsRowId::InstalledSchemes => {
-            Some("Built-in schemes are always available. Imported schemes can be removed.")
-        }
         _ => None,
     }
 }
