@@ -398,6 +398,15 @@ impl Checkbox {
         self
     }
 
+    /// Hides the visible label while retaining it as the logical accessibility name.
+    ///
+    /// Use it only where surrounding presentation already names the control, such as a settings
+    /// row whose own label column carries the name.
+    pub fn label_hidden(mut self, label_hidden: bool) -> Self {
+        self.core.label_hidden = label_hidden;
+        self
+    }
+
     /// Makes the labeled hit target fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
@@ -493,6 +502,15 @@ impl Switch {
         self
     }
 
+    /// Hides the visible label while retaining it as the logical accessibility name.
+    ///
+    /// Use it only where surrounding presentation already names the control, such as a settings
+    /// row whose own label column carries the name.
+    pub fn label_hidden(mut self, label_hidden: bool) -> Self {
+        self.core.label_hidden = label_hidden;
+        self
+    }
+
     /// Makes the label and trailing switch fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
@@ -555,6 +573,7 @@ enum ToggleKind {
 struct ToggleCore {
     id: ElementId,
     label: SharedString,
+    label_hidden: bool,
     size: ToggleSize,
     disabled: bool,
     tab_stop: bool,
@@ -570,6 +589,7 @@ impl ToggleCore {
         Self {
             id,
             label,
+            label_hidden: false,
             size: ToggleSize::default(),
             disabled: false,
             tab_stop: true,
@@ -657,7 +677,9 @@ impl ToggleCore {
                     .group_active(INTERACTION_GROUP, move |style| pressed.label(style))
             });
         let is_switch = matches!(kind, ToggleKind::Switch);
-        let content = if is_switch {
+        let content = if self.label_hidden {
+            vec![indicator]
+        } else if is_switch {
             vec![label.into_any_element(), indicator]
         } else {
             vec![indicator, label.into_any_element()]
@@ -1400,6 +1422,44 @@ mod tests {
 
         assert!(ltr_thumb.center().x > ltr_track.center().x);
         assert!(rtl_thumb.center().x < rtl_track.center().x);
+    }
+
+    struct HiddenLabelRoot;
+
+    impl Render for HiddenLabelRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .child(
+                    Switch::new("labeled-switch", "Italic text", true)
+                        .debug_selector("labeled-switch")
+                        .on_change(|_, _, _| {}),
+                )
+                .child(
+                    Switch::new("unlabeled-switch", "Italic text", true)
+                        .label_hidden(true)
+                        .debug_selector("unlabeled-switch")
+                        .on_change(|_, _, _| {}),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn a_hidden_label_should_leave_only_the_indicator_and_still_activate(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| HiddenLabelRoot);
+        cx.run_until_parked();
+
+        let labeled = cx.debug_bounds("labeled-switch").expect("switch renders");
+        let unlabeled = cx.debug_bounds("unlabeled-switch").expect("switch renders");
+        let indicator = cx
+            .debug_bounds("unlabeled-switch-indicator")
+            .expect("the indicator remains");
+
+        assert!(unlabeled.size.width < labeled.size.width);
+        assert_eq!(unlabeled.size.width, indicator.size.width);
     }
 
     struct ControlledGeometryRoot {
