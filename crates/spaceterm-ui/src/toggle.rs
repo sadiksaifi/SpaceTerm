@@ -663,18 +663,27 @@ impl ToggleCore {
         };
         let hovered = TogglePaintRefinement(style.hovered);
         let pressed = TogglePaintRefinement(style.pressed);
+        let font = crate::control_typography(cx).regular().clone();
+        let hover_font = font.clone();
+        let pressed_font = font.clone();
+        let font_size = style.metrics.font_size;
+        let line_height = style.metrics.line_height;
         let label = div()
             .id(SharedString::from(label_state_id))
             .min_w_0()
             .text_color(paint.label)
-            .text_size(style.metrics.font_size)
-            .line_height(gpui::relative(style.metrics.line_height))
-            .font(crate::control_typography(cx).regular().clone())
+            .text_size(font_size)
+            .line_height(gpui::relative(line_height))
+            .font(font)
             .child(self.label.clone())
             .when(enabled && !keyboard_pressed, |label| {
                 label
-                    .group_hover(INTERACTION_GROUP, move |style| hovered.label(style))
-                    .group_active(INTERACTION_GROUP, move |style| pressed.label(style))
+                    .group_hover(INTERACTION_GROUP, move |style| {
+                        hovered.label(style, &hover_font, font_size, line_height)
+                    })
+                    .group_active(INTERACTION_GROUP, move |style| {
+                        pressed.label(style, &pressed_font, font_size, line_height)
+                    })
             });
         let is_switch = matches!(kind, ToggleKind::Switch);
         let content = if self.label_hidden {
@@ -783,12 +792,32 @@ impl TogglePaintRefinement {
         style.bg(self.0.foreground)
     }
 
-    fn foreground_text(self, style: StyleRefinement) -> StyleRefinement {
-        style.text_color(self.0.foreground)
+    /// Refines the checkbox mark, restating the glyph metrics the base style uses.
+    ///
+    /// GPUI replaces an element's text style rather than merging it, so a refinement carrying only
+    /// a color would resize the mark while the pointer is over the row.
+    fn foreground_text(
+        self,
+        style: StyleRefinement,
+        size: Pixels,
+        line_height: Pixels,
+    ) -> StyleRefinement {
+        style
+            .text_color(self.0.foreground)
+            .text_size(size)
+            .line_height(line_height)
+            .font_weight(gpui::FontWeight::SEMIBOLD)
     }
 
-    fn label(self, style: StyleRefinement) -> StyleRefinement {
-        style.text_color(self.0.label)
+    /// Refines the visible label, restating the typography the base style uses.
+    fn label(
+        self,
+        style: StyleRefinement,
+        font: &gpui::Font,
+        size: Pixels,
+        line_height: f32,
+    ) -> StyleRefinement {
+        crate::refine_control_text(style, font, size, line_height, self.0.label)
     }
 }
 
@@ -839,11 +868,13 @@ fn checkbox_indicator(
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("✓")
                     .when(enabled && !keyboard_pressed, |mark| {
+                        let size = metrics.checkbox_extent * 0.8;
+                        let line_height = metrics.checkbox_extent;
                         mark.group_hover(INTERACTION_GROUP, move |style| {
-                            hovered.foreground_text(style)
+                            hovered.foreground_text(style, size, line_height)
                         })
                         .group_active(INTERACTION_GROUP, move |style| {
-                            pressed.foreground_text(style)
+                            pressed.foreground_text(style, size, line_height)
                         })
                     }),
             )
@@ -1112,13 +1143,24 @@ mod tests {
             refinement.foreground_fill(StyleRefinement::default()),
             StyleRefinement::default().bg(paint.foreground)
         );
+        // Both text refinements restate the metrics their base style uses, because GPUI replaces
+        // an element's text style rather than merging it.
         assert_eq!(
-            refinement.foreground_text(StyleRefinement::default()),
-            StyleRefinement::default().text_color(paint.foreground)
+            refinement.foreground_text(StyleRefinement::default(), px(12.0), px(16.0)),
+            StyleRefinement::default()
+                .text_color(paint.foreground)
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
         );
+        let font = gpui::font("Test Font");
         assert_eq!(
-            refinement.label(StyleRefinement::default()),
-            StyleRefinement::default().text_color(paint.label)
+            refinement.label(StyleRefinement::default(), &font, px(12.0), 1.2),
+            StyleRefinement::default()
+                .font(font)
+                .text_size(px(12.0))
+                .line_height(gpui::relative(1.2))
+                .text_color(paint.label)
         );
     }
 

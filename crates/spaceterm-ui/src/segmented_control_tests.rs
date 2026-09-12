@@ -177,12 +177,24 @@ fn navigation_over_a_fully_disabled_set_reaches_nothing() {
 #[test]
 fn interaction_paint_refines_every_rendered_part_of_a_segment() {
     let paint = SegmentedPaint::new(rgba(0x111111ff), rgba(0x121212ff), rgba(0x131313ff));
+    let font = gpui::font("Test Font");
+    let refinement = SegmentedPaintRefinement {
+        paint,
+        font: font.clone(),
+        font_size: px(12.0),
+        line_height: 1.2,
+    };
 
+    // The refinement restates the segment's typography: GPUI replaces a text style rather than
+    // merging it, so a refinement carrying only a color would reflow the segment under the pointer.
     assert_eq!(
-        SegmentedPaintRefinement(paint).segment(StyleRefinement::default()),
+        refinement.segment(StyleRefinement::default()),
         StyleRefinement::default()
             .bg(paint.background())
             .border_color(paint.border())
+            .font(font)
+            .text_size(px(12.0))
+            .line_height(gpui::relative(1.2))
             .text_color(paint.label())
     );
 }

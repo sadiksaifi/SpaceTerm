@@ -56,6 +56,7 @@ const _: fn() = || {
     let values = SegmentedValuePaints::new(paint, paint);
     let metrics = SegmentedMetrics::new(px(24.0), px(52.0), px(56.0), px(8.0))
         .horizontal_padding(px(10.0))
+        .vertical_padding(px(0.0))
         .radius(px(5.0))
         .border_width(px(1.0))
         .focus_gap(px(2.0))

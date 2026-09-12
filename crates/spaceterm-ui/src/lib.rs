@@ -315,6 +315,27 @@ fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog);
 }
 
+/// Restates a control's complete text style inside an interaction refinement.
+///
+/// GPUI replaces an element's text style wholesale when a hover, active, or group refinement
+/// carries one, rather than merging field by field. A refinement that set only a color would
+/// therefore drop the element's font, size, and line height, which reflows the row under the
+/// pointer. Callers pass what their base style already uses.
+pub(crate) fn refine_control_text(
+    style: gpui::StyleRefinement,
+    font: &gpui::Font,
+    size: gpui::Pixels,
+    line_height: f32,
+    color: gpui::Rgba,
+) -> gpui::StyleRefinement {
+    use gpui::Styled as _;
+    style
+        .font(font.clone())
+        .text_size(size)
+        .line_height(gpui::relative(line_height))
+        .text_color(color)
+}
+
 fn control_typography(cx: &App) -> ControlTypography {
     cx.try_global::<ControlThemeCatalog>()
         .map(|catalog| catalog.typography.clone())

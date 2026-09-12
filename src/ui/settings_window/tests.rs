@@ -958,6 +958,49 @@ fn an_open_selector_shows_its_filter_glyph_and_marks_the_current_value(cx: &mut 
     assert_eq!(cx.debug_bounds("combo-box-row-0-check"), None);
 }
 
+#[gpui::test]
+fn pressing_a_segment_keeps_the_control_height(cx: &mut TestAppContext) {
+    // GPUI replaces an element's text style when an interaction refinement carries one, so a
+    // refinement that forgot the segment's line height would reflow the row under the pointer.
+    let (_window, _harness, cx) = open_settings(cx);
+    let light = cx
+        .debug_bounds("settings-chrome-appearance-mode-light")
+        .expect("the light card should render")
+        .center();
+    let idle = cx
+        .debug_bounds("settings-chrome-appearance-mode")
+        .expect("the control should render");
+
+    cx.simulate_mouse_move(light, None, Modifiers::none());
+    cx.run_until_parked();
+    let hovered = cx.debug_bounds("settings-chrome-appearance-mode");
+    cx.simulate_mouse_down(light, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let pressed = cx.debug_bounds("settings-chrome-appearance-mode");
+    cx.simulate_mouse_up(light, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(hovered, Some(idle), "hover should not resize the control");
+    assert_eq!(pressed, Some(idle), "a press should not resize the control");
+}
+
+#[gpui::test]
+fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    let card = cx
+        .debug_bounds("settings-chrome-appearance-mode-light")
+        .expect("the light card should render");
+    let label = cx
+        .debug_bounds("settings-chrome-appearance-mode-light-label")
+        .expect("the card label should render");
+
+    assert!(
+        card.bottom() - label.bottom() >= px(6.0),
+        "the label should not sit on the card edge, got {card:?} and {label:?}"
+    );
+}
+
 // Helpers --------------------------------------------------------------------------------------
 
 const IMPORTABLE_PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;

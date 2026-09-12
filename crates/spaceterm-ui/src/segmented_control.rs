@@ -221,6 +221,7 @@ pub struct SegmentedMetrics {
     minimum_option_width: Pixels,
     option_gap: Pixels,
     horizontal_padding: Pixels,
+    vertical_padding: Pixels,
     radius: Pixels,
     border_width: Pixels,
     focus_gap: Pixels,
@@ -246,6 +247,7 @@ impl SegmentedMetrics {
             minimum_option_width,
             option_gap,
             horizontal_padding: px(10.0),
+            vertical_padding: px(0.0),
             radius: px(5.0),
             border_width: px(1.0),
             focus_gap: px(2.0),
@@ -258,6 +260,16 @@ impl SegmentedMetrics {
     /// Sets the inline padding inside one option.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
+        self
+    }
+
+    /// Sets the block padding inside one option.
+    ///
+    /// A text-only presentation is sized by its option height and needs none. A presentation that
+    /// stacks a preview above a label is sized by its content, so this is what keeps the label off
+    /// the option's edge.
+    pub fn vertical_padding(mut self, padding: Pixels) -> Self {
+        self.vertical_padding = padding;
         self
     }
 
@@ -310,6 +322,7 @@ impl SegmentedMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
+            vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
             radius: crate::appearance::scale_metric(self.radius, spacing_scale),
             border_width: self.border_width,
             focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
@@ -610,8 +623,14 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 } else {
                     style.paints.disabled.resolve(selected)
                 };
-                let hovered = SegmentedPaintRefinement(style.paints.hovered.resolve(selected));
-                let pressed = SegmentedPaintRefinement(style.paints.pressed.resolve(selected));
+                let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
+                    paint,
+                    font: crate::control_typography(cx).regular().clone(),
+                    font_size: metrics.font_size,
+                    line_height: metrics.line_height,
+                };
+                let hovered = refinement(style.paints.hovered.resolve(selected));
+                let pressed = refinement(style.paints.pressed.resolve(selected));
                 let option_selector = option
                     .debug_selector
                     .clone()
@@ -634,6 +653,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .min_w(metrics.minimum_option_width)
                     .min_h(metrics.option_height)
                     .px(metrics.horizontal_padding)
+                    .py(metrics.vertical_padding)
                     .when(self.full_width, |segment| segment.flex_1())
                     .rounded(metrics.radius)
                     .border(metrics.border_width)
@@ -688,7 +708,15 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                             )
                         },
                     )
-                    .child(div().flex_none().child(option.label.clone()))
+                    .child(
+                        div()
+                            .debug_selector({
+                                let option_selector = option_selector.clone();
+                                move || format!("{option_selector}-label")
+                            })
+                            .flex_none()
+                            .child(option.label.clone()),
+                    )
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -826,15 +854,25 @@ struct SegmentedStyle {
     selected_shadow: ControlShadow,
 }
 
-#[derive(Clone, Copy)]
-struct SegmentedPaintRefinement(SegmentedPaint);
+#[derive(Clone)]
+struct SegmentedPaintRefinement {
+    paint: SegmentedPaint,
+    font: gpui::Font,
+    font_size: Pixels,
+    line_height: f32,
+}
 
 impl SegmentedPaintRefinement {
     fn segment(self, style: StyleRefinement) -> StyleRefinement {
-        style
-            .bg(self.0.background)
-            .border_color(self.0.border)
-            .text_color(self.0.label)
+        crate::refine_control_text(
+            style
+                .bg(self.paint.background)
+                .border_color(self.paint.border),
+            &self.font,
+            self.font_size,
+            self.line_height,
+            self.paint.label,
+        )
     }
 }
 

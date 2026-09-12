@@ -67,6 +67,7 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                 .typography(px(12.0), 1.2),
             SegmentedMetrics::new(px(26.0), px(52.0), px(88.0), px(10.0))
                 .horizontal_padding(px(12.0))
+                .vertical_padding(px(8.0))
                 .radius(px(7.0))
                 .preview_gap(px(7.0))
                 .typography(px(12.0), 1.2),
