@@ -37,8 +37,8 @@ use crate::ui::appearance::ChromeAppearance;
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
-    SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color, reset_button,
-    section_header,
+    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
+    reset_button, section_header,
 };
 use editor::{SaveStatus, SettingsEditor};
 
@@ -393,18 +393,27 @@ impl SettingsWindow {
     /// Whether a row is meaningful for the current document.
     ///
     /// A fixed appearance selects one scheme; Auto selects one per slot. Presenting all three at
-    /// once would imply choices the document cannot hold.
+    /// once would imply choices the document cannot hold. Both surfaces follow the one presented
+    /// mode, so both offer the same shape of choice even if a hand-edited document disagrees.
     fn row_applies(&self, row: SettingsRowId) -> bool {
-        let preferences = &self.editor.document().preferences;
-        let chrome_auto = matches!(preferences.chrome.scheme, SchemeSelection::System { .. });
-        let terminal_auto = matches!(preferences.terminal.scheme, SchemeSelection::System { .. });
+        let automatic = self.appearance_mode() == AppearanceMode::Auto;
         match row {
-            SettingsRowId::ChromeScheme => !chrome_auto,
-            SettingsRowId::ChromeLightScheme | SettingsRowId::ChromeDarkScheme => chrome_auto,
-            SettingsRowId::TerminalScheme => !terminal_auto,
-            SettingsRowId::TerminalLightScheme | SettingsRowId::TerminalDarkScheme => terminal_auto,
+            SettingsRowId::ChromeScheme | SettingsRowId::TerminalScheme => !automatic,
+            SettingsRowId::ChromeLightScheme
+            | SettingsRowId::ChromeDarkScheme
+            | SettingsRowId::TerminalLightScheme
+            | SettingsRowId::TerminalDarkScheme => automatic,
             _ => true,
         }
+    }
+
+    /// The one appearance mode the whole application follows.
+    ///
+    /// Settings writes both surfaces together, so they agree by construction. A hand-edited
+    /// document can still disagree; the application's own chrome is what a person sees first, so
+    /// its policy is the one presented, and the next change reconciles both.
+    fn appearance_mode(&self) -> AppearanceMode {
+        AppearanceMode::of(&self.editor.document().preferences.chrome.scheme)
     }
 
     fn edit(&mut self, edit: impl FnOnce(&mut AppearanceDocument), cx: &mut Context<Self>) {
@@ -565,9 +574,10 @@ impl SettingsWindow {
                     })
                     .child(div().flex_none().child(Icon::new(
                         match section {
-                            SettingsSectionId::Appearance => IconName::Palette,
+                            SettingsSectionId::Appearance => IconName::SunMoon,
+                            SettingsSectionId::Interface => IconName::AppWindow,
                             SettingsSectionId::Terminal => IconName::Terminal,
-                            SettingsSectionId::ColorSchemes => IconName::SunMoon,
+                            SettingsSectionId::ColorSchemes => IconName::Palette,
                         },
                         appearance.text_size(13.0),
                         gpui_color(if !has_matches {
@@ -731,22 +741,41 @@ impl SettingsWindow {
                 .debug_selector(move || format!("{}-empty", section.selector()))
                 .into_any_element();
         }
-        let rendered = rows
+        // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
+        // box. A filtered view groups whatever survived the filter the same way.
+        let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
+        for row in rows {
+            let title = row.descriptor().group;
+            let rendered = self.render_row(row, appearance, window, cx);
+            match groups.last_mut() {
+                Some((current, members)) if *current == title => members.push(rendered),
+                _ => groups.push((title, vec![rendered])),
+            }
+        }
+        let rendered = groups
             .into_iter()
-            .map(|row| self.render_row(row, appearance, window, cx))
+            .map(|(title, members)| {
+                SettingsGroup::new(group_selector(section, title), title, members)
+                    .render(appearance)
+                    .into_any_element()
+            })
             .collect::<Vec<_>>();
+        let notice = (section == SettingsSectionId::ColorSchemes)
+            .then(|| self.render_diagnostics_notice(appearance, cx))
+            .flatten();
         div()
             .debug_selector(move || section.selector().to_owned())
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(2.0))
+            .gap(appearance.spacing(16.0))
             .child(section_header(
                 section.selector(),
                 section.title(),
                 section.description(),
                 appearance,
             ))
+            .children(notice)
             .children(rendered)
             .into_any_element()
     }
@@ -790,12 +819,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
-            SettingsRowId::ChromeAppearanceMode => {
-                self.render_appearance_mode(SchemeKind::Chrome, appearance, cx)
-            }
-            SettingsRowId::TerminalAppearanceMode => {
-                self.render_appearance_mode(SchemeKind::Terminal, appearance, cx)
-            }
+            SettingsRowId::AppearanceMode => self.render_appearance_mode(appearance, cx),
             SettingsRowId::ChromeScheme => {
                 self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
             }
@@ -845,28 +869,20 @@ impl SettingsWindow {
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledSchemes => self.render_installed_schemes(appearance, cx),
             SettingsRowId::SchemeInterchange => self.render_scheme_interchange(appearance, cx),
-            SettingsRowId::AppearanceDiagnostics => {
-                self.render_appearance_diagnostics(appearance, cx)
-            }
         }
     }
 
+    /// The one light, dark, or automatic control, which both surfaces follow.
+    ///
+    /// Chrome and terminal keep separate schemes, but nobody wants light chrome around a dark
+    /// terminal, so the mode is chosen once and written to both surfaces in one edit.
     fn render_appearance_mode(
         &mut self,
-        kind: SchemeKind,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let preferences = &self.editor.document().preferences;
-        let selection = match kind {
-            SchemeKind::Chrome => &preferences.chrome.scheme,
-            SchemeKind::Terminal => &preferences.terminal.scheme,
-        };
-        let current = AppearanceMode::of(selection);
-        let selector = match kind {
-            SchemeKind::Chrome => "settings-chrome-appearance-mode",
-            SchemeKind::Terminal => "settings-terminal-appearance-mode",
-        };
+        let current = self.appearance_mode();
+        let selector = "settings-appearance-mode";
         let owner = cx.weak_entity();
         let options = [
             AppearanceMode::Light,
@@ -875,7 +891,7 @@ impl SettingsWindow {
         ]
         .into_iter()
         .map(|mode| {
-            let swatches = self.mode_preview_colors(kind, mode, cx);
+            let swatches = self.mode_preview_colors(mode, cx);
             SegmentedOption::new(mode, mode.label())
                 .debug_selector(format!("{selector}-{}", mode.label().to_ascii_lowercase()))
                 .preview(move |_, extent| mode_preview(&swatches, extent).into_any_element())
@@ -888,22 +904,19 @@ impl SettingsWindow {
             .debug_selector(selector)
             .on_change(move |change, _, cx| {
                 let mode = *change.requested();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.set_appearance_mode(kind, mode, cx)
-                });
+                let _ = owner.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx));
             });
         let _ = appearance;
         control.into_any_element()
     }
 
     /// Representative colors for one mode's preview card.
-    fn mode_preview_colors(
-        &self,
-        kind: SchemeKind,
-        mode: AppearanceMode,
-        cx: &mut Context<Self>,
-    ) -> Vec<Color> {
+    ///
+    /// The card depicts SpaceTerm's own windows, so it previews the chrome scheme each mode
+    /// selects.
+    fn mode_preview_colors(&self, mode: AppearanceMode, cx: &mut Context<Self>) -> Vec<Color> {
         let _ = cx;
+        let kind = SchemeKind::Chrome;
         let remembered = self.remembered(kind);
         let pick = |appearance| {
             self.editor
@@ -936,17 +949,14 @@ impl SettingsWindow {
         }
     }
 
-    fn set_appearance_mode(
-        &mut self,
-        kind: SchemeKind,
-        mode: AppearanceMode,
-        cx: &mut Context<Self>,
-    ) {
-        let selection = self.remembered(kind).selection(mode);
+    /// Moves both surfaces to `mode` in one edit, each keeping the scheme it wears there.
+    fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        let chrome = self.chrome_schemes.selection(mode);
+        let terminal = self.terminal_schemes.selection(mode);
         self.edit(
-            move |draft| match kind {
-                SchemeKind::Chrome => draft.preferences.chrome.scheme = selection,
-                SchemeKind::Terminal => draft.preferences.terminal.scheme = selection,
+            move |draft| {
+                draft.preferences.chrome.scheme = chrome;
+                draft.preferences.terminal.scheme = terminal;
             },
             cx,
         );
@@ -993,7 +1003,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         settings_selector(
             selector,
-            row.descriptor().label,
+            format!("{} color scheme", row.descriptor().label),
             Some(current),
             "Choose a color scheme",
             items,
@@ -1643,13 +1653,13 @@ fn control_selector(row: SettingsRowId) -> String {
 
 /// Where a row's label sits.
 ///
-/// The Color Schemes rows present lists and button groups rather than one control, so they take
-/// the whole row and carry their label above it.
+/// The Color Schemes rows present a list and a button group rather than one control, and each is
+/// the only row in its box, so the group's own title names them and the content spans the row.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::InstalledSchemes
-        | SettingsRowId::SchemeInterchange
-        | SettingsRowId::AppearanceDiagnostics => SettingsRowLayout::Above,
+        SettingsRowId::InstalledSchemes | SettingsRowId::SchemeInterchange => {
+            SettingsRowLayout::Full
+        }
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -1657,16 +1667,29 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 /// One line of guidance for the rows that warrant it.
 fn row_description(row: SettingsRowId) -> Option<&'static str> {
     match row {
-        SettingsRowId::ChromeAppearanceMode => {
-            Some("Auto follows the system light and dark setting.")
-        }
-        SettingsRowId::TerminalAppearanceMode => {
-            Some("The terminal follows its own setting, not the application's.")
-        }
+        SettingsRowId::AppearanceMode => Some(
+            "The interface and the terminal both follow this. Auto follows the system light and \
+             dark setting.",
+        ),
         SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
         SettingsRowId::InstalledSchemes => {
             Some("Built-in schemes are always available. Imported schemes can be removed.")
         }
         _ => None,
     }
+}
+
+/// The selector of one titled box, so a test can address a group rather than only its rows.
+fn group_selector(section: SettingsSectionId, title: &str) -> String {
+    let slug = title
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{}-group-{slug}", section.selector())
 }

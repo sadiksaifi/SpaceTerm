@@ -115,19 +115,28 @@ range is 10 through 24 px. Terminal defaults to 18 px monospace text, line heigh
 size ranges from 8 through 32 px and line height from 1 through 2. Unavailable font requests retain
 their requested family while resolution supplies a suitable system fallback and Apple Color Emoji.
 
-Reset is typed and independently targets every scheme-selection, font, size, weight, line-height,
-italic, bold-as-bright, and density field; one color override role for an exact scheme ID; each
+Reset is typed and independently targets every scheme-selection, per-domain scheme choice, font,
+size, weight, line-height, italic, bold-as-bright, and density field; both domains' scheme
+selections at once; one color override role for an exact scheme ID; each
 color, typography, density, or rendering group; or all appearance preferences. Resetting a role
 removes that override so it inherits again. No reset removes installed custom schemes.
 
 ## Settings Window
 
-The Settings Window is the interface for everything above: Application Appearance, Terminal
-Appearance, and Color Schemes. It opens from the application menu and its key equivalent, presents
-one navigation list beside one scrolling detail pane, and searches Settings Row labels and keywords.
-Appearance Mode presents Light, Dark, and Auto per domain, mapping onto a fixed selection with that
-appearance or a system light/dark pair; the scheme pickers are restricted to the appearance the mode
-selects. Changes preview live and commit shortly after the last change, so there is no save action.
+The Settings Window is the interface for everything above, across four sections: Appearance,
+Interface, Terminal, and Color Schemes. It opens from the application menu and its key equivalent,
+presents one navigation list beside a detail pane showing one section at a time, groups each
+section's rows into titled boxes, and searches Settings Row labels, group titles, and keywords.
+
+Appearance Mode is presented once, not per domain. The document keeps a separate selection for each
+domain, and the one control writes Light, Dark, or Auto to both in a single edit, mapping onto a
+fixed selection with that appearance or a system light/dark pair. Each domain still chooses its own
+scheme within that mode, so an interface scheme and a terminal scheme remain independent; the scheme
+pickers are restricted to the appearance the mode selects. A domain's scheme reset restores that
+scheme and leaves the mode alone, because the mode belongs to the control that spans both. A
+hand-edited document whose two selections disagree is presented using the chrome selection, and the
+next change writes both back into agreement. Changes preview live and commit shortly after the last
+change, so there is no save action.
 See [ADR 0005](adr/0005-present-settings-in-a-separate-operating-system-window.md).
 
 Per-role color overrides are not editable from the Settings Window. They remain supported by the

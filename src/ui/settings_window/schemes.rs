@@ -42,6 +42,10 @@ enum RemovalChoice {
 }
 
 impl SettingsWindow {
+    /// The scheme library: every installed scheme, grouped by the surface it dresses.
+    ///
+    /// The list draws no frame of its own. It is the only content of its box, and the box already
+    /// says where the library begins and ends.
     pub(super) fn render_installed_schemes(
         &mut self,
         appearance: &ChromeAppearance,
@@ -50,34 +54,37 @@ impl SettingsWindow {
         let chrome = self.scheme_summaries(SchemeKind::Chrome, cx);
         let terminal = self.scheme_summaries(SchemeKind::Terminal, cx);
         let total = chrome.len() + terminal.len();
-        let last = total.min(VISIBLE_SCHEMES).saturating_sub(1);
-        let rows = chrome
-            .into_iter()
-            .chain(terminal)
-            .take(VISIBLE_SCHEMES)
-            .enumerate()
-            .map(|(index, summary)| self.render_scheme_row(&summary, index < last, appearance, cx))
-            .collect::<Vec<_>>();
-        let remaining = total.saturating_sub(rows.len());
-        // One bordered list reads as a single surface, so the rows line up instead of floating in
-        // the section.
+        let mut budget = VISIBLE_SCHEMES;
+        let mut shown = 0;
+        let mut children: Vec<AnyElement> = Vec::new();
+        for (kind, summaries) in [
+            (SchemeKind::Chrome, chrome),
+            (SchemeKind::Terminal, terminal),
+        ] {
+            let visible = summaries.into_iter().take(budget).collect::<Vec<_>>();
+            let Some(last) = visible.len().checked_sub(1) else {
+                continue;
+            };
+            budget -= visible.len();
+            shown += visible.len();
+            children.push(
+                scheme_kind_heading(kind, children.is_empty(), appearance).into_any_element(),
+            );
+            for (index, summary) in visible.iter().enumerate() {
+                children.push(self.render_scheme_row(summary, index < last, appearance, cx));
+            }
+        }
+        let remaining = total - shown;
         div()
+            .debug_selector(|| "settings-installed-schemes".to_owned())
             .flex()
             .flex_col()
             .w_full()
-            .rounded(px(7.0))
-            .overflow_hidden()
-            .border_1()
-            .border_color(gpui_color(appearance.colors.border))
-            .bg(gpui_color(appearance.colors.panel_background))
-            .children(rows)
+            .children(children)
             .when(remaining > 0, |list| {
                 list.child(
                     div()
-                        .px(appearance.spacing(10.0))
-                        .py(appearance.spacing(6.0))
-                        .border_t_1()
-                        .border_color(gpui_color(appearance.colors.border))
+                        .pt(appearance.spacing(8.0))
                         .text_size(appearance.text_size(11.0))
                         .text_color(gpui_color(appearance.colors.text_muted))
                         .child(SharedString::from(format!(
@@ -86,6 +93,58 @@ impl SettingsWindow {
                 )
             })
             .into_any_element()
+    }
+
+    /// The warning the library carries when something selected could not be resolved.
+    ///
+    /// It is a notice at the top of the page rather than a labeled row: when nothing is wrong
+    /// there is nothing to say, and a row whose value reads "everything is fine" is noise.
+    pub(super) fn render_diagnostics_notice(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let diagnostics = crate::ui::appearance_runtime::current(cx)
+            .diagnostics
+            .clone();
+        if diagnostics.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .debug_selector(|| "settings-diagnostics-notice".to_owned())
+                .flex()
+                .flex_row()
+                .items_start()
+                .w_full()
+                .gap(appearance.spacing(8.0))
+                .p(appearance.spacing(10.0))
+                .rounded(px(8.0))
+                .bg(gpui_color(appearance.colors.warning_background))
+                .border_1()
+                .border_color(gpui_color(appearance.colors.warning_border))
+                .child(div().flex_none().mt(px(1.0)).child(spaceterm_ui::Icon::new(
+                    spaceterm_ui::IconName::TriangleAlert,
+                    appearance.text_size(12.0),
+                    gpui_color(appearance.colors.warning),
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .gap(appearance.spacing(3.0))
+                        .children(diagnostics.into_iter().map(|diagnostic| {
+                            div()
+                                .text_size(appearance.text_size(11.0))
+                                .text_color(gpui_color(appearance.colors.text_secondary))
+                                .whitespace_normal()
+                                .child(diagnostic_message(diagnostic))
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_scheme_row(
@@ -138,13 +197,6 @@ impl SettingsWindow {
                     .justify_end()
                     .gap(appearance.spacing(4.0))
                     .children(selected.then(|| badge("In use", appearance)))
-                    .child(badge(
-                        match summary.kind {
-                            SchemeKind::Chrome => "Application",
-                            SchemeKind::Terminal => "Terminal",
-                        },
-                        appearance,
-                    ))
                     .child(badge(
                         match summary.appearance {
                             crate::appearance::Appearance::Light => "Light",
@@ -250,52 +302,6 @@ impl SettingsWindow {
                     .text_color(gpui_color(appearance.colors.text_secondary))
                     .whitespace_normal()
                     .child(status)
-            }))
-            .into_any_element()
-    }
-
-    pub(super) fn render_appearance_diagnostics(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let diagnostics = crate::ui::appearance_runtime::current(cx)
-            .diagnostics
-            .clone();
-        if diagnostics.is_empty() {
-            return div()
-                .debug_selector(|| "settings-diagnostics-empty".to_owned())
-                .text_size(appearance.text_size(11.0))
-                .text_color(gpui_color(appearance.colors.text_muted))
-                .child("Everything you selected is available.")
-                .into_any_element();
-        }
-        div()
-            .debug_selector(|| "settings-diagnostics-list".to_owned())
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(appearance.spacing(3.0))
-            .children(diagnostics.into_iter().map(|diagnostic| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(appearance.spacing(6.0))
-                    .child(div().flex_none().mt(px(2.0)).child(spaceterm_ui::Icon::new(
-                        spaceterm_ui::IconName::TriangleAlert,
-                        appearance.text_size(11.0),
-                        gpui_color(appearance.colors.warning),
-                    )))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_size(appearance.text_size(11.0))
-                            .text_color(gpui_color(appearance.colors.text_secondary))
-                            .whitespace_normal()
-                            .child(diagnostic_message(diagnostic)),
-                    )
             }))
             .into_any_element()
     }
@@ -526,6 +532,34 @@ impl SettingsWindow {
         })
         .detach();
     }
+}
+
+/// The subhead naming the surface the schemes under it dress.
+fn scheme_kind_heading(
+    kind: SchemeKind,
+    leading: bool,
+    appearance: &ChromeAppearance,
+) -> impl IntoElement {
+    div()
+        .debug_selector(move || {
+            format!(
+                "settings-scheme-heading-{}",
+                match kind {
+                    SchemeKind::Chrome => "chrome",
+                    SchemeKind::Terminal => "terminal",
+                }
+            )
+        })
+        .w_full()
+        .pb(appearance.spacing(4.0))
+        .when(!leading, |heading| heading.pt(appearance.spacing(12.0)))
+        .font(appearance.emphasis.clone())
+        .text_size(appearance.text_size(10.0))
+        .text_color(gpui_color(appearance.colors.text_muted))
+        .child(match kind {
+            SchemeKind::Chrome => "Interface",
+            SchemeKind::Terminal => "Terminal",
+        })
 }
 
 fn installed_message(installed: usize) -> SharedString {

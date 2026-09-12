@@ -20,8 +20,8 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
 }
 
-/// The label column width, so every control in a section starts at the same offset.
-const LABEL_WIDTH: f32 = 188.0;
+/// The label column width, so every control in a group starts at the same offset.
+const LABEL_WIDTH: f32 = 160.0;
 
 /// The gap between the label column and the control it names.
 const LABEL_GAP: f32 = 12.0;
@@ -36,6 +36,76 @@ pub(super) enum SettingsRowLayout {
     Beside,
     /// A label above content that needs the whole row, such as a list.
     Above,
+    /// Content spanning the row with no label of its own, for a group whose title already names
+    /// it. Repeating that title on the only row inside the box says the same thing twice.
+    Full,
+}
+
+/// One titled box of related rows.
+///
+/// Grouping is the structure a settings form is read by: a title names a handful of rows, and the
+/// box tells the eye where those rows end. Rows inside one box are separated by a hairline rather
+/// than by space, so the box reads as one surface.
+pub(super) struct SettingsGroup {
+    selector: String,
+    title: &'static str,
+    rows: Vec<AnyElement>,
+}
+
+impl SettingsGroup {
+    pub(super) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
+        Self {
+            selector,
+            title,
+            rows,
+        }
+    }
+
+    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+        let selector = self.selector.clone();
+        let title_selector = format!("{selector}-title");
+        let separator = |appearance: &ChromeAppearance| {
+            div()
+                .flex_none()
+                .h(px(1.0))
+                .w_full()
+                .bg(gpui_color(appearance.colors.border_variant))
+        };
+        let mut box_rows = Vec::with_capacity(self.rows.len() * 2);
+        for (index, row) in self.rows.into_iter().enumerate() {
+            if index > 0 {
+                box_rows.push(separator(appearance).into_any_element());
+            }
+            box_rows.push(row);
+        }
+        div()
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(appearance.spacing(6.0))
+            .child(
+                div()
+                    .debug_selector(move || title_selector.clone())
+                    .pl(appearance.spacing(2.0))
+                    .font(appearance.emphasis.clone())
+                    .text_size(appearance.text_size(11.0))
+                    .text_color(gpui_color(appearance.colors.text_secondary))
+                    .child(self.title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .rounded(px(8.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(gpui_color(appearance.colors.border))
+                    .bg(gpui_color(appearance.colors.panel_background))
+                    .children(box_rows),
+            )
+    }
 }
 
 /// One labeled row: a right-aligned label, its control, and an optional reset affordance.
@@ -96,22 +166,21 @@ impl SettingsRow {
         let label_width = appearance.text_size(LABEL_WIDTH);
         let label_gap = appearance.spacing(LABEL_GAP);
         let above = self.layout == SettingsRowLayout::Above;
-        let label = div()
-            .debug_selector(move || label_selector.clone())
-            .flex_none()
-            .text_color(gpui_color(appearance.colors.text_secondary))
-            .whitespace_normal()
-            .when(above, |label| label.font(appearance.emphasis.clone()))
-            .when(!above, |label| {
-                label.w(label_width).text_align(gpui::TextAlign::Right)
-            })
-            .child(self.label)
-            .into_any_element();
-        let (label_above, label_beside) = if above {
-            (Some(label), None)
-        } else {
-            (None, Some(label))
-        };
+        let full = self.layout == SettingsRowLayout::Full;
+        let label = (!full).then(|| {
+            div()
+                .debug_selector(move || label_selector.clone())
+                .flex_none()
+                .text_color(gpui_color(appearance.colors.text_secondary))
+                .whitespace_normal()
+                .when(above, |label| label.font(appearance.emphasis.clone()))
+                .when(!above, |label| {
+                    label.w(label_width).text_align(gpui::TextAlign::Right)
+                })
+                .child(self.label)
+                .into_any_element()
+        });
+        let (label_above, label_beside) = if above { (label, None) } else { (None, label) };
         // A label beside its control is centered against it, so a tall control and a short one both
         // read as one line. Guidance keeps its own line under the control column.
         let primary = div()
@@ -132,7 +201,7 @@ impl SettingsRow {
             )
             // The trailing column is reserved so a control never shifts when its reset appears. A
             // row that cannot be reset, such as a list, keeps the width for its own content.
-            .when(!above || self.reset.is_some(), |line| {
+            .when(!(above || full) || self.reset.is_some(), |line| {
                 line.child(
                     div()
                         .w(appearance.text_size(RESET_WIDTH))
@@ -148,7 +217,7 @@ impl SettingsRow {
                 .text_size(appearance.text_size(11.0))
                 .text_color(gpui_color(appearance.colors.text_muted))
                 .whitespace_normal()
-                .when(!above, |line| line.pl(label_width + label_gap))
+                .when(!(above || full), |line| line.pl(label_width + label_gap))
                 .child(description)
         });
         div()
@@ -157,9 +226,8 @@ impl SettingsRow {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(4.0))
-            .px(appearance.spacing(8.0))
-            .py(appearance.spacing(5.0))
-            .rounded(px(6.0))
+            .px(appearance.spacing(12.0))
+            .py(appearance.spacing(8.0))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(appearance.colors.info_background))
             })
@@ -182,7 +250,6 @@ pub(super) fn section_header(
         .flex_col()
         .w_full()
         .gap(appearance.spacing(3.0))
-        .pb(appearance.spacing(6.0))
         .child(
             div()
                 .font(appearance.heading.clone())

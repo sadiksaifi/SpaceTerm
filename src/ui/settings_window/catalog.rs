@@ -9,19 +9,30 @@ use crate::appearance::ResetTarget;
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SettingsSectionId {
+    /// What both surfaces share: the one appearance mode, and the scheme each surface wears in it.
     Appearance,
+    /// SpaceTerm's own typography.
+    Interface,
+    /// Terminal typography and text rendering.
     Terminal,
+    /// The scheme library both surfaces draw from.
     ColorSchemes,
 }
 
 impl SettingsSectionId {
-    /// Every section in presentation order. The order is also the scroll order.
-    pub(super) const ALL: [Self; 3] = [Self::Appearance, Self::Terminal, Self::ColorSchemes];
+    /// Every section in presentation order.
+    pub(super) const ALL: [Self; 4] = [
+        Self::Appearance,
+        Self::Interface,
+        Self::Terminal,
+        Self::ColorSchemes,
+    ];
 
     pub(super) const fn title(self) -> &'static str {
         match self {
-            Self::Appearance => "Application Appearance",
-            Self::Terminal => "Terminal Appearance",
+            Self::Appearance => "Appearance",
+            Self::Interface => "Interface",
+            Self::Terminal => "Terminal",
             Self::ColorSchemes => "Color Schemes",
         }
     }
@@ -30,6 +41,7 @@ impl SettingsSectionId {
     pub(super) const fn navigation_title(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Interface => "Interface",
             Self::Terminal => "Terminal",
             Self::ColorSchemes => "Color Schemes",
         }
@@ -38,13 +50,16 @@ impl SettingsSectionId {
     pub(super) const fn description(self) -> &'static str {
         match self {
             Self::Appearance => {
-                "How SpaceTerm's own windows, tabs, and panels look, independently of the terminal."
+                "One light or dark setting for the whole application. Each surface still wears its \
+                 own color scheme."
             }
-            Self::Terminal => {
-                "How terminal output looks. These choices do not affect SpaceTerm's own chrome."
+            Self::Interface => {
+                "Type in SpaceTerm's own windows, tabs, and panels. Terminal output is unaffected."
             }
+            Self::Terminal => "Type and text rendering in terminal output.",
             Self::ColorSchemes => {
-                "The schemes available to both sections above, and where they come from."
+                "Every scheme installed for the interface and the terminal, and where they come \
+                 from."
             }
         }
     }
@@ -52,6 +67,7 @@ impl SettingsSectionId {
     pub(super) const fn selector(self) -> &'static str {
         match self {
             Self::Appearance => "settings-section-appearance",
+            Self::Interface => "settings-section-interface",
             Self::Terminal => "settings-section-terminal",
             Self::ColorSchemes => "settings-section-color-schemes",
         }
@@ -61,30 +77,29 @@ impl SettingsSectionId {
 /// One labeled Setting control within a Section.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SettingsRowId {
-    ChromeAppearanceMode,
+    /// The one light, dark, or automatic choice, which both surfaces follow.
+    AppearanceMode,
+    ChromeDensity,
     ChromeScheme,
     ChromeLightScheme,
     ChromeDarkScheme,
-    ChromeDensity,
+    TerminalScheme,
+    TerminalLightScheme,
+    TerminalDarkScheme,
     ChromeFontFamily,
     ChromeBaseSize,
     ChromeRegularWeight,
     ChromeEmphasisWeight,
     ChromeHeadingWeight,
-    TerminalAppearanceMode,
-    TerminalScheme,
-    TerminalLightScheme,
-    TerminalDarkScheme,
     TerminalFontFamily,
     TerminalBaseSize,
+    TerminalLineHeight,
     TerminalRegularWeight,
     TerminalBoldWeight,
-    TerminalLineHeight,
     TerminalItalic,
     TerminalBoldAsBright,
     InstalledSchemes,
     SchemeInterchange,
-    AppearanceDiagnostics,
 }
 
 impl SettingsRowId {
@@ -95,22 +110,24 @@ impl SettingsRowId {
     }
 
     /// The reset target restoring this row alone, when the row holds a resettable preference.
+    ///
+    /// A scheme row restores its own scheme and leaves the appearance mode alone, because the mode
+    /// belongs to the one control that spans both surfaces.
     pub(super) fn reset_target(self) -> Option<ResetTarget> {
         Some(match self {
-            Self::ChromeAppearanceMode | Self::ChromeScheme => ResetTarget::ChromeSchemeSelection,
-            Self::ChromeLightScheme | Self::ChromeDarkScheme => ResetTarget::ChromeSchemeSelection,
+            Self::AppearanceMode => ResetTarget::SchemeSelections,
             Self::ChromeDensity => ResetTarget::ChromeDensity,
+            Self::ChromeScheme | Self::ChromeLightScheme | Self::ChromeDarkScheme => {
+                ResetTarget::ChromeSchemeChoice
+            }
+            Self::TerminalScheme | Self::TerminalLightScheme | Self::TerminalDarkScheme => {
+                ResetTarget::TerminalSchemeChoice
+            }
             Self::ChromeFontFamily => ResetTarget::ChromeFontFamily,
             Self::ChromeBaseSize => ResetTarget::ChromeBaseSize,
             Self::ChromeRegularWeight => ResetTarget::ChromeRegularWeight,
             Self::ChromeEmphasisWeight => ResetTarget::ChromeEmphasisWeight,
             Self::ChromeHeadingWeight => ResetTarget::ChromeHeadingWeight,
-            Self::TerminalAppearanceMode | Self::TerminalScheme => {
-                ResetTarget::TerminalSchemeSelection
-            }
-            Self::TerminalLightScheme | Self::TerminalDarkScheme => {
-                ResetTarget::TerminalSchemeSelection
-            }
             Self::TerminalFontFamily => ResetTarget::TerminalFontFamily,
             Self::TerminalBaseSize => ResetTarget::TerminalBaseSize,
             Self::TerminalRegularWeight => ResetTarget::TerminalRegularWeight,
@@ -118,9 +135,7 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::InstalledSchemes | Self::SchemeInterchange | Self::AppearanceDiagnostics => {
-                return None;
-            }
+            Self::InstalledSchemes | Self::SchemeInterchange => return None,
         })
     }
 }
@@ -129,6 +144,11 @@ impl SettingsRowId {
 pub(super) struct SettingsRowDescriptor {
     pub(super) id: SettingsRowId,
     pub(super) section: SettingsSectionId,
+    /// The titled box this row shares with the rows next to it in the table.
+    ///
+    /// Rows carrying the same group title in one section render as one box, so the order here is
+    /// also the grouping: a row that leaves its neighbours starts a new box.
+    pub(super) group: &'static str,
     pub(super) label: &'static str,
     /// Words a person might search for that do not appear in the label.
     pub(super) keywords: &'static [&'static str],
@@ -140,6 +160,7 @@ impl SettingsRowDescriptor {
     fn matches(&self, query: &str) -> bool {
         self.label.to_ascii_lowercase().contains(query)
             || self.section.title().to_ascii_lowercase().contains(query)
+            || self.group.to_ascii_lowercase().contains(query)
             || self
                 .keywords
                 .iter()
@@ -158,8 +179,9 @@ pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
 
 pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
-        id: SettingsRowId::ChromeAppearanceMode,
+        id: SettingsRowId::AppearanceMode,
         section: SettingsSectionId::Appearance,
+        group: "Mode",
         label: "Appearance",
         keywords: &[
             "light",
@@ -170,145 +192,148 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "mode",
             "theme",
         ],
-        selector: "settings-row-chrome-appearance-mode",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ChromeScheme,
-        section: SettingsSectionId::Appearance,
-        label: "Color scheme",
-        keywords: &["colour", "palette", "theme", "scheme"],
-        selector: "settings-row-chrome-scheme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ChromeLightScheme,
-        section: SettingsSectionId::Appearance,
-        label: "Light scheme",
-        keywords: &["colour", "palette", "theme", "light"],
-        selector: "settings-row-chrome-light-scheme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ChromeDarkScheme,
-        section: SettingsSectionId::Appearance,
-        label: "Dark scheme",
-        keywords: &["colour", "palette", "theme", "dark"],
-        selector: "settings-row-chrome-dark-scheme",
+        selector: "settings-row-appearance-mode",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ChromeDensity,
         section: SettingsSectionId::Appearance,
+        group: "Mode",
         label: "Density",
         keywords: &["compact", "comfortable", "spacing", "padding"],
         selector: "settings-row-chrome-density",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ChromeFontFamily,
+        id: SettingsRowId::ChromeScheme,
         section: SettingsSectionId::Appearance,
-        label: "Interface font",
-        keywords: &["typeface", "family", "font"],
-        selector: "settings-row-chrome-font-family",
+        group: "Color scheme",
+        label: "Interface",
+        keywords: &["colour", "palette", "theme", "scheme", "chrome"],
+        selector: "settings-row-chrome-scheme",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ChromeBaseSize,
+        id: SettingsRowId::ChromeLightScheme,
         section: SettingsSectionId::Appearance,
-        label: "Interface font size",
-        keywords: &["points", "size", "bigger", "smaller", "zoom"],
-        selector: "settings-row-chrome-base-size",
+        group: "Color scheme",
+        label: "Interface light",
+        keywords: &["colour", "palette", "theme", "light", "chrome"],
+        selector: "settings-row-chrome-light-scheme",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ChromeRegularWeight,
+        id: SettingsRowId::ChromeDarkScheme,
         section: SettingsSectionId::Appearance,
-        label: "Regular weight",
-        keywords: &["bold", "weight", "font"],
-        selector: "settings-row-chrome-regular-weight",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ChromeEmphasisWeight,
-        section: SettingsSectionId::Appearance,
-        label: "Emphasis weight",
-        keywords: &["bold", "weight", "semibold", "font"],
-        selector: "settings-row-chrome-emphasis-weight",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ChromeHeadingWeight,
-        section: SettingsSectionId::Appearance,
-        label: "Heading weight",
-        keywords: &["bold", "weight", "title", "font"],
-        selector: "settings-row-chrome-heading-weight",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalAppearanceMode,
-        section: SettingsSectionId::Terminal,
-        label: "Appearance",
-        keywords: &[
-            "light",
-            "dark",
-            "auto",
-            "automatic",
-            "system",
-            "mode",
-            "theme",
-        ],
-        selector: "settings-row-terminal-appearance-mode",
+        group: "Color scheme",
+        label: "Interface dark",
+        keywords: &["colour", "palette", "theme", "dark", "chrome"],
+        selector: "settings-row-chrome-dark-scheme",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalScheme,
-        section: SettingsSectionId::Terminal,
-        label: "Color scheme",
+        section: SettingsSectionId::Appearance,
+        group: "Color scheme",
+        label: "Terminal",
         keywords: &["colour", "palette", "theme", "scheme", "ansi"],
         selector: "settings-row-terminal-scheme",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalLightScheme,
-        section: SettingsSectionId::Terminal,
-        label: "Light scheme",
-        keywords: &["colour", "palette", "theme", "light"],
+        section: SettingsSectionId::Appearance,
+        group: "Color scheme",
+        label: "Terminal light",
+        keywords: &["colour", "palette", "theme", "light", "ansi"],
         selector: "settings-row-terminal-light-scheme",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalDarkScheme,
-        section: SettingsSectionId::Terminal,
-        label: "Dark scheme",
-        keywords: &["colour", "palette", "theme", "dark"],
+        section: SettingsSectionId::Appearance,
+        group: "Color scheme",
+        label: "Terminal dark",
+        keywords: &["colour", "palette", "theme", "dark", "ansi"],
         selector: "settings-row-terminal-dark-scheme",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ChromeFontFamily,
+        section: SettingsSectionId::Interface,
+        group: "Font",
+        label: "Family",
+        keywords: &["typeface", "family", "font", "interface"],
+        selector: "settings-row-chrome-font-family",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ChromeBaseSize,
+        section: SettingsSectionId::Interface,
+        group: "Font",
+        label: "Size",
+        keywords: &["points", "size", "bigger", "smaller", "zoom", "font"],
+        selector: "settings-row-chrome-base-size",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ChromeRegularWeight,
+        section: SettingsSectionId::Interface,
+        group: "Weight",
+        label: "Regular",
+        keywords: &["bold", "weight", "font"],
+        selector: "settings-row-chrome-regular-weight",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ChromeEmphasisWeight,
+        section: SettingsSectionId::Interface,
+        group: "Weight",
+        label: "Emphasis",
+        keywords: &["bold", "weight", "semibold", "font"],
+        selector: "settings-row-chrome-emphasis-weight",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ChromeHeadingWeight,
+        section: SettingsSectionId::Interface,
+        group: "Weight",
+        label: "Heading",
+        keywords: &["bold", "weight", "title", "font"],
+        selector: "settings-row-chrome-heading-weight",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalFontFamily,
         section: SettingsSectionId::Terminal,
-        label: "Terminal font",
+        group: "Font",
+        label: "Family",
         keywords: &["typeface", "family", "monospace", "font"],
         selector: "settings-row-terminal-font-family",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalBaseSize,
         section: SettingsSectionId::Terminal,
-        label: "Terminal font size",
-        keywords: &["points", "size", "bigger", "smaller", "zoom"],
+        group: "Font",
+        label: "Size",
+        keywords: &["points", "size", "bigger", "smaller", "zoom", "font"],
         selector: "settings-row-terminal-base-size",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalLineHeight,
+        section: SettingsSectionId::Terminal,
+        group: "Font",
+        label: "Line height",
+        keywords: &["leading", "spacing", "line"],
+        selector: "settings-row-terminal-line-height",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalRegularWeight,
         section: SettingsSectionId::Terminal,
-        label: "Regular weight",
+        group: "Weight",
+        label: "Regular",
         keywords: &["weight", "font"],
         selector: "settings-row-terminal-regular-weight",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalBoldWeight,
         section: SettingsSectionId::Terminal,
-        label: "Bold weight",
+        group: "Weight",
+        label: "Bold",
         keywords: &["weight", "font", "bold"],
         selector: "settings-row-terminal-bold-weight",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::TerminalLineHeight,
-        section: SettingsSectionId::Terminal,
-        label: "Line height",
-        keywords: &["leading", "spacing", "line"],
-        selector: "settings-row-terminal-line-height",
-    },
-    SettingsRowDescriptor {
         id: SettingsRowId::TerminalItalic,
         section: SettingsSectionId::Terminal,
+        group: "Rendering",
         label: "Italic text",
         keywords: &["oblique", "slant", "italic"],
         selector: "settings-row-terminal-italic",
@@ -316,6 +341,7 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalBoldAsBright,
         section: SettingsSectionId::Terminal,
+        group: "Rendering",
         label: "Show bold text in bright colors",
         keywords: &["ansi", "bright", "bold", "colour"],
         selector: "settings-row-terminal-bold-as-bright",
@@ -323,23 +349,27 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::InstalledSchemes,
         section: SettingsSectionId::ColorSchemes,
+        group: "Installed",
         label: "Installed schemes",
-        keywords: &["builtin", "custom", "remove", "delete", "list"],
+        keywords: &[
+            "builtin",
+            "custom",
+            "remove",
+            "delete",
+            "list",
+            "unavailable",
+            "fallback",
+            "missing",
+        ],
         selector: "settings-row-installed-schemes",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::SchemeInterchange,
         section: SettingsSectionId::ColorSchemes,
+        group: "Import and export",
         label: "Import and export",
         keywords: &["zed", "import", "export", "file", "package", "share"],
         selector: "settings-row-scheme-interchange",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::AppearanceDiagnostics,
-        section: SettingsSectionId::ColorSchemes,
-        label: "Diagnostics",
-        keywords: &["unavailable", "fallback", "missing", "warning"],
-        selector: "settings-row-appearance-diagnostics",
     },
 ];
 
@@ -350,31 +380,29 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 24] = [
-        SettingsRowId::ChromeAppearanceMode,
+    const EVERY_ROW: [SettingsRowId; 22] = [
+        SettingsRowId::AppearanceMode,
+        SettingsRowId::ChromeDensity,
         SettingsRowId::ChromeScheme,
         SettingsRowId::ChromeLightScheme,
         SettingsRowId::ChromeDarkScheme,
-        SettingsRowId::ChromeDensity,
+        SettingsRowId::TerminalScheme,
+        SettingsRowId::TerminalLightScheme,
+        SettingsRowId::TerminalDarkScheme,
         SettingsRowId::ChromeFontFamily,
         SettingsRowId::ChromeBaseSize,
         SettingsRowId::ChromeRegularWeight,
         SettingsRowId::ChromeEmphasisWeight,
         SettingsRowId::ChromeHeadingWeight,
-        SettingsRowId::TerminalAppearanceMode,
-        SettingsRowId::TerminalScheme,
-        SettingsRowId::TerminalLightScheme,
-        SettingsRowId::TerminalDarkScheme,
         SettingsRowId::TerminalFontFamily,
         SettingsRowId::TerminalBaseSize,
+        SettingsRowId::TerminalLineHeight,
         SettingsRowId::TerminalRegularWeight,
         SettingsRowId::TerminalBoldWeight,
-        SettingsRowId::TerminalLineHeight,
         SettingsRowId::TerminalItalic,
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledSchemes,
         SettingsRowId::SchemeInterchange,
-        SettingsRowId::AppearanceDiagnostics,
     ];
 
     #[test]
@@ -401,6 +429,64 @@ mod tests {
     }
 
     #[test]
+    fn every_section_presents_at_least_one_row() {
+        for section in SettingsSectionId::ALL {
+            assert!(
+                ROWS.iter().any(|row| row.section == section),
+                "{section:?} has no rows"
+            );
+        }
+    }
+
+    /// Rendering makes one box per run of neighbouring rows sharing a group, so a group that
+    /// appears twice in one section would silently become two identical boxes.
+    #[test]
+    fn every_group_occupies_one_run_of_the_table() {
+        let mut seen = HashSet::new();
+        let mut previous: Option<(SettingsSectionId, &str)> = None;
+        for row in ROWS {
+            let current = (row.section, row.group);
+            if previous == Some(current) {
+                continue;
+            }
+            assert!(
+                seen.insert(current),
+                "{current:?} is split across the table"
+            );
+            previous = Some(current);
+        }
+    }
+
+    /// One appearance mode governs the whole application, so the catalog offers exactly one.
+    #[test]
+    fn one_row_owns_the_appearance_mode() {
+        let modes = ROWS
+            .iter()
+            .filter(|row| row.id.reset_target() == Some(ResetTarget::SchemeSelections))
+            .count();
+
+        assert_eq!(modes, 1);
+    }
+
+    /// A scheme row changes a scheme, so its reset leaves the shared appearance mode alone.
+    #[test]
+    fn a_scheme_row_resets_only_its_own_scheme() {
+        for (row, expected) in [
+            (SettingsRowId::ChromeScheme, ResetTarget::ChromeSchemeChoice),
+            (
+                SettingsRowId::ChromeLightScheme,
+                ResetTarget::ChromeSchemeChoice,
+            ),
+            (
+                SettingsRowId::TerminalDarkScheme,
+                ResetTarget::TerminalSchemeChoice,
+            ),
+        ] {
+            assert_eq!(row.reset_target(), Some(expected));
+        }
+    }
+
+    #[test]
     fn an_empty_query_matches_every_row() {
         assert_eq!(matching_rows("   ").len(), ROWS.len());
     }
@@ -417,15 +503,32 @@ mod tests {
     fn a_keyword_query_reaches_a_row_whose_label_omits_the_word() {
         assert!(matching_rows("leading").contains(&SettingsRowId::TerminalLineHeight));
         assert!(matching_rows("zed").contains(&SettingsRowId::SchemeInterchange));
-        assert!(matching_rows("automatic").contains(&SettingsRowId::ChromeAppearanceMode));
+        assert!(matching_rows("automatic").contains(&SettingsRowId::AppearanceMode));
+    }
+
+    /// The diagnostics readout is part of the scheme library rather than a row of its own, so the
+    /// words a person searches for when a scheme is missing still reach that page.
+    #[test]
+    fn a_missing_scheme_query_reaches_the_library() {
+        assert!(matching_rows("unavailable").contains(&SettingsRowId::InstalledSchemes));
+        assert!(matching_rows("fallback").contains(&SettingsRowId::InstalledSchemes));
     }
 
     #[test]
     fn a_section_query_matches_that_sections_rows() {
-        let matches = matching_rows("terminal appearance");
+        let matches = matching_rows("terminal");
 
         assert!(matches.contains(&SettingsRowId::TerminalItalic));
         assert!(!matches.contains(&SettingsRowId::ChromeDensity));
+    }
+
+    /// A group title is a heading a person can read on the page, so searching it reaches its rows.
+    #[test]
+    fn a_group_query_matches_that_groups_rows() {
+        let matches = matching_rows("rendering");
+
+        assert!(matches.contains(&SettingsRowId::TerminalBoldAsBright));
+        assert!(!matches.contains(&SettingsRowId::TerminalBaseSize));
     }
 
     #[test]
@@ -438,9 +541,7 @@ mod tests {
         for row in ROWS {
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::InstalledSchemes
-                    | SettingsRowId::SchemeInterchange
-                    | SettingsRowId::AppearanceDiagnostics
+                SettingsRowId::InstalledSchemes | SettingsRowId::SchemeInterchange
             );
             assert_eq!(
                 row.id.reset_target().is_some(),
