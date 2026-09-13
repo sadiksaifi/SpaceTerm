@@ -10,6 +10,7 @@ use crate::ui::appearance::ChromeAppearance;
 use super::SIDEBAR_NAME_TEXT_SIZE as NAME_SIZE;
 const DETAIL_SIZE: f32 = 12.0;
 const GAP: f32 = 8.0;
+const PIN_SIZE: f32 = 10.0;
 const PIN_WIDTH: f32 = 16.0;
 
 pub(super) fn title(
@@ -108,8 +109,8 @@ pub(super) fn detail(
                             .debug_selector(move || format!("workspace-row-pin-{id}"))
                             .child(Icon::new(
                                 IconName::Pin,
-                                appearance.spacing(12.0),
-                                gpui_color(appearance.colors.icon),
+                                appearance.spacing(PIN_SIZE),
+                                gpui_color(secondary_text_color(&appearance.colors)),
                             )),
                     )
                 })
