@@ -106,36 +106,60 @@ impl SettingsDraft {
         source: SchemeImport<'_>,
         replace: &BTreeSet<SchemeId>,
     ) -> Result<ImportReceipt, SettingsError> {
-        if !self.editable() {
-            return Err(SettingsError::Busy);
-        }
-        // Import validates and installs against the live transaction, so the preview must hold the
-        // draft before the catalog revision is captured.
-        self.apply_preview();
-        let token = self.preview.as_ref().ok_or(SettingsError::Busy)?;
-        let catalog_revision = self.settings.snapshot().catalog_revision;
-        let receipt = self
-            .settings
-            .import_preview(token, catalog_revision, source, replace)?;
-        self.draft = self.settings.snapshot().candidate;
-        self.unwritten = true;
-        self.status = SaveStatus::Saving;
-        Ok(receipt)
+        self.edit_catalog(|settings, token, revision| {
+            settings.import_preview(token, revision, source, replace)
+        })
     }
 
     pub(super) fn remove_custom_scheme(&mut self, id: &SchemeId) -> Result<(), SettingsError> {
+        self.edit_catalog(|settings, token, revision| {
+            settings
+                .remove_custom_scheme_preview(token, revision, id)
+                .map(|_| ())
+        })
+    }
+
+    fn edit_catalog<T>(
+        &mut self,
+        edit: impl FnOnce(&UserSettings, &PreviewToken, u64) -> Result<T, SettingsError>,
+    ) -> Result<T, SettingsError> {
         if !self.editable() {
             return Err(SettingsError::Busy);
         }
+        let owns_changes = self.unwritten || self.preview.is_some();
+        // Validate catalog changes against the authoritative draft before capturing its revision.
         self.apply_preview();
-        let token = self.preview.as_ref().ok_or(SettingsError::Busy)?;
-        let catalog_revision = self.settings.snapshot().catalog_revision;
-        self.settings
-            .remove_custom_scheme_preview(token, catalog_revision, id)?;
-        self.draft = self.settings.snapshot().candidate;
-        self.unwritten = true;
-        self.status = SaveStatus::Saving;
-        Ok(())
+        let result = self
+            .preview
+            .as_ref()
+            .ok_or(SettingsError::Busy)
+            .and_then(|token| {
+                edit(
+                    &self.settings,
+                    token,
+                    self.settings.snapshot().catalog_revision,
+                )
+            });
+        match result {
+            Ok(value) => {
+                self.draft = self.settings.snapshot().candidate;
+                self.unwritten = true;
+                self.status = SaveStatus::Saving;
+                Ok(value)
+            }
+            Err(error) => {
+                if !owns_changes {
+                    // Rejection from an idle draft must not reserve the shared transaction. A
+                    // previously owned preview or pending edit remains intact on the same error.
+                    if let Some(token) = self.preview.take() {
+                        let _ = self.settings.cancel_preview(&token);
+                    }
+                    self.resync = false;
+                    self.draft = self.settings.snapshot().committed;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Lists one kind's selectable schemes from the draft, so a freshly imported scheme appears

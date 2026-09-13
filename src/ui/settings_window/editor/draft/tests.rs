@@ -7,6 +7,8 @@ use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
 
+const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
+
 fn setup() -> (SettingsDraft, UserSettings, Arc<MemoryStorage>) {
     let storage = MemoryStorage::with_document(&AppearanceDocument::default());
     let (settings, _) = UserSettings::load(storage.clone());
@@ -122,9 +124,8 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
 fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
     let (mut draft, _, storage) = setup();
     let preferences = draft.document().preferences.clone();
-    let source = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
     let receipt = draft
-        .import(SchemeImport::SpaceTerm(source), &BTreeSet::new())
+        .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
         .unwrap();
     assert_eq!(draft.status(), SaveStatus::Saving);
     assert!(draft.has_unwritten_changes());
@@ -331,4 +332,64 @@ fn exporting_while_another_writer_is_busy_uses_the_authoritative_draft() {
         21.0
     );
     drop(competing);
+}
+
+#[test]
+fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
+    let (mut draft, settings, _) = setup();
+    draft
+        .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
+        .unwrap();
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+
+    for operation in 0..3 {
+        let result = match operation {
+            0 => draft
+                .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+                .map(|_| ()),
+            1 => draft
+                .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
+                .map(|_| ()),
+            _ => draft
+                .remove_custom_scheme(&crate::appearance::SchemeId::new("custom.absent").unwrap()),
+        };
+        assert!(result.is_err());
+        assert_eq!(draft.status(), SaveStatus::Saved);
+        assert!(!draft.has_unwritten_changes());
+        assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
+        let another_owner = settings
+            .begin_preview(settings.snapshot().committed.revision)
+            .unwrap();
+        drop(another_owner);
+    }
+}
+
+#[test]
+fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
+    let (mut draft, settings, storage) = setup();
+    draft.edit(|document| document.preferences.chrome.density = ChromeDensity::Comfortable);
+    let expected = draft.document().clone();
+
+    assert!(
+        draft
+            .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+            .is_err()
+    );
+    assert!(
+        draft
+            .remove_custom_scheme(&crate::appearance::SchemeId::new("custom.absent").unwrap())
+            .is_err()
+    );
+
+    assert_eq!(draft.document(), &expected);
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
+    assert_eq!(settings.snapshot().phase, PreviewPhase::Previewing);
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    assert_eq!(
+        storage.document().unwrap().preferences.chrome.density,
+        ChromeDensity::Comfortable
+    );
 }
