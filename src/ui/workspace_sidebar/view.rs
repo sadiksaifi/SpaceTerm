@@ -407,7 +407,6 @@ impl WorkspaceSidebar {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(appearance.spacing(SIDEBAR_CREATION_BUTTON_GAP))
                             .child(
                                 IconButton::new(
                                     "new-remote-workspace-button",

@@ -4415,8 +4415,8 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     );
     assert_eq!(
         local.left() - remote.right(),
-        px(1.0),
-        "the creation pair should keep a tight gap, got {remote:?} and {local:?}"
+        px(0.0),
+        "the creation pair should have no gap, got {remote:?} and {local:?}"
     );
     // All three footer glyphs share one visual extent while their buttons keep the same hit target.
     for (icon_selector, target) in [
