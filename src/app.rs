@@ -132,6 +132,7 @@ actions!(
 
 pub(crate) fn init(cx: &mut App, application_menu: Rc<dyn ApplicationMenuAdapter>) {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
+    crate::ui::settings_window::init(cx);
     cx.on_action(request_application_quit);
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
@@ -221,14 +222,11 @@ fn request_application_quit(_: &QuitApplication, cx: &mut App) {
 }
 
 fn application_quit_confirmation_window(cx: &App) -> Option<gpui::WindowHandle<WorkspaceManager>> {
-    cx.windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<WorkspaceManager>())
-        .find(|window| {
-            window
-                .read(cx)
-                .is_ok_and(|manager| manager.blocks_unconfirmed_application_quit(cx))
-        })
+    workspace_windows(cx).into_iter().find(|window| {
+        window
+            .read(cx)
+            .is_ok_and(|manager| manager.blocks_unconfirmed_application_quit(cx))
+    })
 }
 
 pub(crate) fn open(
@@ -298,8 +296,19 @@ pub(crate) fn open(
     Ok(window)
 }
 
+/// Every live Workspace window, resolved at call time from GPUI's own registry.
+///
+/// A Settings window is not a Workspace window: it presents no Workspace, cannot host one, and must
+/// never be counted as one when SpaceTerm decides whether a Workspace still exists.
+fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<WorkspaceManager>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<WorkspaceManager>())
+        .collect()
+}
+
 fn restore_default_window(cx: &mut App, host: &HostComposition) {
-    if !cx.windows().is_empty() {
+    if !workspace_windows(cx).is_empty() {
         return;
     }
     if let Err(error) = open(cx, host) {
@@ -309,7 +318,7 @@ fn restore_default_window(cx: &mut App, host: &HostComposition) {
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     cx.on_action(move |_: &NewWorkspace, cx| {
-        if !cx.windows().is_empty() {
+        if !workspace_windows(cx).is_empty() {
             return;
         }
         if let Err(error) = open(cx, &host) {
@@ -874,6 +883,123 @@ mod runtime_tests {
                 services.calls.borrow().clone(),
             ),
             (1, 1, vec!["register", "install"])
+        );
+    }
+
+    /// Settings storage for composition tests: nothing is retained and nothing is written.
+    struct EmptySettingsStorage;
+
+    impl crate::settings::storage::SettingsStorage for EmptySettingsStorage {
+        fn read(
+            &self,
+        ) -> Result<
+            Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
+            crate::settings::storage::StorageError,
+        > {
+            Ok(None)
+        }
+
+        fn write(
+            &self,
+            _: &[u8],
+            _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
+        ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
+        {
+            Err(crate::settings::storage::StorageError::Unavailable)
+        }
+    }
+
+    fn host_with_settings() -> Rc<HostComposition> {
+        Rc::new(
+            HostComposition::new(parts(Rc::default(), Rc::default()))
+                .unwrap()
+                .with_appearance(
+                    Arc::new(EmptySettingsStorage),
+                    Rc::new(
+                        crate::platform::appearance::testing::RecordingAppearancePlatform::default(
+                        ),
+                    ),
+                ),
+        )
+    }
+
+    #[gpui::test]
+    fn opening_settings_twice_presents_one_window(cx: &mut gpui::TestAppContext) {
+        let host = host_with_settings();
+        cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+    }
+
+    #[gpui::test]
+    fn a_settings_window_does_not_stand_in_for_a_workspace_window(cx: &mut gpui::TestAppContext) {
+        let host = host_with_settings();
+        let workspace = cx.update(|cx| {
+            let workspace = start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
+            workspace
+        });
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+
+        // Close the only Workspace window while Settings stays open.
+        cx.update(|cx| {
+            workspace
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+
+        // Both paths that restore a Workspace must still fire.
+        cx.update(|cx| cx.dispatch_action(&NewWorkspace));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+
+        cx.update(|cx| {
+            workspace_windows(cx)[0]
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| restore_default_window(cx, &host));
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+    }
+
+    #[gpui::test]
+    fn a_settings_only_window_leaves_application_quit_unblocked(cx: &mut gpui::TestAppContext) {
+        let host = host_with_settings();
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+        // The Workspace has running work, so it does block quit while it exists.
+        assert!(cx.update(|cx| application_quit_confirmation_window(cx).is_some()));
+
+        cx.update(|cx| {
+            workspace
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        // Only Settings remains. A window that presents no Workspace has no work to confirm, so
+        // quit must proceed rather than wait on it.
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(
+            cx.update(|cx| application_quit_confirmation_window(cx)),
+            None
         );
     }
 

@@ -4397,21 +4397,89 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     assert!(row.bottom() < list.bottom());
     assert_eq!(button.top(), list.bottom());
     assert_eq!(button.bottom(), sidebar.bottom());
+    let settings = cx.debug_bounds("open-settings-button").unwrap();
     let remote = cx.debug_bounds("new-remote-workspace-button").unwrap();
     let local = cx.debug_bounds("new-local-workspace-button").unwrap();
     assert!(remote.left() < local.left());
     assert_eq!(remote.center().y, local.center().y);
     assert!(remote.left() >= button.left());
     assert!(local.right() <= button.right());
-    for (icon_selector, target) in [
-        ("new-remote-workspace-icon", remote),
-        ("new-local-workspace-icon", local),
+    // Settings is application scoped and the pair opposite it both add a Workspace, so the odd one
+    // out stands alone at the leading end and the pair sits together at the other.
+    assert!(settings.left() >= button.left());
+    assert!(settings.right() < remote.left());
+    assert_eq!(settings.center().y, remote.center().y);
+    assert!(
+        settings.right() - button.left() < remote.left() - settings.right(),
+        "settings should stand apart from the creation pair, got {settings:?} beside {remote:?}"
+    );
+    assert!(
+        remote.right() >= local.left() - px(8.0),
+        "the creation pair should read as one cluster, got {remote:?} and {local:?}"
+    );
+    // The cog is a denser glyph than the two open outlines beside it, so it sets a step smaller to
+    // carry the same optical weight. Every button keeps the one hit target whatever it holds.
+    for (icon_selector, target, extent) in [
+        ("open-settings-icon", settings, px(15.0)),
+        ("new-remote-workspace-icon", remote, px(18.0)),
+        ("new-local-workspace-icon", local, px(18.0)),
     ] {
         let icon = cx.debug_bounds(icon_selector).unwrap();
-        assert_eq!(icon.size, gpui::size(px(18.0), px(18.0)));
+        assert_eq!(icon.size, gpui::size(extent, extent));
         assert_eq!(target.size, gpui::size(px(28.0), px(28.0)));
         assert_eq!(icon.center(), target.center());
     }
+}
+
+/// The workspace chooser's glyph is one size in both of its states.
+///
+/// Open, the chooser is an icon beside the sidebar toggle; closed, it widens into the chip naming
+/// the active Workspace. It is the same control and the same glyph either way, so taking the
+/// selector's generic icon size in one state and the top chrome's in the other made it change size
+/// as the sidebar came and went.
+#[gpui::test]
+fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+
+    let expected = px(super::WORKSPACE_CHROME_ICON_SIZE);
+    let opened = cx.debug_bounds("workspace-switcher-icon").unwrap();
+    assert_eq!(
+        opened.size,
+        gpui::size(expected, expected),
+        "the chooser should take the top chrome's icon size, got {opened:?}"
+    );
+
+    click("toggle-sidebar-button", cx);
+    let closed = cx.debug_bounds("workspace-switcher-icon").unwrap();
+
+    assert_eq!(
+        closed.size, opened.size,
+        "the chooser's glyph should not resize with the sidebar, got {closed:?} then {opened:?}"
+    );
+}
+
+/// The sidebar's cog asks for Settings the same way the menu item and the keyboard equivalent do.
+///
+/// It dispatches the application action rather than opening a window itself, so the one Settings
+/// Window, and the decision to activate it when it already exists, stay in one place.
+#[gpui::test]
+fn sidebar_settings_button_should_request_the_application_settings_action(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    let requests = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    cx.update(|_, cx| {
+        let requests = requests.clone();
+        cx.on_action(
+            move |_: &crate::ui::settings_window::OpenSettings, _: &mut gpui::App| {
+                requests.set(requests.get() + 1);
+            },
+        );
+    });
+
+    click("open-settings-button", cx);
+    cx.run_until_parked();
+
+    assert_eq!(requests.get(), 1, "the cog should ask for Settings");
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -5725,7 +5793,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         let row = cx
             .debug_bounds(selector)
             .expect("the compact Workspace source row should render");
-        assert_eq!(row.size.height, px(30.0));
+        // Selector rows share the chrome control height with the trigger and the filter above them.
+        assert_eq!(row.size.height, px(28.0));
         assert_eq!(
             row.left() - panel.left(),
             panel.right() - row.right(),

@@ -133,6 +133,7 @@ fn desktop_profile(
                 ActionShortcut::new(crate::ui::ToggleSidebar, "⌘B"),
                 ActionShortcut::new(NewWorkspace, "⌘N"),
                 ActionShortcut::new(crate::ui::NewRemoteWorkspace, "⇧⌘N"),
+                ActionShortcut::new(crate::ui::settings_window::OpenSettings, "⌘,"),
                 ActionShortcut::new(CreateTab, "⌘T"),
                 ActionShortcut::new(EditCopy, "⌘C"),
                 ActionShortcut::new(EditPaste, "⌘V"),
@@ -275,7 +276,7 @@ mod tests {
             .join("spaceterm-appearance-exerciser")
             .join(super::super::app_directories::APP_DIR_NAME);
 
-        assert_eq!(directories.config_file(), config.join("settings.json"));
+        assert_eq!(directories.settings_file(), config.join("settings.json"));
         assert_eq!(
             directories.managed_ssh_config().path(),
             config.join("ssh_config")

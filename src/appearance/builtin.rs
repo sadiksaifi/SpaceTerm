@@ -102,6 +102,11 @@ struct ChromePalette {
     panel: Color,
     elevated: Color,
     raised: Color,
+    /// One step beyond `raised`, for an element that is both selected and hovered.
+    ///
+    /// It is authored rather than borrowed from another role: the value must stay in the chrome
+    /// surface family, and a terminal or selection color carries no authority over chrome.
+    raised_hover: Color,
     inactive: Color,
     text: Color,
     secondary: Color,
@@ -112,8 +117,9 @@ struct ChromePalette {
     accent_hover: Color,
     border: Color,
     focus: Color,
-    selection: Color,
     hover: Color,
+    /// The scrollbar thumb's own fill, which Zed themes author directly.
+    scrollbar_thumb: Color,
     info: Color,
     success: Color,
     warning: Color,
@@ -157,7 +163,7 @@ fn chrome_from_palette(p: ChromePalette) -> ChromeColors {
         element_hover: p.hover,
         element_active: p.raised,
         element_selected: p.raised,
-        element_selected_hover: p.selection,
+        element_selected_hover: p.raised_hover,
         element_disabled: p.background,
         element_foreground: p.text,
         element_hover_foreground: p.text,
@@ -208,7 +214,7 @@ fn chrome_from_palette(p: ChromePalette) -> ChromeColors {
         scrollbar_track_border: transparent,
         scrollbar_thumb_background: Color {
             a: 0x78,
-            ..p.selection
+            ..p.scrollbar_thumb
         },
         scrollbar_thumb_border: transparent,
         scrollbar_thumb_hover_background: Color {
@@ -233,6 +239,7 @@ fn vague_dark_chrome() -> ChromeColors {
         panel: Color::rgb(0x141415),
         elevated: Color::rgb(0x141415),
         raised: Color::rgb(0x252530),
+        raised_hover: Color::rgb(0x2f2f3b),
         inactive: Color::rgb(0x1c1c24),
         text: Color::rgb(0xcdcdcd),
         secondary: Color::rgb(0x8f8f8f),
@@ -243,8 +250,8 @@ fn vague_dark_chrome() -> ChromeColors {
         accent_hover: Color::rgb(0x7e98e8),
         border: Color::rgb(0x252530),
         focus: Color::rgb(0x405065),
-        selection: Color::rgb(0x333738),
         hover: Color::rgb(0x252530),
+        scrollbar_thumb: Color::rgb(0x333738),
         info: Color::rgb(0x7e98e8),
         success: Color::rgb(0x7fa563),
         warning: Color::rgb(0xf3be7c),
@@ -258,6 +265,7 @@ fn spaceterm_light_chrome() -> ChromeColors {
         panel: Color::rgb(0xeeeef2),
         elevated: Color::rgb(0xffffff),
         raised: Color::rgb(0xe4e5ea),
+        raised_hover: Color::rgb(0xdadbe2),
         inactive: Color::rgb(0xededf1),
         text: Color::rgb(0x202124),
         secondary: Color::rgb(0x45474d),
@@ -268,8 +276,8 @@ fn spaceterm_light_chrome() -> ChromeColors {
         accent_hover: Color::rgb(0x244d78),
         border: Color::rgb(0xc9cbd2),
         focus: Color::rgb(0x315f91),
-        selection: Color::rgb(0xd7e5f4),
         hover: Color::rgb(0xe9eaf0),
+        scrollbar_thumb: Color::rgb(0xd7e5f4),
         info: Color::rgb(0x285f9e),
         success: Color::rgb(0x28733d),
         warning: Color::rgb(0x8a5300),
@@ -336,5 +344,36 @@ fn spaceterm_light_terminal() -> TerminalColors {
         find_active_match_foreground: None,
         hyperlink: Color::rgb(0x315f91),
         visual_bell: Color::rgba(0xd28a2380),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every built-in chrome interaction fill stays in the neutral surface family.
+    ///
+    /// The fills a reader sees while pointing at a list row, a selected element, or a scrollbar
+    /// thumb are surfaces, so they come from this palette's own surface ramp. Reaching for an
+    /// unrelated role, such as a terminal selection color, produces a fill from another hue family
+    /// and a state that reads as a different control.
+    #[test]
+    fn a_selected_element_should_gain_weight_on_hover_without_leaving_its_family() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = chrome_base(appearance);
+
+            assert_ne!(
+                colors.element_selected, colors.element_selected_hover,
+                "{appearance:?} should keep the hovered state of a selected element visible"
+            );
+            for role in [
+                colors.element_selected,
+                colors.element_selected_hover,
+                colors.ghost_element_hover,
+                colors.ghost_element_selected,
+            ] {
+                assert_eq!(role.a, 0xff, "{appearance:?} paints chrome surfaces opaque");
+            }
+        }
     }
 }

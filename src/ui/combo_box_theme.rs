@@ -21,13 +21,13 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
         .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
-        ComboBoxMetrics::new(px(240.0), px(40.0))
+        ComboBoxMetrics::new(px(240.0), px(28.0))
             .icon_trigger_size(px(28.0))
-            .geometry(px(260.0), px(28.0), px(30.0), px(46.0))
-            .spacing(px(4.0), px(10.0), px(18.0), px(8.0))
-            .shape(px(7.0), px(1.0))
+            .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
+            .spacing(px(4.0), px(8.0), px(18.0), px(6.0))
+            .shape(px(6.0), px(1.0))
             .font_sizes(px(12.0), px(11.0))
-            .text_geometry(px(16.0), px(14.0)),
+            .text_geometry(px(16.0), px(12.0)),
     )
     .shadow(super::appearance::control_shadow(colors, false))
 }
@@ -67,13 +67,13 @@ mod tests {
             .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
             .hover_background(gpui_color(colors.ghost_element_hover))
             .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
-            ComboBoxMetrics::new(px(240.0), px(40.0))
+            ComboBoxMetrics::new(px(240.0), px(28.0))
                 .icon_trigger_size(px(28.0))
-                .geometry(px(260.0), px(28.0), px(30.0), px(46.0))
-                .spacing(px(4.0), px(10.0), px(18.0), px(8.0))
-                .shape(px(7.0), px(1.0))
+                .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
+                .spacing(px(4.0), px(8.0), px(18.0), px(6.0))
+                .shape(px(6.0), px(1.0))
                 .font_sizes(px(12.0), px(11.0))
-                .text_geometry(px(16.0), px(14.0)),
+                .text_geometry(px(16.0), px(12.0)),
         )
         .shadow(super::super::appearance::control_shadow(&colors, false));
 

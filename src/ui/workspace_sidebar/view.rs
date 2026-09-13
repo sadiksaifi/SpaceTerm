@@ -303,7 +303,9 @@ impl WorkspaceSidebar {
         let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let creation_icon_size = appearance.spacing(WORKSPACE_CREATION_ICON_SIZE);
+        let settings_icon_size = appearance.spacing(SETTINGS_ICON_SIZE);
         let shortcuts = presentation.shortcut(&crate::ui::NewWorkspace);
+        let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
         let mut rows = div()
             .id("workspace-list")
@@ -372,68 +374,116 @@ impl WorkspaceSidebar {
                     .items_center()
                     .justify_between()
                     .px(appearance.spacing(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
+                    // Settings stands alone at the leading end: it is application scoped, while
+                    // the two buttons opposite it both add a Workspace to this window. Putting the
+                    // pair together and the odd one out apart says which is which without a label.
                     .child(
-                        IconButton::new(
-                            "new-remote-workspace-button",
-                            "New Remote Workspace",
-                            move |foreground| {
-                                div()
-                                    .debug_selector(|| "new-remote-workspace-icon".to_owned())
-                                    .flex()
-                                    .child(Icon::custom(
-                                        CustomIconName::GlobePlus,
-                                        creation_icon_size,
-                                        foreground,
-                                    ))
-                                    .into_any_element()
-                            },
-                        )
+                        IconButton::new("open-settings-button", "Settings", move |foreground| {
+                            div()
+                                .debug_selector(|| "open-settings-icon".to_owned())
+                                .flex()
+                                .child(Icon::new(IconName::Cog, settings_icon_size, foreground))
+                                .into_any_element()
+                        })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
-                        .disabled(self.remote_unavailable.is_some())
                         .preserve_ancestor_hover()
-                        .debug_selector("new-remote-workspace-button")
+                        .debug_selector("open-settings-button")
                         .tooltip(
-                            Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
-                                .keyboard_equivalent(presentation.shortcut(&NewRemoteWorkspace))
-                                .debug_selector("new-remote-workspace-tooltip"),
+                            Tooltip::new("open-settings-tooltip", "Settings")
+                                .keyboard_equivalent(settings_shortcut)
+                                .debug_selector("open-settings-tooltip"),
                         )
+                        // The same application action the menu item and the keyboard equivalent
+                        // carry, so every way in reaches the one Settings Window.
                         .on_activate(move |_, window, cx| {
-                            let _ = sidebar.update(cx, |sidebar, cx| {
-                                sidebar.dismiss_editing(window, cx);
-                                cx.emit(SidebarEvent::NewRemoteWorkspace);
-                            });
+                            window.dispatch_action(
+                                Box::new(crate::ui::settings_window::OpenSettings),
+                                cx,
+                            );
                         }),
                     )
                     .child(
-                        IconButton::new(
-                            "new-local-workspace-button",
-                            "New Local Workspace",
-                            move |foreground| {
-                                div()
-                                    .debug_selector(|| "new-local-workspace-icon".to_owned())
-                                    .flex()
-                                    .child(Icon::custom(
-                                        CustomIconName::RectangleStackBadgePlus,
-                                        creation_icon_size,
-                                        foreground,
-                                    ))
-                                    .into_any_element()
-                            },
-                        )
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Regular)
-                        .preserve_ancestor_hover()
-                        .debug_selector("new-local-workspace-button")
-                        .tooltip(
-                            Tooltip::new("new-local-workspace-tooltip", "New Local Workspace")
-                                .debug_selector("new-local-workspace-tooltip")
-                                .keyboard_equivalent(shortcuts),
-                        )
-                        .on_activate(move |_, _, cx| {
-                            let _ = local_sidebar
-                                .update(cx, |_, cx| cx.emit(SidebarEvent::NewLocalWorkspace));
-                        }),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(appearance.spacing(2.0))
+                            .child(
+                                IconButton::new(
+                                    "new-remote-workspace-button",
+                                    "New Remote Workspace",
+                                    move |foreground| {
+                                        div()
+                                            .debug_selector(|| {
+                                                "new-remote-workspace-icon".to_owned()
+                                            })
+                                            .flex()
+                                            .child(Icon::custom(
+                                                CustomIconName::GlobePlus,
+                                                creation_icon_size,
+                                                foreground,
+                                            ))
+                                            .into_any_element()
+                                    },
+                                )
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Regular)
+                                .disabled(self.remote_unavailable.is_some())
+                                .preserve_ancestor_hover()
+                                .debug_selector("new-remote-workspace-button")
+                                .tooltip(
+                                    Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
+                                        .keyboard_equivalent(
+                                            presentation.shortcut(&NewRemoteWorkspace),
+                                        )
+                                        .debug_selector("new-remote-workspace-tooltip"),
+                                )
+                                .on_activate(
+                                    move |_, window, cx| {
+                                        let _ = sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.dismiss_editing(window, cx);
+                                            cx.emit(SidebarEvent::NewRemoteWorkspace);
+                                        });
+                                    },
+                                ),
+                            )
+                            .child(
+                                IconButton::new(
+                                    "new-local-workspace-button",
+                                    "New Local Workspace",
+                                    move |foreground| {
+                                        div()
+                                            .debug_selector(|| {
+                                                "new-local-workspace-icon".to_owned()
+                                            })
+                                            .flex()
+                                            .child(Icon::custom(
+                                                CustomIconName::RectangleStackBadgePlus,
+                                                creation_icon_size,
+                                                foreground,
+                                            ))
+                                            .into_any_element()
+                                    },
+                                )
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Regular)
+                                .preserve_ancestor_hover()
+                                .debug_selector("new-local-workspace-button")
+                                .tooltip(
+                                    Tooltip::new(
+                                        "new-local-workspace-tooltip",
+                                        "New Local Workspace",
+                                    )
+                                    .debug_selector("new-local-workspace-tooltip")
+                                    .keyboard_equivalent(shortcuts),
+                                )
+                                .on_activate(move |_, _, cx| {
+                                    let _ = local_sidebar.update(cx, |_, cx| {
+                                        cx.emit(SidebarEvent::NewLocalWorkspace)
+                                    });
+                                }),
+                            ),
                     ),
             )
             .child(scrollbar)

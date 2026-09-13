@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::scheme::{CatalogError, ChromeColorOverrides, TerminalColorOverrides, validate_text};
-use super::{Appearance, SchemeId, builtin};
+use super::{Appearance, SchemeId, SchemeKind, builtin};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "policy", rename_all = "snake_case", deny_unknown_fields)]
@@ -222,7 +222,14 @@ impl AppearancePreferences {
     pub(crate) fn reset(&mut self, target: ResetTarget) {
         let defaults = Self::default();
         match target {
+            ResetTarget::SchemeSelections => {
+                self.chrome.scheme = defaults.chrome.scheme;
+                self.terminal.scheme = defaults.terminal.scheme;
+            }
             ResetTarget::ChromeSchemeSelection => self.chrome.scheme = defaults.chrome.scheme,
+            ResetTarget::ChromeSchemeChoice => {
+                self.chrome.scheme = default_scheme_choice(&self.chrome.scheme, SchemeKind::Chrome)
+            }
             ResetTarget::ChromeFontFamily => {
                 self.chrome.typography.family = defaults.chrome.typography.family
             }
@@ -239,6 +246,10 @@ impl AppearancePreferences {
                 self.chrome.typography.heading_weight = defaults.chrome.typography.heading_weight
             }
             ResetTarget::TerminalSchemeSelection => self.terminal.scheme = defaults.terminal.scheme,
+            ResetTarget::TerminalSchemeChoice => {
+                self.terminal.scheme =
+                    default_scheme_choice(&self.terminal.scheme, SchemeKind::Terminal)
+            }
             ResetTarget::TerminalFontFamily => {
                 self.terminal.typography.family = defaults.terminal.typography.family
             }
@@ -296,19 +307,43 @@ impl AppearancePreferences {
     }
 }
 
+/// The default scheme for every slot the current appearance mode uses, keeping that mode.
+///
+/// A surface's scheme row chooses a scheme, not a mode, so restoring its default leaves the mode
+/// alone. Restoring the whole selection would move one surface to the default mode and leave the
+/// other where it was, which is a state the one shared appearance control cannot present.
+fn default_scheme_choice(current: &SchemeSelection, kind: SchemeKind) -> SchemeSelection {
+    match current {
+        SchemeSelection::Fixed { appearance, .. } => SchemeSelection::Fixed {
+            id: builtin::fallback_id(kind, *appearance),
+            appearance: *appearance,
+        },
+        SchemeSelection::System { .. } => SchemeSelection::System {
+            light: builtin::fallback_id(kind, Appearance::Light),
+            dark: builtin::fallback_id(kind, Appearance::Dark),
+        },
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
-    reason = "the complete typed reset surface is consumed by the optional settings UI"
+    reason = "the Settings Window consumes the field and group targets; the color-role targets await an override editor"
 )]
 pub(crate) enum ResetTarget {
+    /// The appearance mode both surfaces share, and the schemes that mode selects.
+    SchemeSelections,
     ChromeSchemeSelection,
+    /// The chrome scheme chosen for each appearance slot, keeping the current appearance mode.
+    ChromeSchemeChoice,
     ChromeFontFamily,
     ChromeBaseSize,
     ChromeRegularWeight,
     ChromeEmphasisWeight,
     ChromeHeadingWeight,
     TerminalSchemeSelection,
+    /// The terminal scheme chosen for each appearance slot, keeping the current appearance mode.
+    TerminalSchemeChoice,
     TerminalFontFamily,
     TerminalBaseSize,
     TerminalRegularWeight,
@@ -336,7 +371,7 @@ pub(crate) enum ResetTarget {
 impl ResetTarget {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn chrome_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
         Some(Self::ChromeColorOverride {
@@ -347,7 +382,7 @@ impl ResetTarget {
 
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn terminal_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
         Some(Self::TerminalColorOverride {
@@ -363,7 +398,7 @@ pub(crate) struct ChromeColorRole(&'static str);
 impl ChromeColorRole {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn new(role: &'static str) -> Option<Self> {
         ChromeColorOverrides::supports_role(role).then_some(Self(role))
@@ -380,7 +415,7 @@ pub(crate) struct TerminalColorRole(&'static str);
 impl TerminalColorRole {
     #[allow(
         dead_code,
-        reason = "individual color-role reset is consumed by the optional settings UI"
+        reason = "individual color-role reset awaits the color override editor"
     )]
     pub(crate) fn new(role: &'static str) -> Option<Self> {
         TerminalColorOverrides::supports_role(role).then_some(Self(role))

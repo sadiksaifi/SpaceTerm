@@ -244,7 +244,8 @@ impl AppDirectories {
         })
     }
 
-    pub fn config_file(&self) -> PathBuf {
+    /// Returns the Settings document beneath the Operating-System Config root.
+    pub fn settings_file(&self) -> PathBuf {
         self.config.join(SETTINGS_DOCUMENT_NAME)
     }
 
@@ -709,7 +710,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(
-            directories.config_file(),
+            directories.settings_file(),
             Path::new("/home/test/.config/spaceterm/settings.json")
         );
         assert_eq!(
@@ -743,7 +744,7 @@ mod tests {
                 .with_config_directory("/isolated/spaceterm".into());
 
         assert_eq!(
-            directories.config_file(),
+            directories.settings_file(),
             Path::new("/isolated/spaceterm/settings.json")
         );
         assert_eq!(

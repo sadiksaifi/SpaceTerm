@@ -53,7 +53,6 @@ impl SchemeId {
         Self(value.to_owned())
     }
 
-    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -523,6 +522,19 @@ impl TerminalColorOverrides {
     }
 }
 
+/// One catalog entry as a settings list presents it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SchemeSummary {
+    pub(crate) id: SchemeId,
+    pub(crate) name: String,
+    pub(crate) appearance: Appearance,
+    pub(crate) kind: SchemeKind,
+    /// Built-in schemes cannot be removed, and their identifiers are reserved.
+    pub(crate) builtin: bool,
+    /// Representative resolved colors, ordered for a left-to-right preview strip.
+    pub(crate) swatches: Vec<Color>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChromeScheme {
@@ -607,10 +619,58 @@ impl SchemeCatalog {
         self.revision
     }
 
-    #[allow(
-        dead_code,
-        reason = "production catalog listing seam used by optional settings surfaces"
-    )]
+    /// Lists one kind's schemes as identity and resolved swatches, without cloning every role.
+    ///
+    /// A settings surface needs names, appearance, and a small preview. Resolving the complete
+    /// color set for every installed scheme to draw a list would be wasteful, so the summary
+    /// carries only what a row presents.
+    pub(crate) fn summaries(&self, kind: SchemeKind) -> Vec<SchemeSummary> {
+        match kind {
+            SchemeKind::Chrome => self
+                .chrome
+                .values()
+                .map(|scheme| {
+                    let mut colors = builtin::chrome_base(scheme.appearance);
+                    colors.apply(&scheme.colors);
+                    SchemeSummary {
+                        id: scheme.id.clone(),
+                        name: scheme.name.clone(),
+                        appearance: scheme.appearance,
+                        kind,
+                        builtin: scheme.id.is_reserved(),
+                        swatches: vec![
+                            colors.background,
+                            colors.panel_background,
+                            colors.text,
+                            colors.text_accent,
+                            colors.border,
+                            colors.element_selected,
+                        ],
+                    }
+                })
+                .collect(),
+            SchemeKind::Terminal => self
+                .terminal
+                .values()
+                .map(|scheme| {
+                    let mut colors = builtin::terminal_base(scheme.appearance);
+                    colors.apply(&scheme.colors);
+                    SchemeSummary {
+                        id: scheme.id.clone(),
+                        name: scheme.name.clone(),
+                        appearance: scheme.appearance,
+                        kind,
+                        builtin: scheme.id.is_reserved(),
+                        swatches: std::iter::once(colors.background)
+                            .chain(std::iter::once(colors.foreground))
+                            .chain(colors.normal.into_iter().skip(1).take(6))
+                            .collect(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub(crate) fn schemes(&self) -> Vec<CustomScheme> {
         let mut schemes = self
             .chrome

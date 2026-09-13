@@ -180,7 +180,7 @@ impl DesktopProfile {
     }
 }
 
-fn required_presented_actions() -> [&'static str; 22] {
+fn required_presented_actions() -> [&'static str; 23] {
     use crate::ui::OpenTerminalFind;
     use crate::ui::{
         ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
@@ -202,6 +202,7 @@ fn required_presented_actions() -> [&'static str; 22] {
         crate::ui::ToggleSidebar.name(),
         NewWorkspace.name(),
         crate::ui::NewRemoteWorkspace.name(),
+        crate::ui::settings_window::OpenSettings.name(),
         CreateTab.name(),
         EditCopy.name(),
         EditPaste.name(),
@@ -243,6 +244,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(crate::ui::ToggleSidebar, "Primary+B"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(crate::ui::NewRemoteWorkspace, "Primary+Shift+N"),
+            ActionShortcut::new(crate::ui::settings_window::OpenSettings, "Primary+,"),
             ActionShortcut::new(CreateTab, "Primary+T"),
             ActionShortcut::new(EditCopy, "Primary+C"),
             ActionShortcut::new(EditPaste, "Primary+V"),

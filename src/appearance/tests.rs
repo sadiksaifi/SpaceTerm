@@ -548,6 +548,57 @@ fn reset_fixture() -> AppearanceDocument {
     document
 }
 
+/// A scheme row's reset restores the scheme, not the mode.
+///
+/// The appearance mode belongs to the one control spanning both surfaces, so restoring one
+/// surface's scheme must not move that surface to a different mode and leave the other behind.
+#[test]
+fn resetting_a_surfaces_scheme_keeps_the_appearance_mode() {
+    for mode in [
+        SchemeSelection::Fixed {
+            id: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
+            appearance: Appearance::Light,
+        },
+        SchemeSelection::System {
+            light: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
+            dark: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+        },
+    ] {
+        let mut preferences = AppearancePreferences::default();
+        preferences.chrome.scheme = mode.clone();
+        let before = preferences.clone();
+
+        preferences.reset(ResetTarget::ChromeSchemeChoice);
+
+        assert_eq!(
+            preferences, before,
+            "a default scheme under {mode:?} should already be at its default"
+        );
+        assert_eq!(
+            preferences.terminal.scheme, before.terminal.scheme,
+            "the other surface is untouched"
+        );
+    }
+}
+
+/// Restoring the whole selection is still available, and it does move the mode.
+#[test]
+fn resetting_both_selections_restores_the_default_mode() {
+    let mut preferences = AppearancePreferences::default();
+    preferences.chrome.scheme = SchemeSelection::System {
+        light: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
+        dark: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+    };
+    preferences.terminal.scheme = SchemeSelection::System {
+        light: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Light),
+        dark: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
+    };
+
+    preferences.reset(ResetTarget::SchemeSelections);
+
+    assert_eq!(preferences, AppearancePreferences::default());
+}
+
 #[test]
 fn every_individual_preference_reset_changes_only_its_field() {
     type ExpectedEdit = fn(&mut AppearancePreferences);
@@ -585,6 +636,10 @@ fn every_individual_preference_reset_changes_only_its_field() {
         (ResetTarget::TerminalSchemeSelection, |value| {
             value.terminal.scheme = AppearancePreferences::default().terminal.scheme;
         }),
+        // The fixture already holds each slot's default scheme, so what these two prove is what
+        // they leave alone: the appearance mode, and the other surface.
+        (ResetTarget::ChromeSchemeChoice, |_| {}),
+        (ResetTarget::TerminalSchemeChoice, |_| {}),
         (ResetTarget::TerminalFontFamily, |value| {
             value.terminal.typography.family =
                 AppearancePreferences::default().terminal.typography.family;
@@ -624,7 +679,7 @@ fn every_individual_preference_reset_changes_only_its_field() {
                 .bold_as_bright;
         }),
     ];
-    assert_eq!(cases.len(), 14);
+    assert_eq!(cases.len(), 16);
 
     for (target, expected_edit) in cases {
         let mut actual = reset_fixture();
@@ -664,6 +719,11 @@ fn group_and_all_resets_have_exact_scope_and_retain_custom_schemes() {
         }),
         (ResetTarget::TerminalRendering, |value| {
             value.terminal.rendering = AppearancePreferences::default().terminal.rendering;
+        }),
+        (ResetTarget::SchemeSelections, |value| {
+            let defaults = AppearancePreferences::default();
+            value.chrome.scheme = defaults.chrome.scheme;
+            value.terminal.scheme = defaults.terminal.scheme;
         }),
         (ResetTarget::AllAppearance, |value| {
             *value = AppearancePreferences::default();

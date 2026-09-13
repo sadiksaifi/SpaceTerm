@@ -2328,6 +2328,33 @@ fn icon_trigger_should_remain_a_centered_square_without_the_prompt(cx: &mut Test
 }
 
 #[gpui::test]
+fn an_open_combo_box_should_mark_the_current_value(cx: &mut TestAppContext) {
+    // "Zellij Session" is the fourth row and carries no icon of its own.
+    let (_root, _events, _presses, cx) = combo_box_window(cx, Some(4), items(), false);
+    open_by_pointer(cx);
+
+    let check = cx
+        .debug_bounds("combo-box-row-3-check")
+        .expect("the current value should be marked");
+    let row = cx
+        .debug_bounds("combo-row-zellij")
+        .expect("the current row should render");
+
+    assert!(row.contains(&check.center()));
+    assert_eq!(cx.debug_bounds("combo-box-row-0-check"), None);
+}
+
+#[gpui::test]
+fn a_marked_row_should_keep_its_own_leading_icon(cx: &mut TestAppContext) {
+    // "Remote Workspace" is the third row and supplies its own icon.
+    let (_root, _events, _presses, cx) = combo_box_window(cx, Some(3), items(), false);
+    open_by_pointer(cx);
+
+    assert!(cx.debug_bounds("combo-row-remote-icon").is_some());
+    assert_eq!(cx.debug_bounds("combo-box-row-2-check"), None);
+}
+
+#[gpui::test]
 fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
     let (_root, _events, cx) = icon_trigger_window(cx, false);
     open_by_pointer(cx);

@@ -56,6 +56,28 @@ Session itself rather than by the spelling of either value.
 **Operating-System Window**:
 A native window that presents SpaceTerm.
 
+## Settings
+
+**Settings**:
+The application-scoped preferences SpaceTerm retains in `settings.json`.
+
+**Settings Window**:
+The separate modeless Operating-System Window that presents Settings. It presents no Workspace and
+never stands in for a Workspace window.
+
+**Settings Section**:
+One named group of Settings presented as one navigation entry and one content region.
+
+**Settings Row**:
+One labeled Setting control within a Settings Section.
+
+**Settings Search**:
+Literal search over Settings Row labels and keywords that reveals a matching Settings Row.
+
+**Appearance Mode**:
+The Light, Dark, or Auto choice governing which Color Scheme slot applies. Application chrome and
+the terminal each have their own.
+
 ## Focus and transient UI
 
 **Active Workspace**:

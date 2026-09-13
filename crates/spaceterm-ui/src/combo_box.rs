@@ -750,6 +750,8 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     placement: AnchoredPlacementConfig,
     panel_width: Option<Pixels>,
     full_width: bool,
+    hug: bool,
+    bezel: bool,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
@@ -782,6 +784,8 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             placement: AnchoredPlacementConfig::default(),
             panel_width: None,
             full_width: false,
+            hug: false,
+            bezel: false,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
@@ -851,6 +855,26 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Icon-only triggers retain their theme-owned square target size.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Draws a text trigger as a bezeled field rather than as a ghost control.
+    ///
+    /// A ghost trigger belongs in chrome, where it reads as an action. In a form it reads as a
+    /// value with no edge, which puts it optically short of the bezeled controls beside it even
+    /// though the two occupy the same width. The bezel reuses the popup's own surface and border.
+    pub fn bezel(mut self, bezel: bool) -> Self {
+        self.bezel = bezel;
+        self
+    }
+
+    /// Makes a text trigger take only the width its own value needs.
+    ///
+    /// A trigger otherwise reserves the popup's width, which leaves its value and its chevron at
+    /// opposite ends of an empty bezel. A hugging trigger keeps them together, so a row of them
+    /// reads as values rather than as fields. The popup keeps its own width either way.
+    pub fn hug(mut self, hug: bool) -> Self {
+        self.hug = hug;
         self
     }
 
@@ -1812,6 +1836,8 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let custom_trigger = custom_content.is_some();
         let text_trigger = !icon_trigger && !custom_trigger;
         let fill_parent = self.full_width && !icon_trigger;
+        let hug = self.hug && !fill_parent;
+        let bezel = self.bezel && text_trigger;
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1834,7 +1860,12 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 trigger
                     .h(metrics.trigger_height)
                     .when(fill_parent, |trigger| trigger.w_full())
-                    .when(!fill_parent, |trigger| trigger.min_w(metrics.panel_width))
+                    .when(!fill_parent && !hug, |trigger| {
+                        trigger.min_w(metrics.panel_width)
+                    })
+                    // A hugging trigger still stops where a reserving one would have, so one long
+                    // value cannot crowd out the label naming it.
+                    .when(hug, |trigger| trigger.max_w(metrics.panel_width))
                     .px(metrics.horizontal_padding)
                     .gap(metrics.gap)
             })
@@ -1844,11 +1875,15 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .border(metrics.border_width)
             .border_color(if focused {
                 paint.focus_border
+            } else if bezel {
+                paint.border
             } else {
                 paint.trigger_border
             })
             .bg(if open {
                 paint.trigger_hover_background
+            } else if bezel {
+                paint.background
             } else {
                 paint.trigger_background
             })
@@ -1881,7 +1916,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                         div()
                             .debug_selector(|| "combo-box-trigger-label".to_owned())
                             .min_w_0()
-                            .flex_1()
+                            .when(!hug, |value| value.flex_1())
                             .truncate()
                             .child(label),
                     )
@@ -2090,6 +2125,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let input = state.read(cx).input.clone();
     let matches = Rc::clone(&state.read(cx).matches);
     let items = Rc::clone(&state.read(cx).presented_items);
+    let selected = state.read(cx).selected.clone();
     let provisional = state.read(cx).provisional.clone();
     let hovered_row = state.read(cx).hovered_row.clone();
     let busy = state.read(cx).busy;
@@ -2144,6 +2180,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                         row_owner.clone(),
                         position,
                         item,
+                        selected.as_ref() == Some(&item.id),
                         provisional.as_ref() == Some(&item.id),
                         hovered_row.as_ref() == Some(&item.id),
                         theme,
@@ -2301,6 +2338,7 @@ fn render_row<I: Clone + Eq + 'static>(
     state: WeakEntity<ComboBoxState<I>>,
     position: usize,
     item: &ComboBoxItem<I>,
+    selected: bool,
     provisional: bool,
     hovered: bool,
     theme: ComboBoxTheme,
@@ -2368,8 +2406,19 @@ fn render_row<I: Clone + Eq + 'static>(
         .flex()
         .items_center()
         .justify_center();
+    // The leading slot marks the current value, the way a platform selector does. An item that
+    // carries its own icon keeps it: the caller's meaning outranks the mark, and the highlighted
+    // row still shows which value is current.
     if let Some(icon) = &item.leading_icon {
         leading = leading.child(icon(foreground, theme.metrics.icon_size));
+    } else if selected {
+        leading = leading
+            .debug_selector(move || format!("combo-box-row-{position}-check"))
+            .child(Icon::new(
+                IconName::Check,
+                theme.metrics.icon_size,
+                foreground,
+            ));
     }
     row = row.child(leading).child(
         div()

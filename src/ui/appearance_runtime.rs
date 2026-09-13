@@ -178,6 +178,16 @@ pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
     refresh(cx)
 }
 
+/// The font availability captured at startup or at the last explicit font reload.
+///
+/// Settings presents only families the resolver can actually use, so an unavailable choice cannot
+/// be made from the interface in the first place.
+pub(crate) fn available_fonts(cx: &App) -> AvailableFonts {
+    cx.try_global::<AppearanceRuntime>()
+        .map(|runtime| runtime.fonts.clone())
+        .unwrap_or_default()
+}
+
 pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
     cx.try_global::<InstalledAppearance>()
         .map(|value| Arc::clone(&value.0))

@@ -39,6 +39,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "SpaceTerm",
         submenu: None,
+        item: "Settings…",
+        symbol: "gearshape",
+    },
+    MenuItemIcon {
+        menu: "SpaceTerm",
+        submenu: None,
         item: "Hide SpaceTerm",
         symbol: "eye.slash",
     },
@@ -305,6 +311,8 @@ fn application_menu() -> Menu {
         name: "SpaceTerm".into(),
         items: vec![
             MenuItem::action("About SpaceTerm", ShowAboutApplication),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", crate::ui::settings_window::OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -761,6 +769,8 @@ mod tests {
             labels(application_menu().owned()),
             [
                 "About SpaceTerm",
+                "|",
+                "Settings…",
                 "|",
                 "Services",
                 "|",
