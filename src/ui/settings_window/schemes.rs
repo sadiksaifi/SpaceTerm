@@ -9,8 +9,11 @@ use spaceterm_ui::{
     ModalId,
 };
 
-use crate::appearance::{AppearanceDiagnostic, SchemeId, SchemeKind, SchemeSummary, ZedImportKind};
-use crate::settings::SchemeImport;
+use crate::appearance::{
+    AppearanceDiagnostic, CatalogError, ImportError, SchemeId, SchemeKind, SchemeSummary,
+    ZedImportKind,
+};
+use crate::settings::{ImportReceipt, SchemeImport, SettingsError};
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
@@ -18,12 +21,6 @@ use super::controls::{
     ROW_INSET, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
 };
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
-
-/// The greatest number of scheme rows the section draws at once.
-///
-/// The document already bounds installed schemes at 128. Drawing every one of them in a fixed-size
-/// window would be unreadable, so the section presents a bounded head and says how many remain.
-const VISIBLE_SCHEMES: usize = 12;
 
 /// A weak-owner handler, so a button outlives one render without borrowing the window.
 fn owned(
@@ -55,16 +52,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summaries = self.scheme_summaries(kind, cx);
-        let total = summaries.len();
-        let visible = summaries
-            .into_iter()
-            .take(VISIBLE_SCHEMES)
-            .collect::<Vec<_>>();
-        let rows = visible
+        let rows = summaries
             .iter()
             .map(|summary| self.render_scheme_row(summary, appearance, cx))
             .collect::<Vec<_>>();
-        let remaining = total - visible.len();
         let selector = match kind {
             SchemeKind::Chrome => "settings-installed-schemes-chrome",
             SchemeKind::Terminal => "settings-installed-schemes-terminal",
@@ -75,17 +66,6 @@ impl SettingsWindow {
             .flex_col()
             .w_full()
             .children(rows)
-            .when(remaining > 0, |list| {
-                list.child(
-                    div()
-                        .pt(appearance.spacing(8.0))
-                        .text_size(appearance.text_size(text::SMALL))
-                        .text_color(gpui_color(appearance.colors.text_muted))
-                        .child(SharedString::from(format!(
-                            "{remaining} more installed, visible in your settings file"
-                        ))),
-                )
-            })
             .into_any_element()
     }
 
@@ -429,50 +409,9 @@ impl SettingsWindow {
                 return;
             }
         };
-        // A SpaceTerm color package is tried first; a Zed theme family is the other accepted shape.
-        let native = self
-            .editor
-            .import(SchemeImport::SpaceTerm(&bytes), &BTreeSet::new(), cx);
-        let status = match native {
-            Ok(receipt) => Some(installed_message(receipt.installed.len())),
-            Err(_) => match super::editor::SettingsEditor::list_import_candidates(&bytes) {
-                Ok(candidates) if !candidates.is_empty() => {
-                    // Every candidate in the family is installed under its own identity, so one
-                    // import makes the whole family selectable without choosing for the user.
-                    let mut installed = 0;
-                    let mut failed = false;
-                    for candidate in &candidates {
-                        match self.editor.import(
-                            SchemeImport::Zed {
-                                bytes: &bytes,
-                                candidate_index: candidate.index,
-                                kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
-                            },
-                            &BTreeSet::new(),
-                            cx,
-                        ) {
-                            Ok(receipt) => installed += receipt.installed.len(),
-                            Err(_) => failed = true,
-                        }
-                    }
-                    if installed == 0 {
-                        Some(SharedString::from(
-                            "Those schemes are already installed, or they collide with schemes you have.",
-                        ))
-                    } else if failed {
-                        Some(SharedString::from(format!(
-                            "Installed {installed} schemes. Some were skipped because they collide with schemes you have."
-                        )))
-                    } else {
-                        Some(installed_message(installed))
-                    }
-                }
-                _ => Some(SharedString::from(
-                    "That file is not a SpaceTerm color package or a Zed theme.",
-                )),
-            },
-        };
-        self.interchange_status = status;
+        self.interchange_status = Some(import_document(&bytes, |source| {
+            self.editor.import(source, &BTreeSet::new(), cx)
+        }));
         cx.notify();
     }
 
@@ -533,6 +472,67 @@ impl SettingsWindow {
     }
 }
 
+fn import_document<'a>(
+    bytes: &'a [u8],
+    mut install: impl FnMut(SchemeImport<'a>) -> Result<ImportReceipt, SettingsError>,
+) -> SharedString {
+    match install(SchemeImport::SpaceTerm(bytes)) {
+        Ok(receipt) => return installed_message(receipt.installed.len()),
+        // A Zed theme family fails to deserialize as a SpaceTerm package. Installation failures
+        // say nothing about its format and must retain their own classification.
+        Err(SettingsError::Import(ImportError::InvalidJson)) => {}
+        Err(error) => return import_failure_message(error).into(),
+    }
+    let candidates = match super::editor::SettingsEditor::list_import_candidates(bytes) {
+        Ok(candidates) if !candidates.is_empty() => candidates,
+        _ => return "That file is not a SpaceTerm color package or a Zed theme.".into(),
+    };
+    // Each candidate has its own identity. Import the family without selecting a scheme.
+    let mut installed = 0;
+    let mut failure = None;
+    for candidate in candidates {
+        match install(SchemeImport::Zed {
+            bytes,
+            candidate_index: candidate.index,
+            kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
+        }) {
+            Ok(receipt) => installed += receipt.installed.len(),
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    match failure {
+        Some(error) if installed == 0 => import_failure_message(error).into(),
+        Some(error) => format!(
+            "Installed {installed} schemes. Some could not be imported. {}",
+            import_failure_message(error)
+        )
+        .into(),
+        None => installed_message(installed),
+    }
+}
+
+fn import_failure_message(error: SettingsError) -> &'static str {
+    match error {
+        SettingsError::Catalog(CatalogError::DuplicateId) => {
+            "Those schemes are already installed, or they collide with schemes you have."
+        }
+        SettingsError::Catalog(CatalogError::TooManySchemes) => {
+            "There is no room for those schemes. Remove an installed custom scheme and try again."
+        }
+        SettingsError::Busy => "Settings are busy. Try importing again when saving finishes.",
+        SettingsError::Stale | SettingsError::Catalog(CatalogError::RevisionConflict) => {
+            "Settings changed before the import finished. Try importing again."
+        }
+        SettingsError::Import(ImportError::UnsupportedVersion) => {
+            "That color package uses an unsupported version."
+        }
+        SettingsError::Import(_) => "That color package contains invalid schemes.",
+        _ => "Those schemes could not be imported.",
+    }
+}
+
 fn installed_message(installed: usize) -> SharedString {
     if installed == 1 {
         SharedString::from("Installed 1 scheme. Nothing was selected for you.")
@@ -563,6 +563,193 @@ fn diagnostic_message(diagnostic: AppearanceDiagnostic) -> &'static str {
         }
         AppearanceDiagnostic::TerminalFontNotMonospace => {
             "The terminal font you selected is not monospaced. A monospace fallback is in use."
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
+    use crate::settings::UserSettings;
+    use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
+
+    struct EmptyStorage;
+
+    impl SettingsStorage for EmptyStorage {
+        fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
+            Ok(None)
+        }
+
+        fn write(
+            &self,
+            _: &[u8],
+            _: Option<&SecureEntryIdentity>,
+        ) -> Result<StorageCommit, StorageError> {
+            panic!("importing a preview must not write settings");
+        }
+    }
+
+    const PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
+
+    #[gpui::test]
+    fn schemes_beyond_the_twelfth_row_can_be_scrolled_to_and_removed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::appearance::{Appearance, AppearanceDocument};
+        use crate::platform::appearance::testing::RecordingAppearancePlatform;
+        use crate::ui::appearance_runtime;
+        use crate::ui::settings_window::test_support::MemoryStorage;
+
+        let schemes = ["chrome", "terminal"]
+            .into_iter()
+            .flat_map(|kind| {
+                (0..14).map(move |index| {
+                    serde_json::json!({
+                        "kind": kind,
+                        "id": format!("custom.{kind}.{index:02}"),
+                        "name": format!("Sample {index}"),
+                        "appearance": "dark",
+                        "colors": {},
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let document = AppearanceDocument {
+            custom_schemes: serde_json::from_value(serde_json::json!(schemes)).unwrap(),
+            ..AppearanceDocument::default()
+        };
+        let storage = MemoryStorage::with_document(&document);
+        let (settings, changed) = UserSettings::load(storage);
+        let platform = RecordingAppearancePlatform::default();
+        platform.set_system_appearance(Some(Appearance::Dark));
+        cx.update(|cx| {
+            appearance_runtime::install(settings, changed, std::rc::Rc::new(platform), cx)
+                .expect("appearance runtime");
+            crate::ui::init(cx).expect("UI initialization");
+        });
+        let (settings_window, cx) = cx.add_window_view(SettingsWindow::new);
+        cx.update(|window, cx| {
+            window.activate_window();
+            settings_window.update(cx, |settings, cx| {
+                settings.reveal_section(super::super::SettingsSectionId::ColorSchemes, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        for (id, selector) in [
+            (
+                "custom.chrome.13",
+                "settings-scheme-remove-custom.chrome.13",
+            ),
+            (
+                "custom.terminal.13",
+                "settings-scheme-remove-custom.terminal.13",
+            ),
+        ] {
+            let target = cx
+                .debug_bounds(selector)
+                .expect("late scheme removal action");
+            cx.update(|_, cx| {
+                settings_window.update(cx, |settings, cx| {
+                    let viewport = settings.scroll.bounds();
+                    let offset =
+                        settings.scroll.offset().y + viewport.center().y - target.center().y;
+                    settings.scroll.set_offset(gpui::point(px(0.0), offset));
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            let position = cx.debug_bounds(selector).unwrap().center();
+            assert!(settings_window.read_with(cx, |settings, _| {
+                settings.scroll.bounds().contains(&position)
+            }));
+            cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+            cx.simulate_click(position, gpui::Modifiers::none());
+            cx.run_until_parked();
+            let confirmation = cx
+                .debug_bounds("modal-action-settings-remove-scheme-confirm")
+                .expect("removal confirmation")
+                .center();
+            cx.simulate_mouse_move(confirmation, None, gpui::Modifiers::none());
+            cx.simulate_click(confirmation, gpui::Modifiers::none());
+            cx.run_until_parked();
+
+            assert!(settings_window.read_with(cx, |settings, _| {
+                settings
+                    .editor
+                    .document()
+                    .custom_schemes
+                    .iter()
+                    .all(|scheme| scheme.id().as_str() != id)
+            }));
+        }
+    }
+
+    #[test]
+    fn importing_an_installed_native_package_reports_a_collision() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let mut install = |source| {
+            settings.import_preview(
+                &token,
+                settings.snapshot().catalog_revision,
+                source,
+                &BTreeSet::new(),
+            )
+        };
+        import_document(PACKAGE, &mut install);
+
+        assert_eq!(
+            import_document(PACKAGE, &mut install).as_ref(),
+            "Those schemes are already installed, or they collide with schemes you have."
+        );
+        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
+    }
+
+    #[test]
+    fn a_zed_family_is_imported_when_native_deserialization_fails() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
+
+        let message = import_document(bytes, |source| {
+            settings.import_preview(
+                &token,
+                settings.snapshot().catalog_revision,
+                source,
+                &BTreeSet::new(),
+            )
+        });
+
+        assert_eq!(message, installed_message(2));
+        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+    }
+
+    #[test]
+    fn native_import_failures_do_not_attempt_zed_installation() {
+        for (error, expected) in [
+            (
+                SettingsError::Busy,
+                "Settings are busy. Try importing again when saving finishes.",
+            ),
+            (
+                SettingsError::Catalog(CatalogError::TooManySchemes),
+                "There is no room for those schemes. Remove an installed custom scheme and try again.",
+            ),
+            (
+                SettingsError::Import(ImportError::UnsupportedVersion),
+                "That color package uses an unsupported version.",
+            ),
+        ] {
+            let mut attempts = 0;
+            let message = import_document(PACKAGE, |source| {
+                assert!(matches!(source, SchemeImport::SpaceTerm(_)));
+                attempts += 1;
+                Err(error)
+            });
+            assert_eq!(attempts, 1);
+            assert_eq!(message.as_ref(), expected);
         }
     }
 }
