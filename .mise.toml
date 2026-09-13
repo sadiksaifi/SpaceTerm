@@ -10,10 +10,14 @@ python = "3.13.15"
 [tasks.setup]
 description = "Prepare the shared development environment"
 run = [
-  "git submodule update --init --recursive",
+  { task = "deps:submodules" },
   { task = "deps:fetch" },
   { task = "doctor" },
 ]
+
+[tasks."deps:submodules"]
+description = "Initialize and update pinned Git submodules"
+run = "git submodule update --init --recursive"
 
 [tasks.doctor]
 description = "Verify shared development tools"
