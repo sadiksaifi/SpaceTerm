@@ -4397,21 +4397,61 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     assert!(row.bottom() < list.bottom());
     assert_eq!(button.top(), list.bottom());
     assert_eq!(button.bottom(), sidebar.bottom());
+    let settings = cx.debug_bounds("open-settings-button").unwrap();
     let remote = cx.debug_bounds("new-remote-workspace-button").unwrap();
     let local = cx.debug_bounds("new-local-workspace-button").unwrap();
     assert!(remote.left() < local.left());
     assert_eq!(remote.center().y, local.center().y);
     assert!(remote.left() >= button.left());
     assert!(local.right() <= button.right());
-    for (icon_selector, target) in [
-        ("new-remote-workspace-icon", remote),
-        ("new-local-workspace-icon", local),
+    // Settings is application scoped and the pair opposite it both add a Workspace, so the odd one
+    // out stands alone at the leading end and the pair sits together at the other.
+    assert!(settings.left() >= button.left());
+    assert!(settings.right() < remote.left());
+    assert_eq!(settings.center().y, remote.center().y);
+    assert!(
+        settings.right() - button.left() < remote.left() - settings.right(),
+        "settings should stand apart from the creation pair, got {settings:?} beside {remote:?}"
+    );
+    assert!(
+        remote.right() >= local.left() - px(8.0),
+        "the creation pair should read as one cluster, got {remote:?} and {local:?}"
+    );
+    // The cog is a denser glyph than the two open outlines beside it, so it sets a step smaller to
+    // carry the same optical weight. Every button keeps the one hit target whatever it holds.
+    for (icon_selector, target, extent) in [
+        ("open-settings-icon", settings, px(15.0)),
+        ("new-remote-workspace-icon", remote, px(18.0)),
+        ("new-local-workspace-icon", local, px(18.0)),
     ] {
         let icon = cx.debug_bounds(icon_selector).unwrap();
-        assert_eq!(icon.size, gpui::size(px(18.0), px(18.0)));
+        assert_eq!(icon.size, gpui::size(extent, extent));
         assert_eq!(target.size, gpui::size(px(28.0), px(28.0)));
         assert_eq!(icon.center(), target.center());
     }
+}
+
+/// The sidebar's cog asks for Settings the same way the menu item and the keyboard equivalent do.
+///
+/// It dispatches the application action rather than opening a window itself, so the one Settings
+/// Window, and the decision to activate it when it already exists, stay in one place.
+#[gpui::test]
+fn sidebar_settings_button_should_request_the_application_settings_action(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    let requests = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    cx.update(|_, cx| {
+        let requests = requests.clone();
+        cx.on_action(
+            move |_: &crate::ui::settings_window::OpenSettings, _: &mut gpui::App| {
+                requests.set(requests.get() + 1);
+            },
+        );
+    });
+
+    click("open-settings-button", cx);
+    cx.run_until_parked();
+
+    assert_eq!(requests.get(), 1, "the cog should ask for Settings");
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {

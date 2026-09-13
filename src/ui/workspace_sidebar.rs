@@ -48,6 +48,12 @@ pub(super) enum SidebarEvent {
 impl EventEmitter<SidebarEvent> for WorkspaceSidebar {}
 
 pub(super) const WORKSPACE_CREATION_ICON_SIZE: f32 = 18.0;
+/// The cog's glyph, a step under the creation icons beside it.
+///
+/// A cog is a filled, toothed shape where the two creation icons are open outlines, so at one
+/// nominal size it carries the most weight in the footer while asking for the least attention.
+/// The step back matches what the eye reads rather than what the box measures.
+pub(super) const SETTINGS_ICON_SIZE: f32 = 15.0;
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 pub(super) const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
