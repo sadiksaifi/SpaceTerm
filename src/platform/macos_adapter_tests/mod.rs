@@ -1,4 +1,6 @@
 //! Original native corpus oracles, separate from the portable release gate.
+mod selected_file;
+
 use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
 use crate::terminal::KeyTranslation;
 use crate::terminal::{KeyAction, OptionAsAltPolicy, PhysicalKey};

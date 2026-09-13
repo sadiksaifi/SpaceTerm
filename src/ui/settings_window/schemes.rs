@@ -376,6 +376,14 @@ impl SettingsWindow {
 
     fn begin_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
+        let Some(opener) = cx
+            .try_global::<crate::app::SelectedFileAccess>()
+            .map(|access| std::sync::Arc::clone(&access.0))
+        else {
+            self.interchange_status = Some("File import is unavailable.".into());
+            cx.notify();
+            return;
+        };
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -393,7 +401,7 @@ impl SettingsWindow {
             };
             let read = cx
                 .background_executor()
-                .spawn(async move { read_interchange_document(&path) })
+                .spawn(async move { read_interchange_document(&path, opener.as_ref()) })
                 .await;
             let _ = owner.update(cx, |window, cx| window.finish_import(read, cx));
         })

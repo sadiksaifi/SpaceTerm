@@ -83,7 +83,7 @@ fn shift_tab_reaches_interface_and_space_activates_its_section(cx: &mut TestAppC
 #[gpui::test]
 fn tab_skips_sections_without_search_matches(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&AppearanceDocument::default(), cx);
-    cx.simulate_keystrokes("cmd-f");
+    cx.dispatch_action(super::FocusSettingsSearch);
     cx.simulate_input("line height");
     cx.run_until_parked();
 

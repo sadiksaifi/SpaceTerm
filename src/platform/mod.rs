@@ -6,7 +6,10 @@ pub(crate) mod application_menu;
 pub(crate) mod control_socket;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
+#[cfg(target_os = "macos")]
+mod macos_selected_file;
 pub(crate) mod secure_filesystem;
+pub(crate) mod selected_file;
 pub(crate) mod window_visibility;
 
 pub(crate) mod local_filesystem;
