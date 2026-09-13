@@ -24,6 +24,7 @@ use spaceterm_ui::{
 
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_FOOTER_HORIZONTAL_PADDING: f32 = 4.0;
+const SIDEBAR_CREATION_BUTTON_GAP: f32 = 1.0;
 
 #[derive(Clone)]
 pub(super) enum SidebarEvent {
