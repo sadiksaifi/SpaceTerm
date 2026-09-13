@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::appearance::{AppearanceDocument, ChromeDensity, ResetTarget, SchemeKind};
-use crate::settings::{PreviewPhase, SchemeImport, UserSettings};
+use crate::settings::storage::StorageError;
+use crate::settings::{PreviewPhase, SchemeImport, SettingsError, UserSettings};
 use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
@@ -53,7 +54,6 @@ fn synchronization_keeps_a_draft_that_was_blocked_by_another_writer() {
     assert!(draft.edit(|document| {
         document.preferences.chrome.density = ChromeDensity::Comfortable;
     }));
-    draft.mark_saving();
     competing.run().unwrap();
 
     draft.synchronize();
@@ -77,14 +77,12 @@ fn an_edit_after_publication_reacquires_the_retired_preview() {
     assert!(draft.edit(|document| {
         document.preferences.chrome.density = ChromeDensity::Comfortable;
     }));
-    draft.mark_saving();
     // The storage write has finished, but its scheduling Adapter has not delivered completion.
     draft.prepare_commit().unwrap().run().unwrap();
 
     assert!(draft.edit(|document| {
         document.preferences.terminal.typography.base_size = 21.0;
     }));
-    draft.mark_saving();
 
     assert_eq!(
         settings
@@ -113,7 +111,6 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
     assert!(draft.edit(|document| {
         document.preferences.chrome.density = ChromeDensity::Comfortable;
     }));
-    draft.mark_saving();
     let result = draft.prepare_commit().unwrap().run();
 
     assert!(!draft.settle(false, result));
@@ -129,7 +126,8 @@ fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
     let receipt = draft
         .import(SchemeImport::SpaceTerm(source), &BTreeSet::new())
         .unwrap();
-    draft.mark_saving();
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
     let id = &receipt.installed[0];
 
     assert!(
@@ -147,10 +145,111 @@ fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
     assert_eq!(draft.document().preferences, preferences);
     assert_eq!(storage.writes(), 0);
 
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    assert_eq!(draft.status(), SaveStatus::Saved);
+
     draft.remove_custom_scheme(id).unwrap();
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
     let result = draft.prepare_commit().unwrap().run();
     assert!(!draft.settle(true, result));
     let retained = storage.document().unwrap();
     assert!(retained.custom_schemes.is_empty());
     assert_eq!(retained.preferences, preferences);
+}
+
+#[test]
+fn a_successful_edit_owns_its_unwritten_state_before_scheduling() {
+    let (mut draft, settings, storage) = setup();
+
+    assert!(draft.edit(|document| {
+        document.preferences.chrome.density = ChromeDensity::Comfortable;
+    }));
+
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
+    assert_eq!(settings.snapshot().phase, PreviewPhase::Previewing);
+    assert_eq!(storage.writes(), 0);
+    assert!(!draft.edit(|_| {}));
+    assert_eq!(draft.status(), SaveStatus::Saving);
+}
+
+#[test]
+fn unchanged_or_rejected_edits_preserve_a_save_failure_until_retry_finishes() {
+    let (mut draft, _, storage) = setup();
+    assert!(draft.edit(|document| {
+        document.preferences.chrome.density = ChromeDensity::Comfortable;
+    }));
+    storage.fail_writes(Some(StorageError::Unavailable));
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    let failed = SaveStatus::Failed(SettingsError::Storage(StorageError::Unavailable));
+    assert_eq!(draft.status(), failed);
+
+    assert!(!draft.edit(|_| {}));
+    assert!(
+        draft
+            .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+            .is_err()
+    );
+    assert_eq!(draft.status(), failed);
+    assert!(draft.has_unwritten_changes());
+
+    storage.fail_writes(None);
+    let retry = draft.prepare_commit().unwrap();
+    assert_eq!(draft.status(), failed);
+    assert!(!draft.settle(true, retry.run()));
+    assert_eq!(draft.status(), SaveStatus::Saved);
+}
+
+#[test]
+fn busy_commit_preparation_requeues_a_failed_draft() {
+    let (mut draft, _, storage) = setup();
+    assert!(draft.edit(|document| {
+        document.preferences.chrome.density = ChromeDensity::Comfortable;
+    }));
+    storage.fail_writes(Some(StorageError::Unavailable));
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    storage.fail_writes(None);
+    let retry = draft.prepare_commit().unwrap();
+
+    assert!(matches!(draft.prepare_commit(), Err(SettingsError::Busy)));
+
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
+    assert!(!draft.settle(true, retry.run()));
+    assert_eq!(draft.status(), SaveStatus::Saved);
+}
+
+#[test]
+fn resynchronization_after_failure_owns_its_unwritten_state() {
+    let (mut draft, _, storage) = setup();
+    assert!(draft.edit(|document| {
+        document.preferences.chrome.density = ChromeDensity::Comfortable;
+    }));
+    let in_flight = draft.prepare_commit().unwrap();
+    assert!(draft.edit(|document| {
+        document.preferences.terminal.typography.base_size = 21.0;
+    }));
+    storage.fail_writes(Some(StorageError::Unavailable));
+
+    assert!(draft.settle(false, in_flight.run()));
+
+    assert_eq!(draft.status(), SaveStatus::Saving);
+    assert!(draft.has_unwritten_changes());
+    storage.fail_writes(None);
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    assert_eq!(
+        storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
 }

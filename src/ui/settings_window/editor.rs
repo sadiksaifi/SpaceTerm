@@ -155,7 +155,6 @@ impl SettingsEditor {
 
     /// Replaces any scheduled write with a fresh one, which is the debounce.
     fn schedule(&mut self, cx: &mut Context<SettingsWindow>) {
-        self.draft.mark_saving();
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         // Assigning the field drops the previous task, cancelling its timer.

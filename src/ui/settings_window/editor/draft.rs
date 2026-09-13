@@ -84,6 +84,7 @@ impl SettingsDraft {
         }
         self.draft = Arc::new(draft);
         self.apply_preview();
+        self.status = SaveStatus::Saving;
         true
     }
 
@@ -114,6 +115,7 @@ impl SettingsDraft {
             .settings
             .import_preview(token, catalog_revision, source, replace)?;
         self.draft = self.settings.snapshot().candidate;
+        self.status = SaveStatus::Saving;
         Ok(receipt)
     }
 
@@ -127,6 +129,7 @@ impl SettingsDraft {
         self.settings
             .remove_custom_scheme_preview(token, catalog_revision, id)?;
         self.draft = self.settings.snapshot().candidate;
+        self.status = SaveStatus::Saving;
         Ok(())
     }
 
@@ -240,14 +243,20 @@ impl SettingsDraft {
         if self.resync {
             self.apply_preview();
         }
-        match self.preview.as_ref() {
+        let result = match self.preview.as_ref() {
             Some(token) => self.settings.commit_preview(token),
             None => {
                 let revision = self.settings.snapshot().committed.revision;
                 self.settings
                     .update_committed(revision, (*self.draft).clone())
             }
+        };
+        // A busy transaction defers the write. A retry that starts successfully keeps its previous
+        // failure visible until completion, matching the existing Settings Window feedback.
+        if matches!(result, Err(SettingsError::Busy)) {
+            self.status = SaveStatus::Saving;
         }
+        result
     }
 
     /// Incorporates a completed write, returning whether the draft needs another scheduled write.
@@ -288,6 +297,7 @@ impl SettingsDraft {
         }
         if self.resync && self.editable() {
             self.apply_preview();
+            self.status = SaveStatus::Saving;
             return true;
         }
         false
@@ -300,10 +310,6 @@ impl SettingsDraft {
             }
             _ => SaveStatus::Failed(error),
         };
-    }
-
-    pub(super) fn mark_saving(&mut self) {
-        self.status = SaveStatus::Saving;
     }
 }
 
