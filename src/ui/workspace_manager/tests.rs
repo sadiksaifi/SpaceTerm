@@ -4431,6 +4431,34 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     }
 }
 
+/// The workspace chooser's glyph is one size in both of its states.
+///
+/// Open, the chooser is an icon beside the sidebar toggle; closed, it widens into the chip naming
+/// the active Workspace. It is the same control and the same glyph either way, so taking the
+/// selector's generic icon size in one state and the top chrome's in the other made it change size
+/// as the sidebar came and went.
+#[gpui::test]
+fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+
+    let expected = px(super::WORKSPACE_CHROME_ICON_SIZE);
+    let opened = cx.debug_bounds("workspace-switcher-icon").unwrap();
+    assert_eq!(
+        opened.size,
+        gpui::size(expected, expected),
+        "the chooser should take the top chrome's icon size, got {opened:?}"
+    );
+
+    click("toggle-sidebar-button", cx);
+    let closed = cx.debug_bounds("workspace-switcher-icon").unwrap();
+
+    assert_eq!(
+        closed.size, opened.size,
+        "the chooser's glyph should not resize with the sidebar, got {closed:?} then {opened:?}"
+    );
+}
+
 /// The sidebar's cog asks for Settings the same way the menu item and the keyboard equivalent do.
 ///
 /// It dispatches the application action rather than opening a window itself, so the one Settings

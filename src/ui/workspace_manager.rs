@@ -2961,8 +2961,21 @@ impl WorkspaceManager {
             }
             vec![local, remote]
         }))
-        .icon_trigger(move |foreground, size| {
-            Icon::custom(CustomIconName::RectangleStack, size, foreground).into_any_element()
+        // The chooser takes the top chrome's icon size rather than the selector's own, so the
+        // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
+        // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
+        .icon_trigger(move |foreground, _| {
+            // The same selector the chip's glyph carries: they are the one chooser icon in its two
+            // states, so a test can hold them to one size.
+            div()
+                .debug_selector(|| "workspace-switcher-icon".to_owned())
+                .flex_shrink_0()
+                .child(Icon::custom(
+                    CustomIconName::RectangleStack,
+                    chrome_icon_size,
+                    foreground,
+                ))
+                .into_any_element()
         })
         .placement(AnchoredPlacementConfig::new(
             AnchoredPlacement::Bottom,
