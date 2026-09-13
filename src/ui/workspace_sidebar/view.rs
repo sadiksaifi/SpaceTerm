@@ -571,6 +571,9 @@ fn workspace_menu_entries(
                 "Unpin Directory",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::UnpinDirectory),
             )
+            .icon(|foreground, size| {
+                Icon::new(IconName::PinOff, size, foreground).into_any_element()
+            })
             .debug_selector("workspace-menu-row-unpin-directory"),
         );
     }
