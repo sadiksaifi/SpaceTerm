@@ -113,7 +113,7 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
     }));
     let result = draft.prepare_commit().unwrap().run();
 
-    assert!(!draft.settle(false, result));
+    assert!(draft.settle(false, result));
 
     assert_eq!(draft.status(), SaveStatus::Saving);
 }
@@ -252,4 +252,83 @@ fn resynchronization_after_failure_owns_its_unwritten_state() {
             .base_size,
         21.0
     );
+}
+
+#[test]
+fn a_completed_write_preserves_the_edit_made_while_storage_was_blocked() {
+    let (mut draft, settings, storage) = setup();
+    draft.edit(|document| document.preferences.chrome.density = ChromeDensity::Comfortable);
+    let blocked = storage.block_next_write();
+    let first = draft.prepare_commit().unwrap();
+    let worker = std::thread::spawn(move || first.run());
+    blocked.wait_until_started();
+    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    blocked.release();
+    let result = worker.join().unwrap();
+
+    assert!(draft.settle(false, result));
+    assert_eq!(
+        draft.document().preferences.terminal.typography.base_size,
+        21.0
+    );
+    assert_eq!(
+        settings
+            .snapshot()
+            .candidate
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+
+    let result = draft.prepare_commit().unwrap().run();
+    assert!(!draft.settle(true, result));
+    let retained = storage.document().unwrap();
+    assert_eq!(
+        retained.preferences.chrome.density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(retained.preferences.terminal.typography.base_size, 21.0);
+}
+
+#[test]
+fn opening_during_a_foreign_preview_never_adopts_its_canceled_values() {
+    let (_, settings, storage) = setup();
+    let committed = settings.snapshot().committed;
+    let foreign = settings.begin_preview(committed.revision).unwrap();
+    let mut candidate = (*committed).clone();
+    candidate.preferences.chrome.density = ChromeDensity::Comfortable;
+    settings.update_preview(&foreign, candidate).unwrap();
+    let mut draft = SettingsDraft::new(settings.clone());
+    drop(foreign);
+    draft.synchronize();
+    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    let result = draft.prepare_commit().unwrap().run();
+    draft.settle(true, result);
+    assert_eq!(
+        storage.document().unwrap().preferences.chrome.density,
+        ChromeDensity::Compact
+    );
+}
+
+#[test]
+fn exporting_while_another_writer_is_busy_uses_the_authoritative_draft() {
+    let (mut draft, settings, _) = setup();
+    let committed = settings.snapshot().committed;
+    let competing = settings
+        .update_committed(committed.revision, (*committed).clone())
+        .unwrap();
+    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    let exported = draft.export_document().unwrap();
+    assert_eq!(
+        crate::appearance::parse_settings(exported.as_bytes())
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    drop(competing);
 }

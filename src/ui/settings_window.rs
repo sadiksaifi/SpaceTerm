@@ -20,9 +20,9 @@ mod tests;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Entity, FocusHandle, Global, ScrollHandle, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions, div,
-    px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Entity, FocusHandle, Global, ScrollHandle,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    actions, div, px, size,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconButton, IconName, ModalAction,
@@ -109,11 +109,10 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             let settings = cx.new(|cx| SettingsWindow::new(window, cx));
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
-                // A change made moments ago has not been written yet. Writing it here is the only
-                // point at which it can still reach the retained document.
-                let _ = closing.update(cx, |settings, cx| settings.editor.flush(cx));
-                let _ = window;
-                true
+                let _ = closing.update(cx, |settings, cx| {
+                    settings.request_close(CloseIntent::Window(window.window_handle()), cx);
+                });
+                false
             });
             settings
         },
@@ -125,6 +124,28 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         }
         Err(error) => eprintln!("failed to open the SpaceTerm Settings window: {error}"),
     }
+}
+
+/// Runs only after Workspace close authorization, retaining Settings until its latest edit is saved.
+pub(crate) fn quit_when_saved(cx: &mut App) {
+    if let Some(settings) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<SettingsWindow>())
+    {
+        let _ = settings.update(cx, |settings, window, cx| {
+            window.activate_window();
+            settings.request_close(CloseIntent::Application, cx);
+        });
+    } else {
+        cx.quit();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CloseIntent {
+    Window(AnyWindowHandle),
+    Application,
 }
 
 /// Registers the application-scoped Settings actions.
@@ -214,6 +235,16 @@ impl RememberedSchemes {
         }
     }
 
+    fn reconcile(&mut self, selection: &SchemeSelection) {
+        match selection {
+            SchemeSelection::System { light, dark } => {
+                self.light = light.clone();
+                self.dark = dark.clone();
+            }
+            SchemeSelection::Fixed { id, appearance } => self.remember(*appearance, id.clone()),
+        }
+    }
+
     /// The selection a mode produces, preserving the other slot's choice.
     fn selection(&self, mode: AppearanceMode) -> SchemeSelection {
         match mode {
@@ -235,6 +266,7 @@ impl RememberedSchemes {
 
 pub(crate) struct SettingsWindow {
     editor: SettingsEditor,
+    close_after_save: Option<CloseIntent>,
     search: Entity<TextInput>,
     query: SharedString,
     scroll: ScrollHandle,
@@ -318,8 +350,16 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+        cx.on_app_quit(|settings, cx| {
+            if !settings.editor.flush_for_shutdown(cx) {
+                eprintln!("SpaceTerm Settings could not be saved during shutdown");
+            }
+            async {}
+        })
+        .detach();
         Self {
             editor,
+            close_after_save: None,
             search,
             query: SharedString::default(),
             scroll: ScrollHandle::new(),
@@ -334,8 +374,33 @@ impl SettingsWindow {
     }
 
     fn close(&mut self, _: &CloseSettingsWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.flush(cx);
-        window.remove_window();
+        self.request_close(CloseIntent::Window(window.window_handle()), cx);
+    }
+
+    fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
+        if !matches!(self.close_after_save, Some(CloseIntent::Application)) {
+            self.close_after_save = Some(intent);
+        }
+        self.finish_close(cx);
+    }
+
+    fn finish_close(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self.close_after_save else {
+            return;
+        };
+        if self.editor.flush(cx) {
+            self.close_after_save = None;
+            match intent {
+                CloseIntent::Window(handle) => cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                }),
+                CloseIntent::Application => cx.quit(),
+            }
+        } else if !self.editor.is_writing() {
+            // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed
+            // save. A competing preview is reported once rather than spinning during close.
+            self.close_after_save = None;
+        }
     }
 
     fn focus_search(
@@ -482,6 +547,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reconcile_remembered_schemes();
         let appearance = crate::ui::appearance::chrome(cx).clone();
         self.sync_scrollbar(cx);
         let content = div()
@@ -973,8 +1039,16 @@ impl SettingsWindow {
         }
     }
 
+    fn reconcile_remembered_schemes(&mut self) {
+        let preferences = &self.editor.document().preferences;
+        self.chrome_schemes.reconcile(&preferences.chrome.scheme);
+        self.terminal_schemes
+            .reconcile(&preferences.terminal.scheme);
+    }
+
     /// Moves both surfaces to `mode` in one edit, each keeping the scheme it wears there.
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        self.reconcile_remembered_schemes();
         let chrome = self.chrome_schemes.selection(mode);
         let terminal = self.terminal_schemes.selection(mode);
         self.edit(

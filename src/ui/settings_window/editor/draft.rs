@@ -35,6 +35,7 @@ pub(super) struct SettingsDraft {
     draft: Arc<AppearanceDocument>,
     preview: Option<PreviewToken>,
     status: SaveStatus,
+    unwritten: bool,
     /// A draft change that could not reach the live preview and must be re-pushed.
     resync: bool,
 }
@@ -48,9 +49,10 @@ impl SettingsDraft {
         };
         Self {
             settings,
-            draft: snapshot.candidate,
+            draft: snapshot.committed,
             preview: None,
             status,
+            unwritten: false,
             resync: false,
         }
     }
@@ -84,6 +86,7 @@ impl SettingsDraft {
         }
         self.draft = Arc::new(draft);
         self.apply_preview();
+        self.unwritten = true;
         self.status = SaveStatus::Saving;
         true
     }
@@ -115,6 +118,7 @@ impl SettingsDraft {
             .settings
             .import_preview(token, catalog_revision, source, replace)?;
         self.draft = self.settings.snapshot().candidate;
+        self.unwritten = true;
         self.status = SaveStatus::Saving;
         Ok(receipt)
     }
@@ -129,6 +133,7 @@ impl SettingsDraft {
         self.settings
             .remove_custom_scheme_preview(token, catalog_revision, id)?;
         self.draft = self.settings.snapshot().candidate;
+        self.unwritten = true;
         self.status = SaveStatus::Saving;
         Ok(())
     }
@@ -143,14 +148,15 @@ impl SettingsDraft {
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
-        self.settings.export_document()
+        Ok(crate::appearance::export_settings(&self.draft)?)
     }
 
     pub(super) fn export_schemes(
         &self,
         schemes: &[(SchemeKind, SchemeId)],
     ) -> Result<String, SettingsError> {
-        self.settings.export_schemes(schemes)
+        let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
+        Ok(crate::appearance::export_schemes(&catalog, schemes)?)
     }
 
     pub(super) fn list_import_candidates(
@@ -168,6 +174,7 @@ impl SettingsDraft {
         match self.settings.reload() {
             Ok(()) => {
                 self.draft = self.settings.snapshot().committed;
+                self.unwritten = false;
                 self.status = SaveStatus::Saved;
             }
             Err(error) => self.status = SaveStatus::Unavailable(error),
@@ -189,7 +196,7 @@ impl SettingsDraft {
     }
 
     pub(super) fn has_unwritten_changes(&self) -> bool {
-        self.resync || matches!(self.status, SaveStatus::Saving | SaveStatus::Failed(_))
+        self.unwritten
     }
 
     /// Pushes the draft into the live preview so every window repaints at once.
@@ -270,17 +277,24 @@ impl SettingsDraft {
                 // The published document has no verifiable identity, so the next write could
                 // replace content this session never read.
                 self.preview = None;
+                self.unwritten = !current_generation || self.resync;
+                if !self.unwritten {
+                    self.draft = self.settings.snapshot().committed;
+                }
                 self.resync = false;
                 self.status =
                     SaveStatus::Unavailable(SettingsError::Storage(StorageError::Conflict));
             }
             Ok(_) => {
-                // The token is retired with the revision it captured. The transaction is already
-                // idle, so releasing it cancels nothing.
-                self.preview = None;
-                self.draft = self.settings.snapshot().committed;
                 if current_generation && !self.resync {
+                    self.preview = None;
+                    self.draft = self.settings.snapshot().committed;
+                    self.unwritten = false;
                     self.status = SaveStatus::Saved;
+                } else {
+                    // A newer edit may already own a fresh preview. Preserve both its document
+                    // and token; apply_preview can retire an old token if it is still held.
+                    self.resync = true;
                 }
             }
             Err(error) => {

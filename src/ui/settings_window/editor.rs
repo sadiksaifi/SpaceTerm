@@ -1,11 +1,15 @@
 //! Schedules instant-apply Settings edits on the Settings Window's GPUI executor.
 //!
 //! Draft and preview ownership live in the framework-independent draft Module. This Adapter owns
-//! debounce cancellation, background execution, synchronous close flushing, and view notification.
+//! debounce cancellation, retained background execution, close/quit flushing, and view notification.
 
 mod draft;
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use gpui::{Context, Task};
 
@@ -26,8 +30,34 @@ pub(super) const COMMIT_DELAY: Duration = Duration::from_millis(500);
 pub(super) struct SettingsEditor {
     draft: SettingsDraft,
     pending: Option<Task<()>>,
+    in_flight: Option<ActiveCommit>,
     /// Retires a superseded scheduled write so a late completion cannot report stale status.
     generation: u64,
+}
+
+struct ActiveCommit {
+    generation: u64,
+    result: CommitCompletion,
+    _worker: Task<()>,
+    completion: Task<()>,
+}
+
+#[derive(Clone)]
+struct CommitCompletion {
+    result: Arc<OnceLock<Result<CommitOutcome, SettingsError>>>,
+    finished: async_channel::Receiver<()>,
+}
+
+impl CommitCompletion {
+    async fn wait(&self) -> Result<CommitOutcome, SettingsError> {
+        // The sender closes only after publishing the result. Every waiter sees that closure;
+        // foreground completion and shutdown never compete to consume one result message.
+        let _ = self.finished.recv().await;
+        self.result
+            .get()
+            .copied()
+            .unwrap_or(Err(SettingsError::Storage(StorageError::Unavailable)))
+    }
 }
 
 impl SettingsEditor {
@@ -35,6 +65,7 @@ impl SettingsEditor {
         Self {
             draft: SettingsDraft::new(settings),
             pending: None,
+            in_flight: None,
             generation: 0,
         }
     }
@@ -112,15 +143,17 @@ impl SettingsEditor {
         SettingsDraft::list_import_candidates(bytes)
     }
 
-    /// Writes any scheduled change immediately and synchronously.
+    /// Attempts to save before closing, keeping a running write and any failed draft alive.
     ///
-    /// Called while the window is closing, when an asynchronous write would be cancelled with the
-    /// window that owns its task. The document is one small file, so the pause is imperceptible and
-    /// it is the only way a change made moments before closing survives.
-    pub(super) fn flush(&mut self, cx: &mut Context<SettingsWindow>) {
+    /// A running write completes through its retained callback. Otherwise the final small document
+    /// is written synchronously, so a successful close never depends on a task owned by the window.
+    pub(super) fn flush(&mut self, cx: &mut Context<SettingsWindow>) -> bool {
         self.pending = None;
+        if self.in_flight.is_some() {
+            return false;
+        }
         if !self.draft.has_unwritten_changes() {
-            return;
+            return true;
         }
         match self.draft.prepare_commit() {
             Ok(job) => {
@@ -133,6 +166,24 @@ impl SettingsEditor {
                 cx.notify();
             }
         }
+        !self.draft.has_unwritten_changes()
+    }
+
+    pub(super) fn is_writing(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    /// Native shutdown cannot be deferred by GPUI and its returned futures get only 100 ms.
+    /// Drain the background result before returning, without awaiting any foreground callback.
+    pub(super) fn flush_for_shutdown(&mut self, cx: &mut Context<SettingsWindow>) -> bool {
+        self.pending = None;
+        if let Some(active) = self.in_flight.take() {
+            drop(active.completion);
+            let result = cx.background_executor().block(active.result.wait());
+            self.draft
+                .settle(active.generation == self.generation, result);
+        }
+        self.flush(cx)
     }
 
     /// Writes a change that a previous attempt could not.
@@ -148,7 +199,7 @@ impl SettingsEditor {
     }
 
     pub(super) fn synchronize(&mut self) {
-        if self.pending.is_none() {
+        if self.pending.is_none() && self.in_flight.is_none() {
             self.draft.synchronize();
         }
     }
@@ -172,17 +223,13 @@ impl SettingsEditor {
             return;
         }
         self.pending = None;
+        if self.in_flight.is_some() {
+            return;
+        }
         match self.draft.prepare_commit() {
             Ok(job) => {
-                self.pending = Some(cx.spawn(async move |window, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move { job.run() })
-                        .await;
-                    let _ = window.update(cx, |window, cx| {
-                        window.editor.settle(generation, result, cx);
-                    });
-                }));
+                let result = cx.background_executor().spawn(async move { job.run() });
+                self.track_commit(generation, result, cx);
                 cx.notify();
             }
             Err(SettingsError::Busy) => {
@@ -196,13 +243,64 @@ impl SettingsEditor {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn start_threaded_commit(
+        &mut self,
+        cx: &mut Context<SettingsWindow>,
+    ) -> std::thread::JoinHandle<()> {
+        self.pending = None;
+        let job = self.draft.prepare_commit().unwrap();
+        let (sender, receiver) = async_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            let _ = sender.send_blocking(job.run());
+        });
+        let result = cx
+            .background_executor()
+            .spawn(async move { receiver.recv().await.unwrap() });
+        self.track_commit(self.generation, result, cx);
+        worker
+    }
+
+    fn track_commit(
+        &mut self,
+        generation: u64,
+        result: Task<Result<CommitOutcome, SettingsError>>,
+        cx: &mut Context<SettingsWindow>,
+    ) {
+        let (finished, waiting) = async_channel::bounded(1);
+        let shared = Arc::new(OnceLock::new());
+        let published = shared.clone();
+        let worker = cx.background_executor().spawn(async move {
+            let _ = published.set(result.await);
+            drop(finished);
+        });
+        let result = CommitCompletion {
+            result: shared,
+            finished: waiting,
+        };
+        let completion = result.clone();
+        let completion = cx.spawn(async move |window, cx| {
+            let result = completion.wait().await;
+            let _ = window.update(cx, |window, cx| {
+                window.editor.settle(generation, result, cx);
+                window.finish_close(cx);
+            });
+        });
+        self.in_flight = Some(ActiveCommit {
+            generation,
+            result,
+            _worker: worker,
+            completion,
+        });
+    }
+
     fn settle(
         &mut self,
         generation: u64,
         result: Result<CommitOutcome, SettingsError>,
         cx: &mut Context<SettingsWindow>,
     ) {
-        self.pending = None;
+        self.in_flight = None;
         if self.draft.settle(generation == self.generation, result) {
             self.schedule(cx);
         }

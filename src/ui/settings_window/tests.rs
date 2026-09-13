@@ -1393,3 +1393,223 @@ fn leaked(selector: &'static str) -> &'static str {
 fn leaked_owned(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
 }
+
+fn request_window_close(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
+    cx.update(|native, cx| {
+        let intent = super::CloseIntent::Window(native.window_handle());
+        window.update(cx, |settings, cx| settings.request_close(intent, cx));
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+    let handle = cx.update(|native, _| native.window_handle());
+
+    request_window_close(&window, cx);
+    request_window_close(&window, cx);
+    assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
+    assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
+
+    blocked.release();
+    worker.join().unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+    assert!(!cx.cx.update(|cx| cx.windows().contains(&handle)));
+}
+
+#[gpui::test]
+fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppContext) {
+    for failure in [StorageError::Unavailable, StorageError::Conflict] {
+        let (window, harness, cx) = open_settings(cx);
+        click("settings-chrome-density-comfortable", cx);
+        harness.storage.fail_writes(Some(failure));
+        let handle = cx.update(|native, _| native.window_handle());
+
+        request_window_close(&window, cx);
+        request_window_close(&window, cx);
+
+        assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
+        assert_eq!(
+            document_of(&window, cx).preferences.chrome.density,
+            ChromeDensity::Comfortable
+        );
+        assert!(cx.debug_bounds("settings-banner").is_some());
+        assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_none()));
+        harness.storage.fail_writes(None);
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
+        request_window_close(&window, cx);
+    }
+}
+
+#[gpui::test]
+fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+
+    cx.cx.update(super::quit_when_saved);
+    assert!(window.read_with(cx, |settings, _| matches!(
+        settings.close_after_save,
+        Some(super::CloseIntent::Application)
+    )));
+    blocked.release();
+    worker.join().unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+    assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_none()));
+}
+
+#[gpui::test]
+fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContext) {
+    let (_, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    assert_eq!(harness.storage.writes(), 0);
+
+    cx.cx.update(|cx| cx.shutdown());
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .chrome
+            .density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(harness.storage.writes(), 1);
+}
+
+#[gpui::test]
+fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+    blocked.release();
+    worker.join().unwrap();
+
+    // GPUI's deterministic executor cannot park for an external OS thread. The storage result is
+    // ready, but neither GPUI's background result publication nor its foreground callback has run.
+    cx.cx.update(|cx| cx.shutdown());
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+}
+
+#[gpui::test]
+fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
+    let mut document = AppearanceDocument::default();
+    document.preferences.chrome.scheme = SchemeSelection::Fixed {
+        id: crate::appearance::SchemeId::new("custom.previous.chrome").unwrap(),
+        appearance: Appearance::Dark,
+    };
+    document.preferences.terminal.scheme = SchemeSelection::Fixed {
+        id: crate::appearance::SchemeId::new("custom.previous.terminal").unwrap(),
+        appearance: Appearance::Dark,
+    };
+    let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings
+                .editor
+                .reset(crate::appearance::ResetTarget::ChromeSchemeChoice, cx);
+            settings
+                .editor
+                .reset(crate::appearance::ResetTarget::TerminalSchemeChoice, cx);
+            // Exercise the next action immediately, before a render can refresh remembered slots.
+            settings.set_appearance_mode(super::AppearanceMode::Light, cx);
+            settings.set_appearance_mode(super::AppearanceMode::Dark, cx);
+        })
+    });
+    let preferences = document_of(&window, cx).preferences;
+    assert_eq!(
+        preferences.chrome.scheme,
+        SchemeSelection::Fixed {
+            id: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+            appearance: Appearance::Dark,
+        }
+    );
+    assert_eq!(
+        preferences.terminal.scheme,
+        SchemeSelection::Fixed {
+            id: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
+            appearance: Appearance::Dark,
+        }
+    );
+}

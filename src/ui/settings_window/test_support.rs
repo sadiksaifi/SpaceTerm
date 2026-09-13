@@ -1,6 +1,9 @@
 //! Shared storage Adapter for Settings draft and window tests.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Condvar, Mutex},
+    time::Duration,
+};
 
 use crate::appearance::{AppearanceDocument, export_settings};
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
@@ -8,7 +11,7 @@ use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, Stora
 
 /// In-memory Settings storage that counts writes and can be made to fail on demand.
 #[derive(Default)]
-pub(super) struct MemoryStorage(Mutex<MemoryState>);
+pub(super) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>>);
 
 #[derive(Default)]
 struct MemoryState {
@@ -20,7 +23,47 @@ struct MemoryState {
     drop_identity: bool,
 }
 
+#[derive(Default)]
+struct WriteGate {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+pub(super) struct BlockedWrite(Arc<WriteGate>);
+
+impl BlockedWrite {
+    pub(super) fn wait_until_started(&self) {
+        let (state, timeout) = self
+            .0
+            .changed
+            .wait_timeout_while(
+                self.0.state.lock().unwrap(),
+                Duration::from_secs(5),
+                |state| !state.0,
+            )
+            .unwrap();
+        assert!(state.0 && !timeout.timed_out(), "the write should start");
+    }
+
+    pub(super) fn release(&self) {
+        self.0.state.lock().unwrap().1 = true;
+        self.0.changed.notify_all();
+    }
+}
+
+impl Drop for BlockedWrite {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 impl MemoryStorage {
+    pub(super) fn block_next_write(&self) -> BlockedWrite {
+        let gate = Arc::new(WriteGate::default());
+        *self.1.lock().unwrap() = Some(gate.clone());
+        BlockedWrite(gate)
+    }
+
     pub(super) fn with_document(document: &AppearanceDocument) -> Arc<Self> {
         let storage = Arc::new(Self::default());
         let bytes = export_settings(document)
@@ -80,6 +123,13 @@ impl SettingsStorage for MemoryStorage {
         bytes: &[u8],
         expected: Option<&SecureEntryIdentity>,
     ) -> Result<StorageCommit, StorageError> {
+        let gate = self.1.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let mut state = gate.state.lock().unwrap();
+            state.0 = true;
+            gate.changed.notify_all();
+            drop(gate.changed.wait_while(state, |state| !state.1).unwrap());
+        }
         let mut state = self.0.lock().unwrap();
         if let Some(error) = state.write_failure {
             return Err(error);

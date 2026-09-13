@@ -216,7 +216,7 @@ fn request_application_quit(_: &QuitApplication, cx: &mut App) {
                 manager.request_application_quit(window, cx);
             });
         } else {
-            cx.quit();
+            crate::ui::settings_window::quit_when_saved(cx);
         }
     });
 }
