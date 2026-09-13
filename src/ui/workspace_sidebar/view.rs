@@ -302,8 +302,7 @@ impl WorkspaceSidebar {
     ) -> AnyElement {
         let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let creation_icon_size = appearance.spacing(WORKSPACE_CREATION_ICON_SIZE);
-        let settings_icon_size = appearance.spacing(SETTINGS_ICON_SIZE);
+        let footer_icon_size = appearance.spacing(SIDEBAR_FOOTER_ICON_SIZE);
         let shortcuts = presentation.shortcut(&crate::ui::NewWorkspace);
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
@@ -382,7 +381,7 @@ impl WorkspaceSidebar {
                             div()
                                 .debug_selector(|| "open-settings-icon".to_owned())
                                 .flex()
-                                .child(Icon::new(IconName::Cog, settings_icon_size, foreground))
+                                .child(Icon::new(IconName::Cog, footer_icon_size, foreground))
                                 .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
@@ -421,7 +420,7 @@ impl WorkspaceSidebar {
                                             .flex()
                                             .child(Icon::custom(
                                                 CustomIconName::GlobePlus,
-                                                creation_icon_size,
+                                                footer_icon_size,
                                                 foreground,
                                             ))
                                             .into_any_element()
@@ -460,7 +459,7 @@ impl WorkspaceSidebar {
                                             .flex()
                                             .child(Icon::custom(
                                                 CustomIconName::RectangleStackBadgePlus,
-                                                creation_icon_size,
+                                                footer_icon_size,
                                                 foreground,
                                             ))
                                             .into_any_element()

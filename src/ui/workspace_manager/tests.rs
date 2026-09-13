@@ -4417,15 +4417,14 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
         remote.right() >= local.left() - px(8.0),
         "the creation pair should read as one cluster, got {remote:?} and {local:?}"
     );
-    // The cog is a denser glyph than the two open outlines beside it, so it sets a step smaller to
-    // carry the same optical weight. Every button keeps the one hit target whatever it holds.
-    for (icon_selector, target, extent) in [
-        ("open-settings-icon", settings, px(15.0)),
-        ("new-remote-workspace-icon", remote, px(18.0)),
-        ("new-local-workspace-icon", local, px(18.0)),
+    // All three footer glyphs share one visual extent while their buttons keep the same hit target.
+    for (icon_selector, target) in [
+        ("open-settings-icon", settings),
+        ("new-remote-workspace-icon", remote),
+        ("new-local-workspace-icon", local),
     ] {
         let icon = cx.debug_bounds(icon_selector).unwrap();
-        assert_eq!(icon.size, gpui::size(extent, extent));
+        assert_eq!(icon.size, gpui::size(px(15.0), px(15.0)));
         assert_eq!(target.size, gpui::size(px(28.0), px(28.0)));
         assert_eq!(icon.center(), target.center());
     }
