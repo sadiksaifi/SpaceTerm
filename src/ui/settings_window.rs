@@ -12,14 +12,20 @@ mod import;
 mod schemes;
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+mod control_tests;
+
+#[cfg(test)]
 #[path = "settings_window/tests.rs"]
 mod tests;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Entity, FocusHandle, Global, ScrollHandle, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions, div,
-    px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Entity, FocusHandle, Global, ScrollHandle,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    actions, div, px, size,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconButton, IconName, ModalAction,
@@ -106,11 +112,10 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             let settings = cx.new(|cx| SettingsWindow::new(window, cx));
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
-                // A change made moments ago has not been written yet. Writing it here is the only
-                // point at which it can still reach the retained document.
-                let _ = closing.update(cx, |settings, cx| settings.editor.flush(cx));
-                let _ = window;
-                true
+                let _ = closing.update(cx, |settings, cx| {
+                    settings.request_close(CloseIntent::Window(window.window_handle()), cx);
+                });
+                false
             });
             settings
         },
@@ -122,6 +127,28 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         }
         Err(error) => eprintln!("failed to open the SpaceTerm Settings window: {error}"),
     }
+}
+
+/// Runs only after Workspace close authorization, retaining Settings until its latest edit is saved.
+pub(crate) fn quit_when_saved(cx: &mut App) {
+    if let Some(settings) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<SettingsWindow>())
+    {
+        let _ = settings.update(cx, |settings, window, cx| {
+            window.activate_window();
+            settings.request_close(CloseIntent::Application, cx);
+        });
+    } else {
+        cx.quit();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CloseIntent {
+    Window(AnyWindowHandle),
+    Application,
 }
 
 /// Registers the application-scoped Settings actions.
@@ -211,6 +238,16 @@ impl RememberedSchemes {
         }
     }
 
+    fn reconcile(&mut self, selection: &SchemeSelection) {
+        match selection {
+            SchemeSelection::System { light, dark } => {
+                self.light = light.clone();
+                self.dark = dark.clone();
+            }
+            SchemeSelection::Fixed { id, appearance } => self.remember(*appearance, id.clone()),
+        }
+    }
+
     /// The selection a mode produces, preserving the other slot's choice.
     fn selection(&self, mode: AppearanceMode) -> SchemeSelection {
         match mode {
@@ -232,6 +269,7 @@ impl RememberedSchemes {
 
 pub(crate) struct SettingsWindow {
     editor: SettingsEditor,
+    close_after_save: Option<CloseIntent>,
     search: Entity<TextInput>,
     query: SharedString,
     scroll: ScrollHandle,
@@ -245,6 +283,7 @@ pub(crate) struct SettingsWindow {
     terminal_schemes: RememberedSchemes,
     interchange_status: Option<SharedString>,
     focus_handle: FocusHandle,
+    section_focus: [FocusHandle; SettingsSectionId::ALL.len()],
 }
 
 impl SettingsWindow {
@@ -263,6 +302,12 @@ impl SettingsWindow {
         // opens, rather than only after something inside it is clicked.
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
+        let section_focus = SettingsSectionId::ALL.map(|_| {
+            let focus = cx.focus_handle().tab_stop(true);
+            cx.on_focus(&focus, window, |_, _, cx| cx.notify()).detach();
+            cx.on_blur(&focus, window, |_, _, cx| cx.notify()).detach();
+            focus
+        });
         let search = cx.new(|cx| {
             TextInput::new(
                 "settings-search",
@@ -315,8 +360,16 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+        cx.on_app_quit(|settings, cx| {
+            if !settings.editor.flush_for_shutdown(cx) {
+                eprintln!("SpaceTerm Settings could not be saved during shutdown");
+            }
+            async {}
+        })
+        .detach();
         Self {
             editor,
+            close_after_save: None,
             search,
             query: SharedString::default(),
             scroll: ScrollHandle::new(),
@@ -327,12 +380,38 @@ impl SettingsWindow {
             terminal_schemes,
             interchange_status: None,
             focus_handle,
+            section_focus,
         }
     }
 
     fn close(&mut self, _: &CloseSettingsWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.flush(cx);
-        window.remove_window();
+        self.request_close(CloseIntent::Window(window.window_handle()), cx);
+    }
+
+    fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
+        if !matches!(self.close_after_save, Some(CloseIntent::Application)) {
+            self.close_after_save = Some(intent);
+        }
+        self.finish_close(cx);
+    }
+
+    fn finish_close(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self.close_after_save else {
+            return;
+        };
+        if self.editor.flush(cx) {
+            self.close_after_save = None;
+            match intent {
+                CloseIntent::Window(handle) => cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                }),
+                CloseIntent::Application => cx.quit(),
+            }
+        } else if !self.editor.is_writing() {
+            // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed
+            // save. A competing preview is reported once rather than spinning during close.
+            self.close_after_save = None;
+        }
     }
 
     fn focus_search(
@@ -479,6 +558,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reconcile_remembered_schemes();
         let appearance = crate::ui::appearance::chrome(cx).clone();
         self.sync_scrollbar(cx);
         let content = div()
@@ -487,6 +567,26 @@ impl Render for SettingsWindow {
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::clear_search))
+            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key != "tab"
+                    || modifiers.control
+                    || modifiers.alt
+                    || modifiers.platform
+                    || modifiers.function
+                {
+                    return;
+                }
+                // Inputs and popups handle their own traversal first. Other Settings controls
+                // delegate an unhandled Tab to the window's registered focus order.
+                if modifiers.shift {
+                    window.focus_prev();
+                } else {
+                    window.focus_next();
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -500,7 +600,7 @@ impl Render for SettingsWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(&appearance, cx))
+                    .child(self.render_sidebar(&appearance, window, cx))
                     .child(self.render_detail(&appearance, window, cx)),
             )
             .child(self.render_footer(&appearance, cx));
@@ -512,24 +612,30 @@ impl SettingsWindow {
     fn render_sidebar(
         &mut self,
         appearance: &ChromeAppearance,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let matching = catalog::matching_rows(&self.query);
         let entries = SettingsSectionId::ALL
             .iter()
-            .map(|section| {
+            .zip(&self.section_focus)
+            .map(|(section, focus)| {
                 let section = *section;
                 let has_matches = ROWS
                     .iter()
                     .any(|row| row.section == section && matching.contains(&row.id));
                 let selected = self.active_section == section && has_matches;
+                let focused = focus.is_focused(window) && has_matches;
                 let owner = cx.weak_entity();
+                let keyboard_owner = owner.clone();
+                let pointer_focus = focus.clone();
                 div()
                     .id(SharedString::from(format!(
                         "settings-navigation-{}",
                         section.navigation_title()
                     )))
                     .debug_selector(move || format!("settings-navigation-{}", section.selector()))
+                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -563,7 +669,21 @@ impl SettingsWindow {
                                         appearance.colors.ghost_element_hover_foreground,
                                     ))
                             })
-                            .on_click(move |_, _, cx| {
+                            .track_focus(focus)
+                            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                                if event.keystroke.modifiers.modified()
+                                    || !matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    return;
+                                }
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                let _ = keyboard_owner.update(cx, |settings, cx| {
+                                    settings.reveal_section(section, cx);
+                                });
+                            })
+                            .on_click(move |_, window, cx| {
+                                pointer_focus.focus(window);
                                 let _ = owner.update(cx, |settings, cx| {
                                     settings.reveal_section(section, cx)
                                 });
@@ -571,6 +691,16 @@ impl SettingsWindow {
                     })
                     .when(!has_matches, |entry| {
                         entry.text_color(gpui_color(appearance.colors.text_disabled))
+                    })
+                    .when(focused, |entry| {
+                        entry.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(gpui_color(appearance.colors.border_focused)),
+                        )
                     })
                     .child(div().flex_none().child(Icon::new(
                         match section {
@@ -970,8 +1100,16 @@ impl SettingsWindow {
         }
     }
 
+    fn reconcile_remembered_schemes(&mut self) {
+        let preferences = &self.editor.document().preferences;
+        self.chrome_schemes.reconcile(&preferences.chrome.scheme);
+        self.terminal_schemes
+            .reconcile(&preferences.terminal.scheme);
+    }
+
     /// Moves both surfaces to `mode` in one edit, each keeping the scheme it wears there.
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        self.reconcile_remembered_schemes();
         let chrome = self.chrome_schemes.selection(mode);
         let terminal = self.terminal_schemes.selection(mode);
         self.edit(
@@ -1014,13 +1152,21 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
         // The control carries its own selector so it never collides with its row's.
         let selector = control_selector(row);
-        let items = summaries
+        let mut items = summaries
             .iter()
             .map(|summary| {
                 ComboBoxItem::new(summary.id.clone(), SharedString::from(summary.name.clone()))
                     .debug_selector(format!("{selector}-{}", summary.id.as_str()))
             })
             .collect::<Vec<_>>();
+        retain_selected_item(
+            &mut items,
+            ComboBoxItem::new(
+                current.clone(),
+                SharedString::from(format!("{current} (Unavailable)")),
+            )
+            .debug_selector(format!("{selector}-{}", current.as_str())),
+        );
         let owner = cx.weak_entity();
         settings_selector(
             selector,
@@ -1120,6 +1266,16 @@ impl SettingsWindow {
                 SharedString::from(font.family.clone()),
             )
         }));
+        if let Some(family) = &current {
+            retain_selected_item(
+                &mut items,
+                ComboBoxItem::new(
+                    current.clone(),
+                    SharedString::from(format!("{family} (Unavailable)")),
+                )
+                .debug_selector("settings-chrome-font-unavailable"),
+            );
+        }
         let owner = cx.weak_entity();
         settings_selector(
             "settings-chrome-font-family".to_owned(),
@@ -1175,6 +1331,16 @@ impl SettingsWindow {
                 .into_iter()
                 .map(|family| ComboBoxItem::new(Some(family.clone()), SharedString::from(family))),
         );
+        if let Some(family) = &current {
+            retain_selected_item(
+                &mut items,
+                ComboBoxItem::new(
+                    current.clone(),
+                    SharedString::from(format!("{family} (Unavailable)")),
+                )
+                .debug_selector("settings-terminal-font-unavailable"),
+            );
+        }
         let owner = cx.weak_entity();
         settings_selector(
             "settings-terminal-font-family".to_owned(),
@@ -1331,12 +1497,17 @@ impl SettingsWindow {
             _ => typography.terminal.typography.bold_weight,
         };
         let selector = control_selector(row);
-        let items = WEIGHTS
+        let mut items = WEIGHTS
             .iter()
             .map(|(weight, label)| {
                 ComboBoxItem::new(*weight, *label).debug_selector(format!("{selector}-{weight}"))
             })
             .collect::<Vec<_>>();
+        retain_selected_item(
+            &mut items,
+            ComboBoxItem::new(current, SharedString::from(format!("Custom ({current})")))
+                .debug_selector(format!("{selector}-{current}")),
+        );
         let owner = cx.weak_entity();
         settings_selector(
             selector,
@@ -1639,6 +1810,13 @@ fn terminal_font_families(fonts: &crate::appearance::AvailableFonts) -> Vec<Stri
         .filter(|font| font.class == FontClass::Monospace)
         .map(|font| font.family.clone())
         .collect()
+}
+
+/// Keeps a retained preference visible even when the available choices no longer include it.
+fn retain_selected_item<I: Eq>(items: &mut Vec<ComboBoxItem<I>>, current: ComboBoxItem<I>) {
+    if !items.iter().any(|item| item.id() == current.id()) {
+        items.insert(0, current);
+    }
 }
 
 /// One settings selector, decorated the same way wherever the form offers a choice.

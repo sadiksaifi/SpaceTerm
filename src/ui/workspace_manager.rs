@@ -2382,7 +2382,7 @@ impl WorkspaceManager {
                 }
             }
             CloseTarget::Window => window.remove_window(),
-            CloseTarget::Application => cx.quit(),
+            CloseTarget::Application => crate::ui::settings_window::quit_when_saved(cx),
         }
     }
 

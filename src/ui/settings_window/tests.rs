@@ -1,115 +1,18 @@
-use std::{
-    rc::Rc,
-    sync::{Arc, Mutex},
-};
+use std::{rc::Rc, sync::Arc};
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px};
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, ChromeDensity, SchemeKind, SchemeSelection, export_settings,
+    Appearance, AppearanceDocument, ChromeDensity, SchemeKind, SchemeSelection,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
-use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, StorageError};
+use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
 use super::editor::{COMMIT_DELAY, SaveStatus};
 use super::{SettingsRowId, SettingsSectionId, SettingsWindow, builtin_fallback_scheme};
 
-/// In-memory Settings storage that counts writes and can be made to fail on demand.
-#[derive(Default)]
-struct MemoryStorage(Mutex<MemoryState>);
-
-#[derive(Default)]
-struct MemoryState {
-    snapshot: Option<(Vec<u8>, u64)>,
-    writes: usize,
-    write_failure: Option<StorageError>,
-    read_failure: Option<StorageError>,
-    /// Publishes without a verifiable identity, which forces a reload before the next write.
-    drop_identity: bool,
-}
-
-impl MemoryStorage {
-    fn with_document(document: &AppearanceDocument) -> Arc<Self> {
-        let storage = Arc::new(Self::default());
-        let bytes = export_settings(document)
-            .expect("fixture document")
-            .into_bytes();
-        storage.0.lock().unwrap().snapshot = Some((bytes, 1));
-        storage
-    }
-
-    fn writes(&self) -> usize {
-        self.0.lock().unwrap().writes
-    }
-
-    fn document(&self) -> Option<AppearanceDocument> {
-        let state = self.0.lock().unwrap();
-        let (bytes, _) = state.snapshot.as_ref()?;
-        crate::appearance::parse_settings(bytes).ok()
-    }
-
-    fn fail_writes(&self, error: Option<StorageError>) {
-        self.0.lock().unwrap().write_failure = error;
-    }
-
-    fn corrupt(&self) {
-        self.0.lock().unwrap().snapshot = Some((b"{ not settings".to_vec(), 1));
-    }
-
-    fn repair(&self) {
-        let bytes = export_settings(&AppearanceDocument::default())
-            .expect("default document")
-            .into_bytes();
-        self.0.lock().unwrap().snapshot = Some((bytes, 2));
-    }
-
-    fn drop_identity(&self, drop: bool) {
-        self.0.lock().unwrap().drop_identity = drop;
-    }
-}
-
-impl SettingsStorage for MemoryStorage {
-    fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-        let state = self.0.lock().unwrap();
-        if let Some(error) = state.read_failure {
-            return Err(error);
-        }
-        Ok(state
-            .snapshot
-            .as_ref()
-            .map(|(bytes, identity)| PrivateFileSnapshot {
-                bytes: bytes.clone(),
-                identity: SecureEntryIdentity::from_opaque(*identity),
-            }))
-    }
-
-    fn write(
-        &self,
-        bytes: &[u8],
-        expected: Option<&SecureEntryIdentity>,
-    ) -> Result<StorageCommit, StorageError> {
-        let mut state = self.0.lock().unwrap();
-        if let Some(error) = state.write_failure {
-            return Err(error);
-        }
-        let expected = expected
-            .and_then(|identity| identity.opaque_ref::<u64>())
-            .copied();
-        if expected != state.snapshot.as_ref().map(|(_, identity)| *identity) {
-            return Err(StorageError::Conflict);
-        }
-        state.writes += 1;
-        let identity = expected.unwrap_or_default() + 1;
-        state.snapshot = Some((bytes.to_vec(), identity));
-        let drop_identity = state.drop_identity;
-        Ok(StorageCommit {
-            durability: Durability::Synchronized,
-            identity: (!drop_identity).then(|| SecureEntryIdentity::from_opaque(identity)),
-        })
-    }
-}
+use super::test_support::MemoryStorage;
 
 struct Harness {
     storage: Arc<MemoryStorage>,
@@ -1489,4 +1392,224 @@ fn leaked(selector: &'static str) -> &'static str {
 /// A test builds a handful of these and then ends, so leaking them costs nothing worth managing.
 fn leaked_owned(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
+}
+
+fn request_window_close(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
+    cx.update(|native, cx| {
+        let intent = super::CloseIntent::Window(native.window_handle());
+        window.update(cx, |settings, cx| settings.request_close(intent, cx));
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+    let handle = cx.update(|native, _| native.window_handle());
+
+    request_window_close(&window, cx);
+    request_window_close(&window, cx);
+    assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
+    assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
+
+    blocked.release();
+    worker.join().unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+    assert!(!cx.cx.update(|cx| cx.windows().contains(&handle)));
+}
+
+#[gpui::test]
+fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppContext) {
+    for failure in [StorageError::Unavailable, StorageError::Conflict] {
+        let (window, harness, cx) = open_settings(cx);
+        click("settings-chrome-density-comfortable", cx);
+        harness.storage.fail_writes(Some(failure));
+        let handle = cx.update(|native, _| native.window_handle());
+
+        request_window_close(&window, cx);
+        request_window_close(&window, cx);
+
+        assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
+        assert_eq!(
+            document_of(&window, cx).preferences.chrome.density,
+            ChromeDensity::Comfortable
+        );
+        assert!(cx.debug_bounds("settings-banner").is_some());
+        assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_none()));
+        harness.storage.fail_writes(None);
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
+        request_window_close(&window, cx);
+    }
+}
+
+#[gpui::test]
+fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+
+    cx.cx.update(super::quit_when_saved);
+    assert!(window.read_with(cx, |settings, _| matches!(
+        settings.close_after_save,
+        Some(super::CloseIntent::Application)
+    )));
+    blocked.release();
+    worker.join().unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+    assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_none()));
+}
+
+#[gpui::test]
+fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContext) {
+    let (_, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    assert_eq!(harness.storage.writes(), 0);
+
+    cx.cx.update(|cx| cx.shutdown());
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .chrome
+            .density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(harness.storage.writes(), 1);
+}
+
+#[gpui::test]
+fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    let blocked = harness.storage.block_next_write();
+    let worker = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    });
+    blocked.wait_until_started();
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            )
+        })
+    });
+    blocked.release();
+    worker.join().unwrap();
+
+    // GPUI's deterministic executor cannot park for an external OS thread. The storage result is
+    // ready, but neither GPUI's background result publication nor its foreground callback has run.
+    cx.cx.update(|cx| cx.shutdown());
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
+    assert_eq!(harness.storage.writes(), 2);
+}
+
+#[gpui::test]
+fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
+    let mut document = AppearanceDocument::default();
+    document.preferences.chrome.scheme = SchemeSelection::Fixed {
+        id: crate::appearance::SchemeId::new("custom.previous.chrome").unwrap(),
+        appearance: Appearance::Dark,
+    };
+    document.preferences.terminal.scheme = SchemeSelection::Fixed {
+        id: crate::appearance::SchemeId::new("custom.previous.terminal").unwrap(),
+        appearance: Appearance::Dark,
+    };
+    let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings
+                .editor
+                .reset(crate::appearance::ResetTarget::ChromeSchemeChoice, cx);
+            settings
+                .editor
+                .reset(crate::appearance::ResetTarget::TerminalSchemeChoice, cx);
+            // Exercise the next action immediately, before a render can refresh remembered slots.
+            settings.set_appearance_mode(super::AppearanceMode::Light, cx);
+            settings.set_appearance_mode(super::AppearanceMode::Dark, cx);
+        })
+    });
+    let preferences = document_of(&window, cx).preferences;
+    assert_eq!(
+        preferences.chrome.scheme,
+        SchemeSelection::Fixed {
+            id: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+            appearance: Appearance::Dark,
+        }
+    );
+    assert_eq!(
+        preferences.terminal.scheme,
+        SchemeSelection::Fixed {
+            id: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
+            appearance: Appearance::Dark,
+        }
+    );
 }

@@ -216,7 +216,7 @@ fn request_application_quit(_: &QuitApplication, cx: &mut App) {
                 manager.request_application_quit(window, cx);
             });
         } else {
-            cx.quit();
+            crate::ui::settings_window::quit_when_saved(cx);
         }
     });
 }
@@ -514,6 +514,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
+    pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility:
@@ -525,6 +526,13 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) remote_workspace:
         Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
 }
+
+/// The startup-supplied file opener available to explicit local file selections.
+pub(crate) struct SelectedFileAccess(
+    pub(crate) Arc<dyn crate::platform::selected_file::SelectedFileOpener>,
+);
+
+impl gpui::Global for SelectedFileAccess {}
 
 /// Complete constructor wiring. This value defines no platform operations.
 pub(crate) struct HostCompositionParts {
@@ -642,6 +650,9 @@ fn start_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    if let Some(opener) = &host.adapters.selected_files {
+        cx.set_global(SelectedFileAccess(Arc::clone(opener)));
+    }
     if let Some((storage, platform)) = &host.appearance {
         let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
         crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
@@ -730,6 +741,7 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
             adapters: ApplicationCapabilities {
+                selected_files: None,
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
                 ),
