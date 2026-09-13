@@ -12,6 +12,9 @@ mod import;
 mod schemes;
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 #[path = "settings_window/tests.rs"]
 mod tests;
 
