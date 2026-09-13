@@ -23,6 +23,45 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
 /// The width every scheme's color strip takes, so the names beside them share one column.
 const SWATCH_WIDTH: f32 = 88.0;
 
+/// The Settings type ramp.
+///
+/// Five sizes, each a clear step from the next, and every role on every page takes one of them.
+/// The ramp is monotone in rank: a page outranks a run of rows, a run outranks the settings inside
+/// it, and a setting outranks the guidance beside it. Nothing chooses a size of its own, so a new
+/// row cannot invent a fifth step and no two roles can land close enough to read as the same
+/// thing.
+pub(super) mod text {
+    /// The page's name.
+    pub(crate) const TITLE: f32 = 17.0;
+    /// The title of one run of related rows.
+    ///
+    /// It is larger and heavier than the labels under it: a heading that a label outweighs is not
+    /// a heading, and with nothing ruled off, rank is the only thing telling a reader where a run
+    /// begins.
+    pub(crate) const GROUP: f32 = 13.0;
+    /// One setting's label, one control's value, and one scheme's name.
+    pub(crate) const BODY: f32 = 12.0;
+    /// Guidance, metadata, and status: everything that explains something else.
+    pub(crate) const SMALL: f32 = 11.0;
+    /// A state a row carries, such as the scheme in use.
+    pub(crate) const BADGE: f32 = 10.0;
+}
+
+/// The horizontal breathing room every row keeps inside the content column.
+///
+/// Rows carry it rather than the column, so a fill a row paints, such as the one Settings Search
+/// leaves on the row it reveals, is inset from the text on both sides instead of running hard
+/// against it. The column gives back exactly this much padding, so the left edge a reader sees is
+/// unchanged.
+pub(super) const ROW_INSET: f32 = 8.0;
+
+/// The widest a run of explanatory prose is allowed to set.
+///
+/// A sentence spanning the whole pane is a long line to track back from, and the window is free to
+/// be far wider than prose wants to be. Rows are unaffected: a control column has its own reason
+/// to reach the right edge.
+const PROSE_MEASURE: f32 = 460.0;
+
 /// The least space between a label and the control it names, so the two never touch.
 const LABEL_GAP: f32 = 16.0;
 
@@ -73,14 +112,19 @@ impl SettingsGroup {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(4.0))
+            .gap(appearance.spacing(2.0))
             .child(
-                div()
-                    .debug_selector(move || title_selector.clone())
-                    .font(appearance.emphasis.clone())
-                    .text_size(appearance.text_size(11.0))
-                    .text_color(gpui_color(appearance.colors.text_secondary))
-                    .child(self.title),
+                // The title keeps the rows' inset so it starts on their left edge, and the inset
+                // sits on a wrapper so the title's own box is the type it sets, not the padding
+                // around it.
+                div().px(appearance.spacing(ROW_INSET)).child(
+                    div()
+                        .debug_selector(move || title_selector.clone())
+                        .font(appearance.emphasis.clone())
+                        .text_size(appearance.text_size(text::GROUP))
+                        .text_color(gpui_color(appearance.colors.text))
+                        .child(self.title),
+                ),
             )
             .child(div().flex().flex_col().w_full().children(self.rows))
     }
@@ -147,7 +191,7 @@ impl SettingsRow {
         // ends at its right edge, and nothing is centered.
         let caption = |description: SharedString| {
             div()
-                .text_size(appearance.text_size(11.0))
+                .text_size(appearance.text_size(text::SMALL))
                 .text_color(gpui_color(appearance.colors.text_muted))
                 .whitespace_normal()
                 .child(description)
@@ -166,6 +210,7 @@ impl SettingsRow {
                 .child(
                     div()
                         .debug_selector(move || label_selector.clone())
+                        .text_size(appearance.text_size(text::BODY))
                         .text_color(gpui_color(appearance.colors.text))
                         .whitespace_normal()
                         .child(self.label),
@@ -209,7 +254,9 @@ impl SettingsRow {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(3.0))
+            .px(appearance.spacing(ROW_INSET))
             .py(appearance.spacing(8.0))
+            .rounded(px(6.0))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(appearance.colors.info_background))
             })
@@ -231,18 +278,23 @@ pub(super) fn section_header(
         .flex()
         .flex_col()
         .w_full()
+        .px(appearance.spacing(ROW_INSET))
+        // The page's own name stands further from the first run than the runs stand from each
+        // other, so the ramp and the spacing say the same thing about what contains what.
+        .pb(appearance.spacing(6.0))
         .gap(appearance.spacing(3.0))
         .child(
             div()
                 .font(appearance.heading.clone())
-                .text_size(appearance.text_size(17.0))
+                .text_size(appearance.text_size(text::TITLE))
                 .text_color(gpui_color(appearance.colors.text))
                 .child(title),
         )
         .child(
             div()
-                .text_size(appearance.text_size(11.0))
-                .text_color(gpui_color(appearance.colors.text_muted))
+                .max_w(appearance.text_size(PROSE_MEASURE))
+                .text_size(appearance.text_size(text::BODY))
+                .text_color(gpui_color(appearance.colors.text_secondary))
                 .whitespace_normal()
                 .child(description),
         )
@@ -374,7 +426,10 @@ impl Stepper {
                     .flex_1()
                     .min_w_0()
                     .text_align(gpui::TextAlign::Center)
-                    .text_size(appearance.text_size(12.0))
+                    // Tabular figures, so the readout holds still while a step runs: the digits of
+                    // 9 and 10, or of 1.11 and 1.2, occupy the same width.
+                    .font(appearance.tabular())
+                    .text_size(appearance.text_size(text::BODY))
                     .text_color(gpui_color(if self.enabled {
                         appearance.colors.input_text
                     } else {
@@ -416,6 +471,11 @@ pub(super) fn swatch_strip(
         .h(appearance.text_size(14.0))
         .rounded(px(4.0))
         .overflow_hidden()
+        // A strip is bounded by a hairline rather than left to its own colors: a scheme is free to
+        // open on a near-background color, and the built-in dark scheme does, which would otherwise
+        // leave the strip looking short of the column every other strip fills.
+        .border_1()
+        .border_color(gpui_color(appearance.colors.border))
         .bg(gpui_color(appearance.colors.element_background))
         .children(
             swatches
@@ -441,7 +501,7 @@ pub(super) fn badge(
         .px(appearance.spacing(6.0))
         .rounded(px(4.0))
         .bg(gpui_color(appearance.colors.element_active))
-        .text_size(appearance.text_size(10.0))
+        .text_size(appearance.text_size(text::BADGE))
         .text_color(gpui_color(appearance.colors.text_secondary))
         .child(label.into())
 }
@@ -460,4 +520,30 @@ pub(super) fn action_button(
         .tab_stop(true)
         .debug_selector(selector)
         .on_activate(move |_, window, cx| on_activate(window, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text;
+
+    /// The ramp is only a hierarchy while it stays ordered, and it is edited one constant at a
+    /// time.
+    #[test]
+    fn the_type_ramp_stays_ordered_by_rank() {
+        let ramp = [
+            ("title", text::TITLE),
+            ("group", text::GROUP),
+            ("body", text::BODY),
+            ("small", text::SMALL),
+            ("badge", text::BADGE),
+        ];
+        for pair in ramp.windows(2) {
+            let (outer, outer_size) = pair[0];
+            let (inner, inner_size) = pair[1];
+            assert!(
+                outer_size > inner_size,
+                "{outer} should set above {inner}, got {outer_size} over {inner_size}"
+            );
+        }
+    }
 }

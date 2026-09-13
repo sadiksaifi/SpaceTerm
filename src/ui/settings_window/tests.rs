@@ -938,10 +938,50 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
     }
 }
 
+/// A run's title outranks every label inside it, and shares the labels' left edge.
+///
+/// Nothing on a Settings page is ruled off, so rank is the only thing saying where a run begins. A
+/// title a label outweighs inverts that reading, and it is the kind of inversion that survives
+/// review because each piece looks reasonable on its own.
+#[gpui::test]
+fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+
+    for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+
+        for row in window.read_with(cx, |window, _| window.rows_for(section)) {
+            let group = super::group_selector(section, row.descriptor().group);
+            let title = cx
+                .debug_bounds(leaked_owned(format!("{group}-title")))
+                .unwrap_or_else(|| panic!("{group} should carry its title"));
+            let Some(label) =
+                cx.debug_bounds(leaked_owned(format!("{}-label", row.descriptor().selector)))
+            else {
+                continue;
+            };
+
+            assert!(
+                title.size.height > label.size.height,
+                "{group} should set its title above the rank of {row:?}, got {title:?} over \
+                 {label:?}"
+            );
+            assert_eq!(
+                title.left(),
+                label.left(),
+                "{group} should start its title on the same edge as {row:?}"
+            );
+        }
+    }
+}
+
 /// One alignment rule for the whole form: labels share a left edge, controls share a right edge.
 ///
 /// This is the property that makes a settings page look designed rather than assembled. It is
-/// asserted numerically because it is the kind of thing that decays one row at a time.
+/// asserted numerically because it is the kind of thing that decays one row at a time. A row's own
+/// box reaches past its text on both sides, because the fill Settings Search leaves on a revealed
+/// row has to clear the text rather than run against it, so what has to agree is the inset every
+/// row keeps, not the box edge itself.
 #[gpui::test]
 fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     cx: &mut TestAppContext,
@@ -953,6 +993,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 
         let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
         let mut right: Option<(SettingsRowId, gpui::Pixels)> = None;
+        let mut inset: Option<(SettingsRowId, gpui::Pixels)> = None;
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
             let bounds = cx
                 .debug_bounds(leaked(row.descriptor().selector))
@@ -969,11 +1010,19 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
                 } else {
                     left = Some((row, label.left()));
                 }
-                assert_eq!(
-                    label.left(),
-                    bounds.left(),
-                    "{row:?} should start its label at the row's own left edge"
+                let own = label.left() - bounds.left();
+                assert!(
+                    own > gpui::px(0.0),
+                    "{row:?} should hold its label clear of the row's own edge, got {own:?}"
                 );
+                if let Some((first, expected)) = inset {
+                    assert_eq!(
+                        own, expected,
+                        "{row:?} insets its label further than {first:?}"
+                    );
+                } else {
+                    inset = Some((row, own));
+                }
             }
             if let Some((first, edge)) = right {
                 assert_eq!(

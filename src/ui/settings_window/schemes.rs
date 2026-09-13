@@ -14,7 +14,9 @@ use crate::settings::SchemeImport;
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use super::controls::{TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip};
+use super::controls::{
+    ROW_INSET, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
+};
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
 
 /// The greatest number of scheme rows the section draws at once.
@@ -77,7 +79,7 @@ impl SettingsWindow {
                 list.child(
                     div()
                         .pt(appearance.spacing(8.0))
-                        .text_size(appearance.text_size(11.0))
+                        .text_size(appearance.text_size(text::SMALL))
                         .text_color(gpui_color(appearance.colors.text_muted))
                         .child(SharedString::from(format!(
                             "{remaining} more installed, visible in your settings file"
@@ -108,16 +110,18 @@ impl SettingsWindow {
                 .flex()
                 .flex_row()
                 .items_start()
-                .w_full()
                 .gap(appearance.spacing(8.0))
+                .mx(appearance.spacing(ROW_INSET))
                 .p(appearance.spacing(10.0))
                 .rounded(px(8.0))
                 .bg(gpui_color(appearance.colors.warning_background))
                 .border_1()
                 .border_color(gpui_color(appearance.colors.warning_border))
+                // The same glyph the window's own banner carries, at the same size: they are the
+                // same kind of warning, one about the page and one about the window.
                 .child(div().flex_none().mt(px(1.0)).child(spaceterm_ui::Icon::new(
                     spaceterm_ui::IconName::TriangleAlert,
-                    appearance.text_size(12.0),
+                    appearance.text_size(13.0),
                     gpui_color(appearance.colors.warning),
                 )))
                 .child(
@@ -129,7 +133,7 @@ impl SettingsWindow {
                         .gap(appearance.spacing(3.0))
                         .children(diagnostics.into_iter().map(|diagnostic| {
                             div()
-                                .text_size(appearance.text_size(11.0))
+                                .text_size(appearance.text_size(text::SMALL))
                                 .text_color(gpui_color(appearance.colors.text_secondary))
                                 .whitespace_normal()
                                 .child(diagnostic_message(diagnostic))
@@ -186,7 +190,7 @@ impl SettingsWindow {
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .text_size(appearance.text_size(12.0))
+                    .text_size(appearance.text_size(text::BODY))
                     .text_color(gpui_color(appearance.colors.text))
                     .child(SharedString::from(summary.name.clone())),
             )
@@ -194,7 +198,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .flex_none()
-                    .text_size(appearance.text_size(11.0))
+                    .text_size(appearance.text_size(text::SMALL))
                     .text_color(gpui_color(appearance.colors.text_muted))
                     .child(SharedString::from(classification)),
             )
@@ -293,7 +297,7 @@ impl SettingsWindow {
             .children(self.interchange_status.clone().map(|status| {
                 div()
                     .debug_selector(|| "settings-interchange-status".to_owned())
-                    .text_size(appearance.text_size(11.0))
+                    .text_size(appearance.text_size(text::SMALL))
                     .text_color(gpui_color(appearance.colors.text_secondary))
                     .whitespace_normal()
                     .child(status)

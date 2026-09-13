@@ -37,8 +37,8 @@ use crate::ui::appearance::ChromeAppearance;
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
-    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
-    reset_button, section_header,
+    ROW_INSET, SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
+    reset_button, section_header, text,
 };
 use editor::{SaveStatus, SettingsEditor};
 
@@ -492,7 +492,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .bg(gpui_color(appearance.colors.background))
             .text_color(gpui_color(appearance.colors.text))
-            .text_size(appearance.text_size(12.0))
+            .text_size(appearance.text_size(text::BODY))
             .font(appearance.regular.clone())
             .child(
                 div()
@@ -588,7 +588,13 @@ impl SettingsWindow {
                             appearance.colors.icon_muted
                         }),
                     )))
-                    .child(div().min_w_0().flex_1().child(section.navigation_title()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_size(appearance.text_size(text::BODY))
+                            .child(section.navigation_title()),
+                    )
             })
             .collect::<Vec<_>>();
         let owner = cx.weak_entity();
@@ -633,8 +639,8 @@ impl SettingsWindow {
             .flex_row()
             .items_center()
             .w_full()
-            .gap(appearance.spacing(5.0))
-            .px(appearance.spacing(7.0))
+            .gap(appearance.spacing(7.0))
+            .px(appearance.spacing(8.0))
             .h(appearance.height(28.0, 12.0))
             // The search field belongs to the window, not to the navigation list under it, so the
             // break between them is wider than the spacing inside the list.
@@ -647,9 +653,11 @@ impl SettingsWindow {
                 appearance.colors.input_border
             }))
             .bg(gpui_color(appearance.colors.input_background))
+            // The same glyph size the navigation icons take, so one icon column and one text
+            // column run the height of the sidebar.
             .child(div().flex_none().child(Icon::new(
                 IconName::Search,
-                appearance.text_size(11.0),
+                appearance.text_size(13.0),
                 gpui_color(appearance.colors.icon_muted),
             )))
             .child(div().min_w_0().flex_1().child(self.search.clone()))
@@ -704,7 +712,7 @@ impl SettingsWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .px(appearance.spacing(20.0))
+                            .px(appearance.spacing(CONTENT_GUTTER - ROW_INSET))
                             .py(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
                                 let _ = revealing.update(cx, |settings, cx| {
@@ -716,6 +724,7 @@ impl SettingsWindow {
                                 detail.child(
                                     div()
                                         .debug_selector(|| "settings-no-results".to_owned())
+                                        .px(appearance.spacing(ROW_INSET))
                                         .text_color(gpui_color(appearance.colors.text_muted))
                                         .child(SharedString::from(format!(
                                             "No settings match “{}”.",
@@ -781,6 +790,12 @@ impl SettingsWindow {
             .into_any_element()
     }
 }
+
+/// The space between the detail pane's edge and the text inside it.
+///
+/// Rows carry part of it themselves so the fill on a revealed row clears the text, and the column
+/// gives back the rest. The two together are what a reader sees as the content's left edge.
+const CONTENT_GUTTER: f32 = 20.0;
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -1476,7 +1491,7 @@ impl SettingsWindow {
                         )
                         .child(
                             div()
-                                .text_size(appearance.text_size(11.0))
+                                .text_size(appearance.text_size(text::SMALL))
                                 .text_color(gpui_color(appearance.colors.text_secondary))
                                 .whitespace_normal()
                                 .child(explanation),
@@ -1510,14 +1525,15 @@ impl SettingsWindow {
             .w_full()
             .flex_none()
             .h(appearance.height(28.0, 11.0))
-            .px(appearance.spacing(14.0))
+            // The status ends on the content column's right edge rather than short of it.
+            .px(appearance.spacing(CONTENT_GUTTER))
             .bg(gpui_color(appearance.colors.panel_background))
             .border_t_1()
             .border_color(gpui_color(appearance.colors.border))
             .child(
                 div()
                     .debug_selector(|| "settings-save-status".to_owned())
-                    .text_size(appearance.text_size(11.0))
+                    .text_size(appearance.text_size(text::SMALL))
                     .text_color(gpui_color(match status {
                         SaveStatus::Saved | SaveStatus::Saving => appearance.colors.text_muted,
                         SaveStatus::Failed(_) => appearance.colors.error,

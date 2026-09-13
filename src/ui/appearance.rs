@@ -118,6 +118,22 @@ impl ChromeAppearance {
     pub(crate) fn text_size(&self, baseline: f32) -> Pixels {
         px(baseline * self.text_scale)
     }
+
+    /// The body font with tabular figures, for a readout whose value changes in place.
+    ///
+    /// Proportional digits give a numeric readout a different width for every value it shows, so
+    /// stepping through one shifts the text under the pointer. The feature is added to whatever
+    /// the resolved font already asks for rather than replacing it, and a family without tabular
+    /// figures simply ignores it.
+    pub(crate) fn tabular(&self) -> Font {
+        let mut font = self.regular.clone();
+        let mut features = font.features.tag_value_list().to_vec();
+        if !features.iter().any(|(tag, _)| tag == "tnum") {
+            features.push(("tnum".to_owned(), 1));
+        }
+        font.features = gpui::FontFeatures(Arc::new(features));
+        font
+    }
     pub(crate) fn spacing(&self, baseline: f32) -> Pixels {
         px(baseline * self.spacing_scale)
     }
@@ -164,6 +180,29 @@ impl ChromeAppearance {
                 None,
             )
             .width
+    }
+}
+
+#[cfg(test)]
+mod typography_tests {
+    use super::ChromeAppearance;
+
+    /// A readout asking for tabular figures keeps whatever the resolved font already asked for.
+    #[test]
+    fn tabular_figures_join_the_resolved_features_rather_than_replacing_them() {
+        let mut appearance = ChromeAppearance::default();
+        appearance.regular.features =
+            gpui::FontFeatures(std::sync::Arc::new(vec![("calt".to_owned(), 0)]));
+
+        let features = appearance.tabular().features.tag_value_list().to_vec();
+
+        assert!(features.contains(&("calt".to_owned(), 0)));
+        assert!(features.contains(&("tnum".to_owned(), 1)));
+        assert_eq!(
+            appearance.tabular().features.tag_value_list().len(),
+            features.len(),
+            "asking twice should not stack the feature"
+        );
     }
 }
 
