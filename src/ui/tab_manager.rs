@@ -55,7 +55,7 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render, Rgba,
+    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
     ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
@@ -81,8 +81,11 @@ struct TabChromePresentation {
     inactive_tab_background: Color,
     active_tab_foreground: Color,
     inactive_tab_foreground: Color,
-    icon_foreground: Color,
+    active_tab_icon: Color,
+    inactive_tab_icon: Color,
     hover_background: Color,
+    hover_foreground: Color,
+    hover_icon: Color,
     active_tab_underline: Color,
     divider: Color,
 }
@@ -95,10 +98,13 @@ impl TabChromePresentation {
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 inactive_tab_background: colors.tab_inactive_background,
-                active_tab_foreground: colors.text_accent,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
+                active_tab_foreground: colors.tab_active_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_active_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
                 active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
@@ -106,13 +112,16 @@ impl TabChromePresentation {
             Self {
                 window_active,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.title_bar_inactive_background,
+                active_tab_background: colors.tab_inactive_selected_background,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.text_muted,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.text_muted,
-                hover_background: colors.title_bar_inactive_background,
-                active_tab_underline: colors.border,
+                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_inactive_selected_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
+                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         }
@@ -134,12 +143,26 @@ impl TabChromePresentation {
         }
     }
 
-    fn resolved_icon_foreground(&self, button_state_foreground: Rgba) -> Rgba {
-        if self.window_active {
-            button_state_foreground
+    fn control_style(
+        &self,
+        active: bool,
+        colors: &ChromeColors,
+    ) -> spaceterm_ui::ButtonVariantStyle {
+        let clear = gpui::rgba(0);
+        let icon = if active {
+            self.active_tab_icon
         } else {
-            gpui_color(self.icon_foreground)
-        }
+            self.inactive_tab_icon
+        };
+        let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
+        let hover = spaceterm_ui::ButtonPaint::new(
+            gpui_color(self.hover_background),
+            gpui_color(self.hover_icon),
+            clear,
+        );
+        let disabled =
+            spaceterm_ui::ButtonPaint::new(clear, gpui_color(colors.text_disabled), clear);
+        spaceterm_ui::ButtonVariantStyle::new(normal, hover, hover, disabled)
     }
 }
 
@@ -1040,8 +1063,9 @@ impl TabManager {
         let close_manager = manager;
         let background = presentation.tab_background(active);
         let foreground = presentation.tab_foreground(active);
-        let icon_presentation = presentation.clone();
+        let control_style = presentation.control_style(active, &appearance.colors);
         let hover_background = presentation.hover_background;
+        let hover_foreground = presentation.hover_foreground;
         let active_tab_underline = presentation.active_tab_underline;
         let divider = presentation.divider;
         let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
@@ -1072,7 +1096,10 @@ impl TabManager {
             .font(appearance.emphasis.clone())
             .text_size(appearance.text_size(12.0))
             .text_color(gpui_color(foreground))
-            .hover(move |item| item.bg(gpui_color(hover_background)))
+            .hover(move |item| {
+                item.bg(gpui_color(hover_background))
+                    .text_color(gpui_color(hover_foreground))
+            })
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1113,15 +1140,15 @@ impl TabManager {
                             ("tab-close-button", tab_id.get()),
                             "Close Tab",
                             move |foreground| {
-                                Icon::new(
-                                    IconName::X,
-                                    close_icon_size,
-                                    icon_presentation.resolved_icon_foreground(foreground),
-                                )
-                                .into_any_element()
+                                Icon::new(IconName::X, close_icon_size, foreground)
+                                    .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
+                        .contextual_style(
+                            control_style,
+                            gpui_color(appearance.colors.border_focused),
+                        )
                         .size(ButtonSize::Compact)
                         .preserve_ancestor_hover()
                         .debug_selector(format!("tab-close-button-{}", tab_id.get()))
@@ -1241,6 +1268,10 @@ impl TabManager {
                                 .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
+                        .contextual_style(
+                            presentation.control_style(false, &appearance.colors),
+                            gpui_color(appearance.colors.border_focused),
+                        )
                         .size(ButtonSize::Regular)
                         .debug_selector("create-tab-button")
                         .tooltip(
@@ -1408,18 +1439,21 @@ mod tests {
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 inactive_tab_background: colors.tab_inactive_background,
-                active_tab_foreground: colors.text_accent,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
-                active_tab_underline: colors.border_selected,
+                active_tab_foreground: colors.tab_active_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_active_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
+                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         );
     }
 
     #[test]
-    fn inactive_window_tab_chrome_should_be_one_muted_title_bar_band() {
+    fn inactive_window_preserves_selected_tab_identity() {
         let colors = ChromeColors::default();
         let presentation = TabChromePresentation::resolve(false, &colors);
 
@@ -1428,58 +1462,47 @@ mod tests {
             TabChromePresentation {
                 window_active: false,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.title_bar_inactive_background,
+                active_tab_background: colors.tab_inactive_selected_background,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.text_muted,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.text_muted,
-                hover_background: colors.title_bar_inactive_background,
-                active_tab_underline: colors.border,
+                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_inactive_selected_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
+                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         );
     }
 
     #[test]
-    fn tab_icon_foreground_should_follow_button_state_only_while_window_active() {
-        let colors = ChromeColors::default();
-        let button_state_foreground = rgba(0x1234_56ff);
-
-        assert_eq!(
-            TabChromePresentation::resolve(true, &colors)
-                .resolved_icon_foreground(button_state_foreground),
-            button_state_foreground
-        );
-        assert_eq!(
-            TabChromePresentation::resolve(false, &colors)
-                .resolved_icon_foreground(button_state_foreground),
-            gpui_color(colors.text_muted)
-        );
-    }
-
-    fn tab_icon_test_theme(
-        normal: Rgba,
-        hovered: Rgba,
-        pressed: Rgba,
-    ) -> spaceterm_ui::ButtonTheme {
-        use spaceterm_ui::{
-            ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle,
-            ButtonVariants,
-        };
-
-        let paint = |icon_foreground| {
-            ButtonPaint::new(rgba(0), rgba(0), rgba(0)).icon_foreground(icon_foreground)
-        };
-        let neutral =
-            ButtonVariantStyle::new(paint(normal), paint(normal), paint(normal), paint(normal));
-        let ghost =
-            ButtonVariantStyle::new(paint(normal), paint(hovered), paint(pressed), paint(normal));
-        let metrics = ButtonMetrics::new(px(28.0));
-        ButtonTheme::new(
-            ButtonVariants::new(neutral, neutral, neutral, ghost, neutral, neutral, neutral),
-            ButtonSizes::new(metrics, metrics, metrics, metrics),
-            normal,
-        )
+    fn tab_control_styles_keep_state_foregrounds_in_both_window_states() {
+        let mut colors = ChromeColors::default();
+        colors.tab_active_icon = Color::rgb(0x112233);
+        colors.tab_inactive_selected_icon = Color::rgb(0x223344);
+        colors.tab_hover_icon = Color::rgb(0x334455);
+        for window_active in [false, true] {
+            let style =
+                TabChromePresentation::resolve(window_active, &colors).control_style(true, &colors);
+            assert_eq!(
+                style.normal().foreground(),
+                gpui_color(if window_active {
+                    colors.tab_active_icon
+                } else {
+                    colors.tab_inactive_selected_icon
+                })
+            );
+            assert_eq!(
+                style.hovered().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+            assert_eq!(
+                style.pressed().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+        }
     }
 
     struct InspectedIconStyle {
@@ -1565,11 +1588,12 @@ mod tests {
         let (_manager, _records, cx) = tab_manager(cx);
         let normal = rgba(0x11_22_33_ff);
         let hovered = rgba(0x22_cc_44_ff);
-        let pressed = rgba(0x44_66_ee_ff);
         let observed = Rc::new(RefCell::new(Vec::new()));
         let observed_styles = Rc::clone(&observed);
         cx.update(|window, cx| {
-            cx.set_global(tab_icon_test_theme(normal, hovered, pressed));
+            let mut appearance = crate::ui::appearance::chrome(cx).clone();
+            appearance.colors.tab_hover_icon = Color::rgb(0x22cc44);
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
             cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
                 observed_styles.borrow_mut().push(InspectedIconStyle {
                     family: state
@@ -1599,13 +1623,15 @@ mod tests {
             );
             assert_eq!(
                 inspect_icon_foreground(selector, true, &observed, cx),
-                Hsla::from(pressed),
+                Hsla::from(hovered),
                 "{selector} must paint its glyph with the pressed IconButton foreground"
             );
         }
 
         cx.update(|window, cx| {
-            cx.set_global(tab_icon_test_theme(normal, normal, normal));
+            let mut appearance = crate::ui::appearance::chrome(cx).clone();
+            appearance.colors.tab_hover_icon = Color::rgb(0x112233);
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
             window.refresh();
         });
         cx.deactivate_window();

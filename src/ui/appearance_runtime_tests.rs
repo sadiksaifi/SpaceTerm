@@ -154,3 +154,35 @@ fn cancelling_fixed_preview_resolves_committed_system_policy_again(cx: &mut Test
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(current(cx).chrome.appearance, Appearance::Light));
 }
+
+#[gpui::test]
+fn chrome_palette_and_typography_preview_preserve_native_classification_and_terminal(
+    cx: &mut TestAppContext,
+) {
+    let (settings, platform) = start(cx);
+    let before = cx.update(|cx| current(cx));
+    let native_calls = platform.applied.borrow().len();
+    let token = settings.begin_preview(0).unwrap();
+    let mut candidate = AppearanceDocument::default();
+    candidate.preferences.chrome.typography.base_size = 17.0;
+    candidate.preferences.chrome.overrides.insert(
+        before.chrome.effective_scheme.clone(),
+        crate::appearance::ChromeColorOverrides {
+            background: Some(crate::appearance::Color::rgb(0x20252a)),
+            ..Default::default()
+        },
+    );
+    settings.update_preview(&token, candidate).unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let after = current(cx);
+        assert_eq!(after.terminal, before.terminal);
+        assert_ne!(after.chrome.colors, before.chrome.colors);
+        assert_ne!(after.chrome.typography, before.chrome.typography);
+    });
+    assert_eq!(platform.applied.borrow().len(), native_calls);
+    drop(token);
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(current(cx).chrome, before.chrome));
+    assert_eq!(platform.applied.borrow().len(), native_calls);
+}

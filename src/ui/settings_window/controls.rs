@@ -374,7 +374,7 @@ impl Stepper {
         self
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+    pub(super) fn render(self, appearance: &ChromeAppearance, cx: &App) -> impl IntoElement {
         let accessibility_name = self.accessibility_name;
         let step = |selector: String,
                     verb: &'static str,
@@ -399,56 +399,57 @@ impl Stepper {
             })
         };
         let selector = self.selector;
-        div()
-            .debug_selector(move || selector.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_none()
-            .w(appearance.text_size(132.0))
-            .gap(appearance.spacing(2.0))
-            .px(appearance.spacing(2.0))
-            .h(appearance.height(28.0, 12.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(gpui_color(appearance.colors.input_border))
-            .bg(gpui_color(appearance.colors.input_background))
-            .child(step(
-                format!("{selector}-decrease"),
-                "Decrease",
-                IconName::Minus,
-                -1,
-                self.enabled && self.can_decrease,
-                self.on_step.clone(),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_align(gpui::TextAlign::Center)
-                    // Tabular figures, so the readout holds still while a step runs: the digits of
-                    // 9 and 10, or of 1.11 and 1.2, occupy the same width.
-                    .font(appearance.tabular())
-                    .text_size(appearance.text_size(text::BODY))
-                    .text_color(gpui_color(if self.enabled {
-                        appearance.colors.input_text
-                    } else {
-                        appearance.colors.input_disabled_text
-                    }))
-                    .debug_selector({
-                        let value_selector = format!("{selector}-value");
-                        move || value_selector.clone()
-                    })
-                    .child(self.value),
-            )
-            .child(step(
-                format!("{selector}-increase"),
-                "Increase",
-                IconName::Plus,
-                1,
-                self.enabled && self.can_increase,
-                self.on_step,
-            ))
+        spaceterm_ui::field_surface(
+            selector,
+            spaceterm_ui::FieldState::default().disabled(!self.enabled),
+            cx,
+        )
+        .debug_selector(move || selector.to_owned())
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .w(appearance.text_size(132.0))
+        .gap(appearance.spacing(2.0))
+        .px(appearance.spacing(2.0))
+        .h(appearance.height(28.0, 12.0))
+        .rounded(px(6.0))
+        .child(step(
+            format!("{selector}-decrease"),
+            "Decrease",
+            IconName::Minus,
+            -1,
+            self.enabled && self.can_decrease,
+            self.on_step.clone(),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_align(gpui::TextAlign::Center)
+                // Tabular figures, so the readout holds still while a step runs: the digits of
+                // 9 and 10, or of 1.11 and 1.2, occupy the same width.
+                .font(appearance.tabular())
+                .text_size(appearance.text_size(text::BODY))
+                .text_color(gpui_color(if self.enabled {
+                    appearance.colors.input_text
+                } else {
+                    appearance.colors.input_disabled_text
+                }))
+                .debug_selector({
+                    let value_selector = format!("{selector}-value");
+                    move || value_selector.clone()
+                })
+                .child(self.value),
+        )
+        .child(step(
+            format!("{selector}-increase"),
+            "Increase",
+            IconName::Plus,
+            1,
+            self.enabled && self.can_increase,
+            self.on_step,
+        ))
     }
 }
 
@@ -500,9 +501,9 @@ pub(super) fn badge(
         .h(appearance.text_size(16.0))
         .px(appearance.spacing(6.0))
         .rounded(px(4.0))
-        .bg(gpui_color(appearance.colors.element_active))
+        .bg(gpui_color(appearance.colors.badge_background))
         .text_size(appearance.text_size(text::BADGE))
-        .text_color(gpui_color(appearance.colors.text_secondary))
+        .text_color(gpui_color(appearance.colors.badge_foreground))
         .child(label.into())
 }
 

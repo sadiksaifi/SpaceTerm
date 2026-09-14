@@ -91,6 +91,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
         WindowOptions {
+            window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
             titlebar: Some(TitlebarOptions {
@@ -268,6 +269,7 @@ impl RememberedSchemes {
 }
 
 pub(crate) struct SettingsWindow {
+    window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     editor: SettingsEditor,
     close_after_save: Option<CloseIntent>,
     search: Entity<TextInput>,
@@ -288,6 +290,8 @@ pub(crate) struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
         let settings = cx
             .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
             .settings
@@ -355,10 +359,14 @@ impl SettingsWindow {
         )
         .detach();
         // Another surface may commit while this window is open, and a preview repaints everything.
-        cx.observe_global::<crate::ui::appearance_runtime::InstalledAppearance>(|settings, cx| {
-            settings.editor.synchronize();
-            cx.notify();
-        })
+        cx.observe_global_in::<crate::ui::appearance_runtime::InstalledAppearance>(
+            window,
+            |settings, window, cx| {
+                settings.window_appearance.apply(window, cx);
+                settings.editor.synchronize();
+                cx.notify();
+            },
+        )
         .detach();
         cx.on_app_quit(|settings, cx| {
             if !settings.editor.flush_for_shutdown(cx) {
@@ -368,6 +376,7 @@ impl SettingsWindow {
         })
         .detach();
         Self {
+            window_appearance,
             editor,
             close_after_save: None,
             search,
@@ -469,30 +478,25 @@ impl SettingsWindow {
             .collect()
     }
 
-    /// Whether a row is meaningful for the current document.
-    ///
-    /// A fixed appearance selects one scheme; Auto selects one per slot. Presenting all three at
-    /// once would imply choices the document cannot hold. Both surfaces follow the one presented
-    /// mode, so both offer the same shape of choice even if a hand-edited document disagrees.
+    /// Each surface presents fixed or automatic slots according to its own policy.
     fn row_applies(&self, row: SettingsRowId) -> bool {
-        let automatic = self.appearance_mode() == AppearanceMode::Auto;
+        let chrome_auto = self.appearance_mode(SchemeKind::Chrome) == AppearanceMode::Auto;
+        let terminal_auto = self.appearance_mode(SchemeKind::Terminal) == AppearanceMode::Auto;
         match row {
-            SettingsRowId::ChromeScheme | SettingsRowId::TerminalScheme => !automatic,
-            SettingsRowId::ChromeLightScheme
-            | SettingsRowId::ChromeDarkScheme
-            | SettingsRowId::TerminalLightScheme
-            | SettingsRowId::TerminalDarkScheme => automatic,
+            SettingsRowId::ChromeScheme => !chrome_auto,
+            SettingsRowId::TerminalScheme => !terminal_auto,
+            SettingsRowId::ChromeLightScheme | SettingsRowId::ChromeDarkScheme => chrome_auto,
+            SettingsRowId::TerminalLightScheme | SettingsRowId::TerminalDarkScheme => terminal_auto,
             _ => true,
         }
     }
 
-    /// The one appearance mode the whole application follows.
-    ///
-    /// Settings writes both surfaces together, so they agree by construction. A hand-edited
-    /// document can still disagree; the application's own chrome is what a person sees first, so
-    /// its policy is the one presented, and the next change reconciles both.
-    fn appearance_mode(&self) -> AppearanceMode {
-        AppearanceMode::of(&self.editor.document().preferences.chrome.scheme)
+    fn appearance_mode(&self, kind: SchemeKind) -> AppearanceMode {
+        let preferences = &self.editor.document().preferences;
+        AppearanceMode::of(match kind {
+            SchemeKind::Chrome => &preferences.chrome.scheme,
+            SchemeKind::Terminal => &preferences.terminal.scheme,
+        })
     }
 
     fn edit(&mut self, edit: impl FnOnce(&mut AppearanceDocument), cx: &mut Context<Self>) {
@@ -629,6 +633,28 @@ impl SettingsWindow {
                 let owner = cx.weak_entity();
                 let keyboard_owner = owner.clone();
                 let pointer_focus = focus.clone();
+                let row_group = format!("settings-row-state-{}", section.selector());
+                let colors = &appearance.colors;
+                let (background, foreground, icon, hover_background, hover_foreground, hover_icon) =
+                    if selected {
+                        (
+                            colors.row_selected_background,
+                            colors.row_selected_foreground,
+                            colors.row_selected_icon,
+                            colors.row_selected_hover_background,
+                            colors.row_selected_hover_foreground,
+                            colors.row_selected_hover_icon,
+                        )
+                    } else {
+                        (
+                            colors.row_background,
+                            colors.row_foreground,
+                            colors.row_icon,
+                            colors.row_hover_background,
+                            colors.row_hover_foreground,
+                            colors.row_hover_icon,
+                        )
+                    };
                 div()
                     .id(SharedString::from(format!(
                         "settings-navigation-{}",
@@ -636,6 +662,9 @@ impl SettingsWindow {
                     )))
                     .debug_selector(move || format!("settings-navigation-{}", section.selector()))
                     .relative()
+                    .group(row_group.clone())
+                    .bg(gpui_color(background))
+                    .text_color(gpui_color(foreground))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -645,29 +674,13 @@ impl SettingsWindow {
                     .px(appearance.spacing(8.0))
                     .rounded(px(6.0))
                     .cursor_default()
-                    // A navigation row is a chrome list row: the selected row takes the ghost
-                    // selected fill and hover keeps precedence over it, as every other list in
-                    // SpaceTerm does. The accent role stays reserved for accents such as the
-                    // active Tab underline, which no scheme promises to be legible behind text.
-                    .when(selected, |entry| {
-                        entry
-                            .bg(gpui_color(appearance.colors.ghost_element_selected))
-                            .font(appearance.emphasis.clone())
-                            .text_color(gpui_color(
-                                appearance.colors.ghost_element_selected_foreground,
-                            ))
-                    })
-                    .when(!selected && has_matches, |entry| {
-                        entry.text_color(gpui_color(appearance.colors.text_secondary))
-                    })
+                    .when(selected, |entry| entry.font(appearance.emphasis.clone()))
                     .when(has_matches, |entry| {
                         entry
                             .hover(|entry| {
                                 entry
-                                    .bg(gpui_color(appearance.colors.ghost_element_hover))
-                                    .text_color(gpui_color(
-                                        appearance.colors.ghost_element_hover_foreground,
-                                    ))
+                                    .bg(gpui_color(hover_background))
+                                    .text_color(gpui_color(hover_foreground))
                             })
                             .track_focus(focus)
                             .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
@@ -702,22 +715,29 @@ impl SettingsWindow {
                                 .border_color(gpui_color(appearance.colors.border_focused)),
                         )
                     })
-                    .child(div().flex_none().child(Icon::new(
-                        match section {
-                            SettingsSectionId::Appearance => IconName::SunMoon,
-                            SettingsSectionId::Interface => IconName::AppWindow,
-                            SettingsSectionId::Terminal => IconName::Terminal,
-                            SettingsSectionId::ColorSchemes => IconName::Palette,
-                        },
-                        appearance.text_size(13.0),
-                        gpui_color(if !has_matches {
-                            appearance.colors.icon_disabled
-                        } else if selected {
-                            appearance.colors.icon_accent
-                        } else {
-                            appearance.colors.icon_muted
-                        }),
-                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(gpui_color(if has_matches {
+                                icon
+                            } else {
+                                colors.icon_disabled
+                            }))
+                            .when(has_matches, |icon| {
+                                icon.group_hover(row_group, |style| {
+                                    style.text_color(gpui_color(hover_icon))
+                                })
+                            })
+                            .child(Icon::inherited(
+                                match section {
+                                    SettingsSectionId::Appearance => IconName::SunMoon,
+                                    SettingsSectionId::Interface => IconName::AppWindow,
+                                    SettingsSectionId::Terminal => IconName::Terminal,
+                                    SettingsSectionId::ColorSchemes => IconName::Palette,
+                                },
+                                appearance.text_size(13.0),
+                            )),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -762,52 +782,50 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let focused = self.search.read(cx).is_focused();
+        let search_focus = self.search.read(cx).focus_handle();
         let owner = cx.weak_entity();
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .gap(appearance.spacing(7.0))
-            .px(appearance.spacing(8.0))
-            .h(appearance.height(28.0, 12.0))
-            // The search field belongs to the window, not to the navigation list under it, so the
-            // break between them is wider than the spacing inside the list.
-            .mb(appearance.spacing(12.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(gpui_color(if focused {
-                appearance.colors.input_focused_border
-            } else {
-                appearance.colors.input_border
-            }))
-            .bg(gpui_color(appearance.colors.input_background))
-            // The same glyph size the navigation icons take, so one icon column and one text
-            // column run the height of the sidebar.
-            .child(div().flex_none().child(Icon::new(
-                IconName::Search,
-                appearance.text_size(13.0),
-                gpui_color(appearance.colors.icon_muted),
-            )))
-            .child(div().min_w_0().flex_1().child(self.search.clone()))
-            .when(!self.query.is_empty(), |field| {
-                field.child(
-                    IconButton::new("settings-search-clear", "Clear search", |foreground| {
-                        Icon::new(IconName::X, px(10.0), foreground).into_any_element()
-                    })
-                    .variant(spaceterm_ui::ButtonVariant::Ghost)
-                    .size(spaceterm_ui::ButtonSize::Compact)
-                    .tab_stop(true)
-                    .debug_selector("settings-search-clear")
-                    .on_activate(move |_, window, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.clear_search(&ClearSettingsSearch, window, cx);
-                        });
-                    }),
-                )
-            })
-            .into_any_element()
+        spaceterm_ui::field_frame(
+            "settings-search-frame",
+            &search_focus,
+            spaceterm_ui::FieldState::default(),
+            cx,
+        )
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .gap(appearance.spacing(7.0))
+        .px(appearance.spacing(8.0))
+        .h(appearance.height(28.0, 12.0))
+        // The search field belongs to the window, not to the navigation list under it, so the
+        // break between them is wider than the spacing inside the list.
+        .mb(appearance.spacing(12.0))
+        .rounded(px(6.0))
+        // The same glyph size the navigation icons take, so one icon column and one text
+        // column run the height of the sidebar.
+        .child(div().flex_none().child(Icon::new(
+            IconName::Search,
+            appearance.text_size(13.0),
+            gpui_color(appearance.colors.icon_muted),
+        )))
+        .child(div().min_w_0().flex_1().child(self.search.clone()))
+        .when(!self.query.is_empty(), |field| {
+            field.child(
+                IconButton::new("settings-search-clear", "Clear search", |foreground| {
+                    Icon::new(IconName::X, px(10.0), foreground).into_any_element()
+                })
+                .variant(spaceterm_ui::ButtonVariant::Ghost)
+                .size(spaceterm_ui::ButtonSize::Compact)
+                .tab_stop(true)
+                .debug_selector("settings-search-clear")
+                .on_activate(move |_, window, cx| {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.clear_search(&ClearSettingsSearch, window, cx);
+                    });
+                }),
+            )
+        })
+        .into_any_element()
     }
 
     fn render_detail(
@@ -965,7 +983,12 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
-            SettingsRowId::AppearanceMode => self.render_appearance_mode(appearance, cx),
+            SettingsRowId::ChromeAppearanceMode => {
+                self.render_appearance_mode(SchemeKind::Chrome, appearance, cx)
+            }
+            SettingsRowId::TerminalAppearanceMode => {
+                self.render_appearance_mode(SchemeKind::Terminal, appearance, cx)
+            }
             SettingsRowId::ChromeScheme => {
                 self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
             }
@@ -1023,17 +1046,18 @@ impl SettingsWindow {
         }
     }
 
-    /// The one light, dark, or automatic control, which both surfaces follow.
-    ///
-    /// Chrome and terminal keep separate schemes, but nobody wants light chrome around a dark
-    /// terminal, so the mode is chosen once and written to both surfaces in one edit.
+    /// Edits only the selected surface, preserving the other surface and its remembered slots.
     fn render_appearance_mode(
         &mut self,
+        kind: SchemeKind,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = self.appearance_mode();
-        let selector = "settings-appearance-mode";
+        let current = self.appearance_mode(kind);
+        let selector = match kind {
+            SchemeKind::Chrome => "settings-chrome-appearance-mode",
+            SchemeKind::Terminal => "settings-terminal-appearance-mode",
+        };
         let owner = cx.weak_entity();
         let options = [
             AppearanceMode::Light,
@@ -1042,20 +1066,26 @@ impl SettingsWindow {
         ]
         .into_iter()
         .map(|mode| {
-            let swatches = self.mode_preview_colors(mode, cx);
+            let swatches = self.mode_preview_colors(kind, mode, cx);
             SegmentedOption::new(mode, mode.label())
                 .debug_selector(format!("{selector}-{}", mode.label().to_ascii_lowercase()))
                 .preview(move |_, extent| mode_preview(&swatches, extent).into_any_element())
         })
         .collect::<Vec<_>>();
-        let control = SegmentedControl::new(selector, "Appearance", &current, options)
+        let label = match kind {
+            SchemeKind::Chrome => "Interface appearance",
+            SchemeKind::Terminal => "Terminal appearance",
+        };
+        let control = SegmentedControl::new(selector, label, &current, options)
             .expect("three appearance modes are within the bounded option set")
             .size(SegmentedSize::Card)
             .disabled(!self.editor.editable())
             .debug_selector(selector)
             .on_change(move |change, _, cx| {
                 let mode = *change.requested();
-                let _ = owner.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx));
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.set_appearance_mode(kind, mode, cx)
+                });
             });
         let _ = appearance;
         control.into_any_element()
@@ -1065,9 +1095,13 @@ impl SettingsWindow {
     ///
     /// The card depicts SpaceTerm's own windows, so it previews the chrome scheme each mode
     /// selects.
-    fn mode_preview_colors(&self, mode: AppearanceMode, cx: &mut Context<Self>) -> Vec<Color> {
+    fn mode_preview_colors(
+        &self,
+        kind: SchemeKind,
+        mode: AppearanceMode,
+        cx: &mut Context<Self>,
+    ) -> Vec<Color> {
         let _ = cx;
-        let kind = SchemeKind::Chrome;
         let remembered = self.remembered(kind);
         let pick = |appearance| {
             self.editor
@@ -1107,15 +1141,18 @@ impl SettingsWindow {
             .reconcile(&preferences.terminal.scheme);
     }
 
-    /// Moves both surfaces to `mode` in one edit, each keeping the scheme it wears there.
-    fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+    fn set_appearance_mode(
+        &mut self,
+        kind: SchemeKind,
+        mode: AppearanceMode,
+        cx: &mut Context<Self>,
+    ) {
         self.reconcile_remembered_schemes();
-        let chrome = self.chrome_schemes.selection(mode);
-        let terminal = self.terminal_schemes.selection(mode);
+        let selection = self.remembered(kind).selection(mode);
         self.edit(
-            move |draft| {
-                draft.preferences.chrome.scheme = chrome;
-                draft.preferences.terminal.scheme = terminal;
+            move |draft| match kind {
+                SchemeKind::Chrome => draft.preferences.chrome.scheme = selection,
+                SchemeKind::Terminal => draft.preferences.terminal.scheme = selection,
             },
             cx,
         );
@@ -1401,7 +1438,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance)
+        .render(appearance, cx)
         .into_any_element()
     }
 
@@ -1436,7 +1473,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance)
+        .render(appearance, cx)
         .into_any_element()
     }
 
@@ -1474,7 +1511,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance)
+        .render(appearance, cx)
         .into_any_element()
     }
 
@@ -1633,6 +1670,11 @@ impl SettingsWindow {
                 } else {
                     appearance.colors.error_background
                 }))
+                .text_color(gpui_color(if critical {
+                    appearance.colors.warning
+                } else {
+                    appearance.colors.error
+                }))
                 .border_b_1()
                 .border_color(gpui_color(if critical {
                     appearance.colors.warning_border
@@ -1663,7 +1705,6 @@ impl SettingsWindow {
                         .child(
                             div()
                                 .text_size(appearance.text_size(text::SMALL))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
                                 .whitespace_normal()
                                 .child(explanation),
                         ),
@@ -1872,10 +1913,9 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 /// One line of guidance for the rows that warrant it.
 fn row_description(row: SettingsRowId) -> Option<&'static str> {
     match row {
-        SettingsRowId::AppearanceMode => Some(
-            "The interface and the terminal both follow this. Auto follows the system light and \
-             dark setting.",
-        ),
+        SettingsRowId::ChromeAppearanceMode | SettingsRowId::TerminalAppearanceMode => {
+            Some("Auto follows the system light and dark setting for this surface.")
+        }
         SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
         _ => None,
     }

@@ -8,6 +8,7 @@ impl WorkspaceSidebar {
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
     ) -> AnyElement {
         let WorkspaceRowViewModel {
             workspace_id,
@@ -22,6 +23,20 @@ impl WorkspaceSidebar {
             pane_count,
             active,
         } = row;
+        let mut appearance = appearance.clone();
+        let row_group = format!("workspace-row-state-{}", workspace_id.get());
+        if active {
+            appearance.colors.row_background = appearance.colors.row_selected_background;
+            appearance.colors.row_foreground = appearance.colors.row_selected_foreground;
+            appearance.colors.row_secondary = appearance.colors.row_selected_secondary;
+            appearance.colors.row_icon = appearance.colors.row_selected_icon;
+            appearance.colors.row_hover_background =
+                appearance.colors.row_selected_hover_background;
+            appearance.colors.row_hover_foreground =
+                appearance.colors.row_selected_hover_foreground;
+            appearance.colors.row_hover_secondary = appearance.colors.row_selected_hover_secondary;
+            appearance.colors.row_hover_icon = appearance.colors.row_selected_hover_icon;
+        }
         let click_sidebar = sidebar.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color =
@@ -59,28 +74,29 @@ impl WorkspaceSidebar {
         let first_line = if let Some(rename) = rename {
             let input = rename.input.clone();
             let focus_handle = rename.focus_handle.clone();
-            div()
-                .id(("workspace-rename-input", workspace_id.get()))
-                .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-                .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
-                .w_full()
-                .px(appearance.spacing(5.0))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(appearance.spacing(4.0))
-                .border(px(1.0))
-                .border_color(gpui_color(appearance.colors.border_focused))
-                .bg(gpui_color(appearance.colors.element_background))
-                .font(appearance.regular.clone())
-                .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(appearance.colors.text))
-                .on_click(move |_, window, cx| {
-                    focus_handle.focus(window);
-                    cx.stop_propagation();
-                })
-                .child(input)
-                .into_any_element()
+            spaceterm_ui::field_frame(
+                ("workspace-rename-input", workspace_id.get()),
+                &focus_handle,
+                spaceterm_ui::FieldState::default(),
+                cx,
+            )
+            .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
+            .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
+            .w_full()
+            .px(appearance.spacing(5.0))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .rounded(appearance.spacing(4.0))
+            .font(appearance.regular.clone())
+            .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
+            .text_color(gpui_color(appearance.colors.text))
+            .on_click(move |_, window, cx| {
+                focus_handle.focus(window);
+                cx.stop_propagation();
+            })
+            .child(input)
+            .into_any_element()
         } else {
             div()
                 .id(("workspace-row-name", workspace_id.get()))
@@ -89,11 +105,10 @@ impl WorkspaceSidebar {
                 .truncate()
                 .font(appearance.emphasis.clone())
                 .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(if active {
-                    appearance.colors.text_accent
-                } else {
-                    appearance.colors.text
-                }))
+                .text_color(gpui_color(appearance.colors.row_foreground))
+                .group_hover(row_group.clone(), |style| {
+                    style.text_color(gpui_color(appearance.colors.row_hover_foreground))
+                })
                 .child(name.clone())
                 .into_any_element()
         };
@@ -131,10 +146,9 @@ impl WorkspaceSidebar {
             .items_center()
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
-            .when(active, |row| {
-                row.bg(gpui_color(appearance.colors.ghost_element_selected))
-            })
-            .hover(|row| row.bg(gpui_color(appearance.colors.ghost_element_hover)))
+            .group(row_group.clone())
+            .bg(gpui_color(appearance.colors.row_background))
+            .hover(|row| row.bg(gpui_color(appearance.colors.row_hover_background)))
             .on_click(move |_, _, cx| {
                 let _ = click_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Activate {
@@ -154,24 +168,17 @@ impl WorkspaceSidebar {
                     .child(
                         div()
                             .relative()
-                            .child(Icon::new(
+                            .text_color(gpui_color(appearance.colors.row_icon))
+                            .group_hover(row_group.clone(), |style| {
+                                style.text_color(gpui_color(appearance.colors.row_hover_icon))
+                            })
+                            .child(Icon::inherited(
                                 if remote_connection_phase.is_some() {
                                     IconName::Globe
                                 } else {
                                     IconName::Terminal
                                 },
                                 appearance.spacing(SIDEBAR_ROW_ICON_SIZE),
-                                gpui_color(if let Some(color) = remote_color {
-                                    color
-                                } else if available {
-                                    if active {
-                                        appearance.colors.icon_accent
-                                    } else {
-                                        appearance.colors.icon
-                                    }
-                                } else {
-                                    appearance.colors.warning
-                                }),
                             ))
                             .when(!available, |icon| {
                                 icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
@@ -329,6 +336,7 @@ impl WorkspaceSidebar {
                 presentation,
                 window,
                 appearance,
+                cx,
             ));
         }
 

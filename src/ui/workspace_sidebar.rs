@@ -595,11 +595,6 @@ impl WorkspaceSidebar {
     }
 }
 
-// Preserve the muted hierarchy while keeping small text readable on selected and hovered rows.
-fn secondary_text_color(colors: &ChromeColors) -> Color {
-    colors.text_secondary
-}
-
 impl WorkspaceSidebar {
     pub(super) fn layout(&self) -> SidebarLayout {
         self.layout
@@ -684,30 +679,22 @@ impl WorkspaceSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn luminance(color: Color) -> f64 {
-        let linear = |channel: u8| {
-            let c = f64::from(channel) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        linear(color.r) * 0.2126 + linear(color.g) * 0.7152 + linear(color.b) * 0.0722
-    }
     #[test]
     fn secondary_text_should_be_readable_on_every_row_background() {
         let colors = ChromeColors::default();
-        let foreground = luminance(secondary_text_color(&colors));
-        for background in [
-            colors.panel_background,
-            colors.ghost_element_selected,
-            colors.ghost_element_hover,
+        for (foreground, background) in [
+            (colors.row_secondary, colors.row_background),
+            (colors.row_hover_secondary, colors.row_hover_background),
+            (
+                colors.row_selected_secondary,
+                colors.row_selected_background,
+            ),
+            (
+                colors.row_selected_hover_secondary,
+                colors.row_selected_hover_background,
+            ),
         ] {
-            let background = luminance(background);
-            assert!(
-                (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05) >= 4.5
-            );
+            assert!(foreground.contrast_ratio(background) >= 4.5);
         }
     }
     #[test]

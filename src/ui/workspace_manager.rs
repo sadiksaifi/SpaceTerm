@@ -223,6 +223,7 @@ enum WorkspaceSwitcherChoice {
 }
 
 pub(crate) struct WorkspaceManager {
+    window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<WorkspaceSwitcherChoice>,
     remote_workspace_name: Option<String>,
@@ -342,6 +343,16 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
+        cx.observe_global_in::<super::appearance_runtime::InstalledAppearance>(
+            window,
+            |manager, window, cx| {
+                manager.window_appearance.apply(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         let WorkspaceManagerAdapters {
             local_filesystem,
             key_input: key_input_adapter_factory,
@@ -440,6 +451,7 @@ impl WorkspaceManager {
         .detach();
 
         Self {
+            window_appearance,
             transient: WorkspaceTransientUi {
                 picker: directory_picker,
                 pin_target: None,
@@ -2852,10 +2864,8 @@ impl WorkspaceManager {
     ///
     /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
     /// chip would be duplicate chrome; with it closed nothing on screen does.
-    fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
-        let appearance = super::appearance::chrome(cx);
+    fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
-        let available = workspace.availability().is_available();
         let remote_connection_phase = workspace
             .remote_connection_state()
             .map(RemoteConnectionState::phase);
@@ -2867,16 +2877,6 @@ impl WorkspaceManager {
             workspace.remote_display_directory(),
             &self.local_home_directory_path,
         );
-        let foreground = gpui_color(if available {
-            appearance.colors.text
-        } else {
-            appearance.colors.warning
-        });
-        let icon_color = gpui_color(if !available {
-            appearance.colors.warning
-        } else {
-            appearance.colors.icon
-        });
         let tooltip_detail = remote_status
             .map(|status| format!("{path}: {status}"))
             .unwrap_or_else(|| path.clone());
@@ -2885,8 +2885,6 @@ impl WorkspaceManager {
             WorkspaceChromeIdentity {
                 name: name.clone(),
                 pinned: workspace.pinned_directory().is_some(),
-                foreground,
-                pin_color: icon_color,
             },
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!("{name}\n{tooltip_detail}"))
@@ -2992,7 +2990,7 @@ impl WorkspaceManager {
                 .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
         )
         .when(!sidebar_visible, |chooser| {
-            let (identity, tooltip) = self.workspace_chrome_identity(cx);
+            let (identity, tooltip) = self.workspace_chrome_identity();
             chooser
                 .custom_trigger(identity.render(gpui_color(appearance.colors.icon), appearance))
                 .full_width(true)

@@ -249,6 +249,7 @@ pub(crate) fn open(
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
+            window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.0), px(260.0))),
             titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {

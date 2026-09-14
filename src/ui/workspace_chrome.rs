@@ -118,8 +118,6 @@ impl WorkspaceChromeLayout {
 pub(super) struct WorkspaceChromeIdentity {
     pub(super) name: String,
     pub(super) pinned: bool,
-    pub(super) foreground: Rgba,
-    pub(super) pin_color: Rgba,
 }
 
 impl WorkspaceChromeIdentity {
@@ -142,7 +140,7 @@ impl WorkspaceChromeIdentity {
                         .child(Icon::new(
                             IconName::Pin,
                             appearance.spacing(PIN_SIZE),
-                            self.pin_color,
+                            switcher_color,
                         )),
                 )
             })
@@ -152,7 +150,7 @@ impl WorkspaceChromeIdentity {
                     .min_w_0()
                     .truncate()
                     .text_size(appearance.text_size(NAME_TEXT_SIZE))
-                    .text_color(self.foreground)
+                    .text_color(switcher_color)
                     .child(self.name),
             );
         div()

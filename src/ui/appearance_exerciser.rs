@@ -51,6 +51,7 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     let bounds = Bounds::centered(None, size(px(920.0), px(420.0)), cx);
     let appearance = cx.open_window(
         WindowOptions {
+            window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.0), px(320.0))),
             titlebar: Some(TitlebarOptions {
@@ -86,6 +87,7 @@ fn toggle_appearance_preview(_: &ToggleAppearancePreview, cx: &mut App) {
 }
 
 struct AppearanceExerciser {
+    window_appearance: appearance_runtime::WindowAppearanceOwner,
     editor: Entity<TextInput>,
     preview: Option<PreviewToken>,
     status: String,
@@ -97,8 +99,16 @@ struct AppearanceExerciser {
 
 impl AppearanceExerciser {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_global::<appearance_runtime::InstalledAppearance>(|_, cx| cx.notify())
-            .detach();
+        let mut window_appearance = appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
+        cx.observe_global_in::<appearance_runtime::InstalledAppearance>(
+            window,
+            |exerciser, window, cx| {
+                exerciser.window_appearance.apply(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         let settings = Self::settings(cx);
         let initial = settings
             .export_document()
@@ -109,6 +119,7 @@ impl AppearanceExerciser {
                 .input_length_limit(Some(64 * 1024))
         });
         Self {
+            window_appearance,
             editor,
             preview: None,
             status: String::from("Ready. Storage is isolated."),
@@ -575,9 +586,11 @@ impl AppearanceExerciser {
 
     fn show_fixture_window(&mut self, cx: &mut Context<Self>) {
         let bounds = Bounds::centered(None, size(px(640.0), px(440.0)), cx);
+        let window_background = appearance_runtime::window_background(cx);
         self.status = if cx
             .open_window(
                 WindowOptions {
+                    window_background,
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(480.0), px(320.0))),
                     titlebar: Some(TitlebarOptions {
@@ -648,8 +661,6 @@ impl Render for AppearanceExerciser {
         let background = rgba(appearance.colors.background.rgba_hex());
         let foreground = rgba(appearance.colors.text.rgba_hex());
         let muted = rgba(appearance.colors.text_muted.rgba_hex());
-        let editor_background = rgba(appearance.colors.input_background.rgba_hex());
-        let editor_border = rgba(appearance.colors.input_border.rgba_hex());
         let weak = cx.weak_entity();
         let preview_shortcut =
             crate::desktop_profile::DesktopPresentation::get(cx).shortcut(&ToggleAppearancePreview);
@@ -701,7 +712,7 @@ impl Render for AppearanceExerciser {
                 let generation = appearance_runtime::current(cx).generation.get();
                 move || format!("appearance-diagnostics-generation-{generation}")
             }).text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
-            .child(div().h(appearance.height(32.0, 13.0)).bg(editor_background).border_1().border_color(editor_border).child(self.editor.clone()))
+            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.height(32.0, 13.0)).child(self.editor.clone()))
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(action("appearance-apply", "Apply JSON Preview", Self::apply_editor))
                 .child(
@@ -758,12 +769,24 @@ impl Render for AppearanceDialogBody {
 }
 
 struct AppearanceFixtures {
+    window_appearance: appearance_runtime::WindowAppearanceOwner,
     input: Entity<TextInput>,
 }
 
 impl AppearanceFixtures {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut window_appearance = appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
+        cx.observe_global_in::<appearance_runtime::InstalledAppearance>(
+            window,
+            |fixtures, window, cx| {
+                fixtures.window_appearance.apply(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         Self {
+            window_appearance,
             input: cx.new(|cx| {
                 TextInput::new(
                     "appearance-obscured-input",

@@ -1674,6 +1674,7 @@ fn render_pane_caption(
         move |bounds, window, cx| {
             let background = caption.terminal.read(cx).surface_background();
             let pane_id = caption.pane_id;
+            let paint = appearance.colors.caption(background, caption.focused);
             let content = render_pane_caption_content(
                 caption,
                 &pane_group,
@@ -1682,6 +1683,7 @@ fn render_pane_caption(
                 bounds.size.width,
                 window,
                 &appearance,
+                paint,
             );
             // The caption shares the terminal surface, but its contents remain Chrome-owned.
             let mut content = div()
@@ -1716,6 +1718,7 @@ fn render_pane_caption_content(
     width: Pixels,
     window: &Window,
     appearance: &super::appearance::ChromeAppearance,
+    paint: crate::appearance::CaptionPaint,
 ) -> AnyElement {
     let layout = CaptionLayout::resolve(&caption, width, window, appearance);
     let PaneCaption {
@@ -1727,7 +1730,21 @@ fn render_pane_caption_content(
         attention,
         has_multiple_panes,
     } = caption;
-    let color = caption_color(focused, &appearance.colors);
+    let color = paint.foreground;
+    let button_paint = |value: crate::appearance::SemanticPaint| {
+        spaceterm_ui::ButtonPaint::new(
+            gpui_color(value.background),
+            gpui_color(value.foreground),
+            gpui_color(value.border),
+        )
+        .icon_foreground(gpui_color(value.icon))
+    };
+    let control_style = spaceterm_ui::ButtonVariantStyle::new(
+        button_paint(paint.control),
+        button_paint(paint.control_hover),
+        button_paint(paint.control_pressed),
+        button_paint(paint.control_disabled),
+    );
     let focus_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
@@ -1799,8 +1816,8 @@ fn render_pane_caption_content(
                 name,
                 move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
             )
-            // Caption controls remain bare over the terminal surface.
             .variant(ButtonVariant::Bare)
+            .contextual_style(control_style, gpui_color(paint.focus))
             .size(ButtonSize::Compact)
             .preserve_ancestor_hover()
             .debug_selector(id.clone())
@@ -1853,7 +1870,7 @@ fn render_pane_caption_content(
                     .size(appearance.spacing(6.0))
                     .flex_shrink_0()
                     .rounded_full()
-                    .bg(gpui_color(appearance.colors.warning)),
+                    .bg(gpui_color(paint.attention)),
             )
         })
         .child(
@@ -1910,18 +1927,6 @@ fn render_pane_caption_content(
         )
         .child(controls)
         .into_any_element()
-}
-
-/// The single colour one caption paints every part of itself with.
-///
-/// The caption is one statement of identity, so its icon, account, machine, directory, label and
-/// controls all read at the same weight. Only focus changes the tier.
-fn caption_color(focused: bool, colors: &crate::appearance::ChromeColors) -> Color {
-    if focused {
-        colors.text_secondary
-    } else {
-        colors.icon_muted
-    }
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.

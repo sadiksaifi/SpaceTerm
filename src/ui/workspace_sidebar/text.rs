@@ -3,7 +3,7 @@ use gpui::{AnyElement, Pixels, SharedString, canvas, div, px};
 use spaceterm_ui::{Icon, IconName};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{gpui_color, secondary_text_color};
+use super::gpui_color;
 use crate::appearance::Color;
 use crate::ui::appearance::ChromeAppearance;
 
@@ -45,7 +45,10 @@ pub(super) fn title(
                             .truncate()
                             .font(appearance.regular.clone())
                             .text_size(appearance.text_size(DETAIL_SIZE))
-                            .text_color(gpui_color(secondary_text_color(&appearance.colors)))
+                            .text_color(gpui_color(appearance.colors.row_secondary))
+                            .group_hover(format!("workspace-row-state-{id}"), |style| {
+                                style.text_color(gpui_color(appearance.colors.row_hover_secondary))
+                            })
                             .child(machine),
                     )
                 })
@@ -107,11 +110,11 @@ pub(super) fn detail(
                             .flex_shrink_0()
                             .id(("workspace-row-pin", id))
                             .debug_selector(move || format!("workspace-row-pin-{id}"))
-                            .child(Icon::new(
-                                IconName::Pin,
-                                appearance.spacing(PIN_SIZE),
-                                gpui_color(secondary_text_color(&appearance.colors)),
-                            )),
+                            .text_color(gpui_color(appearance.colors.row_secondary))
+                            .group_hover(format!("workspace-row-state-{id}"), |style| {
+                                style.text_color(gpui_color(appearance.colors.row_hover_secondary))
+                            })
+                            .child(Icon::inherited(IconName::Pin, appearance.spacing(PIN_SIZE))),
                     )
                 })
                 .child(
@@ -123,10 +126,10 @@ pub(super) fn detail(
                         .debug_selector(move || {
                             selector.unwrap_or_else(|| format!("workspace-row-path-{id}"))
                         })
-                        .text_color(gpui_color(
-                            status_color
-                                .unwrap_or_else(|| secondary_text_color(&appearance.colors)),
-                        ))
+                        .text_color(gpui_color(appearance.colors.row_secondary))
+                        .group_hover(format!("workspace-row-state-{id}"), |style| {
+                            style.text_color(gpui_color(appearance.colors.row_hover_secondary))
+                        })
                         .child(fitted),
                 );
             let mut content = div()
@@ -145,7 +148,10 @@ pub(super) fn detail(
                         .whitespace_nowrap()
                         .id(("workspace-counts", id))
                         .debug_selector(move || format!("workspace-counts-{id}"))
-                        .text_color(gpui_color(secondary_text_color(&appearance.colors)))
+                        .text_color(gpui_color(appearance.colors.row_secondary))
+                        .group_hover(format!("workspace-row-state-{id}"), |style| {
+                            style.text_color(gpui_color(appearance.colors.row_hover_secondary))
+                        })
                         .child(counts),
                 )
                 .into_any_element();

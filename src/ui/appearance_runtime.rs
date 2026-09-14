@@ -121,8 +121,11 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             spaceterm_ui::replace_control_theme_catalog(cx, controls)
                 .map_err(|_| SettingsError::Invalid)?;
         }
-        platform.apply_native_appearance(resolved.chrome.appearance);
+
         cx.set_global(InstalledChrome(Arc::new(prepared)));
+    }
+    if changes.is_none_or(|changes| changes.native_appearance) {
+        platform.apply_native_appearance(resolved.chrome.appearance);
     }
     cx.set_global(InstalledAppearance(Arc::new(resolved)));
     Ok(())
@@ -215,4 +218,41 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
                     .expect("built-in appearance is valid"),
             )
         })
+}
+
+/// Owns native backdrop effects for one Operating-System Window. The application native
+/// Light/Dark setting remains app-scoped through AppearancePlatform.
+#[derive(Default)]
+pub(crate) struct WindowAppearanceOwner {
+    effective: Option<crate::appearance::WindowBackgroundAppearance>,
+}
+
+impl WindowAppearanceOwner {
+    pub(crate) fn apply(&mut self, window: &mut gpui::Window, cx: &App) {
+        let effective = current(cx).chrome.composition.effective;
+        if self.effective != Some(effective) {
+            window.set_background_appearance(native_background(effective));
+            self.effective = Some(effective);
+        }
+    }
+}
+
+pub(crate) fn window_background(cx: &App) -> gpui::WindowBackgroundAppearance {
+    native_background(current(cx).chrome.composition.effective)
+}
+
+fn native_background(
+    appearance: crate::appearance::WindowBackgroundAppearance,
+) -> gpui::WindowBackgroundAppearance {
+    match appearance {
+        crate::appearance::WindowBackgroundAppearance::Opaque => {
+            gpui::WindowBackgroundAppearance::Opaque
+        }
+        crate::appearance::WindowBackgroundAppearance::Transparent => {
+            gpui::WindowBackgroundAppearance::Transparent
+        }
+        crate::appearance::WindowBackgroundAppearance::Blurred => {
+            gpui::WindowBackgroundAppearance::Blurred
+        }
+    }
 }
