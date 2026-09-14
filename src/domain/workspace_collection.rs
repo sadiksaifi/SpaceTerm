@@ -249,12 +249,6 @@ pub(crate) enum DirectoryAvailability {
     Unavailable { reason: String },
 }
 
-impl DirectoryAvailability {
-    pub(crate) const fn is_available(&self) -> bool {
-        matches!(self, Self::Available)
-    }
-}
-
 #[derive(Clone, Eq)]
 /// A validated local directory and its local filesystem identity.
 ///

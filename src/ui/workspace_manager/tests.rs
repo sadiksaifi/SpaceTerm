@@ -4149,11 +4149,10 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     cx.run_until_parked();
     assert_eq!(records.starts().len(), 2);
     assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .active_workspace()
-            .availability()
-            .is_available()
+        matches!(
+            manager.workspaces.active_workspace().availability(),
+            crate::domain::DirectoryAvailability::Available
+        )
     }));
     fs::remove_dir_all(root).unwrap();
 }

@@ -81,7 +81,7 @@ impl Default for ChromeAppearance {
         let mut emphasis = regular.clone();
         emphasis.weight = FontWeight::SEMIBOLD;
         Self {
-            colors: ChromeColors::default(),
+            colors: ChromeColors::default().opaque_presentation(),
             caption: regular.clone(),
             regular,
             heading: emphasis.clone(),
@@ -103,7 +103,10 @@ impl ChromeAppearance {
     }
     pub(crate) fn prepare(resolved: &ResolvedChromeAppearance) -> Self {
         Self {
-            colors: resolved.colors.clone(),
+            // Native foundation presentation has a known opaque backing. Preserve authored RGBA
+            // in the published appearance, and share the compiler's canonical surface hierarchy
+            // with every app consumer and the injected reusable-control catalog.
+            colors: resolved.colors.opaque_presentation(),
             regular: prepared_font(&resolved.typography.body),
             emphasis: prepared_font(&resolved.typography.navigation),
             caption: prepared_font(&resolved.typography.caption),
@@ -186,6 +189,43 @@ impl ChromeAppearance {
 #[cfg(test)]
 mod typography_tests {
     use super::ChromeAppearance;
+
+    #[test]
+    fn prepared_field_surfaces_match_compiler_backing_without_flattening_authored_intent() {
+        use crate::appearance::*;
+        let document = parse_color_document(br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.translucent","name":"Translucent","appearance":"light","colors":{"background":"#ffffff80","panel_background":"#00000040","input_background":"#00000000"}}]}"##).unwrap();
+        let catalog = SchemeCatalog::from_custom_schemes(&document.schemes).unwrap();
+        let mut preferences = AppearancePreferences::default();
+        preferences.chrome.scheme = SchemeSelection::Fixed {
+            id: SchemeId::new("test.translucent").unwrap(),
+            appearance: Appearance::Light,
+        };
+        let resolved = catalog
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable(),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let prepared = ChromeAppearance::prepare(&resolved.chrome);
+        assert_eq!(resolved.chrome.colors.background.a, 128);
+        assert_eq!(resolved.chrome.colors.input_background.a, 0);
+        assert_eq!(prepared.colors.background, Color::rgb(0xffffff));
+        assert_eq!(
+            prepared.colors.input_background,
+            prepared.colors.panel_background
+        );
+        assert_eq!(prepared.colors.input_background.a, 255);
+        assert!(
+            prepared
+                .colors
+                .input_text
+                .source_over(prepared.colors.input_background)
+                .contrast_ratio(prepared.colors.input_background)
+                >= 4.5
+        );
+    }
 
     /// A readout asking for tabular figures keeps whatever the resolved font already asked for.
     #[test]
