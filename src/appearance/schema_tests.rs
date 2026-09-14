@@ -128,6 +128,36 @@ fn published_schema_accepts_sparse_terminal_palettes() {
     assert!(super::parse_color_document(&serde_json::to_vec(&package).unwrap()).is_ok());
 }
 
+#[test]
+fn named_font_families_have_matching_schema_and_runtime_character_rules() {
+    let definitions: serde_json::Value = serde_json::from_str(include_str!(
+        "../../docs/schema/color-scheme-definitions-v1.schema.json"
+    ))
+    .unwrap();
+    let settings_schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../docs/schema/appearance-settings.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(PublishedSchemaRetriever(definitions))
+        .build(&settings_schema)
+        .unwrap();
+
+    for surface in ["chrome", "terminal"] {
+        let mut invalid = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+        invalid["preferences"][surface]["typography"]["family"] =
+            serde_json::json!({"source": "named", "family": "Broken\nFamily"});
+        assert!(!validator.is_valid(&invalid));
+        assert!(super::parse_settings(&serde_json::to_vec(&invalid).unwrap()).is_err());
+
+        let mut unicode = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+        unicode["preferences"][surface]["typography"]["family"] =
+            serde_json::json!({"source": "named", "family": "ヒラギノ角ゴシック"});
+        assert!(validator.is_valid(&unicode));
+        assert!(super::parse_settings(&serde_json::to_vec(&unicode).unwrap()).is_ok());
+    }
+}
+
 struct PublishedSchemaRetriever(serde_json::Value);
 
 impl jsonschema::Retrieve for PublishedSchemaRetriever {
