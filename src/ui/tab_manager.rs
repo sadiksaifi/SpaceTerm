@@ -92,9 +92,14 @@ const TAB_CHIP_INSET_Y: f32 = 4.0;
 const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 /// The visible length of the quiet mark between two neighbouring inactive Tabs.
 ///
-/// Inactive Tabs rest as text on the bar, so a short one-device-pixel stroke is enough to say where
-/// one title ends. The Active Tab's chip already has an edge, so no mark touches it.
+/// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
+/// ends. The Active Tab's chip already has an edge, so no mark touches it.
 const TAB_SEPARATOR_LENGTH: f32 = 12.0;
+/// The mark's thickness: the same whole-point hairline as the chip rim and the Tab bar divider.
+///
+/// A width derived from the display scale is a single device pixel, which is too faint to read as a
+/// short mark and leaves layout rounding to decide which side of an edge it lands on.
+const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
@@ -115,6 +120,7 @@ struct TabChromePresentation {
     hover_foreground: Color,
     hover_icon: Color,
     divider: Color,
+    tab_separator: Color,
 }
 
 impl TabChromePresentation {
@@ -138,6 +144,7 @@ impl TabChromePresentation {
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.outline_border,
             }
         } else {
             Self {
@@ -160,6 +167,7 @@ impl TabChromePresentation {
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.outline_border,
             }
         }
     }
@@ -1293,7 +1301,6 @@ impl TabManager {
         &self,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
-        device_pixel: Pixels,
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
@@ -1316,13 +1323,7 @@ impl TabManager {
                 previous_inactive_tab
                     .filter(|_| !active)
                     .map(|leading_tab_id| {
-                        render_tab_separator(
-                            leading_tab_id,
-                            tab_id,
-                            presentation,
-                            device_pixel,
-                            appearance,
-                        )
+                        render_tab_separator(leading_tab_id, tab_id, presentation, appearance)
                     });
             previous_inactive_tab = (!active).then_some(tab_id);
             items = items.child(
@@ -1441,12 +1442,7 @@ impl Render for TabManager {
         let appearance = super::appearance::chrome(cx);
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
-        let tab_bar = self.render_tab_bar(
-            &presentation,
-            manager.clone(),
-            px(1.0 / window.scale_factor()),
-            cx,
-        );
+        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
 
         div()
             .id("tab-manager")
@@ -1509,21 +1505,25 @@ impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
 
 /// The quiet mark at the boundary between two neighbouring inactive Tabs.
 ///
-/// The trailing Tab carries the mark as paint straddling its shared edge, so the row keeps one
-/// scroll child per Tab and both Tabs keep their spacing, hit targets, and hover regions.
+/// The trailing Tab carries the mark as paint just inside its own edge on the shared boundary, so
+/// the row keeps one scroll child per Tab and both Tabs keep their spacing, hit targets, and hover
+/// regions. Staying inside the Tab's bounds and on whole points leaves layout rounding nothing to
+/// move, and the chip inset keeps hover paint clear of it.
+///
+/// `border` describes full-length structure and is too close to the bar to show on a mark this
+/// short, so the mark takes the quiet outline role that controls rest on the same surface with.
 fn render_tab_separator(
     leading_tab_id: TabId,
     trailing_tab_id: TabId,
     presentation: &TabChromePresentation,
-    device_pixel: Pixels,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     div()
         .absolute()
         .top_0()
         .bottom_0()
-        .left(-device_pixel / 2.0)
-        .w(device_pixel)
+        .left_0()
+        .w(px(TAB_SEPARATOR_WIDTH))
         .flex()
         .items_center()
         .child(
@@ -1537,7 +1537,7 @@ fn render_tab_separator(
                 })
                 .w_full()
                 .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
-                .bg(gpui_color(presentation.divider)),
+                .bg(gpui_color(presentation.tab_separator)),
         )
         .into_any_element()
 }
@@ -1598,6 +1598,7 @@ mod tests {
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.outline_border,
             }
         );
     }
@@ -1627,6 +1628,7 @@ mod tests {
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.outline_border,
             }
         );
     }
@@ -1752,6 +1754,40 @@ mod tests {
                 chip.hover_fill, chip.fill,
                 "{appearance:?} Active Tab should answer hover"
             );
+        }
+    }
+
+    /// A separator is a short hairline, so it needs more contrast than a full-length divider to be
+    /// seen at all, yet it must stay a step quieter than the titles it sits between.
+    #[test]
+    fn built_in_tab_separator_should_be_visible_but_quieter_than_inactive_titles() {
+        use crate::appearance::{Appearance, builtin_chrome_base};
+
+        const MINIMUM_SEPARATOR_CONTRAST: f64 = 1.4;
+        const MAXIMUM_SEPARATOR_CONTRAST: f64 = 3.0;
+
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin_chrome_base(appearance);
+            for window_active in [true, false] {
+                let presentation = TabChromePresentation::resolve(window_active, &colors);
+                let bar = presentation.background;
+                let separator = presentation.tab_separator.source_over(bar);
+                let contrast = separator.contrast_ratio(bar);
+                assert!(
+                    (MINIMUM_SEPARATOR_CONTRAST..=MAXIMUM_SEPARATOR_CONTRAST).contains(&contrast),
+                    "{appearance:?} window_active={window_active}: separator contrast {contrast:.2} \
+                     should be visible but quiet"
+                );
+                assert!(
+                    contrast
+                        < presentation
+                            .tab_foreground(false)
+                            .source_over(bar)
+                            .contrast_ratio(bar),
+                    "{appearance:?} window_active={window_active}: separator should stay quieter \
+                     than an inactive Tab title"
+                );
+            }
         }
     }
 
@@ -2557,15 +2593,30 @@ mod tests {
     /// Each position gets its own window because rendered debug bounds outlive the frame that drew
     /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
     ///
-    /// A boundary is marked only while both of its Tabs are inactive, and the mark straddles their
-    /// shared edge as a thin short stroke without opening a gap between their hit targets. The
-    /// shared edge is found from the rendered items rather than assumed to run left to right.
+    /// A boundary is marked only while both of its Tabs are inactive. The mark is a short hairline
+    /// of at least one whole point, laid out on whole device pixels, painted entirely inside one of
+    /// the two Tabs against their shared edge and clear of both chips, so neither layout rounding,
+    /// an ancestor's clip, nor a neighbour's paint can take it away. It carries no hit target of its
+    /// own. The shared edge is found from the rendered items rather than assumed to run left to
+    /// right.
     fn assert_separators_mark_only_inactive_neighbours(
         cx: &mut TestAppContext,
         direction: spaceterm_ui::TextDirection,
     ) {
         cx.update(|cx| crate::ui::init_with_text_direction(cx, direction))
             .expect("UI initialization should succeed");
+        let within = |inner: gpui::Bounds<Pixels>, outer: gpui::Bounds<Pixels>| {
+            inner.left() >= outer.left()
+                && inner.right() <= outer.right()
+                && inner.top() >= outer.top()
+                && inner.bottom() <= outer.bottom()
+        };
+        let overlaps = |a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>| {
+            a.left() < b.right()
+                && b.left() < a.right()
+                && a.top() < b.bottom()
+                && b.top() < a.bottom()
+        };
         for selected in 1..=4_u64 {
             let (manager, _records, cx) = open_tab_manager(cx);
             cx.update(|window, cx| {
@@ -2581,6 +2632,11 @@ mod tests {
                 manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
                 TabId::new(selected)
             );
+            let scale_factor = cx.update(|window, _| window.scale_factor());
+            let on_device_pixels = |value: Pixels| {
+                let device = f32::from(value) * scale_factor;
+                (device - device.round()).abs() < 1e-3
+            };
             let item = |tab: u64, cx: &mut VisualTestContext| {
                 let state = if tab == selected {
                     "active"
@@ -2589,6 +2645,10 @@ mod tests {
                 };
                 cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-{state}")))
                     .unwrap_or_else(|| panic!("Tab {tab} was not rendered"))
+            };
+            let chip = |tab: u64, cx: &mut VisualTestContext| {
+                cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-chip")))
+                    .unwrap_or_else(|| panic!("Tab {tab} chip was not rendered"))
             };
 
             for leading in 1..4_u64 {
@@ -2614,20 +2674,44 @@ mod tests {
                 match (separator, touches_selected) {
                     (Some(separator), false) => {
                         assert!(
-                            separator.size.width > px(0.0) && separator.size.width <= px(1.0),
-                            "the separator should be a hairline, got {separator:?}"
+                            separator.size.width >= px(1.0) && separator.size.width <= px(1.5),
+                            "the separator should be a whole-point hairline rather than a single \
+                             device pixel, got {separator:?}"
                         );
                         assert!(
-                            separator.size.height < leading_item.size.height / 2.0,
-                            "the separator should stay short of the bar, got {separator:?}"
+                            on_device_pixels(separator.left())
+                                && on_device_pixels(separator.size.width),
+                            "the separator should be laid out on whole device pixels at scale \
+                             {scale_factor}, got {separator:?}"
                         );
                         assert!(
-                            (separator.center().x - shared_edge).abs() <= px(0.5)
-                                && (separator.center().y - leading_item.center().y).abs()
-                                    <= px(0.5),
-                            "the separator should sit on the shared edge of Tabs {leading} and \
-                             {trailing}, got {separator:?} at {shared_edge:?}"
+                            separator.size.height >= px(6.0)
+                                && separator.size.height < leading_item.size.height / 2.0,
+                            "the separator should be a short visible mark, got {separator:?}"
                         );
+                        assert!(
+                            (separator.center().y - leading_item.center().y).abs() <= px(0.5),
+                            "the separator should be centred on the bar, got {separator:?}"
+                        );
+                        assert!(
+                            within(separator, leading_item) || within(separator, trailing_item),
+                            "the separator should paint inside one of Tabs {leading} and \
+                             {trailing} rather than across their edge, got {separator:?} between \
+                             {leading_item:?} and {trailing_item:?}"
+                        );
+                        assert!(
+                            separator.left() == shared_edge || separator.right() == shared_edge,
+                            "the separator should rest against the shared edge of Tabs {leading} \
+                             and {trailing}, got {separator:?} at {shared_edge:?}"
+                        );
+                        for tab in [leading, trailing] {
+                            let chip = chip(tab, cx);
+                            assert!(
+                                !overlaps(separator, chip),
+                                "the separator should stay clear of Tab {tab}'s chip, got \
+                                 {separator:?} and {chip:?}"
+                            );
+                        }
                     }
                     (None, true) => {}
                     (Some(_), true) => panic!(
@@ -2641,26 +2725,42 @@ mod tests {
                 }
             }
 
-            if selected == 4 {
-                // A press right beside a mark still lands on the Tab it borders.
-                let separator = cx
-                    .debug_bounds("tab-separator-1-2")
-                    .expect("the boundary between inactive Tabs 1 and 2 should be marked");
-                let second = item(2, cx);
-                let beside = if second.center().x > separator.center().x {
+            // The mark is paint only: a press on it lands on the Tab that contains it, and a press
+            // just across the shared edge lands on the neighbour.
+            let (leading, trailing, across) = match selected {
+                4 => (1, 2, false),
+                1 => (3, 4, true),
+                _ => continue,
+            };
+            let separator = cx
+                .debug_bounds(leaked_selector(format!(
+                    "tab-separator-{leading}-{trailing}"
+                )))
+                .expect("the boundary between two inactive Tabs should be marked");
+            let leading_item = item(leading, cx);
+            let (owner, neighbour) = if within(separator, leading_item) {
+                (leading, trailing)
+            } else {
+                (trailing, leading)
+            };
+            let position = if across {
+                let owner_item = item(owner, cx);
+                let x = if separator.center().x > owner_item.center().x {
                     separator.right() + px(1.0)
                 } else {
                     separator.left() - px(1.0)
                 };
-                let position = point(beside, separator.center().y);
-                cx.simulate_mouse_move(position, None, Modifiers::none());
-                cx.simulate_click(position, Modifiers::none());
-                cx.run_until_parked();
-                assert_eq!(
-                    manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
-                    TabId::new(2)
-                );
-            }
+                point(x, separator.center().y)
+            } else {
+                separator.center()
+            };
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            cx.simulate_click(position, Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(
+                manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+                TabId::new(if across { neighbour } else { owner })
+            );
         }
     }
 
