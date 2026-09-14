@@ -178,6 +178,7 @@ macro_rules! define_chrome_colors {
         }
 
         impl ChromeColors {
+            #[cfg(test)]
             pub(crate) fn apply(&mut self, overrides: &ChromeColorOverrides) {
                 $(if let Some(value) = overrides.$field { self.$field = value; })+
             }

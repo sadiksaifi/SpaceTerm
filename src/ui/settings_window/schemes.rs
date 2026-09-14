@@ -434,14 +434,7 @@ impl SettingsWindow {
     fn begin_scheme_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
         let resolved = crate::ui::appearance_runtime::current(cx);
-        let schemes = [
-            (SchemeKind::Chrome, resolved.chrome.effective_scheme.clone()),
-            (
-                SchemeKind::Terminal,
-                resolved.terminal.effective_scheme.clone(),
-            ),
-        ];
-        match self.editor.export_schemes(&schemes) {
+        match self.editor.export_appearance(&resolved) {
             Ok(contents) => self.write_export("SpaceTerm-color-schemes.json", contents, cx),
             Err(_) => {
                 self.interchange_status =

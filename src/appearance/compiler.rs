@@ -264,8 +264,10 @@ pub(crate) fn compile_chrome(
     );
     let primary_icon = resolve!(primary_icon, primary_foreground);
     let primary_border = resolve!(primary_border, primary_background);
-    let primary_hover_background =
-        resolve!(primary_hover_background, primary_background.mix(text, 0.10));
+    let primary_hover_background = resolve!(
+        primary_hover_background,
+        primary_background.mix(primary_foreground, 0.10)
+    );
     let primary_hover_foreground = resolve!(
         primary_hover_foreground,
         contrast(text, primary_hover_background.source_over(background), 4.5)
@@ -274,7 +276,7 @@ pub(crate) fn compile_chrome(
     let primary_hover_border = resolve!(primary_hover_border, primary_hover_background);
     let primary_pressed_background = resolve!(
         primary_pressed_background,
-        primary_background.mix(text, 0.18)
+        primary_background.mix(primary_foreground, 0.18)
     );
     let primary_pressed_foreground = resolve!(
         primary_pressed_foreground,
@@ -302,7 +304,7 @@ pub(crate) fn compile_chrome(
     let destructive_border = resolve!(destructive_border, destructive_background);
     let destructive_hover_background = resolve!(
         destructive_hover_background,
-        destructive_background.mix(text, 0.10)
+        destructive_background.mix(destructive_foreground, 0.10)
     );
     let destructive_hover_foreground = resolve!(
         destructive_hover_foreground,
@@ -316,7 +318,7 @@ pub(crate) fn compile_chrome(
     let destructive_hover_border = resolve!(destructive_hover_border, destructive_hover_background);
     let destructive_pressed_background = resolve!(
         destructive_pressed_background,
-        destructive_background.mix(text, 0.18)
+        destructive_background.mix(destructive_foreground, 0.18)
     );
     let destructive_pressed_foreground = resolve!(
         destructive_pressed_foreground,
@@ -394,7 +396,7 @@ pub(crate) fn compile_chrome(
     let toggle_off_label = resolve!(toggle_off_label, text);
     let toggle_off_hover_background = resolve!(
         toggle_off_hover_background,
-        toggle_off_background.mix(text, 0.08)
+        toggle_off_background.mix(toggle_off_mark, 0.08)
     );
     let toggle_off_hover_mark = resolve!(
         toggle_off_hover_mark,
@@ -415,7 +417,7 @@ pub(crate) fn compile_chrome(
     let toggle_off_hover_label = resolve!(toggle_off_hover_label, text);
     let toggle_off_pressed_background = resolve!(
         toggle_off_pressed_background,
-        toggle_off_background.mix(text, 0.16)
+        toggle_off_background.mix(toggle_off_mark, 0.16)
     );
     let toggle_off_pressed_mark = resolve!(
         toggle_off_pressed_mark,
@@ -460,7 +462,7 @@ pub(crate) fn compile_chrome(
     let toggle_on_label = resolve!(toggle_on_label, text);
     let toggle_on_hover_background = resolve!(
         toggle_on_hover_background,
-        toggle_on_background.mix(text, 0.08)
+        toggle_on_background.mix(toggle_on_mark, 0.08)
     );
     let toggle_on_hover_mark = resolve!(
         toggle_on_hover_mark,
@@ -481,7 +483,7 @@ pub(crate) fn compile_chrome(
     let toggle_on_hover_label = resolve!(toggle_on_hover_label, text);
     let toggle_on_pressed_background = resolve!(
         toggle_on_pressed_background,
-        toggle_on_background.mix(text, 0.16)
+        toggle_on_background.mix(toggle_on_mark, 0.16)
     );
     let toggle_on_pressed_mark = resolve!(
         toggle_on_pressed_mark,
@@ -1260,6 +1262,46 @@ mod tests {
                 .colors
                 .input_selection_foreground,
             Color::rgb(0x123456)
+        );
+    }
+
+    #[test]
+    fn minimal_no_accent_actions_and_toggles_retain_default_interaction_feedback() {
+        let authored = ChromeColorOverrides {
+            background: Some(Color::rgb(0x101010)),
+            text: Some(Color::rgb(0xeeeeee)),
+            ..Default::default()
+        };
+        let c = compile_chrome(Appearance::Dark, &authored, &Default::default()).colors;
+        for (normal, hover, pressed) in [
+            (
+                c.primary_background,
+                c.primary_hover_background,
+                c.primary_pressed_background,
+            ),
+            (
+                c.destructive_background,
+                c.destructive_hover_background,
+                c.destructive_pressed_background,
+            ),
+            (
+                c.toggle_on_background,
+                c.toggle_on_hover_background,
+                c.toggle_on_pressed_background,
+            ),
+        ] {
+            assert_ne!(normal, hover);
+            assert_ne!(hover, pressed);
+        }
+        let authored = ChromeColorOverrides {
+            primary_hover_background: Some(c.primary_background),
+            ..authored
+        };
+        assert_eq!(
+            compile_chrome(Appearance::Dark, &authored, &Default::default())
+                .colors
+                .primary_hover_background,
+            c.primary_background
         );
     }
 

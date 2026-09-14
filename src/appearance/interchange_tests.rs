@@ -316,3 +316,42 @@ fn pinned_upstream_roles_cross_the_production_importer_and_compiler() {
     );
     assert_eq!(terminal.colors.dim.unwrap(), TerminalColors::default().dim);
 }
+
+#[test]
+fn snapshot_export_does_not_apply_unused_builtin_overrides_to_missing_request_fallback() {
+    let catalog = SchemeCatalog::default();
+    let fallback = super::builtin::fallback_id(SchemeKind::Chrome, Appearance::Dark);
+    let mut preferences = AppearancePreferences::default();
+    preferences.chrome.scheme = SchemeSelection::Fixed {
+        id: SchemeId::new("missing.chrome").unwrap(),
+        appearance: Appearance::Dark,
+    };
+    preferences.chrome.overrides.insert(
+        fallback.clone(),
+        ChromeColorOverrides {
+            background: Some(Color::rgb(0xff0000)),
+            ..Default::default()
+        },
+    );
+    let live = catalog
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    assert_ne!(live.chrome.colors.background, Color::rgb(0xff0000));
+    let exported = super::document::export_resolved_schemes(&catalog, &live).unwrap();
+    let parsed = parse_color_document(exported.as_bytes()).unwrap();
+    let mut fresh = SchemeCatalog::default();
+    let ids = fresh
+        .install_batch(&parsed.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
+    assert_eq!(
+        selected(&fresh, ids[0].clone(), Appearance::Dark)
+            .chrome
+            .colors,
+        live.chrome.colors
+    );
+}

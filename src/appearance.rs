@@ -194,7 +194,7 @@ pub(crate) use compiler::{CaptionPaint, SemanticPaint};
 pub(crate) use composition::{ResolvedWindowComposition, WindowBackgroundAppearance};
 pub(crate) use document::{
     AppearanceDocument, AppearanceDocumentError, ImportCandidate, ImportError, ZedImportKind,
-    export_effective_schemes, export_schemes, export_settings, import_zed, list_zed_candidates,
+    export_resolved_schemes, export_schemes, export_settings, import_zed, list_zed_candidates,
     parse_color_document, parse_settings,
 };
 pub(crate) use preferences::{
@@ -224,3 +224,6 @@ pub(crate) use scheme::{
     ChromeColorOverrides, ChromeScheme, OptionalColorOverride, SchemeMetadata,
     TerminalColorOverrides, TerminalScheme,
 };
+
+#[cfg(test)]
+pub(crate) use document::export_effective_schemes;

@@ -137,11 +137,11 @@ impl SettingsEditor {
         self.draft.export_definitions(schemes)
     }
 
-    pub(super) fn export_schemes(
+    pub(super) fn export_appearance(
         &self,
-        schemes: &[(SchemeKind, SchemeId)],
+        resolved: &crate::appearance::ResolvedAppearance,
     ) -> Result<String, SettingsError> {
-        self.draft.export_schemes(schemes)
+        self.draft.export_appearance(resolved)
     }
 
     pub(super) fn list_import_candidates(

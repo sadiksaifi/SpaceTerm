@@ -19,9 +19,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 
+#[cfg(test)]
+use crate::appearance::SchemeKind;
 use crate::appearance::{
     AppearanceDocument, AppearanceDocumentError, CatalogError, CustomScheme, ImportCandidate,
-    ImportError, ResetTarget, SchemeCatalog, SchemeId, SchemeKind, ZedImportKind, export_settings,
+    ImportError, ResetTarget, SchemeCatalog, SchemeId, ZedImportKind, export_settings,
     parse_settings,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
@@ -451,6 +453,18 @@ impl UserSettings {
         Ok(crate::appearance::list_zed_candidates(bytes)?)
     }
 
+    pub(crate) fn export_appearance(
+        &self,
+        resolved: &crate::appearance::ResolvedAppearance,
+    ) -> Result<String, SettingsError> {
+        let snapshot = self.snapshot();
+        let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
+        Ok(crate::appearance::export_resolved_schemes(
+            &catalog, resolved,
+        )?)
+    }
+
+    #[cfg(test)]
     pub(crate) fn export_schemes(
         &self,
         schemes: &[(SchemeKind, SchemeId)],

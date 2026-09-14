@@ -174,12 +174,40 @@ pub(crate) fn export_schemes(
 }
 
 /// Export current resolved paints including per-scheme overrides as independent portable copies.
+#[cfg(test)]
 pub(crate) fn export_effective_schemes(
     catalog: &SchemeCatalog,
     preferences: &AppearancePreferences,
     schemes: &[(SchemeKind, SchemeId)],
 ) -> Result<String, ImportError> {
     export_selected(catalog, schemes, Some(preferences))
+}
+
+/// Capture precisely the published colors, including missing-request fallback behavior.
+pub(crate) fn export_resolved_schemes(
+    catalog: &SchemeCatalog,
+    resolved: &super::ResolvedAppearance,
+) -> Result<String, ImportError> {
+    let mut chrome = catalog
+        .chrome(&resolved.chrome.effective_scheme)
+        .ok_or(ImportError::UnknownScheme)?
+        .clone();
+    chrome.id = portable_id(&chrome.id, true)?;
+    chrome.colors = ChromeColorOverrides::complete(&resolved.chrome.colors);
+    chrome.window_background = Some(resolved.chrome.composition.requested);
+    let mut terminal = catalog
+        .terminal(&resolved.terminal.effective_scheme)
+        .ok_or(ImportError::UnknownScheme)?
+        .clone();
+    terminal.id = portable_id(&terminal.id, true)?;
+    terminal.colors = TerminalColorOverrides::complete(&resolved.terminal.colors);
+    export_color_document(&ColorSchemeDocument {
+        schema_version: SCHEMA_VERSION,
+        schemes: vec![
+            CustomScheme::Chrome(Box::new(chrome)),
+            CustomScheme::Terminal(Box::new(terminal)),
+        ],
+    })
 }
 
 fn portable_id(id: &SchemeId, effective: bool) -> Result<SchemeId, ImportError> {

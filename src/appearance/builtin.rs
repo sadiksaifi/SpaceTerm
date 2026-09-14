@@ -75,6 +75,7 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
     ]
 }
 
+#[cfg(test)]
 pub(crate) fn chrome_base(appearance: Appearance) -> ChromeColors {
     match appearance {
         Appearance::Dark => vague_dark_chrome(),
@@ -109,6 +110,7 @@ fn vague_dark_chrome() -> ChromeColors {
     )
     .colors
 }
+#[cfg(test)]
 fn spaceterm_light_chrome() -> ChromeColors {
     super::compiler::compile_chrome(
         Appearance::Light,

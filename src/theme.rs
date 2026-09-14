@@ -2,6 +2,11 @@
 mod color;
 pub(crate) use color::Color;
 
+#[cfg(test)]
+pub(crate) use fixture::VAGUE_PRO;
+#[cfg(test)]
+pub(crate) use fixture::VAGUE_PRO as ACTIVE_THEME;
+
 /// Pinned upstream Terminal fixture translated through the real production importer.
 /// This preserves independent drift checks without a second theme parser or build generator.
 #[cfg(test)]
@@ -58,7 +63,3 @@ mod fixture {
         }
     });
 }
-#[cfg(test)]
-pub(crate) use fixture::VAGUE_PRO;
-#[cfg(test)]
-pub(crate) use fixture::VAGUE_PRO as ACTIVE_THEME;
