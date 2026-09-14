@@ -481,6 +481,198 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
     }));
 }
 
+/// A reset follows the name it restores, and the control holds the row's right edge either way.
+///
+/// Most rows never carry a reset. A column held open for one would stop every control short of
+/// the edge and leave more space on the right of the form than on its left, and a reset that took
+/// its place only when present would move the control out from under the pointer that changed it.
+#[gpui::test]
+fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"))
+    };
+    let row = bounds("settings-row-terminal-italic", cx);
+    let label = bounds("settings-row-terminal-italic-label", cx);
+    let control = bounds("settings-terminal-italic", cx);
+    assert!(
+        cx.debug_bounds("settings-row-terminal-italic-reset")
+            .is_none()
+    );
+    assert_eq!(
+        row.right() - control.right(),
+        label.left() - row.left(),
+        "a control should keep the same inset from the right as its label keeps from the left"
+    );
+
+    click("settings-terminal-italic", cx);
+
+    let reset = bounds("settings-row-terminal-italic-reset", cx);
+    assert_eq!(
+        bounds("settings-terminal-italic", cx),
+        control,
+        "a control should not move when its reset appears"
+    );
+    assert_eq!(
+        bounds("settings-row-terminal-italic", cx).size.height,
+        row.size.height,
+        "a row should keep its height when its reset appears"
+    );
+    let label = bounds("settings-row-terminal-italic-label", cx);
+    assert!(
+        reset.left() >= label.right() && reset.left() - label.right() < px(12.0),
+        "a reset should follow its label closely, got {reset:?} after {label:?}"
+    );
+    assert!(
+        reset.right() < control.left(),
+        "a reset should stay clear of the control it restores"
+    );
+    let label_middle = label.top() + label.size.height / 2.0;
+    let reset_middle = reset.top() + reset.size.height / 2.0;
+    assert!(
+        (label_middle - reset_middle).abs() < px(1.0),
+        "a reset should sit on its label's line, got {reset:?} beside {label:?}"
+    );
+
+    click("settings-row-terminal-italic-reset", cx);
+
+    // A test frame keeps every selector it has ever drawn, so the reset's absence is read from the
+    // row's state rather than from its bounds.
+    assert!(!window.read_with(cx, |window, _| {
+        window.differs_from_default(SettingsRowId::TerminalItalic)
+    }));
+    assert_eq!(bounds("settings-terminal-italic", cx), control);
+}
+
+/// A reset that appears beside a label never changes where that label wraps.
+///
+/// A long label at a large size sits at its wrapping threshold across a band of window widths. If
+/// the reset took its space only when present, the label would gain a line inside that band as
+/// soon as the setting changed, growing the row and moving the control centered beside it. The
+/// reset scales with the type, so its held slot has to scale with it too, or the visible button
+/// would spill out of the slot and over the gap beside the label.
+#[gpui::test]
+fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestAppContext) {
+    const ROW: &str = "settings-row-terminal-bold-as-bright";
+    const LABEL: &str = "settings-row-terminal-bold-as-bright-label";
+    const CONTROL: &str = "settings-terminal-bold-as-bright";
+    const RESET: &str = "settings-row-terminal-bold-as-bright-reset";
+    const RESET_SLOT: &str = "settings-row-terminal-bold-as-bright-reset-slot";
+
+    let mut document = AppearanceDocument::default();
+    // The largest chrome type with the roomiest density, where the reset is furthest from its
+    // default size.
+    document.preferences.chrome.typography.base_size = 24.0;
+    document.preferences.chrome.density = ChromeDensity::Comfortable;
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Terminal, cx);
+
+    // A tall window keeps the row on screen at every width, so only the width decides wrapping.
+    let resize = |width: f32, cx: &mut VisualTestContext| {
+        cx.simulate_resize(gpui::size(px(width), px(2400.0)));
+        cx.run_until_parked();
+    };
+    let geometry = |cx: &mut VisualTestContext| {
+        let mut bounds = |selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should render"))
+        };
+        (bounds(ROW), bounds(LABEL), bounds(CONTROL))
+    };
+
+    // Find where the label first wraps, then look across a band wider than a reset on either side.
+    let mut widths = (560..=1400).step_by(8).map(|width| width as f32);
+    let single_line = {
+        resize(1400.0, cx);
+        geometry(cx).1.size.height
+    };
+    let threshold = widths
+        .find(|&width| {
+            resize(width, cx);
+            geometry(cx).1.size.height < single_line * 1.5
+        })
+        .expect("the label should fit on one line in a wide window");
+    let band: Vec<f32> = (-40..=40)
+        .step_by(4)
+        .map(|offset| threshold + offset as f32)
+        .collect();
+    let measure = |cx: &mut VisualTestContext| {
+        band.iter()
+            .map(|&width| {
+                resize(width, cx);
+                geometry(cx)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let without_reset = measure(cx);
+    assert!(
+        without_reset
+            .iter()
+            .any(|(_, label, _)| label.size.height > single_line * 1.5)
+            && without_reset
+                .iter()
+                .any(|(_, label, _)| label.size.height < single_line * 1.5),
+        "the band should cross the label's wrapping threshold"
+    );
+
+    resize(1400.0, cx);
+    click(CONTROL, cx);
+    assert!(window.read_with(cx, |window, _| {
+        window.differs_from_default(SettingsRowId::TerminalBoldAsBright)
+    }));
+    let with_reset = measure(cx);
+
+    for ((width, before), after) in band.iter().zip(&without_reset).zip(&with_reset) {
+        assert_eq!(
+            before, after,
+            "at width {width}, the row, its label, and its control should not move when a reset \
+             appears"
+        );
+    }
+    let (row, label, control) = with_reset[0];
+    assert_eq!(
+        row.right() - control.right(),
+        label.left() - row.left(),
+        "a control should keep the same inset from the right as its label keeps from the left"
+    );
+
+    for &width in &band {
+        resize(width, cx);
+        let mut bounds = |selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should render"))
+        };
+        let (label, slot, reset, control) = (
+            bounds(LABEL),
+            bounds(RESET_SLOT),
+            bounds(RESET),
+            bounds(CONTROL),
+        );
+        assert!(
+            reset.size.width > px(20.0),
+            "at width {width}, the reset should have scaled past its default size, got {reset:?}"
+        );
+        assert!(
+            slot.left() <= reset.left() && reset.right() <= slot.right(),
+            "at width {width}, the reset should stay within its held slot, got {reset:?} in \
+             {slot:?}"
+        );
+        assert!(
+            slot.left() > label.right() && reset.left() > label.right(),
+            "at width {width}, the reset should keep its gap after the label, got {reset:?} after \
+             {label:?}"
+        );
+        assert!(
+            reset.right() < control.left(),
+            "at width {width}, the reset should stay clear of the control it restores"
+        );
+    }
+}
+
 #[gpui::test]
 fn resetting_everything_restores_defaults_and_keeps_installed_schemes(cx: &mut TestAppContext) {
     let mut document = AppearanceDocument::default();

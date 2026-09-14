@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Rgba, SharedString, Window, div, px, rgba};
-use spaceterm_ui::{Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip};
+use spaceterm_ui::{
+    Button, ButtonSize, ButtonTheme, ButtonVariant, Icon, IconButton, IconName, Tooltip,
+};
 
 use crate::appearance::{ChromeColors, Color};
 use crate::ui::appearance::ChromeAppearance;
@@ -84,9 +86,30 @@ const PROSE_MEASURE: f32 = 460.0;
 /// The least space between a label and the control it names, so the two never touch.
 const LABEL_GAP: f32 = 16.0;
 
-/// The trailing column every row ends with, so a row action never shifts the control beside it and
-/// every control on every page shares one right edge.
-pub(super) const TRAILING_WIDTH: f32 = 28.0;
+/// The space between a label and the reset that follows it, so the two read as one phrase.
+const RESET_GAP: f32 = 4.0;
+
+/// The size of a row's reset, whose square is also the slot held beside every label for it.
+const RESET_SIZE: ButtonSize = ButtonSize::Compact;
+
+/// The width held beside every label for its reset: the installed reset button's own square.
+///
+/// The slot is held whether or not the reset is present. A label measured against the space a
+/// reset leaves would wrap onto another line the moment a reset appeared, growing the row and
+/// moving the control centered beside it. The width comes from the control theme rather than a
+/// number of its own, so the slot scales with the button it holds instead of letting a larger
+/// button spill into the gap beside the label.
+fn reset_slot_width(cx: &App) -> gpui::Pixels {
+    cx.global::<ButtonTheme>().icon_button_size(RESET_SIZE)
+}
+
+/// The height of one line of a label, which the reset beside it is centered on.
+///
+/// This is the default text line box at the label's size. The reset shares that one line instead
+/// of standing taller than it, and a label that wraps keeps the reset on its first line.
+fn label_line_height(appearance: &ChromeAppearance) -> gpui::Pixels {
+    appearance.text_size(text::BODY * 1.618)
+}
 
 /// How a row arranges its label and its content.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -169,7 +192,14 @@ impl SettingsGroup {
     }
 }
 
-/// One labeled row: a right-aligned label, its control, and an optional reset affordance.
+/// One labeled row: a label, its control, and an optional reset affordance.
+///
+/// The reset follows the label rather than the control. Most rows never carry one, so a column
+/// reserved for it at the far end would stop every control short of the right edge and leave the
+/// form wider on one side than the other. Beside the name it restores, the reset reads as a mark
+/// that this setting was changed, the control stays on the one shared right edge whether or not a
+/// reset is present, and keyboard focus reaches the reset just before the control it restores. The
+/// reset's slot is held empty on a row without one, so the label wraps at the same width either way.
 pub(super) struct SettingsRow {
     selector: &'static str,
     label: &'static str,
@@ -204,6 +234,8 @@ impl SettingsRow {
     }
 
     /// Adds the affordance restoring this row's default. Present only when it differs.
+    ///
+    /// A row without a label of its own has nowhere to carry one, so a full-width row drops it.
     pub(super) fn reset(mut self, reset: Option<impl IntoElement>) -> Self {
         self.reset = reset.map(IntoElement::into_any_element);
         self
@@ -221,7 +253,12 @@ impl SettingsRow {
         self
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+    pub(super) fn render(
+        self,
+        appearance: &ChromeAppearance,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
         let selector = self.selector;
         let (foreground, secondary) = if self.highlighted {
             (
@@ -232,6 +269,12 @@ impl SettingsRow {
             (appearance.colors.text, appearance.colors.text_muted)
         };
         let label_selector = format!("{selector}-label");
+        let reset_slot_selector = format!("{selector}-reset-slot");
+        // Text left to size itself inside a row is measured once without a width and keeps that
+        // answer, so it would neither wrap nor stay put. The label instead starts from the width
+        // of its one line and gives up only what the reset's slot and the control need, and the
+        // width it is left with is the one it wraps at.
+        let label_width = appearance.measure(self.label, text::BODY, window).ceil();
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         // One rule for the whole form: the label starts at the content's left edge, the control
@@ -256,11 +299,33 @@ impl SettingsRow {
                 .gap(appearance.spacing(2.0))
                 .child(
                     div()
-                        .debug_selector(move || label_selector.clone())
-                        .text_size(appearance.text_size(text::BODY))
-                        .text_color(gpui_color(foreground))
-                        .whitespace_normal()
-                        .child(self.label),
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .min_w_0()
+                        .gap(appearance.spacing(RESET_GAP))
+                        .child(
+                            div()
+                                .debug_selector(move || label_selector.clone())
+                                .flex_basis(label_width)
+                                .flex_shrink()
+                                .min_w_0()
+                                .text_size(appearance.text_size(text::BODY))
+                                .text_color(gpui_color(foreground))
+                                .whitespace_normal()
+                                .child(self.label),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(move || reset_slot_selector.clone())
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(reset_slot_width(cx))
+                                .h(label_line_height(appearance))
+                                .children(self.reset),
+                        ),
                 )
                 .children(self.description.clone().filter(|_| !above).map(&caption))
                 .into_any_element()
@@ -282,15 +347,6 @@ impl SettingsRow {
                     .when(above || full, |content| content.flex_1())
                     .when(!(above || full), |content| content.flex_none())
                     .child(self.control),
-            )
-            .child(
-                div()
-                    .w(appearance.text_size(TRAILING_WIDTH))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .children(self.reset),
             );
         // A row whose content takes the whole width has no label column to stack guidance in, so
         // it keeps its own line underneath.
@@ -348,17 +404,23 @@ pub(super) fn section_header(
 }
 
 /// The affordance restoring one row's default value.
+///
+/// It is a quiet glyph sized to the label line it follows. Its accessible name says which setting
+/// it restores, because focus can reach it apart from the label that shows this visually.
 pub(super) fn reset_button(
     selector: String,
+    setting: &'static str,
     enabled: bool,
     on_reset: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let icon_selector = SharedString::from(selector.clone());
-    IconButton::new(icon_selector, "Reset to default", move |foreground| {
-        Icon::new(IconName::RotateCcw, px(12.0), foreground).into_any_element()
-    })
+    IconButton::new(
+        icon_selector,
+        SharedString::from(format!("Reset {setting} to default")),
+        move |foreground| Icon::new(IconName::RotateCcw, px(11.0), foreground).into_any_element(),
+    )
     .variant(ButtonVariant::Ghost)
-    .size(ButtonSize::Small)
+    .size(RESET_SIZE)
     .disabled(!enabled)
     .tab_stop(true)
     .debug_selector(selector.clone())

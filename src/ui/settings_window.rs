@@ -602,6 +602,7 @@ impl SettingsWindow {
         Some(
             reset_button(
                 format!("{}-reset", row.descriptor().selector),
+                row.descriptor().label,
                 true,
                 move |_, cx| {
                     let target = target.clone();
@@ -1099,7 +1100,6 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let _ = window;
         let descriptor = row.descriptor();
         let highlighted = !self.query.is_empty() && self.revealed == Some(row);
         // App-owned copy inside a full-width row shares the row's surface. Reusable controls
@@ -1122,7 +1122,7 @@ impl SettingsWindow {
         if let Some(description) = row_description(row) {
             rendered = rendered.description(description);
         }
-        rendered.render(appearance).into_any_element()
+        rendered.render(appearance, window, cx).into_any_element()
     }
 
     fn render_control(

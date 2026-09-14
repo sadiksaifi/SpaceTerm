@@ -17,10 +17,11 @@ use crate::settings::{ImportReceipt, SchemeImport, SettingsError};
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use super::controls::{
-    CARD_RADIUS, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
-};
+use super::controls::{CARD_RADIUS, action_button, badge, gpui_color, swatch_strip, text};
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
+
+/// The column a scheme's removal takes at the end of its line in a list.
+const TRAILING_WIDTH: f32 = 28.0;
 
 /// A weak-owner handler, so a button outlives one render without borrowing the window.
 fn owned(
@@ -183,8 +184,8 @@ impl SettingsWindow {
                     .child(SharedString::from(classification)),
             )
             .child(
-                // Every row on every page ends with this column, so nothing shifts when an action
-                // is present on one row and absent on the next.
+                // Every scheme in a list ends with this column, so the classifications stay in
+                // one column whether a scheme can be removed or not.
                 div()
                     .w(appearance.text_size(TRAILING_WIDTH))
                     .flex_none()
