@@ -453,6 +453,7 @@ impl UserSettings {
         Ok(crate::appearance::list_zed_candidates(bytes)?)
     }
 
+    #[cfg(feature = "appearance-exerciser")]
     pub(crate) fn export_appearance(
         &self,
         resolved: &crate::appearance::ResolvedAppearance,
