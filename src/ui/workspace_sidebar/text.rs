@@ -3,8 +3,7 @@ use gpui::{AnyElement, Pixels, SharedString, canvas, div, px};
 use spaceterm_ui::{Icon, IconName};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::gpui_color;
-use crate::appearance::Color;
+use super::{WorkspaceStatusPaint, gpui_color};
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SIDEBAR_NAME_TEXT_SIZE as NAME_SIZE;
@@ -73,7 +72,7 @@ pub(super) fn detail(
     text: SharedString,
     counts: SharedString,
     pinned: bool,
-    status_color: Option<Color>,
+    status_paint: Option<WorkspaceStatusPaint>,
     selector: Option<String>,
     id: u64,
     appearance: ChromeAppearance,
@@ -90,7 +89,7 @@ pub(super) fn detail(
             let available =
                 (bounds.size.width - counts_width - appearance.spacing(GAP) - pin_width)
                     .max(px(0.0));
-            let fitted = if status_color.is_some() {
+            let fitted = if status_paint.is_some() {
                 text
             } else {
                 fit_trailing_path(&text, available, |value| {
@@ -98,6 +97,8 @@ pub(super) fn detail(
                 })
                 .into()
             };
+            let status_normal = status_paint.map(|paint| paint.normal);
+            let status_hovered = status_paint.map(|paint| paint.hovered);
             let path = div()
                 .min_w_0()
                 .flex_1()
@@ -126,9 +127,13 @@ pub(super) fn detail(
                         .debug_selector(move || {
                             selector.unwrap_or_else(|| format!("workspace-row-path-{id}"))
                         })
-                        .text_color(gpui_color(appearance.colors.row_secondary))
+                        .text_color(gpui_color(
+                            status_normal.unwrap_or(appearance.colors.row_secondary),
+                        ))
                         .group_hover(format!("workspace-row-state-{id}"), |style| {
-                            style.text_color(gpui_color(appearance.colors.row_hover_secondary))
+                            style.text_color(gpui_color(
+                                status_hovered.unwrap_or(appearance.colors.row_hover_secondary),
+                            ))
                         })
                         .child(fitted),
                 );

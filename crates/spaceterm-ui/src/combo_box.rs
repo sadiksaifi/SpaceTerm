@@ -2351,10 +2351,7 @@ fn render_row<I: Clone + Eq + 'static>(
     hovered: bool,
     theme: ComboBoxTheme,
 ) -> AnyElement {
-    let row_paint = theme
-        .paint
-        .rows
-        .map(|rows| rows.resolve(!item.disabled, provisional && !hovered, hovered));
+    let row_paint = resolve_row_paint(theme.paint.rows, !item.disabled, provisional, hovered);
     let foreground = if item.disabled {
         theme.paint.disabled
     } else if hovered {
@@ -2575,9 +2572,40 @@ fn render_row<I: Clone + Eq + 'static>(
     row.into_any_element()
 }
 
+fn resolve_row_paint(
+    rows: Option<crate::ListRowPaints>,
+    enabled: bool,
+    selected: bool,
+    hovered: bool,
+) -> Option<crate::ListRowPaint> {
+    rows.map(|rows| rows.resolve(enabled, selected, hovered))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row_paint(seed: u32) -> crate::ListRowPaint {
+        let colors = [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5].map(gpui::rgba);
+        crate::ListRowPaint::new(
+            colors[0], colors[1], colors[2], colors[3], colors[4], colors[5],
+        )
+    }
+
+    #[test]
+    fn renderer_should_reach_selected_hovered_row_paint() {
+        let normal = row_paint(10);
+        let hovered = row_paint(20);
+        let selected = row_paint(30);
+        let selected_hovered = row_paint(40);
+        let disabled = row_paint(50);
+        let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
+
+        assert_eq!(
+            resolve_row_paint(Some(rows), true, true, true),
+            Some(selected_hovered)
+        );
+    }
 
     #[test]
     fn trigger_icon_colors_should_not_replace_text_or_selection_colors() {

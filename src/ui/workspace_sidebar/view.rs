@@ -102,6 +102,13 @@ impl WorkspaceSidebar {
         } else {
             (path, None, None)
         };
+        let detail_paint = detail_color
+            .map(|color| workspace_status_paint(color, active, 4.5, &appearance.colors));
+        let remote_icon_paint = remote_color
+            .map(|color| workspace_status_paint(color, active, 3.0, &appearance.colors));
+        let unavailable_icon_paint = (!available).then(|| {
+            workspace_status_paint(appearance.colors.warning, active, 3.0, &appearance.colors)
+        });
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -211,9 +218,17 @@ impl WorkspaceSidebar {
                     .child(
                         div()
                             .relative()
-                            .text_color(gpui_color(appearance.colors.row_icon))
+                            .text_color(gpui_color(
+                                remote_icon_paint
+                                    .map_or(appearance.colors.row_icon, |paint| paint.normal),
+                            ))
                             .group_hover(row_group.clone(), |style| {
-                                style.text_color(gpui_color(appearance.colors.row_hover_icon))
+                                style.text_color(gpui_color(
+                                    remote_icon_paint
+                                        .map_or(appearance.colors.row_hover_icon, |paint| {
+                                            paint.hovered
+                                        }),
+                                ))
                             })
                             .child(Icon::inherited(
                                 if remote_connection_phase.is_some() {
@@ -224,13 +239,30 @@ impl WorkspaceSidebar {
                                 appearance.spacing(SIDEBAR_ROW_ICON_SIZE),
                             ))
                             .when(!available, |icon| {
-                                icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
-                                    Icon::new(
-                                        IconName::TriangleAlert,
-                                        appearance.spacing(10.0),
-                                        gpui_color(appearance.colors.warning),
-                                    ),
-                                ))
+                                icon.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-5.0))
+                                        .bottom(px(-4.0))
+                                        .text_color(gpui_color(
+                                            unavailable_icon_paint
+                                                .map_or(appearance.colors.warning, |paint| {
+                                                    paint.normal
+                                                }),
+                                        ))
+                                        .group_hover(row_group.clone(), |style| {
+                                            style.text_color(gpui_color(
+                                                unavailable_icon_paint
+                                                    .map_or(appearance.colors.warning, |paint| {
+                                                        paint.hovered
+                                                    }),
+                                            ))
+                                        })
+                                        .child(Icon::inherited(
+                                            IconName::TriangleAlert,
+                                            appearance.spacing(10.0),
+                                        )),
+                                )
                             }),
                     ),
             )
@@ -252,7 +284,7 @@ impl WorkspaceSidebar {
                         detail,
                         format!("{tab_count}T · {pane_count}P").into(),
                         pinned && detail_color.is_none(),
-                        detail_color,
+                        detail_paint,
                         detail_selector,
                         workspace_id.get(),
                         appearance.clone(),
