@@ -83,7 +83,12 @@ run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
 [tasks.dev]
 description = "Run SpaceTerm from source"
-run = "./scripts/cargo-artifacts.sh run -- cargo run --locked"
+run = '''
+set -eu
+target_dir="${CARGO_TARGET_DIR:-target}"
+./scripts/cargo-artifacts.sh run -- cargo build --locked
+exec "$target_dir/debug/spaceterm"
+'''
 
 [tasks."dev:appearance"]
 description = "Run the appearance exerciser with isolated retained settings"
@@ -92,7 +97,12 @@ set -eu
 root="${TMPDIR:-/tmp}/spaceterm-appearance-exerciser"
 SPACETERM_APPEARANCE_EXERCISER=1 \
 SPACETERM_APPEARANCE_CONFIG="$root" \
-./scripts/cargo-artifacts.sh run -- cargo run --features appearance-exerciser --locked
+./scripts/cargo-artifacts.sh run -- cargo build --features appearance-exerciser --locked
+target_dir="${CARGO_TARGET_DIR:-target}"
+exec env \
+  SPACETERM_APPEARANCE_EXERCISER=1 \
+  SPACETERM_APPEARANCE_CONFIG="$root" \
+  "$target_dir/debug/spaceterm"
 '''
 
 [tasks.check]
@@ -101,7 +111,11 @@ run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --pac
 
 [tasks."dev:appearance:macos"]
 description = "Run the source appearance exerciser as a separate inspectable macOS app"
-run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- bash scripts/dev-appearance-macos.sh"
+run = '''
+set -eu
+CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- bash scripts/dev-appearance-macos.sh --build-only
+exec bash scripts/dev-appearance-macos.sh --run-only
+'''
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
@@ -163,7 +177,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
 '''
 
 [tasks."lint:diff"]
