@@ -23,6 +23,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
+    FieldFrameTheme,
     button::ModalControlScope,
     menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent},
 };
@@ -286,12 +287,23 @@ impl TextInputMetrics {
 pub struct TextInputTheme {
     variants: TextInputVariants,
     metrics: TextInputMetrics,
+    pub(crate) frame: FieldFrameTheme,
 }
 
 impl TextInputTheme {
     /// Creates a complete text-input theme.
     pub fn new(variants: TextInputVariants, metrics: TextInputMetrics) -> Self {
-        Self { variants, metrics }
+        Self {
+            variants,
+            metrics,
+            frame: FieldFrameTheme::transparent(),
+        }
+    }
+
+    /// Supplies the shared frame used by fields containing this editor.
+    pub fn field_frame(mut self, frame: FieldFrameTheme) -> Self {
+        self.frame = frame;
+        self
     }
 
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {

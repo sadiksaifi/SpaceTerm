@@ -6,44 +6,63 @@ use spaceterm_ui::{
 use crate::appearance::{ChromeColors, Color};
 
 pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
-    let disabled_on = opaque_mix(colors.icon_accent, colors.element_disabled, 0x66);
     ToggleTheme::new(
         TogglePaints::new(
             values(
                 paint(
-                    colors.element_background,
-                    colors.icon,
-                    colors.border,
-                    colors.text,
+                    colors.toggle_off_background,
+                    colors.toggle_off_mark,
+                    colors.toggle_off_border,
+                    colors.toggle_off_label,
                 ),
-                on_paint(colors.icon_accent, colors.text),
+                paint(
+                    colors.toggle_on_background,
+                    colors.toggle_on_mark,
+                    colors.toggle_on_border,
+                    colors.toggle_on_label,
+                ),
             ),
             values(
                 paint(
-                    colors.element_hover,
-                    colors.element_hover_foreground,
-                    colors.border,
-                    colors.text,
+                    colors.toggle_off_hover_background,
+                    colors.toggle_off_hover_mark,
+                    colors.toggle_off_hover_border,
+                    colors.toggle_off_hover_label,
                 ),
-                on_paint(colors.link_text_hover, colors.text),
+                paint(
+                    colors.toggle_on_hover_background,
+                    colors.toggle_on_hover_mark,
+                    colors.toggle_on_hover_border,
+                    colors.toggle_on_hover_label,
+                ),
             ),
             values(
                 paint(
-                    colors.element_active,
-                    colors.element_active_foreground,
-                    colors.border_focused,
-                    colors.text,
+                    colors.toggle_off_pressed_background,
+                    colors.toggle_off_pressed_mark,
+                    colors.toggle_off_pressed_border,
+                    colors.toggle_off_pressed_label,
                 ),
-                on_paint(colors.link_text_hover, colors.text),
+                paint(
+                    colors.toggle_on_pressed_background,
+                    colors.toggle_on_pressed_mark,
+                    colors.toggle_on_pressed_border,
+                    colors.toggle_on_pressed_label,
+                ),
             ),
             values(
                 paint(
-                    colors.element_disabled,
-                    colors.icon_disabled,
-                    colors.border_disabled,
-                    colors.text_disabled,
+                    colors.toggle_off_disabled_background,
+                    colors.toggle_off_disabled_mark,
+                    colors.toggle_off_disabled_border,
+                    colors.toggle_off_disabled_label,
                 ),
-                on_paint(disabled_on, colors.text_disabled),
+                paint(
+                    colors.toggle_on_disabled_background,
+                    colors.toggle_on_disabled_mark,
+                    colors.toggle_on_disabled_border,
+                    colors.toggle_on_disabled_label,
+                ),
             ),
         ),
         ToggleSizes::new(
@@ -73,60 +92,6 @@ fn paint(background: Color, foreground: Color, border: Color, label: Color) -> T
     )
 }
 
-fn on_paint(background: Color, label: Color) -> TogglePaint {
-    let background = Color {
-        a: 0xff,
-        ..background
-    };
-    paint(
-        background,
-        contrasting_foreground(background),
-        background,
-        label,
-    )
-}
-
-fn contrasting_foreground(background: Color) -> Color {
-    let luminance = relative_luminance(background);
-    let black_contrast = (luminance + 0.05) / 0.05;
-    let white_contrast = 1.05 / (luminance + 0.05);
-    if black_contrast >= white_contrast {
-        Color::rgb(0x000000)
-    } else {
-        Color::rgb(0xffffff)
-    }
-}
-
-fn relative_luminance(color: Color) -> f32 {
-    let linear = |channel: u8| {
-        let channel = f32::from(channel) / 255.0;
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
-}
-
-fn opaque_mix(foreground: Color, background: Color, foreground_weight: u8) -> Color {
-    let foreground_weight = f32::from(foreground_weight) / 255.0;
-    let blend = |foreground: u8, background: u8| {
-        f32::from(foreground)
-            .mul_add(
-                foreground_weight,
-                f32::from(background) * (1.0 - foreground_weight),
-            )
-            .round() as u8
-    };
-    Color {
-        r: blend(foreground.r, background.r),
-        g: blend(foreground.g, background.g),
-        b: blend(foreground.b, background.b),
-        a: 0xff,
-    }
-}
-
 fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
 }
@@ -136,6 +101,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_toggle_value_and_interaction_uses_its_exact_paint() {
+        let mut colors = ChromeColors::default();
+        colors.toggle_off_background = Color::rgba(0x10203040);
+        colors.toggle_off_mark = Color::rgba(0x14233142);
+        colors.toggle_off_border = Color::rgba(0x18263244);
+        colors.toggle_off_label = Color::rgba(0x1c293346);
+        colors.toggle_off_hover_background = Color::rgba(0x202c3448);
+        colors.toggle_off_hover_mark = Color::rgba(0x242f354a);
+        colors.toggle_off_hover_border = Color::rgba(0x2832364c);
+        colors.toggle_off_hover_label = Color::rgba(0x2c35374e);
+        colors.toggle_off_pressed_background = Color::rgba(0x30383850);
+        colors.toggle_off_pressed_mark = Color::rgba(0x343b3952);
+        colors.toggle_off_pressed_border = Color::rgba(0x383e3a54);
+        colors.toggle_off_pressed_label = Color::rgba(0x3c413b56);
+        colors.toggle_off_disabled_background = Color::rgba(0x40443c58);
+        colors.toggle_off_disabled_mark = Color::rgba(0x44473d5a);
+        colors.toggle_off_disabled_border = Color::rgba(0x484a3e5c);
+        colors.toggle_off_disabled_label = Color::rgba(0x4c4d3f5e);
+        colors.toggle_on_background = Color::rgba(0x50504060);
+        colors.toggle_on_mark = Color::rgba(0x54534162);
+        colors.toggle_on_border = Color::rgba(0x58564264);
+        colors.toggle_on_label = Color::rgba(0x5c594366);
+        colors.toggle_on_hover_background = Color::rgba(0x605c4468);
+        colors.toggle_on_hover_mark = Color::rgba(0x645f456a);
+        colors.toggle_on_hover_border = Color::rgba(0x6862466c);
+        colors.toggle_on_hover_label = Color::rgba(0x6c65476e);
+        colors.toggle_on_pressed_background = Color::rgba(0x70684870);
+        colors.toggle_on_pressed_mark = Color::rgba(0x746b4972);
+        colors.toggle_on_pressed_border = Color::rgba(0x786e4a74);
+        colors.toggle_on_pressed_label = Color::rgba(0x7c714b76);
+        colors.toggle_on_disabled_background = Color::rgba(0x80744c78);
+        colors.toggle_on_disabled_mark = Color::rgba(0x84774d7a);
+        colors.toggle_on_disabled_border = Color::rgba(0x887a4e7c);
+        colors.toggle_on_disabled_label = Color::rgba(0x8c7d4f7e);
+        let theme = theme(&colors);
+        assert_eq!(
+            theme.paint(false, true, false, false),
+            paint(
+                colors.toggle_off_background,
+                colors.toggle_off_mark,
+                colors.toggle_off_border,
+                colors.toggle_off_label
+            )
+        );
+        assert_eq!(
+            theme.paint(false, true, true, false),
+            paint(
+                colors.toggle_off_hover_background,
+                colors.toggle_off_hover_mark,
+                colors.toggle_off_hover_border,
+                colors.toggle_off_hover_label
+            )
+        );
+        assert_eq!(
+            theme.paint(false, true, true, true),
+            paint(
+                colors.toggle_off_pressed_background,
+                colors.toggle_off_pressed_mark,
+                colors.toggle_off_pressed_border,
+                colors.toggle_off_pressed_label
+            )
+        );
+        assert_eq!(
+            theme.paint(false, false, true, true),
+            paint(
+                colors.toggle_off_disabled_background,
+                colors.toggle_off_disabled_mark,
+                colors.toggle_off_disabled_border,
+                colors.toggle_off_disabled_label
+            )
+        );
+        assert_eq!(
+            theme.paint(true, true, false, false),
+            paint(
+                colors.toggle_on_background,
+                colors.toggle_on_mark,
+                colors.toggle_on_border,
+                colors.toggle_on_label
+            )
+        );
+        assert_eq!(
+            theme.paint(true, true, true, false),
+            paint(
+                colors.toggle_on_hover_background,
+                colors.toggle_on_hover_mark,
+                colors.toggle_on_hover_border,
+                colors.toggle_on_hover_label
+            )
+        );
+        assert_eq!(
+            theme.paint(true, true, true, true),
+            paint(
+                colors.toggle_on_pressed_background,
+                colors.toggle_on_pressed_mark,
+                colors.toggle_on_pressed_border,
+                colors.toggle_on_pressed_label
+            )
+        );
+        assert_eq!(
+            theme.paint(true, false, true, true),
+            paint(
+                colors.toggle_on_disabled_background,
+                colors.toggle_on_disabled_mark,
+                colors.toggle_on_disabled_border,
+                colors.toggle_on_disabled_label
+            )
+        );
+    }
+
+    #[test]
     fn theme_should_scale_toggle_geometry() {
         let theme = theme(&ChromeColors::default());
 
@@ -143,37 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn on_paint_should_use_accent_as_the_complete_surface() {
-        let colors = ChromeColors::default();
-        let paint = on_paint(colors.icon_accent, colors.text);
-
-        assert_eq!(
-            (paint.background(), paint.border()),
-            (
-                gpui_color(colors.icon_accent),
-                gpui_color(colors.icon_accent)
-            )
-        );
-    }
-
-    #[test]
-    fn midtone_accent_should_choose_the_higher_contrast_foreground() {
-        let paint = on_paint(Color::rgb(0x6e94b2), Color::rgb(0xffffff));
-
-        assert_eq!(paint.foreground(), rgba(0x000000ff));
-    }
-
-    #[test]
-    fn translucent_accent_should_resolve_to_an_opaque_selected_surface() {
-        let paint = on_paint(Color::rgba(0xffffff66), Color::rgb(0xffffff));
-
-        assert_eq!(paint.background(), rgba(0xffffffff));
-    }
-
-    #[test]
-    fn disabled_selected_surface_should_mix_accent_without_alpha() {
-        let mixed = opaque_mix(Color::rgb(0xffffff), Color::rgb(0x000000), 0x66);
-
-        assert_eq!(mixed, Color::rgb(0x666666));
+    fn authored_on_state_alpha_and_mark_are_preserved() {
+        let colors = ChromeColors {
+            toggle_on_background: Color::rgba(0x12345678),
+            toggle_on_mark: Color::rgba(0xabcdef98),
+            ..ChromeColors::default()
+        };
+        let paint = theme(&colors).paint(true, true, false, false);
+        assert_eq!(paint.background(), gpui_color(colors.toggle_on_background));
+        assert_eq!(paint.foreground(), gpui_color(colors.toggle_on_mark));
     }
 }

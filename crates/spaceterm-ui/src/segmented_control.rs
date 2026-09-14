@@ -391,6 +391,26 @@ impl SegmentedControlTheme {
         }
     }
 
+    /// Resolves value and interaction together, with disabled state taking precedence.
+    pub fn paint(
+        self,
+        selected: bool,
+        enabled: bool,
+        hovered: bool,
+        pressed: bool,
+    ) -> SegmentedPaint {
+        let paints = if !enabled {
+            self.paints.disabled
+        } else if pressed {
+            self.paints.pressed
+        } else if hovered {
+            self.paints.hovered
+        } else {
+            self.paints.normal
+        };
+        paints.resolve(selected)
+    }
+
     /// Sets the semantic shadow lifting the selected segment out of its track.
     pub const fn selected_shadow(mut self, shadow: ControlShadow) -> Self {
         self.selected_shadow = shadow;

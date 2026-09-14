@@ -1035,6 +1035,7 @@ fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
 /// Application-owned command-palette paint values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CommandPalettePaint {
+    rows: Option<crate::ListRowPaints>,
     background: Rgba,
     border: Rgba,
     separator: Rgba,
@@ -1073,6 +1074,7 @@ impl CommandPalettePaint {
         match_foreground: Rgba,
     ) -> Self {
         Self {
+            rows: None,
             background,
             border,
             separator: border,
@@ -1090,6 +1092,64 @@ impl CommandPalettePaint {
             footer_foreground: muted,
             footer_key_foreground: disabled,
         }
+    }
+
+    /// Installs complete semantic row states.
+    pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
+        self.rows = Some(rows);
+        self
+    }
+
+    /// Resolves the same complete row state consumed by the production renderer.
+    pub fn row_paint(self, disabled: bool, selected: bool, pointer: bool) -> crate::ListRowPaint {
+        if let Some(rows) = self.rows {
+            return rows.resolve(!disabled, selected && !pointer, selected && pointer);
+        }
+        let foreground = if disabled {
+            self.disabled
+        } else if selected {
+            if pointer {
+                self.hover_foreground
+            } else {
+                self.selected_foreground
+            }
+        } else {
+            self.foreground
+        };
+        crate::ListRowPaint::new(
+            if selected {
+                if pointer {
+                    self.hover_background
+                } else {
+                    self.selected_background
+                }
+            } else {
+                gpui::rgba(0)
+            },
+            foreground,
+            if disabled {
+                self.disabled
+            } else if selected {
+                foreground
+            } else {
+                self.muted
+            },
+            if disabled {
+                self.disabled_icon_foreground
+            } else if selected {
+                foreground
+            } else {
+                self.icon_foreground
+            },
+            if disabled {
+                self.disabled
+            } else if selected {
+                foreground
+            } else {
+                self.match_foreground
+            },
+            gpui::rgba(0),
+        )
     }
 
     /// Sets normal and disabled icon colors independently of result text.
@@ -3387,16 +3447,6 @@ fn status_row(
         .child(text.into())
 }
 
-fn row_foreground(paint: CommandPalettePaint, disabled: bool, selected: bool) -> Rgba {
-    if disabled {
-        paint.disabled
-    } else if selected {
-        paint.selected_foreground
-    } else {
-        paint.foreground
-    }
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "one row's complete presentation inputs are clearer than an intermediate struct"
@@ -3415,26 +3465,10 @@ fn render_row<I: Clone + Eq + 'static>(
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
-    let foreground = if selected && !hover_suppressed && !item.disabled {
-        paint.hover_foreground
-    } else {
-        row_foreground(paint, item.disabled, selected)
-    };
-    let secondary = if item.disabled {
-        paint.disabled
-    } else {
-        paint.muted
-    };
-    let match_foreground = if item.disabled {
-        paint.disabled
-    } else {
-        paint.match_foreground
-    };
-    let active_background = if hover_suppressed {
-        paint.selected_background
-    } else {
-        paint.hover_background
-    };
+    let row_paint = paint.row_paint(item.disabled, selected, !hover_suppressed);
+    let foreground = row_paint.foreground;
+    let secondary = row_paint.secondary;
+    let match_foreground = row_paint.matched;
     let logical_name = item.label.clone();
     let debug_selector = item.debug_selector.clone();
     let id = item.id.clone();
@@ -3452,7 +3486,9 @@ fn render_row<I: Clone + Eq + 'static>(
         .rounded(metrics.row_corner_radius())
         .text_color(foreground)
         .cursor_default()
-        .when(selected, |row| row.bg(active_background))
+        .bg(row_paint.background)
+        .border(metrics.border_width)
+        .border_color(row_paint.border)
         .when(!item.disabled, |row| {
             let id = id.clone();
             row.on_mouse_move(move |event, _, cx| {
@@ -3470,14 +3506,7 @@ fn render_row<I: Clone + Eq + 'static>(
             .items_center()
             .justify_center();
         if let Some(icon) = item.leading_icon.clone() {
-            leading = leading.child(icon(
-                if item.disabled {
-                    paint.disabled_icon_foreground
-                } else {
-                    paint.icon_foreground
-                },
-                metrics.icon_size,
-            ));
+            leading = leading.child(icon(row_paint.icon, metrics.icon_size));
         }
         row = row.child(leading);
     }

@@ -15,6 +15,8 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
         gpui_color(colors.error),
         gpui_color(colors.border),
     )
+    .rows(super::control_theme_catalog::list_rows(colors))
+    .destructive_rows(destructive_rows(colors))
     .hover_background(gpui_color(colors.ghost_element_hover))
     .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(
@@ -29,6 +31,28 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
         MenuSizes::new(metrics(196.0), metrics(208.0), metrics(240.0)),
     )
     .shadow(super::appearance::control_shadow(colors, false))
+}
+
+fn destructive_rows(colors: &ChromeColors) -> spaceterm_ui::ListRowPaints {
+    use spaceterm_ui::{ButtonVariant, ListRowPaint, ListRowPaints};
+    let button = super::button_theme::theme(colors).paints(ButtonVariant::Destructive);
+    let row = |paint: spaceterm_ui::ButtonPaint| {
+        ListRowPaint::new(
+            paint.background(),
+            paint.foreground(),
+            paint.foreground(),
+            paint.icon_color(),
+            paint.foreground(),
+            paint.border(),
+        )
+    };
+    ListRowPaints::new(
+        row(button.normal()),
+        row(button.hovered()),
+        row(button.hovered()),
+        row(button.pressed()),
+        row(button.disabled()),
+    )
 }
 
 fn metrics(width: f32) -> MenuMetrics {

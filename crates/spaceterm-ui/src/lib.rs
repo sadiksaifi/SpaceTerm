@@ -12,7 +12,9 @@ mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
 mod command_palette;
+mod field_frame;
 mod icon;
+mod list_row;
 mod menu;
 mod middle_truncated_text;
 mod modal;
@@ -51,7 +53,9 @@ pub use command_palette::{
     CommandPalettePaint, CommandPaletteQuery, CommandPaletteReplacementFocus, CommandPaletteTheme,
     install_command_palette_keybindings,
 };
+pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
+pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent, MenuMetrics, MenuPaint,

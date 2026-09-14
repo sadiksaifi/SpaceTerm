@@ -266,6 +266,12 @@ pub struct ScrollbarTheme {
 }
 
 impl ScrollbarTheme {
+    /// Returns the actual thumb fill, preserving dragging precedence over hover.
+    pub fn thumb_color(self, hovered: bool, dragging: bool) -> Rgba {
+        let (normal, hover) = self.resolve(dragging);
+        if hovered { hover } else { normal }
+    }
+
     /// Creates scrollbar paint for the normal, hovered, and dragging states.
     pub fn new(thumb: Rgba, hovered_thumb: Rgba, dragging_thumb: Rgba) -> Self {
         Self {

@@ -427,6 +427,7 @@ impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
 /// Application-owned ComboBox paint values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ComboBoxPaint {
+    rows: Option<crate::ListRowPaints>,
     background: Rgba,
     border: Rgba,
     foreground: Rgba,
@@ -464,6 +465,7 @@ impl ComboBoxPaint {
         focus_border: Rgba,
     ) -> Self {
         Self {
+            rows: None,
             background,
             border,
             foreground,
@@ -480,6 +482,12 @@ impl ComboBoxPaint {
             trigger_border,
             focus_border,
         }
+    }
+
+    /// Installs complete semantic list row states.
+    pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
+        self.rows = Some(rows);
+        self
     }
 
     /// Sets row hover independently of the provisional selection.
@@ -2343,6 +2351,10 @@ fn render_row<I: Clone + Eq + 'static>(
     hovered: bool,
     theme: ComboBoxTheme,
 ) -> AnyElement {
+    let row_paint = theme
+        .paint
+        .rows
+        .map(|rows| rows.resolve(!item.disabled, provisional && !hovered, hovered));
     let foreground = if item.disabled {
         theme.paint.disabled
     } else if hovered {
@@ -2359,6 +2371,9 @@ fn render_row<I: Clone + Eq + 'static>(
     } else {
         theme.paint.muted
     };
+    let foreground = row_paint.map_or(foreground, |paint| paint.foreground);
+    let secondary = row_paint.map_or(secondary, |paint| paint.secondary);
+    let icon_foreground = row_paint.map_or(foreground, |paint| paint.icon);
     let id = item.id.clone();
     let logical_name = item.label.clone();
     let debug_selector = item.debug_selector.clone();
@@ -2380,6 +2395,11 @@ fn render_row<I: Clone + Eq + 'static>(
         .when(provisional, |row| row.bg(theme.paint.selected_background))
         .when(hovered && !item.disabled, |row| {
             row.bg(theme.paint.hover_background)
+        })
+        .when_some(row_paint, |row, paint| {
+            row.bg(paint.background)
+                .border(theme.metrics.border_width)
+                .border_color(paint.border)
         })
         .when(!item.disabled, |row| {
             let id = id.clone();
@@ -2410,14 +2430,14 @@ fn render_row<I: Clone + Eq + 'static>(
     // carries its own icon keeps it: the caller's meaning outranks the mark, and the highlighted
     // row still shows which value is current.
     if let Some(icon) = &item.leading_icon {
-        leading = leading.child(icon(foreground, theme.metrics.icon_size));
+        leading = leading.child(icon(icon_foreground, theme.metrics.icon_size));
     } else if selected {
         leading = leading
             .debug_selector(move || format!("combo-box-row-{position}-check"))
             .child(Icon::new(
                 IconName::Check,
                 theme.metrics.icon_size,
-                foreground,
+                icon_foreground,
             ));
     }
     row = row.child(leading).child(

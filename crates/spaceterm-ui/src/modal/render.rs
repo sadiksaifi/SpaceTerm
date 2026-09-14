@@ -908,30 +908,28 @@ fn render_alert_suppression(
     .absolute()
     .inset_0();
 
+    let pressed = matches!(
+        state.read(cx).interaction,
+        ModalSuppressionInteraction::Space | ModalSuppressionInteraction::Pointer { inside: true }
+    );
+    let toggle_theme = *cx.global::<crate::ToggleTheme>();
+    let toggle_paint = toggle_theme.paint(selected, enabled, false, pressed);
+    let hover_label = toggle_theme.paint(selected, enabled, true, false).label();
+    let pressed_label = toggle_theme.paint(selected, enabled, false, true).label();
+    let font = crate::control_typography(cx).regular().clone();
+    let hover_font = font.clone();
+    let pressed_font = font.clone();
     let key_down_state = state.clone();
     let key_up_state = state;
     let keyboard_owner = owner;
     let keyboard_focus = focus.clone();
     let focus_anchor = focus_anchors.register(&focus);
     let scroll_anchor = focus_anchor.scroll_anchor();
-    let checkbox_icon = if selected {
-        IconName::SquareCheckBig
-    } else {
-        IconName::Square
-    };
-    let checkbox_color = if !enabled {
-        paint.suppression_disabled
-    } else if focused {
-        paint.suppression_focused
-    } else if selected {
-        paint.suppression_selected
-    } else {
-        paint.suppression_unselected
-    };
     let control = div()
         .id(("modal-suppression", presentation.value()))
         .debug_selector(|| "modal-alert-suppression".to_owned())
         .relative()
+        .group(crate::toggle::INTERACTION_GROUP)
         .max_w(relative(1.0))
         .min_w_0()
         .track_focus(&focus)
@@ -973,8 +971,43 @@ fn render_alert_suppression(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .child(Icon::new(checkbox_icon, metrics.body_size, checkbox_color))
-        .child(label)
+        .child(crate::toggle::modal_checkbox_indicator(
+            toggle_theme,
+            selected,
+            enabled,
+            pressed,
+            "modal-alert-suppression-indicator".to_owned(),
+        ))
+        .child(
+            div()
+                .id("modal-suppression-label")
+                .font(font)
+                .text_size(metrics.body_size)
+                .line_height(relative(1.2))
+                .text_color(toggle_paint.label())
+                .child(label)
+                .when(enabled && !pressed, |label| {
+                    label
+                        .group_hover(crate::toggle::INTERACTION_GROUP, move |style| {
+                            crate::refine_control_text(
+                                style,
+                                &hover_font,
+                                metrics.body_size,
+                                1.2,
+                                hover_label,
+                            )
+                        })
+                        .group_active(crate::toggle::INTERACTION_GROUP, move |style| {
+                            crate::refine_control_text(
+                                style,
+                                &pressed_font,
+                                metrics.body_size,
+                                1.2,
+                                pressed_label,
+                            )
+                        })
+                }),
+        )
         .when(focused, |control| {
             control.child(
                 div()
@@ -986,7 +1019,7 @@ fn render_alert_suppression(
                     .left(-metrics.border_width * 3.0)
                     .rounded(metrics.corner_radius + metrics.border_width * 2.0)
                     .border(metrics.border_width)
-                    .border_color(paint.progress_fill),
+                    .border_color(toggle_theme.focus_border()),
             )
         })
         .child(pointer_tracker)

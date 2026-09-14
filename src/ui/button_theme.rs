@@ -13,26 +13,26 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
                 paint(
                     colors.element_background,
                     colors.element_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.element_icon,
+                    colors.element_border,
                 ),
                 paint(
                     colors.element_hover,
                     colors.element_hover_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.element_hover_icon,
+                    colors.element_hover_border,
                 ),
                 paint(
                     colors.element_active,
                     colors.element_active_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.element_active_icon,
+                    colors.element_active_border,
                 ),
                 paint(
                     colors.element_disabled,
                     colors.element_disabled_foreground,
-                    colors.icon_disabled,
-                    colors.border_transparent,
+                    colors.element_disabled_icon,
+                    colors.element_disabled_border,
                 ),
             ),
             outline(colors),
@@ -40,79 +40,54 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
                 paint(
                     colors.ghost_element_background,
                     colors.ghost_element_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.ghost_element_icon,
+                    colors.ghost_element_border,
                 ),
                 paint(
                     colors.ghost_element_hover,
                     colors.ghost_element_hover_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.ghost_element_hover_icon,
+                    colors.ghost_element_hover_border,
                 ),
                 paint(
                     colors.ghost_element_active,
                     colors.ghost_element_active_foreground,
-                    colors.icon,
-                    colors.border_transparent,
+                    colors.ghost_element_active_icon,
+                    colors.ghost_element_active_border,
                 ),
                 paint(
                     colors.ghost_element_disabled,
                     colors.ghost_element_disabled_foreground,
-                    colors.icon_disabled,
-                    colors.border_transparent,
+                    colors.ghost_element_disabled_icon,
+                    colors.ghost_element_disabled_border,
                 ),
             ),
             bare(colors),
-            variant(
-                paint(
-                    colors.error_background,
-                    colors.error,
-                    colors.error,
-                    colors.error_border,
-                ),
-                paint(
-                    colors.element_hover,
-                    colors.error,
-                    colors.error,
-                    colors.error_border,
-                ),
-                paint(
-                    colors.element_active,
-                    colors.error,
-                    colors.error,
-                    colors.error_border,
-                ),
-                paint(
-                    colors.element_disabled,
-                    colors.element_disabled_foreground,
-                    colors.icon_disabled,
-                    colors.border_disabled,
-                ),
-            ),
+            destructive(colors),
             variant(
                 paint(
                     colors.ghost_element_background,
                     colors.link_text,
                     colors.link_text,
-                    colors.border_transparent,
+                    colors.ghost_element_border,
                 ),
                 paint(
                     colors.ghost_element_background,
                     colors.link_text_hover,
                     colors.link_text_hover,
-                    colors.border_transparent,
+                    colors.ghost_element_border,
                 ),
                 paint(
                     colors.ghost_element_background,
-                    colors.text_accent,
-                    colors.text_accent,
-                    colors.border_transparent,
+                    colors.link_text_pressed,
+                    colors.link_text_pressed,
+                    colors.ghost_element_border,
                 ),
                 paint(
                     colors.ghost_element_background,
-                    colors.ghost_element_disabled_foreground,
-                    colors.icon_disabled,
-                    colors.border_transparent,
+                    colors.link_text_disabled,
+                    colors.ghost_element_icon,
+                    colors.ghost_element_border,
                 ),
             ),
         ),
@@ -142,39 +117,60 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
     )
 }
 
-/// A control with no surface in any state, which brightens rather than fills on interaction.
-///
-/// Chrome that must read as floating uses this: nothing paints behind the glyph, so the control
-/// carries the same visual weight as the text beside it.
-/// The emphasized action variant.
-///
-/// It shares the selected element roles, so its hover paint must stay distinct from its normal
-/// paint for every scheme: an emphasized action is the one control a reader expects to respond.
 fn primary(colors: &ChromeColors) -> ButtonVariantStyle {
     variant(
         paint(
-            colors.element_selected,
-            colors.element_selected_foreground,
-            colors.icon,
-            colors.border_transparent,
+            colors.primary_background,
+            colors.primary_foreground,
+            colors.primary_icon,
+            colors.primary_border,
         ),
         paint(
-            colors.element_selected_hover,
-            colors.element_selected_hover_foreground,
-            colors.icon,
-            colors.border_transparent,
+            colors.primary_hover_background,
+            colors.primary_hover_foreground,
+            colors.primary_hover_icon,
+            colors.primary_hover_border,
         ),
         paint(
-            colors.element_active,
-            colors.element_active_foreground,
-            colors.icon,
-            colors.border_transparent,
+            colors.primary_pressed_background,
+            colors.primary_pressed_foreground,
+            colors.primary_pressed_icon,
+            colors.primary_pressed_border,
         ),
         paint(
-            colors.element_disabled,
-            colors.element_disabled_foreground,
-            colors.icon_disabled,
-            colors.border_transparent,
+            colors.primary_disabled_background,
+            colors.primary_disabled_foreground,
+            colors.primary_disabled_icon,
+            colors.primary_disabled_border,
+        ),
+    )
+}
+
+fn destructive(colors: &ChromeColors) -> ButtonVariantStyle {
+    variant(
+        paint(
+            colors.destructive_background,
+            colors.destructive_foreground,
+            colors.destructive_icon,
+            colors.destructive_border,
+        ),
+        paint(
+            colors.destructive_hover_background,
+            colors.destructive_hover_foreground,
+            colors.destructive_hover_icon,
+            colors.destructive_hover_border,
+        ),
+        paint(
+            colors.destructive_pressed_background,
+            colors.destructive_pressed_foreground,
+            colors.destructive_pressed_icon,
+            colors.destructive_pressed_border,
+        ),
+        paint(
+            colors.destructive_disabled_background,
+            colors.destructive_disabled_foreground,
+            colors.destructive_disabled_icon,
+            colors.destructive_disabled_border,
         ),
     )
 }
@@ -213,26 +209,26 @@ fn outline(colors: &ChromeColors) -> ButtonVariantStyle {
         paint(
             colors.element_background,
             colors.element_foreground,
-            colors.icon,
-            colors.border,
+            colors.element_icon,
+            colors.outline_border,
         ),
         paint(
             colors.element_hover,
             colors.element_hover_foreground,
-            colors.icon,
-            colors.border,
+            colors.element_hover_icon,
+            colors.outline_hover_border,
         ),
         paint(
             colors.element_active,
             colors.element_active_foreground,
-            colors.icon,
-            colors.border,
+            colors.element_active_icon,
+            colors.outline_pressed_border,
         ),
         paint(
             colors.element_disabled,
             colors.element_disabled_foreground,
-            colors.icon_disabled,
-            colors.border_disabled,
+            colors.element_disabled_icon,
+            colors.outline_disabled_border,
         ),
     )
 }
@@ -265,6 +261,125 @@ mod tests {
     use crate::appearance::{Appearance, builtin_chrome_base};
 
     #[test]
+    fn primary_and_destructive_consume_complete_independent_state_tuples() {
+        use spaceterm_ui::ButtonVariant;
+        let mut colors = ChromeColors::default();
+        colors.primary_background = Color::rgba(0x10203040);
+        colors.primary_foreground = Color::rgba(0x14233142);
+        colors.primary_icon = Color::rgba(0x18263244);
+        colors.primary_border = Color::rgba(0x1c293346);
+        colors.primary_hover_background = Color::rgba(0x202c3448);
+        colors.primary_hover_foreground = Color::rgba(0x242f354a);
+        colors.primary_hover_icon = Color::rgba(0x2832364c);
+        colors.primary_hover_border = Color::rgba(0x2c35374e);
+        colors.primary_pressed_background = Color::rgba(0x30383850);
+        colors.primary_pressed_foreground = Color::rgba(0x343b3952);
+        colors.primary_pressed_icon = Color::rgba(0x383e3a54);
+        colors.primary_pressed_border = Color::rgba(0x3c413b56);
+        colors.primary_disabled_background = Color::rgba(0x40443c58);
+        colors.primary_disabled_foreground = Color::rgba(0x44473d5a);
+        colors.primary_disabled_icon = Color::rgba(0x484a3e5c);
+        colors.primary_disabled_border = Color::rgba(0x4c4d3f5e);
+        colors.destructive_background = Color::rgba(0x50504060);
+        colors.destructive_foreground = Color::rgba(0x54534162);
+        colors.destructive_icon = Color::rgba(0x58564264);
+        colors.destructive_border = Color::rgba(0x5c594366);
+        colors.destructive_hover_background = Color::rgba(0x605c4468);
+        colors.destructive_hover_foreground = Color::rgba(0x645f456a);
+        colors.destructive_hover_icon = Color::rgba(0x6862466c);
+        colors.destructive_hover_border = Color::rgba(0x6c65476e);
+        colors.destructive_pressed_background = Color::rgba(0x70684870);
+        colors.destructive_pressed_foreground = Color::rgba(0x746b4972);
+        colors.destructive_pressed_icon = Color::rgba(0x786e4a74);
+        colors.destructive_pressed_border = Color::rgba(0x7c714b76);
+        colors.destructive_disabled_background = Color::rgba(0x80744c78);
+        colors.destructive_disabled_foreground = Color::rgba(0x84774d7a);
+        colors.destructive_disabled_icon = Color::rgba(0x887a4e7c);
+        colors.destructive_disabled_border = Color::rgba(0x8c7d4f7e);
+        for (actual, expected) in [
+            (
+                theme(&colors).paints(ButtonVariant::Primary).normal(),
+                paint(
+                    colors.primary_background,
+                    colors.primary_foreground,
+                    colors.primary_icon,
+                    colors.primary_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Primary).hovered(),
+                paint(
+                    colors.primary_hover_background,
+                    colors.primary_hover_foreground,
+                    colors.primary_hover_icon,
+                    colors.primary_hover_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Primary).pressed(),
+                paint(
+                    colors.primary_pressed_background,
+                    colors.primary_pressed_foreground,
+                    colors.primary_pressed_icon,
+                    colors.primary_pressed_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Primary).disabled(),
+                paint(
+                    colors.primary_disabled_background,
+                    colors.primary_disabled_foreground,
+                    colors.primary_disabled_icon,
+                    colors.primary_disabled_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Destructive).normal(),
+                paint(
+                    colors.destructive_background,
+                    colors.destructive_foreground,
+                    colors.destructive_icon,
+                    colors.destructive_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Destructive).hovered(),
+                paint(
+                    colors.destructive_hover_background,
+                    colors.destructive_hover_foreground,
+                    colors.destructive_hover_icon,
+                    colors.destructive_hover_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Destructive).pressed(),
+                paint(
+                    colors.destructive_pressed_background,
+                    colors.destructive_pressed_foreground,
+                    colors.destructive_pressed_icon,
+                    colors.destructive_pressed_border,
+                ),
+            ),
+            (
+                theme(&colors).paints(ButtonVariant::Destructive).disabled(),
+                paint(
+                    colors.destructive_disabled_background,
+                    colors.destructive_disabled_foreground,
+                    colors.destructive_disabled_icon,
+                    colors.destructive_disabled_border,
+                ),
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+        let before = theme(&colors).paints(ButtonVariant::Primary);
+        colors.selection_background = Color::rgba(0xaabbccdd);
+        colors.selection_hover_background = Color::rgba(0x11223344);
+        colors.error_background = Color::rgba(0x44556677);
+        assert_eq!(theme(&colors).paints(ButtonVariant::Primary), before);
+    }
+
+    #[test]
     fn outline_press_should_preserve_the_normal_border() {
         let outline = outline(&ChromeColors::default());
 
@@ -273,8 +388,6 @@ mod tests {
 
     #[test]
     fn an_emphasized_action_should_keep_a_distinct_hover_in_every_built_in() {
-        // The selected element roles serve both persistent selection and emphasized actions, so a
-        // scheme that collapsed them would leave every primary button without hover feedback.
         for appearance in [Appearance::Light, Appearance::Dark] {
             let primary = primary(&builtin_chrome_base(appearance));
 

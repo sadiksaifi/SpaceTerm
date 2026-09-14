@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
 
-const INTERACTION_GROUP: &str = "spaceterm-toggle";
+pub(crate) const INTERACTION_GROUP: &str = "spaceterm-toggle";
 
 /// The state represented by a checkbox.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -340,6 +340,25 @@ impl ToggleTheme {
             sizes: self.sizes.scaled(text_scale, spacing_scale),
             ..self
         }
+    }
+
+    /// Returns the exact value and interaction paint without changing authored color channels.
+    pub fn paint(self, on: bool, enabled: bool, hovered: bool, pressed: bool) -> TogglePaint {
+        let paints = if !enabled {
+            self.paints.disabled
+        } else if pressed {
+            self.paints.pressed
+        } else if hovered {
+            self.paints.hovered
+        } else {
+            self.paints.normal
+        };
+        paints.resolve(on)
+    }
+
+    /// Returns the independent keyboard focus outline color.
+    pub fn focus_border(self) -> Rgba {
+        self.focus_border
     }
 
     fn resolve(self, size: ToggleSize, on: bool) -> ToggleStyle {
@@ -819,6 +838,31 @@ impl TogglePaintRefinement {
     ) -> StyleRefinement {
         crate::refine_control_text(style, font, size, line_height, self.0.label)
     }
+}
+
+/// Shares checkbox presentation with composites that retain specialized interaction ownership.
+pub(crate) fn modal_checkbox_indicator(
+    theme: ToggleTheme,
+    selected: bool,
+    enabled: bool,
+    pressed: bool,
+    selector: String,
+) -> gpui::AnyElement {
+    let style = theme.resolve(ToggleSize::Regular, selected);
+    checkbox_indicator(
+        if selected {
+            CheckboxState::Checked
+        } else {
+            CheckboxState::Unchecked
+        },
+        style,
+        theme.paint(selected, enabled, false, pressed),
+        enabled,
+        pressed,
+        false,
+        selector,
+        String::new(),
+    )
 }
 
 #[expect(

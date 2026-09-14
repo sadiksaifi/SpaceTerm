@@ -702,10 +702,6 @@ pub struct ModalPaint {
     warning_background: Rgba,
     critical: Rgba,
     critical_background: Rgba,
-    suppression_selected: Rgba,
-    suppression_unselected: Rgba,
-    suppression_focused: Rgba,
-    suppression_disabled: Rgba,
 }
 
 impl ModalPaint {
@@ -745,26 +741,7 @@ impl ModalPaint {
             warning_background,
             critical,
             critical_background,
-            suppression_selected: progress_fill,
-            suppression_unselected: secondary_text,
-            suppression_focused: progress_fill,
-            suppression_disabled: secondary_text,
         }
-    }
-
-    /// Sets the complete semantic paint catalog for the Alert suppression checkbox.
-    pub fn suppression_checkbox(
-        mut self,
-        selected: Rgba,
-        unselected: Rgba,
-        focused: Rgba,
-        disabled: Rgba,
-    ) -> Self {
-        self.suppression_selected = selected;
-        self.suppression_unselected = unselected;
-        self.suppression_focused = focused;
-        self.suppression_disabled = disabled;
-        self
     }
 }
 

@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     App, AssetSource, FontFallbacks, Global, IntoElement, ParentElement as _, Pixels, RenderOnce,
-    Rgba, SharedString, Styled as _, Window, div, font, svg,
+    Rgba, SharedString, Styled as _, Window, div, font, prelude::FluentBuilder as _, svg,
 };
 
 /// The Lucide family embedded by `lucide-icons` 1.34.0.
@@ -144,7 +144,7 @@ enum IconSource {
 pub struct Icon {
     source: IconSource,
     size: Pixels,
-    tint: Rgba,
+    tint: Option<Rgba>,
 }
 
 impl Icon {
@@ -153,7 +153,25 @@ impl Icon {
         Self {
             source: IconSource::Lucide(name),
             size,
-            tint,
+            tint: Some(tint),
+        }
+    }
+
+    /// Creates a glyph whose tint follows the surrounding semantic foreground state.
+    pub fn inherited(name: IconName, size: Pixels) -> Self {
+        Self {
+            source: IconSource::Lucide(name),
+            size,
+            tint: None,
+        }
+    }
+
+    /// Creates a bundled vector whose tint follows the surrounding semantic foreground state.
+    pub fn custom_inherited(name: CustomIconName, size: Pixels) -> Self {
+        Self {
+            source: IconSource::Custom(name),
+            size,
+            tint: None,
         }
     }
 
@@ -163,7 +181,7 @@ impl Icon {
         Self {
             source: IconSource::Custom(name),
             size,
-            tint,
+            tint: Some(tint),
         }
     }
 }
@@ -179,13 +197,13 @@ impl RenderOnce for Icon {
                 })
                 .text_size(self.size)
                 .line_height(self.size)
-                .text_color(self.tint)
+                .when_some(self.tint, |element, tint| element.text_color(tint))
                 .child(name.unicode().to_string())
                 .into_any_element(),
             IconSource::Custom(name) => svg()
                 .path(name.path())
                 .size(self.size)
-                .text_color(self.tint)
+                .when_some(self.tint, |element, tint| element.text_color(tint))
                 .into_any_element(),
         };
         div()

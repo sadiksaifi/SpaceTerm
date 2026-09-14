@@ -15,6 +15,7 @@ pub(super) fn theme(colors: &ChromeColors) -> CommandPaletteTheme {
             gpui_color(colors.ghost_element_selected_foreground),
             gpui_color(colors.text_accent),
         )
+        .rows(super::control_theme_catalog::list_rows(colors))
         .icons(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .separator(gpui_color(colors.border_variant))
         .hover_background(gpui_color(colors.ghost_element_hover))
