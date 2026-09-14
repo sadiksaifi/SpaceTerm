@@ -103,11 +103,11 @@ impl WorkspaceSidebar {
             (path, None, None)
         };
         let detail_paint = detail_color
-            .map(|color| workspace_status_paint(color, active, 4.5, &appearance.colors));
+            .map(|color| workspace_row_status_paint(color, active, 4.5, &appearance.colors));
         let remote_icon_paint = remote_color
-            .map(|color| workspace_status_paint(color, active, 3.0, &appearance.colors));
+            .map(|color| workspace_row_status_paint(color, active, 3.0, &appearance.colors));
         let unavailable_icon_paint = (!available).then(|| {
-            workspace_status_paint(appearance.colors.warning, active, 3.0, &appearance.colors)
+            workspace_row_status_paint(appearance.colors.warning, active, 3.0, &appearance.colors)
         });
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),

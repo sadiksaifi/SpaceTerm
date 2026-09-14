@@ -2877,14 +2877,20 @@ impl WorkspaceManager {
             workspace.remote_display_directory(),
             &self.local_home_directory_path,
         );
-        let tooltip_detail = remote_status
-            .map(|status| format!("{path}: {status}"))
-            .unwrap_or_else(|| path.clone());
+        let availability = workspace.availability().clone();
+        let tooltip_detail = match &availability {
+            DirectoryAvailability::Unavailable { reason } => format!("{path}: {reason}"),
+            DirectoryAvailability::Available => remote_status
+                .map(|status| format!("{path}: {status}"))
+                .unwrap_or_else(|| path.clone()),
+        };
 
         (
             WorkspaceChromeIdentity {
                 name: name.clone(),
                 pinned: workspace.pinned_directory().is_some(),
+                availability,
+                remote_connection_phase,
             },
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!("{name}\n{tooltip_detail}"))

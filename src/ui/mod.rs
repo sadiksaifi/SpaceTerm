@@ -38,6 +38,7 @@ mod tooltip_theme;
 mod workspace_chrome;
 mod workspace_manager;
 mod workspace_sidebar;
+mod workspace_status;
 
 use gpui::{App, actions};
 

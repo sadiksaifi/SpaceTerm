@@ -4,6 +4,7 @@ mod text;
 mod view;
 
 use super::workspace_chrome::WorkspaceChromeLayout;
+use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -441,14 +442,7 @@ pub(super) fn remote_connection_color(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct WorkspaceStatusPaint {
-    pub(super) normal: Color,
-    pub(super) hovered: Color,
-}
-
-/// Keeps a semantic status recognizable while meeting the contrast required by its presentation.
-pub(super) fn workspace_status_paint(
+fn workspace_row_status_paint(
     proposed: Color,
     selected: bool,
     minimum_contrast: f64,
@@ -462,39 +456,12 @@ pub(super) fn workspace_status_paint(
     } else {
         (colors.row_background, colors.row_hover_background)
     };
-    WorkspaceStatusPaint {
-        normal: status_color_on(proposed, normal_background, minimum_contrast),
-        hovered: status_color_on(proposed, hovered_background, minimum_contrast),
-    }
-}
-
-fn status_color_on(proposed: Color, background: Color, minimum_contrast: f64) -> Color {
-    let rendered = proposed.source_over(background);
-    if rendered.contrast_ratio(background) >= minimum_contrast {
-        return rendered;
-    }
-
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
-    let target = if dark.contrast_ratio(background) >= light.contrast_ratio(background) {
-        dark
-    } else {
-        light
-    };
-    let mut lower = 0.0;
-    let mut upper = 1.0;
-    let mut readable = target;
-    for _ in 0..16 {
-        let amount = (lower + upper) / 2.0;
-        let candidate = rendered.mix(target, amount);
-        if candidate.contrast_ratio(background) >= minimum_contrast {
-            readable = candidate;
-            upper = amount;
-        } else {
-            lower = amount;
-        }
-    }
-    readable
+    resolve_workspace_status(
+        proposed,
+        normal_background,
+        hovered_background,
+        minimum_contrast,
+    )
 }
 
 impl WorkspaceSidebar {
@@ -804,7 +771,7 @@ mod tests {
                     (colors.row_background, colors.row_hover_background)
                 };
                 for semantic in [colors.info, colors.success, colors.warning, colors.error] {
-                    let paint = workspace_status_paint(semantic, selected, 4.5, &colors);
+                    let paint = workspace_row_status_paint(semantic, selected, 4.5, &colors);
                     assert!(paint.normal.contrast_ratio(normal_background) >= 4.5);
                     assert!(paint.hovered.contrast_ratio(hovered_background) >= 4.5);
                 }
@@ -816,8 +783,8 @@ mod tests {
     fn remote_status_paints_should_preserve_distinct_semantic_states() {
         let colors = ChromeColors::default();
         for selected in [false, true] {
-            let reconnecting = workspace_status_paint(colors.info, selected, 4.5, &colors);
-            let failed = workspace_status_paint(colors.error, selected, 4.5, &colors);
+            let reconnecting = workspace_row_status_paint(colors.info, selected, 4.5, &colors);
+            let failed = workspace_row_status_paint(colors.error, selected, 4.5, &colors);
             assert_ne!(reconnecting, failed);
         }
     }

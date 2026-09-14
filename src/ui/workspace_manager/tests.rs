@@ -2667,8 +2667,9 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
     assert!(
-        cx.debug_bounds("workspace-chip-remote-status").is_none(),
-        "the collapsed chip conveys connection state through its tooltip"
+        cx.debug_bounds("workspace-switcher-status-disconnected")
+            .is_some(),
+        "the collapsed identity must keep the Active Remote Workspace's disconnected state visible"
     );
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
@@ -2731,6 +2732,14 @@ fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &m
         Some(RemoteConnectionState::failed(2))
     );
     click("modal-action-remote-workspace-reconnect-error-ok", cx);
+    redraw(cx);
+    click("toggle-sidebar-button", cx);
+    assert!(
+        cx.debug_bounds("workspace-switcher-status-failed")
+            .is_some(),
+        "the collapsed identity must keep the Active Remote Workspace's failed state visible"
+    );
+    click("toggle-sidebar-button", cx);
     redraw(cx);
     right_click(row_selector, cx);
     click("workspace-menu-row-reconnect", cx);
@@ -5941,6 +5950,28 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             root.origin.x + px(212.0),
             root.origin.x + px(212.0),
         )
+    );
+}
+
+#[gpui::test]
+fn collapsed_identity_should_keep_an_unavailable_local_workspace_visible(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        let workspace_id = manager.workspaces.active_workspace_id();
+        manager
+            .workspaces
+            .set_directory_unavailable(workspace_id, "Directory unavailable".to_owned())
+            .expect("the Active Workspace should remain present");
+        cx.notify();
+    });
+
+    click("toggle-sidebar-button", cx);
+
+    assert!(cx.debug_bounds("workspace-chip-label").is_some());
+    assert!(
+        cx.debug_bounds("workspace-switcher-status-unavailable")
+            .is_some(),
+        "the collapsed identity must keep the Active Workspace's unavailable state visible"
     );
 }
 

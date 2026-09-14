@@ -3,8 +3,10 @@ use gpui::{AnyElement, Pixels, SharedString, canvas, div, px};
 use spaceterm_ui::{Icon, IconName};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{WorkspaceStatusPaint, gpui_color};
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::workspace_status::WorkspaceStatusPaint;
+
+use super::gpui_color;
 
 use super::SIDEBAR_NAME_TEXT_SIZE as NAME_SIZE;
 const DETAIL_SIZE: f32 = 12.0;
