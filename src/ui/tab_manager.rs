@@ -94,7 +94,7 @@ const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
 /// ends. The Active Tab's chip already has an edge, so no mark touches it.
-const TAB_SEPARATOR_LENGTH: f32 = 12.0;
+const TAB_SEPARATOR_LENGTH: f32 = 18.0;
 /// The mark's thickness: the same whole-point hairline as the chip rim and the Tab bar divider.
 ///
 /// A width derived from the display scale is a single device pixel, which is too faint to read as a
@@ -2685,9 +2685,10 @@ mod tests {
                              {scale_factor}, got {separator:?}"
                         );
                         assert!(
-                            separator.size.height >= px(6.0)
-                                && separator.size.height < leading_item.size.height / 2.0,
-                            "the separator should be a short visible mark, got {separator:?}"
+                            separator.size.height == px(18.0)
+                                && separator.size.height < leading_item.size.height,
+                            "the separator should be an 18-point mark shorter than the Tab, got \
+                             {separator:?}"
                         );
                         assert!(
                             (separator.center().y - leading_item.center().y).abs() <= px(0.5),
