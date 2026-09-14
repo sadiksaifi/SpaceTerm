@@ -458,3 +458,35 @@ fn snapshot_export_does_not_apply_unused_builtin_overrides_to_missing_request_fa
         live.chrome.colors
     );
 }
+
+#[test]
+fn native_tab_separator_survives_export_and_reinstall_apart_from_outlined_controls() {
+    let bytes = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.tab-separator","name":"Tab separator","appearance":"dark","colors":{"background":"#101114","text":"#e6e7ea","outline_border":"#ffffff","tab_separator":"#3a3d44"}}]}"##;
+    let parsed = parse_color_document(bytes).unwrap();
+    let CustomScheme::Chrome(scheme) = &parsed.schemes[0] else {
+        panic!()
+    };
+    assert_eq!(scheme.colors.tab_separator, Some(Color::rgb(0x3a3d44)));
+    let catalog = SchemeCatalog::from_custom_schemes(&parsed.schemes).unwrap();
+    let before = selected(&catalog, scheme.id.clone(), Appearance::Dark);
+    assert_eq!(before.chrome.colors.tab_separator, Color::rgb(0x3a3d44));
+    assert_eq!(before.chrome.colors.outline_border, Color::rgb(0xffffff));
+    assert_eq!(
+        before.chrome.provenance["tab_separator"],
+        ColorProvenance::Authored
+    );
+
+    let exported = export_schemes(&catalog, &[(SchemeKind::Chrome, scheme.id.clone())]).unwrap();
+    let reparsed = parse_color_document(exported.as_bytes()).unwrap();
+    assert_eq!(reparsed.schemes, parsed.schemes);
+    let mut fresh = SchemeCatalog::default();
+    let installed = fresh
+        .install_batch(&reparsed.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
+    assert_eq!(
+        selected(&fresh, installed[0].clone(), Appearance::Dark)
+            .chrome
+            .colors,
+        before.chrome.colors
+    );
+}

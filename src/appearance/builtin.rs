@@ -176,6 +176,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             field_outline: 0x3b3e45,
             control_outline: 0x3b3e45,
             control_outline_strong: 0x4c5058,
+            tab_separator: 0x3b3e45,
             mark_outline: 0x727781,
             mark_outline_strong: 0x848a95,
             mark_track: 0x1e2024,
@@ -223,6 +224,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             field_outline: 0xced1d8,
             control_outline: 0xc8cbd3,
             control_outline_strong: 0xb3b7c0,
+            tab_separator: 0xc8cbd3,
             mark_outline: 0x838890,
             mark_outline_strong: 0x686e78,
             mark_track: 0xeceef1,
@@ -296,6 +298,12 @@ struct ChromePalette {
     field_outline: u32,
     control_outline: u32,
     control_outline_strong: u32,
+    /// The short hairline between two neighbouring inactive Tabs.
+    ///
+    /// It is authored apart from `separator` because a full-length divider disappears at this
+    /// length, and apart from `control_outline` because retuning an outlined action must not move
+    /// the Tab strip. It sits a visible step off both title-bar surfaces and well under the titles.
+    tab_separator: u32,
     /// Checkbox and switch outlines, which must survive a quiet separator.
     mark_outline: u32,
     mark_outline_strong: u32,
@@ -394,6 +402,7 @@ impl ChromePalette {
             tab_inactive_selected_border: Some(
                 Color::rgb(self.row_selected_rim).mix(Color::rgb(self.selected_inactive), 0.5),
             ),
+            tab_separator: opaque(self.tab_separator),
 
             primary_background: opaque(self.emphasis),
             primary_hover_background: opaque(self.emphasis_hover),

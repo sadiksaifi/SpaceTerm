@@ -170,7 +170,7 @@ macro_rules! chrome_color_fields {
             outline_border, outline_hover_border, outline_pressed_border, outline_disabled_border,
             tab_hover_background, tab_hover_foreground, tab_hover_icon, tab_active_icon, tab_inactive_icon, tab_inactive_selected_icon,
             tab_active_border, tab_active_hover_background, tab_active_hover_foreground, tab_active_hover_icon,
-            tab_inactive_selected_border
+            tab_inactive_selected_border, tab_separator
         }
     };
 }

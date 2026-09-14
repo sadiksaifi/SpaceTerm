@@ -692,6 +692,13 @@ pub(crate) fn compile_chrome(
         )
     );
     let tab_inactive_selected_border = resolve!(tab_inactive_selected_border, tab_active_border);
+    // The mark between two inactive Tabs is its own decision rather than a control outline or a
+    // full-length divider. Missing, it takes the inactive title a step back into the bar it rests
+    // on, so it follows the scheme's own title weight: seen as a short hairline, quieter than text.
+    let tab_separator = resolve!(
+        tab_separator,
+        tab_inactive_foreground.mix(title_bar_background.source_over(root_surface), 0.6)
+    );
     let link_text_pressed = resolve!(link_text_pressed, link_text_hover);
     let link_text_disabled = resolve!(link_text_disabled, text_disabled);
     let colors = ChromeColors {
@@ -921,6 +928,7 @@ pub(crate) fn compile_chrome(
         tab_active_hover_foreground,
         tab_active_hover_icon,
         tab_inactive_selected_border,
+        tab_separator,
     };
     CompiledChrome {
         readability: readability_diagnostics(&colors),
@@ -1247,6 +1255,102 @@ mod tests {
             preserved.provenance["tab_active_hover_icon"],
             ColorProvenance::Authored
         );
+    }
+
+    /// The Tab separator and an outlined control's ring are separate authorable decisions.
+    #[test]
+    fn tab_separator_is_its_own_role_independent_of_outlined_controls() {
+        let authored = builtin::chrome_definition(Appearance::Dark);
+        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default());
+        assert_eq!(
+            baseline.provenance["tab_separator"],
+            ColorProvenance::Authored
+        );
+
+        let outline = Color::rgb(0xff00ff);
+        let retuned_outline = compile_chrome(
+            Appearance::Dark,
+            &ChromeColorOverrides {
+                outline_border: Some(outline),
+                ..authored.clone()
+            },
+            &Default::default(),
+        );
+        assert_eq!(retuned_outline.colors.outline_border, outline);
+        assert_eq!(
+            retuned_outline.colors.tab_separator,
+            baseline.colors.tab_separator
+        );
+
+        let separator = Color::rgb(0x00ffff);
+        let retuned_separator = compile_chrome(
+            Appearance::Dark,
+            &authored,
+            &ChromeColorOverrides {
+                tab_separator: Some(separator),
+                ..Default::default()
+            },
+        );
+        assert_eq!(retuned_separator.colors.tab_separator, separator);
+        assert_eq!(
+            retuned_separator.provenance["tab_separator"],
+            ColorProvenance::Overridden
+        );
+        assert_eq!(
+            ChromeColors {
+                tab_separator: baseline.colors.tab_separator,
+                ..retuned_separator.colors
+            },
+            baseline.colors,
+            "retuning the Tab separator should move no other role"
+        );
+
+        // A sparse scheme that outlines its controls loudly still derives a quiet separator.
+        let sparse = ChromeColorOverrides {
+            background: Some(Color::rgb(0x101010)),
+            text: Some(Color::rgb(0xeeeeee)),
+            outline_border: Some(Color::rgb(0xffffff)),
+            ..Default::default()
+        };
+        let derived = compile_chrome(Appearance::Dark, &sparse, &Default::default());
+        assert_eq!(
+            derived.provenance["tab_separator"],
+            ColorProvenance::Derived
+        );
+        assert_ne!(derived.colors.tab_separator, derived.colors.outline_border);
+    }
+
+    /// A missing separator follows the scheme's own inactive title a step back into the bar, so it
+    /// is visible as a short hairline yet quieter than the titles it divides, whether the window is
+    /// focused or not.
+    #[test]
+    fn derived_tab_separator_is_visible_but_quiet_on_both_title_bar_surfaces() {
+        for (appearance, background, text) in [
+            (Appearance::Dark, 0x010203, 0xfefefe),
+            (Appearance::Dark, 0x141415, 0xcdcdcd),
+            (Appearance::Dark, 0x2d2a3e, 0xd8d4f0),
+            (Appearance::Light, 0xffffff, 0x000000),
+            (Appearance::Light, 0xf6f1e4, 0x3b3226),
+            (Appearance::Light, 0xdcdcdc, 0x202020),
+        ] {
+            let authored = ChromeColorOverrides {
+                background: Some(Color::rgb(background)),
+                text: Some(Color::rgb(text)),
+                ..Default::default()
+            };
+            let c = compile_chrome(appearance, &authored, &Default::default())
+                .colors
+                .opaque_presentation();
+            for bar in [c.title_bar_background, c.title_bar_inactive_background] {
+                let separator = c.tab_separator.source_over(bar).contrast_ratio(bar);
+                let title = c.tab_inactive_foreground.contrast_ratio(bar);
+                assert!(
+                    (1.4..=3.0).contains(&separator) && separator < title,
+                    "{appearance:?} {background:06x}/{text:06x}: separator {separator:.2} \
+                     against title {title:.2}"
+                );
+            }
+        }
     }
 
     #[test]

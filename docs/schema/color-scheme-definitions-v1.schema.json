@@ -259,7 +259,8 @@
           "tab_active_hover_background",
           "tab_active_hover_foreground",
           "tab_active_hover_icon",
-          "tab_inactive_selected_border"
+          "tab_inactive_selected_border",
+          "tab_separator"
         ]
       },
       "additionalProperties": {

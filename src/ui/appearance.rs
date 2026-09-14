@@ -112,10 +112,15 @@ impl ChromeAppearance {
             caption: prepared_font(&resolved.typography.caption),
             heading: prepared_font(&resolved.typography.heading),
             text_scale: resolved.typography.body.size / 13.0,
-            spacing_scale: match resolved.density {
-                ChromeDensity::Compact => 1.0,
-                ChromeDensity::Comfortable => 1.25,
-            },
+            spacing_scale: Self::density_spacing_scale(resolved.density),
+        }
+    }
+
+    /// The factor every density-scaled Chrome length is multiplied by.
+    pub(crate) fn density_spacing_scale(density: ChromeDensity) -> f32 {
+        match density {
+            ChromeDensity::Compact => 1.0,
+            ChromeDensity::Comfortable => 1.25,
         }
     }
     pub(crate) fn text_size(&self, baseline: f32) -> Pixels {
