@@ -40,11 +40,12 @@ use crate::appearance::{
     SchemeId, SchemeKind, SchemeSelection, TerminalFontFamily, builtin_fallback_scheme,
 };
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
-    ROW_INSET, SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
-    reset_button, section_header, text,
+    CARD_RADIUS, ROW_INSET, SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
+    gpui_color, reset_button, section_header, text,
 };
 use editor::{SaveStatus, SettingsEditor};
 
@@ -65,6 +66,60 @@ pub(crate) const SETTINGS_KEY_CONTEXT: &str = "Settings";
 const WINDOW_WIDTH: f32 = 880.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
+/// The strip under the window carrying the save status and the one application-wide action.
+const FOOTER_HEIGHT: f32 = 40.0;
+/// The height of one navigation entry and of the search field above it, so the sidebar runs on one
+/// rhythm from its first row to its last.
+const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
+/// The radius of the navigation chip and of the search field, and the air a focus ring keeps
+/// outside that chip.
+const NAVIGATION_CHIP_RADIUS: f32 = 6.0;
+const NAVIGATION_CHIP_RING_GAP: f32 = 2.0;
+
+/// The chip a navigation entry rests its hover and its current-section state on.
+///
+/// It fills the entry rather than insetting further: the sidebar's own padding and the space
+/// between entries are already the air around it, and a second inset would narrow the chip against
+/// the search field it sits under.
+fn navigation_chip(
+    selected: bool,
+    available: bool,
+    appearance: &ChromeAppearance,
+) -> SelectionChip {
+    SelectionChip::new(
+        ChipShape {
+            inset_x: px(0.0),
+            inset_y: px(0.0),
+            radius: appearance.spacing(NAVIGATION_CHIP_RADIUS),
+        },
+        navigation_chip_paint(selected, available, &appearance.colors),
+    )
+}
+
+fn navigation_chip_paint(
+    selected: bool,
+    available: bool,
+    colors: &crate::appearance::ChromeColors,
+) -> ChipPaint {
+    // Hover changes the fill. The selected rim stays neutral, while keyboard focus has its own
+    // outset ring; a hover rim at the chip edge would look like persistent keyboard focus.
+    if selected {
+        ChipPaint {
+            fill: Some(colors.row_selected_background),
+            rim: Some(colors.row_selected_border),
+            hover_fill: Some(colors.row_selected_hover_background),
+            hover_rim: None,
+        }
+    } else {
+        ChipPaint {
+            fill: Some(colors.row_background),
+            rim: None,
+            // A section the query emptied cannot be chosen, so nothing lights under the pointer.
+            hover_fill: available.then_some(colors.row_hover_background),
+            hover_rim: None,
+        }
+    }
+}
 
 /// The one Settings Window, so a second request activates the existing window.
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
@@ -285,7 +340,10 @@ pub(crate) struct SettingsWindow {
     terminal_schemes: RememberedSchemes,
     interchange_status: Option<SharedString>,
     focus_handle: FocusHandle,
-    section_focus: [FocusHandle; SettingsSectionId::ALL.len()],
+    /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
+    navigation_focus: FocusHandle,
+    /// Keyboard traversal enables the ring; pointer selection withdraws keyboard focus and the ring.
+    navigation_focus_visible: bool,
 }
 
 impl SettingsWindow {
@@ -306,12 +364,11 @@ impl SettingsWindow {
         // opens, rather than only after something inside it is clicked.
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
-        let section_focus = SettingsSectionId::ALL.map(|_| {
-            let focus = cx.focus_handle().tab_stop(true);
-            cx.on_focus(&focus, window, |_, _, cx| cx.notify()).detach();
-            cx.on_blur(&focus, window, |_, _, cx| cx.notify()).detach();
-            focus
-        });
+        let navigation_focus = cx.focus_handle().tab_stop(true);
+        cx.on_focus(&navigation_focus, window, |_, _, cx| cx.notify())
+            .detach();
+        cx.on_blur(&navigation_focus, window, |_, _, cx| cx.notify())
+            .detach();
         let search = cx.new(|cx| {
             TextInput::new(
                 "settings-search",
@@ -324,25 +381,42 @@ impl SettingsWindow {
             .variant(TextInputVariant::Bare)
             .return_behavior(TextInputReturnBehavior::Propagate)
             .escape_behavior(TextInputEscapeBehavior::Propagate)
+            .tab_behavior(spaceterm_ui::TextInputTabBehavior::Propagate)
             .input_length_limit(Some(128))
             .emit_programmatic_changes(true)
             .debug_selector("settings-search")
         });
-        cx.subscribe(&search, |settings, search, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::ValueChanged(_)) {
-                settings.query = SharedString::from(search.read(cx).value().to_owned());
-                settings.revealed = catalog::matching_rows(&settings.query).first().copied();
-                // Each section is its own view, so a query that the visible one cannot answer
-                // moves to the first section that can.
-                if settings.rows_for(settings.active_section).is_empty()
-                    && let Some(section) = settings.section_for_query()
-                {
-                    settings.active_section = section;
-                    settings.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        cx.subscribe_in(
+            &search,
+            window,
+            |settings, search, event: &TextInputEvent, window, cx| {
+                if matches!(
+                    event,
+                    TextInputEvent::TabForwardRequested | TextInputEvent::TabBackwardRequested
+                ) {
+                    settings.navigation_focus_visible = true;
+                    if matches!(event, TextInputEvent::TabForwardRequested) {
+                        window.focus_next();
+                    } else {
+                        window.focus_prev();
+                    }
+                    cx.notify();
                 }
-                cx.notify();
-            }
-        })
+                if matches!(event, TextInputEvent::ValueChanged(_)) {
+                    settings.query = SharedString::from(search.read(cx).value().to_owned());
+                    settings.revealed = catalog::matching_rows(&settings.query).first().copied();
+                    // Each section is its own view, so a query that the visible one cannot answer
+                    // moves to the first section that can.
+                    if settings.rows_for(settings.active_section).is_empty()
+                        && let Some(section) = settings.section_for_query()
+                    {
+                        settings.active_section = section;
+                        settings.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                    }
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("settings-scrollbar"));
         cx.subscribe(
@@ -389,7 +463,8 @@ impl SettingsWindow {
             terminal_schemes,
             interchange_status: None,
             focus_handle,
-            section_focus,
+            navigation_focus,
+            navigation_focus_visible: true,
         }
     }
 
@@ -566,11 +641,27 @@ impl Render for SettingsWindow {
         let appearance = crate::ui::appearance::chrome(cx).clone();
         self.sync_scrollbar(cx);
         let content = div()
+            .debug_selector(|| "settings-window-surface".to_owned())
             .key_context(SETTINGS_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::clear_search))
+            // Record unbound Tab before child key handlers. Search delegates its bound traversal
+            // action explicitly. Focus notifications must never decide input modality.
+            .capture_key_down(cx.listener(|settings, event: &gpui::KeyDownEvent, _, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab"
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && !modifiers.function
+                    && !settings.navigation_focus_visible
+                {
+                    settings.navigation_focus_visible = true;
+                    cx.notify();
+                }
+            }))
             .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 if event.keystroke.key != "tab"
@@ -613,48 +704,94 @@ impl Render for SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn navigation_has_visible_focus(&self, window: &Window) -> bool {
+        self.navigation_focus.is_focused(window) && self.navigation_focus_visible
+    }
+
+    /// Moves the navigation selection with the keyboard, skipping what the query emptied.
+    ///
+    /// The list activates as it moves, the way the Workspace sidebar does: each section is a view
+    /// rather than a destination to confirm, so a separate commit step would say nothing.
+    fn navigate_sections(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.navigation_focus.is_focused(window) || event.keystroke.modifiers.modified() {
+            return;
+        }
+        let available = self.navigable_sections();
+        let Some(current) = available
+            .iter()
+            .position(|section| *section == self.active_section)
+        else {
+            return;
+        };
+        let next = match event.keystroke.key.as_str() {
+            "up" => current.saturating_sub(1),
+            "down" => (current + 1).min(available.len() - 1),
+            "home" => 0,
+            "end" => available.len() - 1,
+            _ => return,
+        };
+        window.prevent_default();
+        cx.stop_propagation();
+        self.navigation_focus_visible = true;
+        if next != current {
+            self.reveal_section(available[next], cx);
+        }
+        cx.notify();
+    }
+
+    /// The sections the current query left something to present.
+    fn navigable_sections(&self) -> Vec<SettingsSectionId> {
+        let matching = catalog::matching_rows(&self.query);
+        SettingsSectionId::ALL
+            .into_iter()
+            .filter(|section| {
+                ROWS.iter()
+                    .any(|row| row.section == *section && matching.contains(&row.id))
+            })
+            .collect()
+    }
+
     fn render_sidebar(
         &mut self,
         appearance: &ChromeAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let matching = catalog::matching_rows(&self.query);
+        let available = self.navigable_sections();
+        let list_focused = self.navigation_has_visible_focus(window);
         let entries = SettingsSectionId::ALL
             .iter()
-            .zip(&self.section_focus)
-            .map(|(section, focus)| {
+            .map(|section| {
                 let section = *section;
-                let has_matches = ROWS
-                    .iter()
-                    .any(|row| row.section == section && matching.contains(&row.id));
+                let has_matches = available.contains(&section);
                 let selected = self.active_section == section && has_matches;
-                let focused = focus.is_focused(window) && has_matches;
                 let owner = cx.weak_entity();
-                let keyboard_owner = owner.clone();
-                let pointer_focus = focus.clone();
                 let row_group = format!("settings-row-state-{}", section.selector());
                 let colors = &appearance.colors;
-                let (background, foreground, icon, hover_background, hover_foreground, hover_icon) =
-                    if selected {
-                        (
-                            colors.row_selected_background,
-                            colors.row_selected_foreground,
-                            colors.row_selected_icon,
-                            colors.row_selected_hover_background,
-                            colors.row_selected_hover_foreground,
-                            colors.row_selected_hover_icon,
-                        )
-                    } else {
-                        (
-                            colors.row_background,
-                            colors.row_foreground,
-                            colors.row_icon,
-                            colors.row_hover_background,
-                            colors.row_hover_foreground,
-                            colors.row_hover_icon,
-                        )
-                    };
+                let (foreground, icon, hover_foreground, hover_icon) = if selected {
+                    (
+                        colors.row_selected_foreground,
+                        colors.row_selected_icon,
+                        colors.row_selected_hover_foreground,
+                        colors.row_selected_hover_icon,
+                    )
+                } else {
+                    (
+                        colors.row_foreground,
+                        colors.row_icon,
+                        colors.row_hover_foreground,
+                        colors.row_hover_icon,
+                    )
+                };
+                // The same chip the Workspace sidebar rests its current row on, so the two
+                // navigation surfaces read as one material rather than as two conventions.
+                let chip = navigation_chip(selected, has_matches, appearance);
+                let chip_selector = format!("settings-navigation-chip-{}", section.selector());
                 div()
                     .id(SharedString::from(format!(
                         "settings-navigation-{}",
@@ -663,57 +800,39 @@ impl SettingsWindow {
                     .debug_selector(move || format!("settings-navigation-{}", section.selector()))
                     .relative()
                     .group(row_group.clone())
-                    .bg(gpui_color(background))
                     .text_color(gpui_color(foreground))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(appearance.spacing(7.0))
                     .w_full()
-                    .h(appearance.height(28.0, 12.0))
+                    .h(appearance.height(NAVIGATION_ROW_HEIGHT, text::BODY))
                     .px(appearance.spacing(8.0))
-                    .rounded(px(6.0))
                     .cursor_default()
                     .when(selected, |entry| entry.font(appearance.emphasis.clone()))
+                    .child(chip.render(chip_selector, &row_group))
                     .when(has_matches, |entry| {
                         entry
-                            .hover(|entry| {
-                                entry
-                                    .bg(gpui_color(hover_background))
-                                    .text_color(gpui_color(hover_foreground))
-                            })
-                            .track_focus(focus)
-                            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                                if event.keystroke.modifiers.modified()
-                                    || !matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                {
-                                    return;
-                                }
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                let _ = keyboard_owner.update(cx, |settings, cx| {
-                                    settings.reveal_section(section, cx);
-                                });
-                            })
+                            .hover(move |entry| entry.text_color(gpui_color(hover_foreground)))
                             .on_click(move |_, window, cx| {
-                                pointer_focus.focus(window);
                                 let _ = owner.update(cx, |settings, cx| {
-                                    settings.reveal_section(section, cx)
+                                    // A completed pointer selection is authoritative even if
+                                    // native focus moved between the press and release.
+                                    settings.navigation_focus_visible = false;
+                                    settings.focus_handle.focus(window);
+                                    settings.reveal_section(section, cx);
                                 });
                             })
                     })
                     .when(!has_matches, |entry| {
                         entry.text_color(gpui_color(appearance.colors.text_disabled))
                     })
-                    .when(focused, |entry| {
-                        entry.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(gpui_color(appearance.colors.border_focused)),
-                        )
+                    .when(selected && list_focused, |entry| {
+                        entry.child(chip.ring(
+                            appearance.spacing(NAVIGATION_CHIP_RING_GAP),
+                            appearance.colors.sidebar_focus,
+                            "settings-navigation-focus-indicator",
+                        ))
                     })
                     .child(
                         div()
@@ -747,33 +866,44 @@ impl SettingsWindow {
                     )
             })
             .collect::<Vec<_>>();
-        let owner = cx.weak_entity();
         div()
             .flex()
             .flex_col()
             .flex_none()
             .w(appearance.text_size(SIDEBAR_WIDTH))
             .h_full()
-            .gap(appearance.spacing(4.0))
             .p(appearance.spacing(10.0))
             .bg(gpui_color(appearance.colors.panel_background))
-            .border_r_1()
-            .border_color(gpui_color(appearance.colors.border))
             .child(self.render_search_field(appearance, cx))
-            .children(entries)
-            .child(div().flex_1())
-            .child(action_button(
-                "settings-reset-all",
-                "Reset All…",
-                self.editor.editable(),
-                {
-                    move |window, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.confirm_reset_all(window, cx);
-                        });
-                    }
-                },
-            ))
+            .child(
+                div()
+                    .id("settings-navigation")
+                    .debug_selector(|| "settings-navigation".to_owned())
+                    .when(!available.is_empty(), |navigation| {
+                        navigation.track_focus(&self.navigation_focus)
+                    })
+                    // GPUI track_focus automatically focuses on mouse-down. Suppress that before
+                    // its bubble listener runs: pointer selection does not enter keyboard navigation.
+                    .capture_any_mouse_down(cx.listener(
+                        |settings, event: &gpui::MouseDownEvent, window, cx| {
+                            if event.button != gpui::MouseButton::Left {
+                                return;
+                            }
+                            window.prevent_default();
+                            settings.navigation_focus_visible = false;
+                            settings.focus_handle.focus(window);
+                            cx.notify();
+                        },
+                    ))
+                    .on_key_down(cx.listener(|settings, event, window, cx| {
+                        settings.navigate_sections(event, window, cx);
+                    }))
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap(appearance.spacing(2.0))
+                    .children(entries),
+            )
             .into_any_element()
     }
 
@@ -796,17 +926,17 @@ impl SettingsWindow {
         .w_full()
         .gap(appearance.spacing(7.0))
         .px(appearance.spacing(8.0))
-        .h(appearance.height(28.0, 12.0))
+        .h(appearance.height(NAVIGATION_ROW_HEIGHT, text::BODY))
         // The search field belongs to the window, not to the navigation list under it, so the
         // break between them is wider than the spacing inside the list.
         .mb(appearance.spacing(12.0))
-        .rounded(px(6.0))
+        .rounded(appearance.spacing(NAVIGATION_CHIP_RADIUS))
         // The same glyph size the navigation icons take, so one icon column and one text
         // column run the height of the sidebar.
         .child(div().flex_none().child(Icon::new(
             IconName::Search,
             appearance.text_size(13.0),
-            gpui_color(appearance.colors.icon_muted),
+            gpui_color(appearance.colors.input_placeholder),
         )))
         .child(div().min_w_0().flex_1().child(self.search.clone()))
         .when(!self.query.is_empty(), |field| {
@@ -815,6 +945,10 @@ impl SettingsWindow {
                     Icon::new(IconName::X, px(10.0), foreground).into_any_element()
                 })
                 .variant(spaceterm_ui::ButtonVariant::Ghost)
+                .contextual_style(
+                    controls::field_action_style(&appearance.colors),
+                    gpui_color(appearance.colors.input_focused_border),
+                )
                 .size(spaceterm_ui::ButtonSize::Compact)
                 .tab_stop(true)
                 .debug_selector("settings-search-clear")
@@ -900,7 +1034,7 @@ impl SettingsWindow {
                 .into_any_element();
         }
         // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
-        // box. A filtered view groups whatever survived the filter the same way.
+        // card. A filtered view groups whatever survived the filter the same way.
         let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
         for row in rows {
             let title = row.descriptor().group;
@@ -941,9 +1075,9 @@ impl SettingsWindow {
 
 /// The space between the detail pane's edge and the text inside it.
 ///
-/// Rows carry part of it themselves so the fill on a revealed row clears the text, and the column
+/// Rows carry part of it themselves so a card's own edge clears the text it holds, and the column
 /// gives back the rest. The two together are what a reader sees as the content's left edge.
-const CONTENT_GUTTER: f32 = 20.0;
+const CONTENT_GUTTER: f32 = 26.0;
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -965,11 +1099,24 @@ impl SettingsWindow {
     ) -> AnyElement {
         let _ = window;
         let descriptor = row.descriptor();
-        let control = self.render_control(row, appearance, cx);
+        let highlighted = !self.query.is_empty() && self.revealed == Some(row);
+        // App-owned copy inside a full-width row shares the row's surface. Reusable controls
+        // retain their own complete paints through the installed control catalog.
+        let mut highlighted_appearance;
+        let content_appearance = if highlighted {
+            highlighted_appearance = appearance.clone();
+            highlighted_appearance.colors.text = appearance.colors.row_selected_foreground;
+            highlighted_appearance.colors.text_secondary = appearance.colors.row_selected_secondary;
+            highlighted_appearance.colors.text_muted = appearance.colors.row_selected_secondary;
+            &highlighted_appearance
+        } else {
+            appearance
+        };
+        let control = self.render_control(row, content_appearance, cx);
         let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
             .layout(row_layout(row))
             .reset(self.row_reset(row, cx))
-            .highlighted(!self.query.is_empty() && self.revealed == Some(row));
+            .highlighted(highlighted);
         if let Some(description) = row_description(row) {
             rendered = rendered.description(description);
         }
@@ -1662,9 +1809,14 @@ impl SettingsWindow {
                 .flex()
                 .flex_row()
                 .items_start()
-                .w_full()
                 .gap(appearance.spacing(8.0))
+                // The same inset notice the Color Schemes page carries, at the window's own scope
+                // rather than the page's. A strip ruled off across the pane would be the one square
+                // edge left on a surface made of cards.
+                .mx(appearance.spacing(CONTENT_GUTTER - ROW_INSET))
+                .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
+                .rounded(appearance.spacing(CARD_RADIUS))
                 .bg(gpui_color(if critical {
                     appearance.colors.warning_background
                 } else {
@@ -1675,7 +1827,7 @@ impl SettingsWindow {
                 } else {
                     appearance.colors.error
                 }))
-                .border_b_1()
+                .border_1()
                 .border_color(gpui_color(if critical {
                     appearance.colors.warning_border
                 } else {
@@ -1722,35 +1874,49 @@ impl SettingsWindow {
         )
     }
 
+    /// The window's own strip: what the last edit did, and the one action that undoes all of them.
+    ///
+    /// Reset All belongs here rather than under the navigation list, which leaves the sidebar to
+    /// navigation alone and puts an application-wide action on the application-wide strip.
     fn render_footer(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let _ = cx;
         let status = self.editor.status();
+        let owner = cx.weak_entity();
         div()
+            .debug_selector(|| "settings-footer".to_owned())
             .flex()
             .flex_row()
             .items_center()
-            .justify_end()
+            .justify_between()
+            .gap(appearance.spacing(12.0))
             .w_full()
             .flex_none()
-            .h(appearance.height(28.0, 11.0))
-            // The status ends on the content column's right edge rather than short of it.
+            .h(appearance.height(FOOTER_HEIGHT, text::BODY))
+            // The strip ends on the content column's edges rather than short of them.
             .px(appearance.spacing(CONTENT_GUTTER))
-            .bg(gpui_color(appearance.colors.panel_background))
             .border_t_1()
             .border_color(gpui_color(appearance.colors.border))
+            .child(action_button(
+                "settings-reset-all",
+                "Reset All…",
+                self.editor.editable(),
+                move |window, cx| {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.confirm_reset_all(window, cx);
+                    });
+                },
+            ))
             .child(
                 div()
                     .debug_selector(|| "settings-save-status".to_owned())
+                    .min_w_0()
+                    .truncate()
                     .text_size(appearance.text_size(text::SMALL))
-                    .text_color(gpui_color(match status {
-                        SaveStatus::Saved | SaveStatus::Saving => appearance.colors.text_muted,
-                        SaveStatus::Failed(_) => appearance.colors.error,
-                        SaveStatus::Unavailable(_) => appearance.colors.warning,
-                    }))
+                    // The recovery banner owns semantic emphasis on its paired surface.
+                    .text_color(gpui_color(appearance.colors.text_muted))
                     .child(status.message()),
             )
             .into_any_element()

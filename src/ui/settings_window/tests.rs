@@ -783,6 +783,124 @@ fn the_scheme_library_warns_only_when_something_could_not_be_resolved(cx: &mut T
 
 // Layout ---------------------------------------------------------------------------------------
 
+#[gpui::test]
+fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
+    cx: &mut TestAppContext,
+) {
+    use crate::appearance::{ChromeColors, Color};
+    use gpui::prelude::*;
+    use gpui::{DivInspectorState, ScrollDelta, ScrollWheelEvent, TouchPhase, div, point};
+    use std::cell::RefCell;
+
+    let (settings, harness, cx) = open_settings(cx);
+    harness.storage.fail_writes(Some(StorageError::Unavailable));
+    click("settings-chrome-density-comfortable", cx);
+    settle(cx);
+    assert!(matches!(status(&settings, cx), SaveStatus::Failed(_)));
+    let colors = ChromeColors {
+        background: Color::rgb(0x101010),
+        text: Color::rgb(0xfefefe),
+        text_muted: Color::rgb(0xdedede),
+        panel_background: Color::rgb(0xffffff),
+        elevated_surface_background: Color::rgb(0xffffff),
+        row_background: Color::rgb(0x111122),
+        row_foreground: Color::rgb(0xeeeeff),
+        row_selected_background: Color::rgb(0xffffdd),
+        row_selected_foreground: Color::rgb(0x111111),
+        row_selected_secondary: Color::rgb(0x333333),
+        info_background: Color::rgb(0xfefefe),
+        error: Color::rgb(0x101010),
+        error_background: Color::rgb(0xffffff),
+        warning: Color::rgb(0x101010),
+        warning_background: Color::rgb(0xffffff),
+        ..ChromeColors::default()
+    };
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let observed_styles = observed.clone();
+    cx.update(|window, cx| {
+        let mut appearance = crate::ui::appearance::chrome(cx).clone();
+        appearance.colors = colors.clone();
+        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            observed_styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    set_query(&settings, "line height", cx);
+    for (selector, expected_background, expected_foreground) in [
+        ("settings-window-surface", Some(colors.background), None),
+        (
+            "settings-navigation-chip-settings-section-interface",
+            Some(colors.row_background),
+            None,
+        ),
+        (
+            "settings-section-terminal-group-font-card",
+            Some(colors.background),
+            None,
+        ),
+        (
+            "settings-row-terminal-line-height",
+            Some(colors.row_selected_background),
+            None,
+        ),
+        (
+            "settings-row-terminal-line-height-label",
+            None,
+            Some(colors.row_selected_foreground),
+        ),
+        ("settings-save-status", None, Some(colors.text_muted)),
+    ] {
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"));
+        let position = bounds.center();
+        observed.borrow_mut().clear();
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.run_until_parked();
+        let matches = || {
+            observed.borrow().iter().any(|state| {
+                state.bounds == bounds
+                    && expected_background.is_none_or(|color| {
+                        state.base_style.background
+                            == Some(super::controls::gpui_color(color).into())
+                    })
+                    && expected_foreground.is_none_or(|color| {
+                        state.base_style.text.as_ref().and_then(|text| text.color)
+                            == Some(super::controls::gpui_color(color).into())
+                    })
+            })
+        };
+        for _ in 0..24 {
+            if matches() {
+                break;
+            }
+            cx.simulate_event(ScrollWheelEvent {
+                position,
+                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        }
+        assert!(
+            matches(),
+            "{selector} must render its complete authored paint pair"
+        );
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+    }
+}
+
 /// Every row belongs to a titled box, and every box frames the rows the catalog put in it.
 ///
 /// Grouping is the structure the page is read by, so a row that escapes its box, or a box drawn
@@ -816,6 +934,75 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
                 "{group} should carry its title"
             );
         }
+    }
+}
+
+/// A run of rows rests on a card that spans the content column and clears the text inside it.
+///
+/// The card is what carries grouping now that nothing is ruled off, so it has to be a shape a
+/// reader can see: wider than the text it holds, narrower than the pane it sits in, and separated
+/// from the next card by more than its own rows are separated from each other.
+#[gpui::test]
+fn a_group_rests_on_a_card_that_spans_the_column_and_clears_its_rows(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let pane = cx
+        .debug_bounds("settings-section-terminal")
+        .expect("the section should render");
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let mut cards: Vec<(String, gpui::Bounds<gpui::Pixels>)> = Vec::new();
+    for row in &rows {
+        let group = super::group_selector(SettingsSectionId::Terminal, row.descriptor().group);
+        let card = cx
+            .debug_bounds(leaked_owned(format!("{group}-card")))
+            .unwrap_or_else(|| panic!("{group} should rest on a card"));
+        let label = cx
+            .debug_bounds(leaked_owned(format!("{}-label", row.descriptor().selector)))
+            .unwrap_or_else(|| panic!("{row:?} should carry a label"));
+
+        assert!(
+            card.left() < label.left() && card.right() > label.right(),
+            "{group} should clear the text it holds, got {card:?} around {label:?}"
+        );
+        assert!(
+            card.left() >= pane.left() && card.right() <= pane.right(),
+            "{group} should stay inside the content column, got {card:?} in {pane:?}"
+        );
+        if cards.last().is_none_or(|(last, _)| *last != group) {
+            cards.push((group, card));
+        }
+    }
+
+    assert!(
+        cards.len() > 1,
+        "the Terminal section should present more than one card"
+    );
+    let widest_row_gap = rows
+        .windows(2)
+        .filter(|pair| pair[0].descriptor().group == pair[1].descriptor().group)
+        .map(|pair| {
+            let top = cx
+                .debug_bounds(leaked(pair[0].descriptor().selector))
+                .expect("row bounds");
+            let bottom = cx
+                .debug_bounds(leaked(pair[1].descriptor().selector))
+                .expect("row bounds");
+            bottom.top() - top.bottom()
+        })
+        .fold(px(0.0), gpui::Pixels::max);
+    for pair in cards.windows(2) {
+        let gap = pair[1].1.top() - pair[0].1.bottom();
+        assert!(
+            gap > widest_row_gap,
+            "cards should separate more than the rows inside one do, got {gap:?} against \
+             {widest_row_gap:?}"
+        );
+        assert_eq!(
+            pair[0].1.left(),
+            pair[1].1.left(),
+            "every card should share one left edge"
+        );
     }
 }
 

@@ -18,7 +18,7 @@ use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
 use super::controls::{
-    ROW_INSET, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
+    CARD_RADIUS, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
 };
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
 
@@ -43,8 +43,8 @@ enum RemovalChoice {
 impl SettingsWindow {
     /// One surface's installed schemes.
     ///
-    /// The group's own title names the surface, so the list adds no heading of its own: it is a
-    /// run of rows separated by hairlines, like every other row on every other page.
+    /// The group's own title names the surface, so the list adds no heading of its own: it is a run
+    /// of rows on the group's card, like every other row on every other page.
     pub(super) fn render_installed_schemes(
         &mut self,
         kind: SchemeKind,
@@ -91,9 +91,9 @@ impl SettingsWindow {
                 .flex_row()
                 .items_start()
                 .gap(appearance.spacing(8.0))
-                .mx(appearance.spacing(ROW_INSET))
                 .p(appearance.spacing(10.0))
-                .rounded(px(8.0))
+                // The notice spans the column the cards under it span, so the page has one edge.
+                .rounded(appearance.spacing(CARD_RADIUS))
                 .bg(gpui_color(appearance.colors.warning_background))
                 .border_1()
                 .border_color(gpui_color(appearance.colors.warning_border))

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
@@ -70,8 +71,18 @@ const TAB_BAR_DIVIDER_SIZE: f32 = 1.0;
 const TAB_ITEM_WIDTH: f32 = 132.0;
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
+const TAB_ITEM_LEFT_PADDING: f32 = 12.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 6.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
+/// The inset, radius, and focus gap of the chip carrying one Tab's material.
+///
+/// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
+/// paint moves inward. The vertical inset is the larger one, because that is the air that turns a
+/// full-height strip into a row of shapes resting inside the title bar, and it leaves the seam
+/// under the bar free for the one divider that still describes real structure.
+const TAB_CHIP_INSET_X: f32 = 3.0;
+const TAB_CHIP_INSET_Y: f32 = 4.0;
+const TAB_CHIP_RADIUS: f32 = 7.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
@@ -86,7 +97,6 @@ struct TabChromePresentation {
     hover_background: Color,
     hover_foreground: Color,
     hover_icon: Color,
-    active_tab_underline: Color,
     divider: Color,
 }
 
@@ -105,7 +115,6 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         } else {
@@ -121,18 +130,41 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         }
     }
 
-    fn tab_background(&self, active: bool) -> Color {
-        if active {
-            self.active_tab_background
-        } else {
-            self.inactive_tab_background
-        }
+    /// The material one Tab rests on, as an inset chip within the title-bar surface.
+    ///
+    /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
+    /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
+    /// title bar itself, which leaves an inactive Tab as text on the bar and the Active Tab as the
+    /// one shape on it.
+    fn tab_chip(
+        &self,
+        active: bool,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> SelectionChip {
+        SelectionChip::new(
+            ChipShape {
+                inset_x: appearance.spacing(TAB_CHIP_INSET_X),
+                inset_y: appearance.spacing(TAB_CHIP_INSET_Y),
+                radius: appearance.spacing(TAB_CHIP_RADIUS),
+            },
+            ChipPaint {
+                fill: Some(if active {
+                    self.active_tab_background
+                } else {
+                    self.inactive_tab_background
+                }),
+                // Tabs sit side by side, so a rim on each would rebuild the row of boxes the chip
+                // replaced. The fill carries the whole state.
+                rim: None,
+                hover_fill: Some(self.tab_hover_paint(active).0),
+                hover_rim: None,
+            },
+        )
     }
 
     fn tab_foreground(&self, active: bool) -> Color {
@@ -140,6 +172,15 @@ impl TabChromePresentation {
             self.active_tab_foreground
         } else {
             self.inactive_tab_foreground
+        }
+    }
+
+    /// The selected chip remains the selection indicator while the pointer is over it.
+    fn tab_hover_paint(&self, active: bool) -> (Color, Color) {
+        if active {
+            (self.active_tab_background, self.active_tab_foreground)
+        } else {
+            (self.hover_background, self.hover_foreground)
         }
     }
 
@@ -1061,13 +1102,10 @@ impl TabManager {
         let release_manager = manager.clone();
         let click_manager = manager.clone();
         let close_manager = manager;
-        let background = presentation.tab_background(active);
+        let chip = presentation.tab_chip(active, appearance);
         let foreground = presentation.tab_foreground(active);
         let control_style = presentation.control_style(active, &appearance.colors);
-        let hover_background = presentation.hover_background;
-        let hover_foreground = presentation.hover_foreground;
-        let active_tab_underline = presentation.active_tab_underline;
-        let divider = presentation.divider;
+        let hover_foreground = presentation.tab_hover_paint(active).1;
         let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
         let tab_group = format!("tab-item-{}", tab_id.get());
         let item = div()
@@ -1086,20 +1124,18 @@ impl TabManager {
             .w(appearance.spacing(TAB_ITEM_WIDTH))
             .min_w(appearance.spacing(TAB_ITEM_MINIMUM_WIDTH))
             .max_w(appearance.spacing(TAB_ITEM_MAXIMUM_WIDTH))
-            .pl(appearance.spacing(12.0))
+            .pl(appearance.spacing(TAB_ITEM_LEFT_PADDING))
             .pr(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
             .flex()
             .items_center()
             .cursor_pointer()
             .block_mouse_except_scroll()
-            .bg(gpui_color(background))
             .font(appearance.emphasis.clone())
             .text_size(appearance.text_size(12.0))
             .text_color(gpui_color(foreground))
-            .hover(move |item| {
-                item.bg(gpui_color(hover_background))
-                    .text_color(gpui_color(hover_foreground))
-            })
+            // Content follows the chip's paired hover paint, preserving selected identity.
+            .hover(move |item| item.text_color(gpui_color(hover_foreground)))
+            .child(chip.render(format!("tab-item-{}-chip", tab_id.get()), &tab_group))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1162,42 +1198,7 @@ impl TabManager {
                             });
                         }),
                     ),
-            )
-            .child(
-                div()
-                    .id(("tab-item-divider", tab_id.get()))
-                    .debug_selector(move || format!("tab-item-{}-divider", tab_id.get()))
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(divider)),
-            )
-            .child(
-                div()
-                    .id(("tab-item-bottom-divider", tab_id.get()))
-                    .debug_selector(move || format!("tab-item-{}-bottom-divider", tab_id.get()))
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(divider)),
-            )
-            .when(active, |item| {
-                item.child(
-                    div()
-                        .id(("tab-item-underline", tab_id.get()))
-                        .debug_selector(move || format!("tab-item-{}-underline", tab_id.get()))
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(TAB_BAR_DIVIDER_SIZE))
-                        .bg(gpui_color(active_tab_underline)),
-                )
-            });
+            );
 
         item.into_any_element()
     }
@@ -1446,7 +1447,6 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         );
@@ -1471,10 +1471,49 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                active_tab_underline: colors.navigation_selection,
                 divider: colors.border,
             }
         );
+    }
+
+    #[test]
+    fn selected_tab_hover_preserves_its_paired_paint_in_both_window_states() {
+        let colors = ChromeColors {
+            tab_active_background: Color::rgb(0x112233),
+            tab_active_foreground: Color::rgb(0xddeeff),
+            tab_inactive_selected_background: Color::rgb(0x334455),
+            tab_inactive_selected_foreground: Color::rgb(0xbbccdd),
+            tab_hover_background: Color::rgb(0x556677),
+            tab_hover_foreground: Color::rgb(0x99aabb),
+            tab_hover_icon: Color::rgb(0x778899),
+            ..ChromeColors::default()
+        };
+
+        for window_active in [true, false] {
+            let presentation = TabChromePresentation::resolve(window_active, &colors);
+            let selected = if window_active {
+                (colors.tab_active_background, colors.tab_active_foreground)
+            } else {
+                (
+                    colors.tab_inactive_selected_background,
+                    colors.tab_inactive_selected_foreground,
+                )
+            };
+            assert_eq!(presentation.tab_hover_paint(true), selected);
+            assert_eq!(
+                presentation.tab_hover_paint(false),
+                (colors.tab_hover_background, colors.tab_hover_foreground),
+            );
+            let close = presentation.control_style(true, &colors);
+            assert_eq!(
+                close.hovered().background(),
+                gpui_color(colors.tab_hover_background)
+            );
+            assert_eq!(
+                close.hovered().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+        }
     }
 
     #[test]
@@ -2080,10 +2119,14 @@ mod tests {
         assert_eq!(records.commands().len(), commands_before);
     }
 
+    /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
+    ///
+    /// The chip is what carries that reading, and it only works while it keeps air on every side:
+    /// against its own item, against the chip beside it, and against the one seam still drawn under
+    /// the bar. The item itself keeps the full height of the bar, because the inset is paint and
+    /// must never shrink what a pointer can hit.
     #[gpui::test]
-    fn tab_bar_should_keep_dim_dividers_beneath_every_item_and_accent_the_active_tab(
-        cx: &mut TestAppContext,
-    ) {
+    fn every_tab_should_float_as_an_inset_chip_over_one_structural_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
@@ -2093,53 +2136,60 @@ mod tests {
         let divider = cx
             .debug_bounds("tab-bar-divider")
             .expect("the Tab bar divider was not rendered");
-        let underline = cx
-            .debug_bounds("tab-item-2-underline")
-            .expect("the Active Tab underline was not rendered");
-        let inactive_item = cx
-            .debug_bounds("tab-item-1-inactive")
-            .expect("the inactive Tab item was not rendered");
         let active_item = cx
             .debug_bounds("tab-item-2-active")
             .expect("the Active Tab item was not rendered");
-        let item_divider = cx
-            .debug_bounds("tab-item-1-divider")
-            .expect("the Tab item divider was not rendered");
-        let inactive_bottom_divider = cx
-            .debug_bounds("tab-item-1-bottom-divider")
-            .expect("the inactive Tab bottom divider was not rendered");
-        let active_bottom_divider = cx
-            .debug_bounds("tab-item-2-bottom-divider")
-            .expect("the Active Tab bottom divider was not rendered");
+        let inactive_chip = cx
+            .debug_bounds("tab-item-1-chip")
+            .expect("the inactive Tab chip was not rendered");
+        let active_chip = cx
+            .debug_bounds("tab-item-2-chip")
+            .expect("the Active Tab chip was not rendered");
 
         assert_eq!(
-            (
-                bar.size.height,
-                divider.size.height,
-                underline.size.height,
-                divider.origin.y + divider.size.height,
-                item_divider.size.width,
-                item_divider.size.height,
-                item_divider.origin.x + item_divider.size.width,
-                inactive_bottom_divider.origin.y,
-                inactive_bottom_divider.size,
-                active_bottom_divider.origin.y,
-                active_bottom_divider.size,
-            ),
-            (
-                px(TAB_BAR_HEIGHT),
-                px(TAB_BAR_DIVIDER_SIZE),
-                px(TAB_BAR_DIVIDER_SIZE),
-                underline.origin.y + underline.size.height,
-                px(TAB_BAR_DIVIDER_SIZE),
-                inactive_item.size.height,
-                inactive_item.origin.x + inactive_item.size.width,
-                divider.origin.y,
-                gpui::size(inactive_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
-                divider.origin.y,
-                gpui::size(active_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
-            )
+            (active_item.size.height, bar.size.height),
+            (px(TAB_BAR_HEIGHT), px(TAB_BAR_HEIGHT)),
+            "a Tab should keep the full height of the bar as its hit target"
         );
+        assert_eq!(
+            active_chip,
+            gpui::bounds(
+                gpui::point(
+                    active_item.origin.x + px(TAB_CHIP_INSET_X),
+                    active_item.origin.y + px(TAB_CHIP_INSET_Y),
+                ),
+                gpui::size(
+                    active_item.size.width - px(TAB_CHIP_INSET_X * 2.0),
+                    active_item.size.height - px(TAB_CHIP_INSET_Y * 2.0),
+                ),
+            ),
+            "the Active Tab material should float inside its item"
+        );
+        assert_eq!(
+            active_chip.left() - inactive_chip.right(),
+            px(TAB_CHIP_INSET_X * 2.0),
+            "neighbouring Tabs should leave the bar visible between them"
+        );
+        assert!(
+            active_chip.bottom() < divider.origin.y,
+            "the Active Tab should clear the seam under the bar, got {active_chip:?} against \
+             {divider:?}"
+        );
+        assert_eq!(
+            (divider.size.height, divider.size.width),
+            (px(TAB_BAR_DIVIDER_SIZE), bar.size.width),
+            "the one seam under the bar should run its whole width"
+        );
+        for stale in [
+            "tab-item-1-divider",
+            "tab-item-1-bottom-divider",
+            "tab-item-2-underline",
+        ] {
+            assert!(
+                cx.debug_bounds(stale).is_none(),
+                "{stale} should no longer be drawn beside the chip"
+            );
+        }
     }
 
     #[gpui::test]

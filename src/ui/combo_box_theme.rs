@@ -40,6 +40,42 @@ fn gpui_color(color: Color) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_colors_should_not_replace_only_the_combo_box_surface() {
+        let popup = ChromeColors {
+            elevated_surface_background: Color::rgb(0x101010),
+            border: Color::rgb(0x808080),
+            text: Color::rgb(0xffffff),
+            text_muted: Color::rgb(0xcccccc),
+            text_disabled: Color::rgb(0x777777),
+            input_background: Color::rgb(0xffffff),
+            input_text: Color::rgb(0x000000),
+            input_border: Color::rgb(0x0000ff),
+            ..ChromeColors::default()
+        };
+        let changed_fields = ChromeColors {
+            input_background: Color::rgb(0xff00ff),
+            input_text: Color::rgb(0x003300),
+            input_placeholder: Color::rgb(0x005500),
+            input_border: Color::rgb(0x00ff00),
+            input_focused_border: Color::rgb(0xffff00),
+            input_disabled_background: Color::rgb(0x55ffff),
+            ..popup.clone()
+        };
+
+        // The bezel retains its existing popup paint contract. Borrowing only the white input
+        // fill would put the popup's white label on white while leaving other states unrelated.
+        assert_eq!(theme(&popup), theme(&changed_fields));
+        assert_ne!(
+            theme(&popup),
+            theme(&ChromeColors {
+                elevated_surface_background: Color::rgb(0x202020),
+                ..popup
+            })
+        );
+    }
+
     #[test]
     fn custom_chrome_row_icons_are_independent_from_trigger_icons() {
         let colors = ChromeColors::default();

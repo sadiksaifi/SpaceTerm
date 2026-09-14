@@ -94,9 +94,11 @@ impl FieldFrameTheme {
 
 /// Creates the shared field frame while leaving geometry and children with its caller.
 ///
-/// Attach the editor's focus handle; the frame follows descendant focus automatically. The editor
-/// continues to own editing, enabled state, content, and input-method composition. Callers must keep
-/// its enabled state synchronized with `state`.
+/// Attach the handle the editor itself takes focus with, because that is the handle the frame
+/// decorates. A frame given an enclosing handle instead would report focus for everything inside
+/// that scope: a dialog that focuses its own root would light every field it contains as though the
+/// reader were typing in all of them. The editor continues to own editing, enabled state, content,
+/// and input-method composition. Callers must keep its enabled state synchronized with `state`.
 pub fn field_frame(
     id: impl Into<ElementId>,
     focus: &FocusHandle,
@@ -124,7 +126,7 @@ pub fn field_surface(id: impl Into<ElementId>, state: FieldState, cx: &App) -> S
             frame.shadow(vec![focus_shadow(theme)])
         })
         .when(!state.disabled, |frame| {
-            frame.in_focus(move |style| {
+            frame.focus(move |style| {
                 let (_, border) = theme.paint(state, true);
                 let style = style.border_color(border);
                 if state.invalid {

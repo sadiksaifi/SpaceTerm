@@ -160,7 +160,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             hover: 0x26282d,
             pressed: 0x2e3036,
             selected: 0x393c43,
-            selected_inactive: 0x17181a,
+            selected_inactive: 0x2c2e34,
             row_selected: 0x3d4046,
             row_selected_rim: 0x4f535b,
             row_selected_text: 0xf1f2f5,
@@ -207,7 +207,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             hover: 0xe7e9ed,
             pressed: 0xd8dbe2,
             selected: 0xd0d4dc,
-            selected_inactive: 0xf9fafb,
+            selected_inactive: 0xe4e6ea,
             row_selected: 0xd6d9df,
             row_selected_rim: 0xc2c6cf,
             row_selected_text: 0x15171a,
@@ -251,19 +251,22 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
 
 /// The authored seeds of one built-in Chrome appearance, named by the job each value does.
 struct ChromePalette {
-    /// Window root, and the surface an active Tab merges into.
+    /// Window root: the surface a Workspace's Pane Layout rests on.
     root: u32,
-    /// Title bar, Tab strip, and Workspace sidebar: the chrome shell around the root.
+    /// Title bar, Tab strip, Workspace sidebar, and the Settings Window: the chrome shell.
     shell: u32,
     shell_inactive: u32,
-    /// Menus, popovers, dialogs, and tooltips.
+    /// Menus, popovers, dialogs, tooltips, and the cards one run of Settings Rows rests on.
     raised: u32,
     field: u32,
     hover: u32,
     pressed: u32,
     /// Persistent selection: a neutral rung, never an accent.
     selected: u32,
-    /// The selected Tab of an unfocused window, which keeps identity with less emphasis.
+    /// The Active Tab's chip in an unfocused window: the same shape, a shorter step off the bar.
+    ///
+    /// It stays on the same side of the chrome shell as the focused chip rather than crossing to
+    /// the other side of it, so an unfocused window reads as quieter rather than as inverted.
     selected_inactive: u32,
     /// The selected row of a persistent list: a chip the reader reads as the current place.
     ///
@@ -372,7 +375,12 @@ impl ChromePalette {
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
             row_selected_hover_secondary: opaque(self.row_selected_secondary),
-            tab_active_background: opaque(self.root),
+            // The Active Tab is an inset chip resting inside the title bar rather than a
+            // full-height panel continuous with the content, so it takes the same rung as a
+            // selected list row. Painting it the window root would read as a well cut into the
+            // bar in dark Chrome and as a raised card in light, which is one shape describing two
+            // different things.
+            tab_active_background: opaque(self.row_selected),
             tab_inactive_selected_background: opaque(self.selected_inactive),
             tab_inactive_selected_foreground: opaque(self.text_secondary),
 
@@ -584,6 +592,42 @@ mod tests {
                 (weight(colors.selection_background) - weight(colors.primary_background)).abs()
                     > 0.02,
                 "{appearance:?} should not let selection approach the emphasis fill"
+            );
+        }
+    }
+
+    /// The Active Tab rests on the same rung as the selected row of a navigation list.
+    ///
+    /// Both are inset chips on the chrome shell, so a palette that gave them different materials
+    /// would make one window present two conventions for the same idea. The unfocused window's Tab
+    /// keeps that identity with a shorter step off the bar: it has to stay on the same side of the
+    /// shell, because crossing to the other side reads as a different state rather than a quieter
+    /// one.
+    #[test]
+    fn the_active_tab_should_rest_on_the_same_chip_material_as_a_selected_row() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = chrome_base(appearance).opaque_presentation();
+
+            assert_eq!(
+                colors.tab_active_background, colors.row_selected_background,
+                "{appearance:?} should give the Active Tab and a selected row one material"
+            );
+            let shell = weight(colors.panel_background);
+            let focused = weight(colors.tab_active_background) - shell;
+            let unfocused = weight(colors.tab_inactive_selected_background) - shell;
+            assert!(
+                focused * unfocused > 0.0,
+                "{appearance:?} should keep the unfocused Tab on the shell's lit side, got \
+                 {unfocused} against {focused}"
+            );
+            assert!(
+                unfocused.abs() < focused.abs(),
+                "{appearance:?} should quieten the unfocused Tab, got {unfocused} against \
+                 {focused}"
+            );
+            assert_eq!(
+                colors.tab_inactive_background, colors.title_bar_background,
+                "{appearance:?} should leave an inactive Tab as text on the bar"
             );
         }
     }

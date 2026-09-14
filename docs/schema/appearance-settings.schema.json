@@ -138,7 +138,6 @@
           "ghost_element_active_foreground",
           "ghost_element_selected_foreground",
           "ghost_element_disabled_foreground",
-          "navigation_selection",
           "sidebar_focus",
           "info",
           "info_background",

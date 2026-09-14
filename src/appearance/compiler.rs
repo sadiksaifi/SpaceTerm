@@ -183,7 +183,6 @@ pub(crate) fn compile_chrome(
     );
     let ghost_element_disabled_foreground =
         resolve!(ghost_element_disabled_foreground, text_disabled);
-    let navigation_selection = resolve!(navigation_selection, border_selected);
     let sidebar_focus = resolve!(sidebar_focus, border_focused);
     let info = resolve!(info, text_accent);
     let success = resolve!(success, text_accent);
@@ -715,7 +714,6 @@ pub(crate) fn compile_chrome(
         ghost_element_active_foreground,
         ghost_element_selected_foreground,
         ghost_element_disabled_foreground,
-        navigation_selection,
         sidebar_focus,
         info,
         info_background,

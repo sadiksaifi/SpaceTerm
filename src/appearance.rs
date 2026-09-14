@@ -23,7 +23,7 @@ macro_rules! chrome_color_fields {
             ghost_element_foreground, ghost_element_hover_foreground,
             ghost_element_active_foreground, ghost_element_selected_foreground,
             ghost_element_disabled_foreground,
-            navigation_selection, sidebar_focus,
+            sidebar_focus,
             info, info_background, success,
             warning, warning_background, warning_border, error, error_background, error_border,
             input_text, input_placeholder, input_disabled_text, input_caret,

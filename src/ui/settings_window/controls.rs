@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Rgba, SharedString, Window, div, px, rgba};
 use spaceterm_ui::{Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip};
 
-use crate::appearance::Color;
+use crate::appearance::{ChromeColors, Color};
 use crate::ui::appearance::ChromeAppearance;
 
 /// One stepper step, negative for decrement and positive for increment.
@@ -18,6 +18,25 @@ type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
 pub(super) fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
+}
+
+/// A field action rests on its field and uses complete neutral paints while interacting.
+pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
+    let paint = |background, foreground| {
+        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), rgba(0))
+    };
+    spaceterm_ui::ButtonVariantStyle::new(
+        paint(colors.input_background, colors.input_text),
+        paint(
+            colors.ghost_element_hover,
+            colors.ghost_element_hover_foreground,
+        ),
+        paint(
+            colors.ghost_element_active,
+            colors.ghost_element_active_foreground,
+        ),
+        paint(colors.input_disabled_background, colors.input_disabled_text),
+    )
 }
 
 /// The width every scheme's color strip takes, so the names beside them share one column.
@@ -47,13 +66,13 @@ pub(super) mod text {
     pub(crate) const BADGE: f32 = 10.0;
 }
 
-/// The horizontal breathing room every row keeps inside the content column.
+/// The horizontal breathing room every row keeps inside the card that holds it.
 ///
-/// Rows carry it rather than the column, so a fill a row paints, such as the one Settings Search
-/// leaves on the row it reveals, is inset from the text on both sides instead of running hard
-/// against it. The column gives back exactly this much padding, so the left edge a reader sees is
-/// unchanged.
-pub(super) const ROW_INSET: f32 = 8.0;
+/// Rows carry it rather than the card, so a fill a row paints, such as the one Settings Search
+/// leaves on the row it reveals, reaches the card's own edges while the text stays clear of them.
+/// The content column gives back exactly this much padding, so a group's title, a section's
+/// heading, and a row's label all start on one edge.
+pub(super) const ROW_INSET: f32 = 12.0;
 
 /// The widest a run of explanatory prose is allowed to set.
 ///
@@ -81,14 +100,18 @@ pub(super) enum SettingsRowLayout {
     Full,
 }
 
-/// One titled run of related rows.
+/// The radius and vertical padding of the card one run of rows rests on.
 ///
-/// Grouping is the structure a settings form is read by, and here it is carried entirely by space
-/// and by the title: rows within a run sit closer together than one run sits to the next. Nothing
-/// is ruled off. A frame would have to be drawn as a border, because a scheme is free to resolve
-/// the window, panel, and elevated surfaces to one color and the built-in dark scheme does exactly
-/// that; and a hairline between every pair of rows adds a line for every reading the eye already
-/// gets from the gap.
+/// The radius is shared with the notices that sit in the same column, so a page of cards and the
+/// warnings above them are cut to one corner.
+pub(super) const CARD_RADIUS: f32 = 10.0;
+const CARD_PADDING_Y: f32 = 4.0;
+
+/// One titled run of related rows, resting on a card.
+///
+/// The card uses the document surface and its text pair. Its rounded hairline and the title above
+/// it carry grouping without requiring another surface's foreground policy. Nothing inside the
+/// card is ruled off: the space between rows already says where one ends.
 pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
@@ -107,12 +130,14 @@ impl SettingsGroup {
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let selector = self.selector.clone();
         let title_selector = format!("{selector}-title");
+        let radius = appearance.spacing(CARD_RADIUS);
+        let card_selector = format!("{selector}-card");
         div()
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(2.0))
+            .gap(appearance.spacing(6.0))
             .child(
                 // The title keeps the rows' inset so it starts on their left edge, and the inset
                 // sits on a wrapper so the title's own box is the type it sets, not the padding
@@ -126,7 +151,31 @@ impl SettingsGroup {
                         .child(self.title),
                 ),
             )
-            .child(div().flex().flex_col().w_full().children(self.rows))
+            .child(
+                div()
+                    .debug_selector(move || card_selector.clone())
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .py(appearance.spacing(CARD_PADDING_Y))
+                    .rounded(radius)
+                    // A revealed row fills to the card's own edges, so the card clips it back to
+                    // its corners instead of letting a square fill escape a rounded shape.
+                    .overflow_hidden()
+                    .bg(gpui_color(appearance.colors.background))
+                    .children(self.rows)
+                    // The hairline is painted over the card rather than added to it, so the rows
+                    // inside start on exactly the edge the title above them starts on.
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(gpui_color(appearance.colors.border)),
+                    ),
+            )
     }
 }
 
@@ -184,6 +233,14 @@ impl SettingsRow {
 
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let selector = self.selector;
+        let (foreground, secondary) = if self.highlighted {
+            (
+                appearance.colors.row_selected_foreground,
+                appearance.colors.row_selected_secondary,
+            )
+        } else {
+            (appearance.colors.text, appearance.colors.text_muted)
+        };
         let label_selector = format!("{selector}-label");
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
@@ -192,7 +249,7 @@ impl SettingsRow {
         let caption = |description: SharedString| {
             div()
                 .text_size(appearance.text_size(text::SMALL))
-                .text_color(gpui_color(appearance.colors.text_muted))
+                .text_color(gpui_color(secondary))
                 .whitespace_normal()
                 .child(description)
         };
@@ -211,7 +268,7 @@ impl SettingsRow {
                     div()
                         .debug_selector(move || label_selector.clone())
                         .text_size(appearance.text_size(text::BODY))
-                        .text_color(gpui_color(appearance.colors.text))
+                        .text_color(gpui_color(foreground))
                         .whitespace_normal()
                         .child(self.label),
                 )
@@ -258,7 +315,7 @@ impl SettingsRow {
             .py(appearance.spacing(8.0))
             .rounded(px(6.0))
             .when(self.highlighted, |row| {
-                row.bg(gpui_color(appearance.colors.info_background))
+                row.bg(gpui_color(appearance.colors.row_selected_background))
             })
             .children(label_above)
             .child(primary)
@@ -526,6 +583,36 @@ pub(super) fn action_button(
 #[cfg(test)]
 mod tests {
     use super::text;
+
+    #[test]
+    fn field_action_preserves_a_light_field_and_opposite_hover_paint() {
+        use crate::appearance::{ChromeColors, Color};
+        let colors = ChromeColors {
+            input_background: Color::rgb(0xffffff),
+            input_text: Color::rgb(0x111111),
+            text: Color::rgb(0xffffff),
+            ghost_element_hover: Color::rgb(0x111111),
+            ghost_element_hover_foreground: Color::rgb(0xffffff),
+            ..ChromeColors::default()
+        };
+        let style = super::field_action_style(&colors);
+        assert_eq!(
+            style.normal().background(),
+            super::gpui_color(colors.input_background)
+        );
+        assert_eq!(
+            style.normal().foreground(),
+            super::gpui_color(colors.input_text)
+        );
+        assert_eq!(
+            style.hovered().background(),
+            super::gpui_color(colors.ghost_element_hover)
+        );
+        assert_eq!(
+            style.hovered().foreground(),
+            super::gpui_color(colors.ghost_element_hover_foreground)
+        );
+    }
 
     /// The ramp is only a hierarchy while it stays ordered, and it is edited one constant at a
     /// time.
