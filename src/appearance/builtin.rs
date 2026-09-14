@@ -381,8 +381,19 @@ impl ChromePalette {
             // bar in dark Chrome and as a raised card in light, which is one shape describing two
             // different things.
             tab_active_background: opaque(self.row_selected),
+            // The rest of that hierarchy comes along with the rung: the same lit rim, and the
+            // same heavier fill and text under the pointer, so a Tab and a navigation row answer
+            // hover identically.
+            tab_active_foreground: opaque(self.row_selected_text),
+            tab_active_border: opaque(self.row_selected_rim),
+            tab_active_hover_foreground: opaque(self.row_selected_text),
             tab_inactive_selected_background: opaque(self.selected_inactive),
             tab_inactive_selected_foreground: opaque(self.text_secondary),
+            // An unfocused window quietens the rim by the same proportion it quietens the fill,
+            // so the Tab keeps its edge without outlining a chip that has stepped back.
+            tab_inactive_selected_border: Some(
+                Color::rgb(self.row_selected_rim).mix(Color::rgb(self.selected_inactive), 0.5),
+            ),
 
             primary_background: opaque(self.emphasis),
             primary_hover_background: opaque(self.emphasis_hover),
@@ -608,10 +619,39 @@ mod tests {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance).opaque_presentation();
 
-            assert_eq!(
-                colors.tab_active_background, colors.row_selected_background,
-                "{appearance:?} should give the Active Tab and a selected row one material"
-            );
+            for (role, tab, row) in [
+                (
+                    "fill",
+                    colors.tab_active_background,
+                    colors.row_selected_background,
+                ),
+                ("rim", colors.tab_active_border, colors.row_selected_border),
+                (
+                    "hovered fill",
+                    colors.tab_active_hover_background,
+                    colors.row_selected_hover_background,
+                ),
+                (
+                    "text",
+                    colors.tab_active_foreground,
+                    colors.row_selected_foreground,
+                ),
+                (
+                    "hovered text",
+                    colors.tab_active_hover_foreground,
+                    colors.row_selected_hover_foreground,
+                ),
+                (
+                    "hovered icon",
+                    colors.tab_active_hover_icon,
+                    colors.row_selected_hover_icon,
+                ),
+            ] {
+                assert_eq!(
+                    tab, row,
+                    "{appearance:?} should give the Active Tab and a selected row one {role}"
+                );
+            }
             let shell = weight(colors.panel_background);
             let focused = weight(colors.tab_active_background) - shell;
             let unfocused = weight(colors.tab_inactive_selected_background) - shell;
@@ -628,6 +668,17 @@ mod tests {
             assert_eq!(
                 colors.tab_inactive_background, colors.title_bar_background,
                 "{appearance:?} should leave an inactive Tab as text on the bar"
+            );
+            // The unfocused rim keeps its lit side of the fill, at a shorter step than the focused one.
+            let rim_step = |rim, fill| weight(rim) - weight(fill);
+            let focused_rim = rim_step(colors.tab_active_border, colors.tab_active_background);
+            let unfocused_rim = rim_step(
+                colors.tab_inactive_selected_border,
+                colors.tab_inactive_selected_background,
+            );
+            assert!(
+                focused_rim * unfocused_rim > 0.0 && unfocused_rim.abs() < focused_rim.abs(),
+                "{appearance:?} should quieten the unfocused Tab rim, got {unfocused_rim} against                  {focused_rim}"
             );
         }
     }

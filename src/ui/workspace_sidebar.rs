@@ -58,7 +58,7 @@ pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 /// their rows, so a selected Workspace and a selected menu entry read as the same kind of shape.
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_X: f32 = 6.0;
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
-pub(super) const SIDEBAR_ROW_SELECTION_RADIUS: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_SELECTION_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 pub(super) const SIDEBAR_ROW_SELECTION_RING_GAP: f32 = 2.0;
 pub(super) const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;

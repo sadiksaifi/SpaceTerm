@@ -74,7 +74,7 @@ const FOOTER_HEIGHT: f32 = 40.0;
 const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
 /// The radius of the navigation chip and of the search field, and the air a focus ring keeps
 /// outside that chip.
-const NAVIGATION_CHIP_RADIUS: f32 = 6.0;
+const NAVIGATION_CHIP_RADIUS: f32 = crate::ui::selection_chip::CHIP_RADIUS;
 const NAVIGATION_CHIP_RING_GAP: f32 = 2.0;
 
 /// The chip a navigation entry rests its hover and its current-section state on.

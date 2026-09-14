@@ -666,6 +666,32 @@ pub(crate) fn compile_chrome(
     let tab_inactive_icon = resolve!(tab_inactive_icon, tab_inactive_foreground);
     let tab_inactive_selected_icon =
         resolve!(tab_inactive_selected_icon, tab_inactive_selected_foreground);
+    // The Active Tab carries the selected-row hierarchy in its own roles: a rim that stays put, and a
+    // hover that gains weight from the Tab's material rather than from a list row's.
+    let tab_active_border = resolve!(tab_active_border, border_transparent);
+    let tab_active_hover_background = resolve!(
+        tab_active_hover_background,
+        tab_active_background.mix(text, 0.06)
+    );
+    let tab_active_hover_foreground = resolve!(
+        tab_active_hover_foreground,
+        contrast(
+            tab_active_foreground,
+            tab_active_hover_background.source_over(background),
+            4.5
+        )
+    );
+    // Close rests on the selected-hover fill whenever the pointer is anywhere over the Active Tab,
+    // so its glyph follows the hovered title and keeps a non-text contrast against that fill.
+    let tab_active_hover_icon = resolve!(
+        tab_active_hover_icon,
+        contrast(
+            tab_active_hover_foreground,
+            tab_active_hover_background.source_over(background),
+            3.0
+        )
+    );
+    let tab_inactive_selected_border = resolve!(tab_inactive_selected_border, tab_active_border);
     let link_text_pressed = resolve!(link_text_pressed, link_text_hover);
     let link_text_disabled = resolve!(link_text_disabled, text_disabled);
     let colors = ChromeColors {
@@ -890,6 +916,11 @@ pub(crate) fn compile_chrome(
         tab_active_icon,
         tab_inactive_icon,
         tab_inactive_selected_icon,
+        tab_active_border,
+        tab_active_hover_background,
+        tab_active_hover_foreground,
+        tab_active_hover_icon,
+        tab_inactive_selected_border,
     };
     CompiledChrome {
         readability: readability_diagnostics(&colors),
@@ -964,6 +995,7 @@ impl ChromeColors {
             tab_active_background,
             tab_inactive_background,
             tab_inactive_selected_background,
+            tab_active_hover_background,
             tab_hover_background,
             badge_background,
             preview_background,
@@ -1178,6 +1210,46 @@ mod tests {
     }
 
     #[test]
+    fn active_tab_hover_icon_is_completed_against_its_rendered_fill_and_preserves_authored_intent()
+    {
+        let authored = ChromeColorOverrides {
+            background: Some(Color::rgb(0x111111)),
+            text: Some(Color::rgb(0xffffff)),
+            tab_active_hover_background: Some(Color::rgba(0xffffffcc)),
+            tab_active_hover_foreground: Some(Color::rgb(0x000000)),
+            ..Default::default()
+        };
+        let completed = compile_chrome(Appearance::Dark, &authored, &Default::default());
+        let rendered_fill = completed
+            .colors
+            .tab_active_hover_background
+            .source_over(completed.colors.background);
+        assert!(
+            completed
+                .colors
+                .tab_active_hover_icon
+                .contrast_ratio(rendered_fill)
+                >= 3.0
+        );
+        assert_eq!(
+            completed.provenance["tab_active_hover_icon"],
+            ColorProvenance::Derived
+        );
+
+        let authored_icon = Color::rgb(0xff00ff);
+        let authored = ChromeColorOverrides {
+            tab_active_hover_icon: Some(authored_icon),
+            ..authored
+        };
+        let preserved = compile_chrome(Appearance::Dark, &authored, &Default::default());
+        assert_eq!(preserved.colors.tab_active_hover_icon, authored_icon);
+        assert_eq!(
+            preserved.provenance["tab_active_hover_icon"],
+            ColorProvenance::Authored
+        );
+    }
+
+    #[test]
     fn translucent_fields_derive_against_the_same_backing_that_is_rendered() {
         for (panel, input) in [
             (Color::rgb(0xffffff), Color::rgba(0)),
@@ -1245,6 +1317,7 @@ mod tests {
             (p.preview_foreground, p.preview_background),
             (p.badge_foreground, p.badge_background),
             (p.tab_active_foreground, p.tab_active_background),
+            (p.tab_active_hover_foreground, p.tab_active_hover_background),
         ] {
             assert!(foreground.contrast_ratio(surface) >= 4.5);
         }
@@ -1372,6 +1445,7 @@ mod tests {
                     c.tab_inactive_selected_foreground,
                     c.tab_inactive_selected_background,
                 ),
+                (c.tab_active_hover_foreground, c.tab_active_hover_background),
             ] {
                 assert!(
                     foreground.source_over(surface).contrast_ratio(surface) >= 4.5,

@@ -18,6 +18,12 @@ use crate::appearance::Color;
 /// The hairline every chip and focus ring is drawn with.
 const CHIP_HAIRLINE: f32 = 1.0;
 
+/// The corner radius of every selection chip, before density scaling.
+///
+/// The Workspace sidebar, the Settings navigation, and the Tab bar present one selection shape, so
+/// the radius has one owner rather than three constants that merely happen to agree.
+pub(crate) const CHIP_RADIUS: f32 = 6.0;
+
 /// Where a chip sits inside the item that owns it.
 ///
 /// The item keeps its own bounds, so hit target, hover region, and keyboard target are unchanged
