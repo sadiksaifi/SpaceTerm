@@ -27,8 +27,10 @@ unrequested rewrite of author decisions.
 Window background appearance is distinct from Light/Dark and from each straight RGBA color.
 The foundation retains requested opaque/transparent/blurred intent with an effective opaque
 presentation. Public transparency requires separate native and rendered acceptance. Window owners
-apply native effects once per window. A root paints its backing once; panels and fields paint their
-own surfaces once; floating and critical surfaces retain deliberate backing. Transparency must not
+apply native effects once per window. Opaque foundation rendering backs the root with its own RGB, composes panels/elevated surfaces
+on that root and fields on the canonical panel. The prepared field paints that complete backing
+regardless of host, matching compiler contrast. Authored RGBA remains separate. A root paints its
+backing once; panels and fields paint their own surfaces once; floating and critical surfaces retain deliberate backing. Transparency must not
 fade text or change terminal protocol colors. Alpha replacement, opacity multiplication and
 source-over are distinct operations.
 

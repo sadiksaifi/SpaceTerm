@@ -457,7 +457,11 @@ impl UserSettings {
     ) -> Result<String, SettingsError> {
         let snapshot = self.snapshot();
         let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
-        Ok(crate::appearance::export_schemes(&catalog, schemes)?)
+        Ok(crate::appearance::export_effective_schemes(
+            &catalog,
+            &snapshot.candidate.preferences,
+            schemes,
+        )?)
     }
 
     pub(crate) fn export_document(&self) -> Result<String, SettingsError> {

@@ -363,6 +363,7 @@ fn reset_fixture() -> AppearanceDocument {
     document
         .custom_schemes
         .push(CustomScheme::Chrome(Box::new(ChromeScheme {
+            window_background: None,
             id: SchemeId::new("custom.reset-fixture").unwrap(),
             name: String::from("Reset Fixture"),
             appearance: Appearance::Dark,
@@ -749,6 +750,7 @@ fn invalid_bounds_and_protocol_alpha_are_rejected() {
 #[test]
 fn catalog_batch_install_is_atomic_and_revision_checked() {
     let scheme = CustomScheme::Chrome(Box::new(ChromeScheme {
+        window_background: None,
         id: SchemeId::new("custom.blue").unwrap(),
         name: String::from("Blue"),
         appearance: Appearance::Dark,
@@ -788,8 +790,8 @@ fn zed_import_uses_explicit_candidate_and_deterministic_kind_ids() {
     .unwrap();
     assert_eq!(first, again);
     assert_eq!(first.len(), 2);
-    assert!(first[0].id().as_str().ends_with(".0.chrome"));
-    assert!(first[1].id().as_str().ends_with(".0.terminal"));
+    assert!(first[0].id().as_str().ends_with(".chrome"));
+    assert!(first[1].id().as_str().ends_with(".terminal"));
 
     let duplicate = br##"{
         "themes": [

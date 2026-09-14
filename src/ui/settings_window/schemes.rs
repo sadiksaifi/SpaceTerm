@@ -114,7 +114,7 @@ impl SettingsWindow {
                         .children(diagnostics.into_iter().map(|diagnostic| {
                             div()
                                 .text_size(appearance.text_size(text::SMALL))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
+                                .text_color(gpui_color(appearance.colors.warning))
                                 .whitespace_normal()
                                 .child(diagnostic_message(diagnostic))
                         })),
@@ -259,10 +259,18 @@ impl SettingsWindow {
                     ))
                     .child(action_button(
                         "settings-scheme-export",
-                        "Export Schemes in Use…",
+                        "Export Effective Schemes…",
                         true,
                         owned(cx, |window, gpui_window, cx| {
                             window.begin_scheme_export(gpui_window, cx);
+                        }),
+                    ))
+                    .child(action_button(
+                        "settings-definition-export",
+                        "Export Scheme Definitions…",
+                        true,
+                        owned(cx, |window, gpui_window, cx| {
+                            window.begin_definition_export(gpui_window, cx);
                         }),
                     ))
                     .child(action_button(
@@ -438,6 +446,27 @@ impl SettingsWindow {
             Err(_) => {
                 self.interchange_status =
                     Some(SharedString::from("Those schemes could not be exported."));
+                cx.notify();
+            }
+        }
+    }
+
+    fn begin_definition_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        let resolved = crate::ui::appearance_runtime::current(cx);
+        let schemes = [
+            (SchemeKind::Chrome, resolved.chrome.effective_scheme.clone()),
+            (
+                SchemeKind::Terminal,
+                resolved.terminal.effective_scheme.clone(),
+            ),
+        ];
+        match self.editor.export_definitions(&schemes) {
+            Ok(contents) => self.write_export("SpaceTerm-scheme-definitions.json", contents, cx),
+            Err(_) => {
+                self.interchange_status = Some(SharedString::from(
+                    "Those definitions could not be exported.",
+                ));
                 cx.notify();
             }
         }

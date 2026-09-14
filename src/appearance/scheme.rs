@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use super::{Color, builtin};
 
 pub(crate) const MAX_SCHEME_ID_BYTES: usize = 128;
-pub(crate) const MAX_SCHEME_NAME_BYTES: usize = 128;
+pub(crate) const MAX_SCHEME_NAME_CHARACTERS: usize = 128;
 pub(crate) const MAX_CUSTOM_SCHEMES: usize = 128;
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
@@ -111,9 +111,37 @@ fn valid_scheme_id(value: &str) -> bool {
     })
 }
 
+/// Imported source descriptors are attribution, never authority to replace an installed scheme.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemeOrigin {
+    pub(crate) format: SchemeSourceFormat,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) package_id: Option<String>,
+    pub(crate) family: String,
+    pub(crate) theme: String,
+    pub(crate) fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SchemeSourceFormat {
+    Zed,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SchemeMetadata {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) origin: Option<SchemeOrigin>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
@@ -524,6 +552,12 @@ pub(crate) struct SchemeSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChromeScheme {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) window_background: Option<super::WindowBackgroundAppearance>,
     pub(crate) id: SchemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
@@ -782,7 +816,22 @@ pub(super) fn validate_scheme(scheme: &CustomScheme, custom: bool) -> Result<(),
             (&value.name, &value.metadata)
         }
     };
-    validate_text(name, MAX_SCHEME_NAME_BYTES)?;
+    validate_text(name, MAX_SCHEME_NAME_CHARACTERS)?;
+    if let Some(origin) = &metadata.origin {
+        if let Some(id) = &origin.package_id {
+            validate_text(id, 256)?;
+        }
+        validate_text(&origin.family, 256)?;
+        validate_text(&origin.theme, 128)?;
+        if origin.fingerprint.len() != 64
+            || !origin
+                .fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CatalogError::InvalidMetadata);
+        }
+    }
     if let Some(value) = &metadata.author {
         validate_text(value, 256)?;
     }
@@ -796,7 +845,7 @@ pub(super) fn validate_scheme(scheme: &CustomScheme, custom: bool) -> Result<(),
 }
 
 pub(super) fn validate_text(value: &str, max: usize) -> Result<(), CatalogError> {
-    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+    if value.is_empty() || value.chars().count() > max || value.chars().any(char::is_control) {
         Err(CatalogError::InvalidMetadata)
     } else {
         Ok(())

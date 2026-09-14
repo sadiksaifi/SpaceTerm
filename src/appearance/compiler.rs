@@ -29,7 +29,8 @@ pub(crate) enum ChromeReadabilityDiagnostic {
     Scrollbar,
 }
 
-fn readability_diagnostics(c: &ChromeColors) -> Vec<ChromeReadabilityDiagnostic> {
+fn readability_diagnostics(authored: &ChromeColors) -> Vec<ChromeReadabilityDiagnostic> {
+    let c = authored.opaque_presentation();
     use ChromeReadabilityDiagnostic::*;
     [
         (Text, c.text, c.background, 4.5),
@@ -103,6 +104,12 @@ pub(crate) fn compile_chrome(
             Appearance::Light => Color::rgb(0xfafafa),
         }
     );
+    // Foundation native windows have an opaque root backing of the root's own RGB.
+    // Derivation and opaque_presentation use identical backing rules.
+    let root_surface = background.with_alpha(255);
+    let contrast = |foreground: Color, surface: Color, minimum| {
+        contrast(foreground, surface.source_over(root_surface), minimum)
+    };
     let text = resolve!(text, contrast(Color::rgb(0x202020), background, 4.5));
     let panel_background = resolve!(panel_background, background);
     let elevated_surface_background = resolve!(elevated_surface_background, background);
@@ -124,7 +131,6 @@ pub(crate) fn compile_chrome(
     let icon = resolve!(icon, text);
     let icon_muted = resolve!(icon_muted, text_muted);
     let icon_disabled = resolve!(icon_disabled, text_disabled);
-    let icon_accent = resolve!(icon_accent, text_accent);
     let border = resolve!(border, text.mix(background, 0.7));
     let border_variant = resolve!(border_variant, border);
     let border_focused = resolve!(border_focused, contrast(text_accent, background, 3.0));
@@ -132,8 +138,8 @@ pub(crate) fn compile_chrome(
     let border_disabled = resolve!(border_disabled, border);
     let border_transparent = resolve!(border_transparent, Color::rgba(0));
     let element_background = resolve!(element_background, background);
-    let element_hover = resolve!(element_hover, background.mix(text, 0.08));
-    let element_active = resolve!(element_active, background.mix(text, 0.14));
+    let element_hover = resolve!(element_hover, element_background.mix(text, 0.08));
+    let element_active = resolve!(element_active, element_background.mix(text, 0.14));
     let element_selected = resolve!(element_selected, background.mix(text_accent, 0.16));
     let element_selected_hover = resolve!(element_selected_hover, element_selected.mix(text, 0.06));
     let element_disabled = resolve!(element_disabled, background);
@@ -144,21 +150,26 @@ pub(crate) fn compile_chrome(
         element_active_foreground,
         contrast(text, element_active, 4.5)
     );
-    let element_selected_foreground = resolve!(
-        element_selected_foreground,
-        contrast(text, element_selected, 4.5)
-    );
-    let element_selected_hover_foreground = resolve!(
-        element_selected_hover_foreground,
-        contrast(text, element_selected_hover, 4.5)
-    );
     let element_disabled_foreground = resolve!(element_disabled_foreground, text_disabled);
     let ghost_element_background = resolve!(ghost_element_background, Color::rgba(0));
-    let ghost_element_hover = resolve!(ghost_element_hover, element_hover);
-    let ghost_element_active = resolve!(ghost_element_active, element_active);
+    let ghost_element_hover = resolve!(
+        ghost_element_hover,
+        ghost_element_background
+            .source_over(root_surface)
+            .mix(text, 0.08)
+    );
+    let ghost_element_active = resolve!(
+        ghost_element_active,
+        ghost_element_background
+            .source_over(root_surface)
+            .mix(text, 0.14)
+    );
     let ghost_element_selected = resolve!(ghost_element_selected, element_selected);
     let ghost_element_disabled = resolve!(ghost_element_disabled, Color::rgba(0));
-    let ghost_element_foreground = resolve!(ghost_element_foreground, text);
+    let ghost_element_foreground = resolve!(
+        ghost_element_foreground,
+        contrast(text, ghost_element_background, 4.5)
+    );
     let ghost_element_hover_foreground = resolve!(
         ghost_element_hover_foreground,
         contrast(text, ghost_element_hover, 4.5)
@@ -188,10 +199,11 @@ pub(crate) fn compile_chrome(
     let error_background = resolve!(error_background, error.multiply_opacity(0x1a));
     let error_border = resolve!(error_border, error);
     let input_background = resolve!(input_background, background);
-    let input_text = resolve!(input_text, contrast(text, input_background, 4.5));
+    let input_surface = input_background.source_over(panel_background.source_over(root_surface));
+    let input_text = resolve!(input_text, contrast(text, input_surface, 4.5));
     let input_placeholder = resolve!(
         input_placeholder,
-        contrast(text_placeholder, input_background, 4.5)
+        contrast(text_placeholder, input_surface, 4.5)
     );
     let input_disabled_background = resolve!(input_disabled_background, input_background);
     let input_disabled_text = resolve!(input_disabled_text, text_disabled);
@@ -200,13 +212,20 @@ pub(crate) fn compile_chrome(
         input_selection_background,
         text_accent.multiply_opacity(0x66)
     );
+    let input_selection_foreground = resolve!(
+        input_selection_foreground,
+        contrast(
+            input_text,
+            input_selection_background.source_over(input_surface),
+            4.5
+        )
+    );
     let input_border = resolve!(input_border, border);
     let input_focused_border = resolve!(
         input_focused_border,
-        contrast(border_focused, input_background, 3.0)
+        contrast(border_focused, input_surface, 3.0)
     );
-    let input_invalid_border =
-        resolve!(input_invalid_border, contrast(error, input_background, 3.0));
+    let input_invalid_border = resolve!(input_invalid_border, contrast(error, input_surface, 3.0));
     let input_disabled_border = resolve!(input_disabled_border, border_disabled);
     let modal_scrim = resolve!(modal_scrim, background.multiply_opacity(0x99));
     let scrollbar_track = resolve!(scrollbar_track, Color::rgba(0));
@@ -218,11 +237,19 @@ pub(crate) fn compile_chrome(
     let scrollbar_thumb_border = resolve!(scrollbar_thumb_border, Color::rgba(0));
     let scrollbar_thumb_hover_background = resolve!(
         scrollbar_thumb_hover_background,
-        contrast(text_secondary, panel_background, 3.0)
+        contrast(
+            scrollbar_thumb_background.mix(text, 0.15),
+            panel_background,
+            3.0
+        )
     );
     let scrollbar_thumb_active_background = resolve!(
         scrollbar_thumb_active_background,
-        contrast(text, panel_background, 3.0)
+        contrast(
+            scrollbar_thumb_hover_background.mix(text, 0.2),
+            panel_background,
+            3.0
+        )
     );
     let resize_idle = resolve!(resize_idle, border);
     let resize_focused = resolve!(resize_focused, border_focused);
@@ -319,7 +346,10 @@ pub(crate) fn compile_chrome(
     );
     let selection_icon = resolve!(selection_icon, selection_foreground);
     let selection_border = resolve!(selection_border, selection_background);
-    let selection_hover_background = resolve!(selection_hover_background, element_selected_hover);
+    let selection_hover_background = resolve!(
+        selection_hover_background,
+        selection_background.mix(text, 0.06)
+    );
     let selection_hover_foreground = resolve!(
         selection_hover_foreground,
         contrast(
@@ -499,7 +529,7 @@ pub(crate) fn compile_chrome(
         contrast(text_accent, row_background.source_over(background), 4.5)
     );
     let row_border = resolve!(row_border, border_transparent);
-    let row_hover_background = resolve!(row_hover_background, element_hover);
+    let row_hover_background = resolve!(row_hover_background, row_background.mix(text, 0.08));
     let row_hover_foreground = resolve!(
         row_hover_foreground,
         contrast(text, row_hover_background.source_over(background), 4.5)
@@ -545,8 +575,10 @@ pub(crate) fn compile_chrome(
         )
     );
     let row_selected_border = resolve!(row_selected_border, border_transparent);
-    let row_selected_hover_background =
-        resolve!(row_selected_hover_background, selection_hover_background);
+    let row_selected_hover_background = resolve!(
+        row_selected_hover_background,
+        row_selected_background.mix(text, 0.06)
+    );
     let row_selected_hover_foreground = resolve!(
         row_selected_hover_foreground,
         contrast(
@@ -634,6 +666,8 @@ pub(crate) fn compile_chrome(
     let tab_inactive_icon = resolve!(tab_inactive_icon, tab_inactive_foreground);
     let tab_inactive_selected_icon =
         resolve!(tab_inactive_selected_icon, tab_inactive_selected_foreground);
+    let link_text_pressed = resolve!(link_text_pressed, link_text_hover);
+    let link_text_disabled = resolve!(link_text_disabled, text_disabled);
     let colors = ChromeColors {
         background,
         panel_background,
@@ -650,10 +684,11 @@ pub(crate) fn compile_chrome(
         text_accent,
         link_text,
         link_text_hover,
+        link_text_pressed,
+        link_text_disabled,
         icon,
         icon_muted,
         icon_disabled,
-        icon_accent,
         border,
         border_variant,
         border_focused,
@@ -669,8 +704,6 @@ pub(crate) fn compile_chrome(
         element_foreground,
         element_hover_foreground,
         element_active_foreground,
-        element_selected_foreground,
-        element_selected_hover_foreground,
         element_disabled_foreground,
         ghost_element_background,
         ghost_element_hover,
@@ -698,6 +731,7 @@ pub(crate) fn compile_chrome(
         input_disabled_text,
         input_caret,
         input_selection_background,
+        input_selection_foreground,
         input_background,
         input_disabled_background,
         input_border,
@@ -907,6 +941,75 @@ pub(crate) struct CaptionPaint {
 }
 
 impl ChromeColors {
+    /// Canonical surface backing for the opaque foundation. Definitions retain authored RGBA;
+    /// rendering and derived foregrounds use the same known root/panel/field hierarchy.
+    pub(crate) fn opaque_presentation(&self) -> Self {
+        let mut paint = self.clone();
+        let root = self.background.with_alpha(255);
+        paint.background = root;
+        paint.panel_background = self.panel_background.source_over(root);
+        paint.elevated_surface_background = self.elevated_surface_background.source_over(root);
+        paint.input_background = self.input_background.source_over(paint.panel_background);
+        paint.input_disabled_background = self
+            .input_disabled_background
+            .source_over(paint.panel_background);
+        if self.ghost_element_background.a != 0 {
+            paint.ghost_element_background = self.ghost_element_background.source_over(root);
+        }
+        if self.ghost_element_disabled.a != 0 {
+            paint.ghost_element_disabled = self.ghost_element_disabled.source_over(root);
+        }
+        macro_rules! on_root { ($($role:ident),+ $(,)?) => { $(paint.$role = self.$role.source_over(root);)+ }; }
+        on_root!(
+            title_bar_background,
+            title_bar_inactive_background,
+            tab_active_background,
+            tab_inactive_background,
+            tab_inactive_selected_background,
+            tab_hover_background,
+            badge_background,
+            preview_background,
+            element_background,
+            element_hover,
+            element_active,
+            element_selected,
+            element_selected_hover,
+            element_disabled,
+            ghost_element_hover,
+            ghost_element_active,
+            ghost_element_selected,
+            primary_background,
+            primary_hover_background,
+            primary_pressed_background,
+            primary_disabled_background,
+            destructive_background,
+            destructive_hover_background,
+            destructive_pressed_background,
+            destructive_disabled_background,
+            selection_background,
+            selection_hover_background,
+            selection_pressed_background,
+            selection_disabled_background,
+            row_background,
+            row_hover_background,
+            row_selected_background,
+            row_selected_hover_background,
+            toggle_on_background,
+            toggle_on_hover_background,
+            toggle_on_pressed_background,
+            toggle_on_disabled_background,
+            toggle_off_background,
+            toggle_off_hover_background,
+            toggle_off_pressed_background,
+            toggle_off_disabled_background,
+            info_background,
+            success_background,
+            warning_background,
+            error_background
+        );
+        paint
+    }
+
     /// Pane Caption context is an opaque Terminal surface, including program-controlled colors.
     /// It does not mutate the theme. All caption controls share this contextual policy.
     pub(crate) fn caption(&self, surface: Color, focused: bool) -> CaptionPaint {
@@ -1027,6 +1130,136 @@ mod tests {
         assert_eq!(
             changed.row_selected_background,
             baseline.row_selected_background
+        );
+    }
+
+    #[test]
+    fn semantic_selection_and_row_overrides_drive_their_missing_hover_states() {
+        let authored = super::super::builtin::chrome_definition(Appearance::Dark);
+        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default());
+        let overrides = ChromeColorOverrides {
+            selection_background: Some(Color::rgb(0xff0000)),
+            row_selected_background: Some(Color::rgb(0x00ff00)),
+            row_background: Some(Color::rgb(0x0000ff)),
+            ..Default::default()
+        };
+        let changed = compile_chrome(Appearance::Dark, &authored, &overrides);
+        assert_ne!(
+            changed.colors.selection_hover_background,
+            baseline.colors.selection_hover_background
+        );
+        assert_ne!(
+            changed.colors.row_selected_hover_background,
+            baseline.colors.row_selected_hover_background
+        );
+        assert_ne!(
+            changed.colors.row_hover_background,
+            baseline.colors.row_hover_background
+        );
+        assert!(
+            changed.colors.selection_hover_background.r
+                > changed.colors.selection_hover_background.g
+        );
+        assert!(
+            changed.colors.row_selected_hover_background.g
+                > changed.colors.row_selected_hover_background.r
+        );
+        let authored = ChromeColorOverrides {
+            selection_hover_background: Some(Color::rgb(0x123456)),
+            row_selected_hover_background: Some(Color::rgb(0x654321)),
+            ..authored
+        };
+        let preserved = compile_chrome(Appearance::Dark, &authored, &overrides);
+        assert_eq!(
+            preserved.colors.selection_hover_background,
+            Color::rgb(0x123456)
+        );
+        assert_eq!(
+            preserved.colors.row_selected_hover_background,
+            Color::rgb(0x654321)
+        );
+    }
+
+    #[test]
+    fn translucent_fields_derive_against_the_same_backing_that_is_rendered() {
+        for (panel, input) in [
+            (Color::rgb(0xffffff), Color::rgba(0)),
+            (Color::rgba(0xff000080), Color::rgba(0x0000ff80)),
+        ] {
+            let authored = ChromeColorOverrides {
+                background: Some(Color::rgb(0xffffff)),
+                text: Some(Color::rgb(0x000000)),
+                panel_background: Some(panel),
+                input_background: Some(input),
+                input_selection_background: Some(Color::rgba(0xffffff80)),
+                ..Default::default()
+            };
+            let result = compile_chrome(Appearance::Light, &authored, &Default::default());
+            assert_eq!(result.colors.input_background, input);
+            let rendered = result.colors.opaque_presentation();
+            assert_eq!(
+                rendered.input_background,
+                input.source_over(panel.source_over(Color::rgb(0xffffff)))
+            );
+            assert!(
+                rendered
+                    .input_text
+                    .contrast_ratio(rendered.input_background)
+                    >= 4.5
+            );
+            assert!(
+                rendered
+                    .input_placeholder
+                    .contrast_ratio(rendered.input_background)
+                    >= 4.5
+            );
+            assert!(
+                rendered
+                    .input_focused_border
+                    .contrast_ratio(rendered.input_background)
+                    >= 3.0
+            );
+            assert!(
+                rendered.input_selection_foreground.contrast_ratio(
+                    rendered
+                        .input_selection_background
+                        .source_over(rendered.input_background)
+                ) >= 4.5
+            );
+            assert_eq!(rendered.ghost_element_background.a, 0);
+        }
+    }
+
+    #[test]
+    fn translucent_interaction_and_static_surfaces_have_readable_derived_foregrounds() {
+        let authored = ChromeColorOverrides {
+            background: Some(Color::rgb(0xffffff)),
+            text: Some(Color::rgb(0)),
+            element_background: Some(Color::rgba(0)),
+            preview_background: Some(Color::rgba(0)),
+            badge_background: Some(Color::rgba(0)),
+            tab_active_background: Some(Color::rgba(0)),
+            ..Default::default()
+        };
+        let result = compile_chrome(Appearance::Light, &authored, &Default::default());
+        let p = result.colors.opaque_presentation();
+        for (foreground, surface) in [
+            (p.element_foreground, p.element_background),
+            (p.preview_foreground, p.preview_background),
+            (p.badge_foreground, p.badge_background),
+            (p.tab_active_foreground, p.tab_active_background),
+        ] {
+            assert!(foreground.contrast_ratio(surface) >= 4.5);
+        }
+        let authored = ChromeColorOverrides {
+            input_selection_foreground: Some(Color::rgb(0x123456)),
+            ..authored
+        };
+        assert_eq!(
+            compile_chrome(Appearance::Light, &authored, &Default::default())
+                .colors
+                .input_selection_foreground,
+            Color::rgb(0x123456)
         );
     }
 

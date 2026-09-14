@@ -283,13 +283,15 @@ impl SchemeCatalog {
             generation,
             chrome: Arc::new(ResolvedChromeAppearance {
                 requested_scheme: requested_chrome.clone(),
-                effective_scheme: effective_chrome,
+                effective_scheme: effective_chrome.clone(),
                 appearance: chrome_appearance,
                 colors: chrome_colors,
                 provenance: compiled_chrome.provenance,
                 readability: compiled_chrome.readability,
                 composition: super::ResolvedWindowComposition::foundation(
-                    super::WindowBackgroundAppearance::Opaque,
+                    self.chrome(&effective_chrome)
+                        .and_then(|scheme| scheme.window_background)
+                        .unwrap_or_default(),
                 ),
                 typography: chrome_typography,
                 density: preferences.chrome.density,

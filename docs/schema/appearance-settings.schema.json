@@ -108,10 +108,11 @@
           "text_accent",
           "link_text",
           "link_text_hover",
+          "link_text_pressed",
+          "link_text_disabled",
           "icon",
           "icon_muted",
           "icon_disabled",
-          "icon_accent",
           "border",
           "border_variant",
           "border_focused",
@@ -127,8 +128,6 @@
           "element_foreground",
           "element_hover_foreground",
           "element_active_foreground",
-          "element_selected_foreground",
-          "element_selected_hover_foreground",
           "element_disabled_foreground",
           "ghost_element_background",
           "ghost_element_hover",
@@ -156,6 +155,7 @@
           "input_disabled_text",
           "input_caret",
           "input_selection_background",
+          "input_selection_foreground",
           "input_background",
           "input_disabled_background",
           "input_border",
@@ -409,15 +409,24 @@
       "properties": {
         "author": {
           "type": "string",
-          "maxLength": 256
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         },
         "license": {
           "type": "string",
-          "maxLength": 256
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         },
         "description": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "origin": {
+          "$ref": "#/$defs/schemeOrigin"
         }
       }
     },
@@ -443,25 +452,38 @@
             "name": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 128
+              "maxLength": 128,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "appearance": {
               "$ref": "#/$defs/appearance"
             },
             "author": {
               "type": "string",
-              "maxLength": 256
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "license": {
               "type": "string",
-              "maxLength": 256
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "description": {
               "type": "string",
-              "maxLength": 1024
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "colors": {
               "$ref": "#/$defs/chromeColors"
+            },
+            "origin": {
+              "$ref": "#/$defs/schemeOrigin"
+            },
+            "window_background": {
+              "$ref": "#/$defs/windowBackground"
             }
           }
         },
@@ -485,25 +507,35 @@
             "name": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 128
+              "maxLength": 128,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "appearance": {
               "$ref": "#/$defs/appearance"
             },
             "author": {
               "type": "string",
-              "maxLength": 256
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "license": {
               "type": "string",
-              "maxLength": 256
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "description": {
               "type": "string",
-              "maxLength": 1024
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             "colors": {
               "$ref": "#/$defs/terminalColors"
+            },
+            "origin": {
+              "$ref": "#/$defs/schemeOrigin"
             }
           }
         }
@@ -745,6 +777,50 @@
           "type": "null"
         }
       ]
+    },
+    "windowBackground": {
+      "enum": [
+        "opaque",
+        "transparent",
+        "blurred"
+      ]
+    },
+    "schemeOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "family",
+        "theme",
+        "fingerprint"
+      ],
+      "properties": {
+        "format": {
+          "const": "zed"
+        },
+        "package_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "theme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      }
     }
   }
 }

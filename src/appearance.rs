@@ -11,14 +11,12 @@ macro_rules! chrome_color_fields {
             title_bar_background, title_bar_inactive_background,
             tab_active_background, tab_inactive_background,
             text, text_secondary, text_muted, text_placeholder, text_disabled,
-            text_accent, link_text, link_text_hover,
-            icon, icon_muted, icon_disabled, icon_accent,
-            border, border_variant, border_focused, border_selected, border_disabled,
+            text_accent, link_text, link_text_hover, link_text_pressed, link_text_disabled,
+            icon, icon_muted, icon_disabled, border, border_variant, border_focused, border_selected, border_disabled,
             border_transparent,
             element_background, element_hover, element_active, element_selected,
             element_selected_hover, element_disabled, element_foreground,
             element_hover_foreground, element_active_foreground,
-            element_selected_foreground, element_selected_hover_foreground,
             element_disabled_foreground,
             ghost_element_background, ghost_element_hover, ghost_element_active,
             ghost_element_selected, ghost_element_disabled,
@@ -29,7 +27,7 @@ macro_rules! chrome_color_fields {
             info, info_background, success,
             warning, warning_background, warning_border, error, error_background, error_border,
             input_text, input_placeholder, input_disabled_text, input_caret,
-            input_selection_background, input_background, input_disabled_background,
+            input_selection_background, input_selection_foreground, input_background, input_disabled_background,
             input_border, input_focused_border, input_invalid_border,
             modal_scrim,
             scrollbar_track, scrollbar_track_border, scrollbar_thumb_background,
@@ -180,11 +178,13 @@ mod builtin;
 mod catalog_tests;
 mod compiler;
 mod composition;
-#[cfg(test)]
-mod consumer_ledger;
 mod document;
+#[cfg(test)]
+mod interchange_tests;
 mod preferences;
 mod resolution;
+#[cfg(test)]
+mod schema_tests;
 mod scheme;
 #[cfg(test)]
 mod tests;
@@ -194,8 +194,8 @@ pub(crate) use compiler::{CaptionPaint, SemanticPaint};
 pub(crate) use composition::{ResolvedWindowComposition, WindowBackgroundAppearance};
 pub(crate) use document::{
     AppearanceDocument, AppearanceDocumentError, ImportCandidate, ImportError, ZedImportKind,
-    export_schemes, export_settings, import_zed, list_zed_candidates, parse_color_document,
-    parse_settings,
+    export_effective_schemes, export_schemes, export_settings, import_zed, list_zed_candidates,
+    parse_color_document, parse_settings,
 };
 pub(crate) use preferences::{
     AppearancePreferences, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeSelection,

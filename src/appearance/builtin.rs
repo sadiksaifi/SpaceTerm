@@ -28,6 +28,7 @@ pub(crate) fn fallback_id(kind: SchemeKind, appearance: Appearance) -> SchemeId 
 
 pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
     let vague_metadata = SchemeMetadata {
+        origin: None,
         author: Some(String::from("Vague Theme contributors")),
         license: Some(String::from("MIT")),
         description: Some(String::from(
@@ -35,12 +36,14 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
         )),
     };
     let spaceterm_metadata = SchemeMetadata {
+        origin: None,
         author: Some(String::from("SpaceTerm contributors")),
         license: Some(String::from("MIT")),
         description: Some(String::from("SpaceTerm-owned light appearance")),
     };
     vec![
         CustomScheme::Chrome(Box::new(ChromeScheme {
+            window_background: None,
             id: vague_chrome_id(),
             name: String::from("Vague Pro Dark"),
             appearance: Appearance::Dark,
@@ -55,6 +58,7 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
             colors: TerminalColorOverrides::default(),
         })),
         CustomScheme::Chrome(Box::new(ChromeScheme {
+            window_background: None,
             id: light_chrome_id(),
             name: String::from("SpaceTerm Light"),
             appearance: Appearance::Light,

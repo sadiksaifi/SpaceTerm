@@ -115,6 +115,12 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         .export_schemes(&[(SchemeKind::Chrome, id.clone())])
         .unwrap();
     assert!(!exported.contains("typography"));
+    let copy = crate::appearance::parse_color_document(exported.as_bytes()).unwrap();
+    assert_ne!(copy.schemes[0].id(), &id);
+    let mut fresh = SchemeCatalog::default();
+    fresh
+        .install_batch(&copy.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
     assert_eq!(
         settings.import_preview(
             &token,
@@ -132,7 +138,7 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         .import_preview(
             &token,
             imported.catalog_revision,
-            SchemeImport::SpaceTerm(exported.as_bytes()),
+            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
             &BTreeSet::from([id]),
         )
         .unwrap();

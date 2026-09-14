@@ -21,9 +21,14 @@ accent uses text. A partial Terminal definition retains the existing Terminal bu
 Removing a Chrome override restores compilation from its authored definition, not a frozen snapshot.
 
 Colors accept `#RGB`, `#RGBA`, `#RRGGBB` and `#RRGGBBAA`; output uses lowercase `#RRGGBBAA`.
+Scheme names and attribution bounds count Unicode characters and reject control characters; the overall document limit remains bytes.
 Chrome roles accept straight alpha except `border_transparent`, which must have zero alpha and
 means no paint. Native backdrop appearance is separate; effective foundation presentation remains
-opaque. Terminal protocol foreground/background, ANSI arrays, cursor and optional interaction
+opaque. Rendering prepares one canonical backing: root uses its own RGB opaque, panel and elevated
+surfaces compose on that root, and fields compose on the canonical panel. The prepared field is
+fully backed even when hosted on another surface, so derived text sees exactly that paint. Structural
+no-paint ghost backgrounds remain transparent. Authored RGBA stays retained for export and later
+native transparency delivery. Terminal protocol foreground/background, ANSI arrays, cursor and optional interaction
 foregrounds remain opaque. Optional terminal foreground roles alone accept null.
 
 Chrome family dependencies are intentionally small:
@@ -63,8 +68,25 @@ terminal-owned interaction paint.
 
 Zed JSON is an explicit Adapter. Callers list candidates, choose a zero-based candidate index and
 one or both kinds, then explicitly install the translated schemes. Unrelated Zed fields are
-ignored. IDs are deterministic `import.<sha256>.<index>.<kind>`. Import is atomic and never selects
-or downloads anything.
+ignored. Installed IDs are deterministic `import.<source-identity-sha256>.<kind>`, based on package ID
+when supplied, family name, author, candidate name and appearance. Formatting, candidate ordering
+and color edits preserve identity. Family/author/name changes create a new identity; source metadata
+never authorizes replacement. Collisions and repeat imports require the catalog's explicit
+replacement intent. Source descriptors and a canonical candidate-content fingerprint are retained
+separately. Missing author/family data does not prove common ownership.
+
+Zed Chrome import maps structural background/title/Tab colors, text/icon/border variants, neutral
+and ghost element states, info/success/warning/error colors and surfaces, scrollbar track/border/
+idle/hover/active colors, the first player's selection and `background.appearance`. Missing and null
+Zed values stay absent; SpaceTerm-specific action/toggle/field states compile from those authored
+inputs. Unsupported syntax/editor roles are ignored. Source backdrop intent is retained while
+foundation native presentation remains opaque. Import is atomic and never selects or downloads.
+
+Definition export preserves sparse authored Chrome intent. Effective export includes current color
+overrides as complete portable copies. Built-in copies receive nonreserved identities. Installing
+an effective export into a fresh catalog reproduces its colors; importing a copy repeatedly still
+requires explicit replacement. The Settings buttons distinguish effective schemes, definitions
+and the entire Settings document.
 
 ## Preferences and defaults
 

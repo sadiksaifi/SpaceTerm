@@ -130,6 +130,13 @@ impl SettingsEditor {
         self.draft.export_document()
     }
 
+    pub(super) fn export_definitions(
+        &self,
+        schemes: &[(SchemeKind, SchemeId)],
+    ) -> Result<String, SettingsError> {
+        self.draft.export_definitions(schemes)
+    }
+
     pub(super) fn export_schemes(
         &self,
         schemes: &[(SchemeKind, SchemeId)],

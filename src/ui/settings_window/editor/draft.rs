@@ -180,6 +180,18 @@ impl SettingsDraft {
         schemes: &[(SchemeKind, SchemeId)],
     ) -> Result<String, SettingsError> {
         let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
+        Ok(crate::appearance::export_effective_schemes(
+            &catalog,
+            &self.draft.preferences,
+            schemes,
+        )?)
+    }
+
+    pub(super) fn export_definitions(
+        &self,
+        schemes: &[(SchemeKind, SchemeId)],
+    ) -> Result<String, SettingsError> {
+        let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
         Ok(crate::appearance::export_schemes(&catalog, schemes)?)
     }
 

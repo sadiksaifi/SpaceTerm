@@ -165,9 +165,35 @@ pub(crate) fn export_color_document(document: &ColorSchemeDocument) -> Result<St
         .map_err(|_| ImportError::Serialization)
 }
 
+/// Export authored definitions. Built-ins receive portable identities; dependencies stay authored.
 pub(crate) fn export_schemes(
     catalog: &SchemeCatalog,
     schemes: &[(SchemeKind, SchemeId)],
+) -> Result<String, ImportError> {
+    export_selected(catalog, schemes, None)
+}
+
+/// Export current resolved paints including per-scheme overrides as independent portable copies.
+pub(crate) fn export_effective_schemes(
+    catalog: &SchemeCatalog,
+    preferences: &AppearancePreferences,
+    schemes: &[(SchemeKind, SchemeId)],
+) -> Result<String, ImportError> {
+    export_selected(catalog, schemes, Some(preferences))
+}
+
+fn portable_id(id: &SchemeId, effective: bool) -> Result<SchemeId, ImportError> {
+    if !effective && !id.is_reserved() {
+        return Ok(id.clone());
+    }
+    let hash = format!("{:x}", Sha256::digest(id.as_str().as_bytes()));
+    SchemeId::new(format!("copy.{hash}")).map_err(|_| ImportError::InvalidScheme)
+}
+
+fn export_selected(
+    catalog: &SchemeCatalog,
+    schemes: &[(SchemeKind, SchemeId)],
+    effective: Option<&AppearancePreferences>,
 ) -> Result<String, ImportError> {
     if schemes.is_empty() || schemes.len() > MAX_IMPORT_SCHEMES {
         return Err(ImportError::InvalidSchemeCount);
@@ -180,28 +206,45 @@ pub(crate) fn export_schemes(
         }
         match kind {
             SchemeKind::Chrome => {
-                let scheme = catalog.chrome(id).ok_or(ImportError::UnknownScheme)?;
-                let mut colors = super::builtin::chrome_base(scheme.appearance);
-                colors.apply(&scheme.colors);
-                exported.push(CustomScheme::Chrome(Box::new(ChromeScheme {
-                    id: scheme.id.clone(),
-                    name: scheme.name.clone(),
-                    appearance: scheme.appearance,
-                    metadata: scheme.metadata.clone(),
-                    colors: ChromeColorOverrides::complete(&colors),
-                })));
+                let mut scheme = catalog
+                    .chrome(id)
+                    .ok_or(ImportError::UnknownScheme)?
+                    .clone();
+                if let Some(preferences) = effective {
+                    let colors = super::compiler::compile_chrome(
+                        scheme.appearance,
+                        &scheme.colors,
+                        preferences
+                            .chrome
+                            .overrides
+                            .get(id)
+                            .unwrap_or(&ChromeColorOverrides::default()),
+                    )
+                    .colors;
+                    scheme.colors = ChromeColorOverrides::complete(&colors);
+                }
+                scheme.id = portable_id(id, effective.is_some())?;
+                exported.push(CustomScheme::Chrome(Box::new(scheme)));
             }
             SchemeKind::Terminal => {
-                let scheme = catalog.terminal(id).ok_or(ImportError::UnknownScheme)?;
-                let mut colors = super::builtin::terminal_base(scheme.appearance);
-                colors.apply(&scheme.colors);
-                exported.push(CustomScheme::Terminal(Box::new(TerminalScheme {
-                    id: scheme.id.clone(),
-                    name: scheme.name.clone(),
-                    appearance: scheme.appearance,
-                    metadata: scheme.metadata.clone(),
-                    colors: TerminalColorOverrides::complete(&colors),
-                })));
+                let mut scheme = catalog
+                    .terminal(id)
+                    .ok_or(ImportError::UnknownScheme)?
+                    .clone();
+                // Terminal definitions retain their documented palette fallback. Flatten built-in
+                // copies so installation preserves every protocol color without reserved identity.
+                if effective.is_some() || id.is_reserved() {
+                    let mut colors = super::builtin::terminal_base(scheme.appearance);
+                    colors.apply(&scheme.colors);
+                    if let Some(overrides) =
+                        effective.and_then(|preferences| preferences.terminal.overrides.get(id))
+                    {
+                        colors.apply(overrides);
+                    }
+                    scheme.colors = TerminalColorOverrides::complete(&colors);
+                }
+                scheme.id = portable_id(id, effective.is_some())?;
+                exported.push(CustomScheme::Terminal(Box::new(scheme)));
             }
         }
     }
@@ -291,11 +334,38 @@ pub(crate) fn import_zed(
         .get("style")
         .and_then(Value::as_object)
         .ok_or(ImportError::InvalidZedDocument)?;
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let author = source_text(&root, "author", 256)?;
+    let family =
+        source_text(&root, "name", 256)?.unwrap_or_else(|| String::from("Unidentified Zed family"));
+    // These descriptors establish a repeatable import namespace, not source ownership. A collision
+    // always requires explicit catalog replacement; no name or origin can authorize that operation.
+    let source_identity = serde_json::to_vec(&(
+        source_text(&root, "id", 256)?,
+        &family,
+        &author,
+        name,
+        appearance,
+    ))
+    .map_err(|_| ImportError::Serialization)?;
+    let hash = format!("{:x}", Sha256::digest(source_identity));
+    let canonical_candidate = serde_json::to_vec(theme).map_err(|_| ImportError::Serialization)?;
     let metadata = SchemeMetadata {
-        author: Some(String::from("Imported from Zed")),
-        license: None,
-        description: Some(String::from("Color roles translated by SpaceTerm")),
+        origin: Some(super::scheme::SchemeOrigin {
+            format: super::scheme::SchemeSourceFormat::Zed,
+            package_id: source_text(&root, "id", 256)?,
+            family,
+            theme: name.to_owned(),
+            fingerprint: format!("{:x}", Sha256::digest(canonical_candidate)),
+        }),
+        author,
+        license: source_text(&root, "license", 256)?,
+        description: Some(String::from("Color roles translated from Zed by SpaceTerm")),
+    };
+    let window_background = match style.get("background.appearance") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value(value.clone()).map_err(|_| ImportError::InvalidZedDocument)?,
+        ),
     };
     let mut result = Vec::with_capacity(kinds.len());
     let mut seen = BTreeSet::new();
@@ -305,7 +375,8 @@ pub(crate) fn import_zed(
         }
         match kind {
             ZedImportKind::Chrome => result.push(CustomScheme::Chrome(Box::new(ChromeScheme {
-                id: SchemeId::new(format!("import.{hash}.{candidate_index}.chrome"))
+                window_background,
+                id: SchemeId::new(format!("import.{hash}.chrome"))
                     .map_err(|_| ImportError::InvalidScheme)?,
                 name: name.to_owned(),
                 appearance,
@@ -314,7 +385,7 @@ pub(crate) fn import_zed(
             }))),
             ZedImportKind::Terminal => {
                 result.push(CustomScheme::Terminal(Box::new(TerminalScheme {
-                    id: SchemeId::new(format!("import.{hash}.{candidate_index}.terminal"))
+                    id: SchemeId::new(format!("import.{hash}.terminal"))
                         .map_err(|_| ImportError::InvalidScheme)?,
                     name: name.to_owned(),
                     appearance,
@@ -328,6 +399,17 @@ pub(crate) fn import_zed(
         validate_scheme(scheme, true).map_err(|_| ImportError::InvalidScheme)?;
     }
     Ok(result)
+}
+
+fn source_text(root: &Value, key: &str, max: usize) -> Result<Option<String>, ImportError> {
+    match root.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            super::scheme::validate_text(value, max).map_err(|_| ImportError::InvalidScheme)?;
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(ImportError::InvalidZedDocument),
+    }
 }
 
 fn parse_zed(bytes: &[u8]) -> Result<Value, ImportError> {
@@ -368,7 +450,7 @@ fn zed_appearance(object: &serde_json::Map<String, Value>) -> Result<Appearance,
 }
 
 fn validate_zed_name(name: &str) -> Result<(), ImportError> {
-    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
         Err(ImportError::InvalidScheme)
     } else {
         Ok(())
@@ -399,7 +481,7 @@ fn zed_chrome(style: &serde_json::Map<String, Value>) -> Result<ChromeColorOverr
         tab_active_background => "tab.active_background", tab_inactive_background => "tab.inactive_background",
         text => "text", text_muted => "text.muted", text_placeholder => "text.placeholder",
         text_disabled => "text.disabled", text_accent => "text.accent", link_text_hover => "link_text.hover",
-        icon => "icon", icon_muted => "icon.muted", icon_disabled => "icon.disabled", icon_accent => "icon.accent",
+        icon => "icon", icon_muted => "icon.muted", icon_disabled => "icon.disabled",
         border => "border", border_variant => "border.variant", border_focused => "border.focused",
         border_selected => "border.selected", border_disabled => "border.disabled", border_transparent => "border.transparent",
         element_background => "element.background", element_hover => "element.hover", element_active => "element.active",
@@ -411,13 +493,13 @@ fn zed_chrome(style: &serde_json::Map<String, Value>) -> Result<ChromeColorOverr
         warning_border => "warning.border", error => "error", error_background => "error.background",
         error_border => "error.border", scrollbar_track_border => "scrollbar.track.border",
         scrollbar_thumb_background => "scrollbar.thumb.background", scrollbar_thumb_border => "scrollbar.thumb.border",
-        scrollbar_thumb_hover_background => "scrollbar.thumb.hover_background"
-    }
-    if let Some(background) = colors.background {
-        colors.modal_scrim = Some(Color {
-            a: 0x99,
-            ..background
-        });
+        scrollbar_thumb_hover_background => "scrollbar.thumb.hover_background",
+        scrollbar_thumb_active_background => "scrollbar.thumb.active_background",
+        scrollbar_track => "scrollbar.track.background", success_background => "success.background",
+        success_border => "success.border", info_border => "info.border",
+        row_hover_background => "ghost_element.hover",
+        row_selected_background => "ghost_element.selected", row_selected_hover_background => "ghost_element.hover"
+
     }
     if let Some(players) = style.get("players").and_then(Value::as_array)
         && let Some(selection) = players

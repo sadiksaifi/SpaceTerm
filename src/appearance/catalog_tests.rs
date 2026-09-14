@@ -4,6 +4,7 @@ use super::*;
 
 fn chrome_scheme(id: impl Into<String>, name: impl Into<String>) -> CustomScheme {
     CustomScheme::Chrome(Box::new(ChromeScheme {
+        window_background: None,
         id: SchemeId::new(id).unwrap(),
         name: name.into(),
         appearance: Appearance::Dark,

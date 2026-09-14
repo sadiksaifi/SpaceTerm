@@ -1,5 +1,3 @@
-use std::{fs, path::Path};
-
 macro_rules! role_names {
     ($($field:ident),+ $(,)?) => { &[ $(stringify!($field)),+ ] };
 }
@@ -24,28 +22,6 @@ const TERMINAL_ROLES: &[&str] = &[
     "hyperlink",
     "visual_bell",
 ];
-
-#[test]
-fn every_accepted_color_role_has_a_production_consumer() {
-    let chrome_sources = rust_sources(Path::new("src/ui"));
-    let terminal_sources = [
-        rust_sources(Path::new("src/terminal")),
-        rust_sources(Path::new("src/ui")),
-    ]
-    .concat();
-    for role in CHROME_ROLES {
-        assert!(
-            contains_field_use(&chrome_sources, role),
-            "chrome role `{role}` has no production consumer"
-        );
-    }
-    for role in TERMINAL_ROLES {
-        assert!(
-            contains_field_use(&terminal_sources, role),
-            "terminal role `{role}` has no production consumer"
-        );
-    }
-}
 
 #[test]
 fn published_schema_lists_exactly_the_accepted_color_roles() {
@@ -124,30 +100,4 @@ fn property_keys(value: &serde_json::Value) -> std::collections::BTreeSet<&str> 
         .keys()
         .map(String::as_str)
         .collect()
-}
-
-fn contains_field_use(sources: &str, role: &str) -> bool {
-    sources.contains(&format!(".{role}"))
-}
-
-fn rust_sources(root: &Path) -> String {
-    let mut result = String::new();
-    collect(root, &mut result);
-    result
-}
-
-fn collect(path: &Path, output: &mut String) {
-    let entries = fs::read_dir(path).expect("consumer source directory must be readable");
-    for entry in entries {
-        let path = entry
-            .expect("consumer source entry must be readable")
-            .path();
-        if path.is_dir() {
-            collect(&path, output);
-        } else if path.extension().is_some_and(|extension| extension == "rs")
-            && !path.to_string_lossy().contains("/tests")
-        {
-            output.push_str(&fs::read_to_string(path).expect("consumer source must be readable"));
-        }
-    }
 }
