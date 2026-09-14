@@ -22,9 +22,13 @@ CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
 target=$temp_root/post/target
 mkdir -p "$target"
 printf '{}\n' > "$target/.rustc_info.json"
+set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
     "dd if=/dev/zero of=\"\$CARGO_TARGET_DIR/artifact\" bs=1048576 count=2 >/dev/null 2>&1"
+status=$?
+set -e
+test "$status" -eq 75
 test ! -e "$target/artifact"
 
 target=$temp_root/failure/target
@@ -32,11 +36,24 @@ mkdir -p "$target"
 printf '{}\n' > "$target/.rustc_info.json"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
-    "$guard" run -- sh -c \
-    "dd if=/dev/zero of=\"\$CARGO_TARGET_DIR/artifact\" bs=1048576 count=2 >/dev/null 2>&1; exit 37"
+    "$guard" run -- sh -c 'exit 37'
 status=$?
 set -e
 test "$status" -eq 37
+
+target=$temp_root/live/target
+continuation=$temp_root/live-continued
+mkdir -p "$target"
+printf '{}\n' > "$target/.rustc_info.json"
+set +e
+CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c \
+    "dd if=/dev/zero of=\"\$CARGO_TARGET_DIR/artifact\" bs=1048576 count=2 >/dev/null 2>&1; (sleep 4; : > \"\$1\") & wait" \
+    sh "$continuation"
+status=$?
+set -e
+test "$status" -eq 75
+test ! -e "$continuation"
 test ! -e "$target/artifact"
 
 target=$temp_root/cleanup-failure/target
@@ -55,7 +72,7 @@ PATH="$temp_root/bin:$PATH" \
     >/dev/null 2>&1
 status=$?
 set -e
-test "$status" -eq 37
+test "$status" -eq 75
 test -e "$target/artifact"
 
 target=$temp_root/nested/target
