@@ -1615,7 +1615,10 @@ struct PaneCaptionText {
 
 impl PaneCaptionText {
     fn from_terminal(terminal: &TerminalPane) -> Self {
-        let facts = terminal.caption();
+        Self::from_facts(terminal.caption())
+    }
+
+    fn from_facts(facts: super::terminal_pane::PaneCaptionFacts) -> Self {
         if facts.directory.is_empty() {
             return Self {
                 origin: facts.origin,
@@ -1672,6 +1675,13 @@ fn render_pane_caption(
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
+            #[cfg(feature = "appearance-exerciser")]
+            let caption = PaneCaption {
+                text: super::appearance_exerciser::caption_fixture(cx)
+                    .map(PaneCaptionText::from_facts)
+                    .unwrap_or(caption.text),
+                ..caption
+            };
             let background = caption.terminal.read(cx).surface_background();
             let pane_id = caption.pane_id;
             let paint = appearance.colors.caption(background, caption.focused);
