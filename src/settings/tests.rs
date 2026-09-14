@@ -1,7 +1,6 @@
 use super::*;
 use crate::appearance::{
-    Appearance, AppearanceGeneration, AvailableFonts, ChromeColorOverrides, SchemeSelection,
-    SystemAppearance,
+    AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeColorOverrides, SystemAppearance,
 };
 use crate::platform::secure_filesystem::PrivateFileSnapshot;
 use storage::StorageCommit;
@@ -241,10 +240,8 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
         .unwrap();
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: selected.clone(),
-        appearance: Appearance::Light,
-    };
+    candidate.preferences.mode = AppearanceMode::Light;
+    candidate.preferences.chrome.schemes.light = selected.clone();
     candidate
         .preferences
         .chrome

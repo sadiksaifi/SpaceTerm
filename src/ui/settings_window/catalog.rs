@@ -4,12 +4,12 @@
 //! is not listed here cannot be found by Settings Search, so the suite asserts that every
 //! [`SettingsRowId`] appears exactly once.
 
-use crate::appearance::ResetTarget;
+use crate::appearance::{Appearance, ResetTarget};
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SettingsSectionId {
-    /// Independent appearance modes and the schemes each surface wears.
+    /// Shared appearance mode and the independent schemes each surface wears.
     Appearance,
     /// SpaceTerm's own typography.
     Interface,
@@ -50,7 +50,7 @@ impl SettingsSectionId {
     pub(super) const fn description(self) -> &'static str {
         match self {
             Self::Appearance => {
-                "Choose independent light, dark, or automatic appearance for the interface and terminal."
+                "Choose light, dark, or automatic appearance, with separate interface and terminal color schemes."
             }
             Self::Interface => {
                 "Type in SpaceTerm's own windows, tabs, and panels. Terminal output is unaffected."
@@ -76,10 +76,8 @@ impl SettingsSectionId {
 /// One labeled Setting control within a Section.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SettingsRowId {
-    /// The interface light, dark, or automatic choice.
-    ChromeAppearanceMode,
-    /// The terminal light, dark, or automatic choice.
-    TerminalAppearanceMode,
+    /// The shared light, dark, or automatic choice.
+    AppearanceMode,
     ChromeDensity,
     ChromeScheme,
     ChromeLightScheme,
@@ -114,18 +112,17 @@ impl SettingsRowId {
     /// The reset target restoring this row alone, when the row holds a resettable preference.
     ///
     /// A scheme row restores its own scheme and leaves the appearance mode alone, because the mode
-    /// belongs to its surface’s appearance control.
-    pub(super) fn reset_target(self) -> Option<ResetTarget> {
+    /// belongs to the shared Appearance control.
+    pub(super) fn reset_target(self, appearance: Appearance) -> Option<ResetTarget> {
         Some(match self {
-            Self::ChromeAppearanceMode => ResetTarget::ChromeSchemeSelection,
-            Self::TerminalAppearanceMode => ResetTarget::TerminalSchemeSelection,
+            Self::AppearanceMode => ResetTarget::AppearanceMode,
             Self::ChromeDensity => ResetTarget::ChromeDensity,
-            Self::ChromeScheme | Self::ChromeLightScheme | Self::ChromeDarkScheme => {
-                ResetTarget::ChromeSchemeChoice
-            }
-            Self::TerminalScheme | Self::TerminalLightScheme | Self::TerminalDarkScheme => {
-                ResetTarget::TerminalSchemeChoice
-            }
+            Self::ChromeScheme => ResetTarget::ChromeScheme(appearance),
+            Self::ChromeLightScheme => ResetTarget::ChromeScheme(Appearance::Light),
+            Self::ChromeDarkScheme => ResetTarget::ChromeScheme(Appearance::Dark),
+            Self::TerminalScheme => ResetTarget::TerminalScheme(appearance),
+            Self::TerminalLightScheme => ResetTarget::TerminalScheme(Appearance::Light),
+            Self::TerminalDarkScheme => ResetTarget::TerminalScheme(Appearance::Dark),
             Self::ChromeFontFamily => ResetTarget::ChromeFontFamily,
             Self::ChromeBaseSize => ResetTarget::ChromeBaseSize,
             Self::ChromeRegularWeight => ResetTarget::ChromeRegularWeight,
@@ -184,10 +181,10 @@ pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
 
 pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
-        id: SettingsRowId::ChromeAppearanceMode,
+        id: SettingsRowId::AppearanceMode,
         section: SettingsSectionId::Appearance,
         group: "Mode",
-        label: "Interface appearance",
+        label: "Appearance",
         keywords: &[
             "light",
             "dark",
@@ -196,24 +193,10 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "system",
             "mode",
             "theme",
+            "interface",
+            "terminal",
         ],
-        selector: "settings-row-chrome-appearance-mode",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalAppearanceMode,
-        section: SettingsSectionId::Appearance,
-        group: "Mode",
-        label: "Terminal appearance",
-        keywords: &[
-            "light",
-            "dark",
-            "auto",
-            "automatic",
-            "system",
-            "mode",
-            "theme",
-        ],
-        selector: "settings-row-terminal-appearance-mode",
+        selector: "settings-row-appearance-mode",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ChromeDensity,
@@ -420,9 +403,8 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 24] = [
-        SettingsRowId::ChromeAppearanceMode,
-        SettingsRowId::TerminalAppearanceMode,
+    const EVERY_ROW: [SettingsRowId; 23] = [
+        SettingsRowId::AppearanceMode,
         SettingsRowId::ChromeDensity,
         SettingsRowId::ChromeScheme,
         SettingsRowId::ChromeLightScheme,
@@ -499,37 +481,35 @@ mod tests {
         }
     }
 
-    /// Each surface has one independent appearance mode.
+    /// One appearance control governs both surfaces.
     #[test]
-    fn each_surface_owns_its_appearance_mode() {
+    fn one_appearance_mode_governs_both_surfaces() {
         let modes = ROWS
             .iter()
-            .filter(|row| {
-                matches!(
-                    row.id,
-                    SettingsRowId::ChromeAppearanceMode | SettingsRowId::TerminalAppearanceMode
-                )
-            })
+            .filter(|row| matches!(row.id, SettingsRowId::AppearanceMode))
             .count();
 
-        assert_eq!(modes, 2);
+        assert_eq!(modes, 1);
     }
 
-    /// A scheme row changes a scheme, so its reset leaves the surface’s appearance mode alone.
+    /// A scheme row changes a scheme, so its reset leaves the shared appearance mode alone.
     #[test]
     fn a_scheme_row_resets_only_its_own_scheme() {
         for (row, expected) in [
-            (SettingsRowId::ChromeScheme, ResetTarget::ChromeSchemeChoice),
+            (
+                SettingsRowId::ChromeScheme,
+                ResetTarget::ChromeScheme(Appearance::Light),
+            ),
             (
                 SettingsRowId::ChromeLightScheme,
-                ResetTarget::ChromeSchemeChoice,
+                ResetTarget::ChromeScheme(Appearance::Light),
             ),
             (
                 SettingsRowId::TerminalDarkScheme,
-                ResetTarget::TerminalSchemeChoice,
+                ResetTarget::TerminalScheme(Appearance::Dark),
             ),
         ] {
-            assert_eq!(row.reset_target(), Some(expected));
+            assert_eq!(row.reset_target(Appearance::Light), Some(expected));
         }
     }
 
@@ -550,7 +530,7 @@ mod tests {
     fn a_keyword_query_reaches_a_row_whose_label_omits_the_word() {
         assert!(matching_rows("leading").contains(&SettingsRowId::TerminalLineHeight));
         assert!(matching_rows("zed").contains(&SettingsRowId::SchemeInterchange));
-        assert!(matching_rows("automatic").contains(&SettingsRowId::ChromeAppearanceMode));
+        assert!(matching_rows("automatic").contains(&SettingsRowId::AppearanceMode));
     }
 
     /// The diagnostics readout is part of the scheme library rather than a row of its own, so the
@@ -593,7 +573,7 @@ mod tests {
                     | SettingsRowId::SchemeInterchange
             );
             assert_eq!(
-                row.id.reset_target().is_some(),
+                row.id.reset_target(Appearance::Light).is_some(),
                 resettable,
                 "{:?} reset mapping disagrees with its kind",
                 row.id

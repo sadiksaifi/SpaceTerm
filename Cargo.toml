@@ -72,6 +72,7 @@ raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }
+jsonschema = { version = "=0.56.0", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

@@ -11,7 +11,8 @@ pub(super) const ICON_SIZE: f32 = 14.0;
 pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 
 // Reserved native traffic-light region, with no additional leading gap.
-const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
+/// Space reserved for native window controls in app-owned top chrome.
+pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
 const CONTROL_TOP_INSET: f32 = 4.0;
 const EXPANDED_MINIMUM_ACTION_GAP: f32 = 4.0;
 const EXPANDED_TRAILING_GAP: f32 = 2.0;

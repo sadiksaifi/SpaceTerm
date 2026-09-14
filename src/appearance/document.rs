@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::preferences::ResetTarget;
 use super::scheme::CustomScheme;
-use super::{Appearance, AppearancePreferences, SchemeCatalog, SchemeKind, SchemeSelection};
+use super::{Appearance, AppearancePreferences, SchemeCatalog, SchemeKind, SchemeSlots};
 use super::{
     Color, SchemeId,
     scheme::{
@@ -18,7 +18,8 @@ use super::{
     },
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SETTINGS_SCHEMA_VERSION: u32 = 2;
+const COLOR_SCHEME_SCHEMA_VERSION: u32 = 1;
 const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 const MAX_IMPORT_SCHEMES: usize = 32;
@@ -36,7 +37,7 @@ pub(crate) struct AppearanceDocument {
 impl Default for AppearanceDocument {
     fn default() -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
+            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: 0,
             preferences: AppearancePreferences::default(),
             custom_schemes: Vec::new(),
@@ -46,7 +47,7 @@ impl Default for AppearanceDocument {
 
 impl AppearanceDocument {
     pub(crate) fn validate(&self) -> Result<(), AppearanceDocumentError> {
-        if self.schema_version != SCHEMA_VERSION {
+        if self.schema_version != SETTINGS_SCHEMA_VERSION {
             return Err(AppearanceDocumentError::UnsupportedVersion);
         }
         self.preferences
@@ -71,12 +72,12 @@ impl AppearanceDocument {
         }
         validate_selection(
             &catalog,
-            &self.preferences.chrome.scheme,
+            &self.preferences.chrome.schemes,
             SchemeKind::Chrome,
         )?;
         validate_selection(
             &catalog,
-            &self.preferences.terminal.scheme,
+            &self.preferences.terminal.schemes,
             SchemeKind::Terminal,
         )?;
         Ok(())
@@ -93,15 +94,13 @@ impl AppearanceDocument {
 
 fn validate_selection(
     catalog: &SchemeCatalog,
-    selection: &SchemeSelection,
+    slots: &SchemeSlots,
     kind: SchemeKind,
 ) -> Result<(), AppearanceDocumentError> {
-    let selections = match selection {
-        SchemeSelection::Fixed { id, appearance } => vec![(id, *appearance)],
-        SchemeSelection::System { light, dark } => {
-            vec![(light, Appearance::Light), (dark, Appearance::Dark)]
-        }
-    };
+    let selections = [
+        (&slots.light, Appearance::Light),
+        (&slots.dark, Appearance::Dark),
+    ];
     for (id, expected) in selections {
         let (same, other) = match kind {
             SchemeKind::Chrome => (
@@ -202,7 +201,7 @@ pub(crate) fn export_resolved_schemes(
     terminal.id = portable_id(&terminal.id, true)?;
     terminal.colors = TerminalColorOverrides::complete(&resolved.terminal.colors);
     export_color_document(&ColorSchemeDocument {
-        schema_version: SCHEMA_VERSION,
+        schema_version: COLOR_SCHEME_SCHEMA_VERSION,
         schemes: vec![
             CustomScheme::Chrome(Box::new(chrome)),
             CustomScheme::Terminal(Box::new(terminal)),
@@ -277,13 +276,13 @@ fn export_selected(
         }
     }
     export_color_document(&ColorSchemeDocument {
-        schema_version: SCHEMA_VERSION,
+        schema_version: COLOR_SCHEME_SCHEMA_VERSION,
         schemes: exported,
     })
 }
 
 fn validate_color_document(document: &ColorSchemeDocument) -> Result<(), ImportError> {
-    if document.schema_version != SCHEMA_VERSION {
+    if document.schema_version != COLOR_SCHEME_SCHEMA_VERSION {
         return Err(ImportError::UnsupportedVersion);
     }
     if document.schemes.is_empty() || document.schemes.len() > MAX_IMPORT_SCHEMES {

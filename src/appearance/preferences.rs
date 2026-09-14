@@ -5,28 +5,59 @@ use serde::{Deserialize, Serialize};
 use super::scheme::{CatalogError, ChromeColorOverrides, TerminalColorOverrides, validate_text};
 use super::{Appearance, SchemeId, SchemeKind, builtin};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "policy", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum SchemeSelection {
-    Fixed {
-        id: SchemeId,
-        appearance: Appearance,
-    },
-    System {
-        light: SchemeId,
-        dark: SchemeId,
-    },
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AppearanceMode {
+    Light,
+    #[default]
+    Dark,
+    Auto,
 }
 
-impl SchemeSelection {
-    pub(crate) fn select(&self, system: Appearance) -> (&SchemeId, Appearance) {
+impl AppearanceMode {
+    pub(crate) const fn resolve(self, system: Appearance) -> Appearance {
         match self {
-            Self::Fixed { id, appearance } => (id, *appearance),
-            Self::System { light, dark } => match system {
-                Appearance::Light => (light, Appearance::Light),
-                Appearance::Dark => (dark, Appearance::Dark),
-            },
+            Self::Light => Appearance::Light,
+            Self::Dark => Appearance::Dark,
+            Self::Auto => system,
         }
+    }
+}
+
+impl From<Appearance> for AppearanceMode {
+    fn from(value: Appearance) -> Self {
+        match value {
+            Appearance::Light => Self::Light,
+            Appearance::Dark => Self::Dark,
+        }
+    }
+}
+
+/// The scheme identities one appearance domain wears in each shared Appearance Mode slot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemeSlots {
+    pub(crate) light: SchemeId,
+    pub(crate) dark: SchemeId,
+}
+
+impl SchemeSlots {
+    pub(crate) fn get(&self, appearance: Appearance) -> &SchemeId {
+        match appearance {
+            Appearance::Light => &self.light,
+            Appearance::Dark => &self.dark,
+        }
+    }
+
+    pub(crate) fn get_mut(&mut self, appearance: Appearance) -> &mut SchemeId {
+        match appearance {
+            Appearance::Light => &mut self.light,
+            Appearance::Dark => &mut self.dark,
+        }
+    }
+
+    pub(crate) fn set(&mut self, appearance: Appearance, id: SchemeId) {
+        *self.get_mut(appearance) = id;
     }
 }
 
@@ -145,7 +176,7 @@ impl Default for TerminalRenderingPreferences {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChromePreferences {
-    pub(crate) scheme: SchemeSelection,
+    pub(crate) schemes: SchemeSlots,
     pub(crate) typography: ChromeTypographyPreferences,
     pub(crate) density: ChromeDensity,
     #[serde(default)]
@@ -155,9 +186,9 @@ pub(crate) struct ChromePreferences {
 impl Default for ChromePreferences {
     fn default() -> Self {
         Self {
-            scheme: SchemeSelection::Fixed {
-                id: builtin::vague_chrome_id(),
-                appearance: Appearance::Dark,
+            schemes: SchemeSlots {
+                light: builtin::fallback_id(SchemeKind::Chrome, Appearance::Light),
+                dark: builtin::vague_chrome_id(),
             },
             typography: ChromeTypographyPreferences::default(),
             density: ChromeDensity::Compact,
@@ -169,7 +200,7 @@ impl Default for ChromePreferences {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TerminalPreferences {
-    pub(crate) scheme: SchemeSelection,
+    pub(crate) schemes: SchemeSlots,
     pub(crate) typography: TerminalTypographyPreferences,
     pub(crate) rendering: TerminalRenderingPreferences,
     #[serde(default)]
@@ -179,9 +210,9 @@ pub(crate) struct TerminalPreferences {
 impl Default for TerminalPreferences {
     fn default() -> Self {
         Self {
-            scheme: SchemeSelection::Fixed {
-                id: builtin::vague_terminal_id(),
-                appearance: Appearance::Dark,
+            schemes: SchemeSlots {
+                light: builtin::fallback_id(SchemeKind::Terminal, Appearance::Light),
+                dark: builtin::vague_terminal_id(),
             },
             typography: TerminalTypographyPreferences::default(),
             rendering: TerminalRenderingPreferences::default(),
@@ -193,6 +224,7 @@ impl Default for TerminalPreferences {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppearancePreferences {
+    pub(crate) mode: AppearanceMode,
     pub(crate) chrome: ChromePreferences,
     pub(crate) terminal: TerminalPreferences,
 }
@@ -222,13 +254,10 @@ impl AppearancePreferences {
     pub(crate) fn reset(&mut self, target: ResetTarget) {
         let defaults = Self::default();
         match target {
-            ResetTarget::SchemeSelections => {
-                self.chrome.scheme = defaults.chrome.scheme;
-                self.terminal.scheme = defaults.terminal.scheme;
-            }
-            ResetTarget::ChromeSchemeSelection => self.chrome.scheme = defaults.chrome.scheme,
-            ResetTarget::ChromeSchemeChoice => {
-                self.chrome.scheme = default_scheme_choice(&self.chrome.scheme, SchemeKind::Chrome)
+            ResetTarget::AppearanceMode => self.mode = defaults.mode,
+            ResetTarget::ChromeScheme(appearance) => {
+                *self.chrome.schemes.get_mut(appearance) =
+                    defaults.chrome.schemes.get(appearance).clone();
             }
             ResetTarget::ChromeFontFamily => {
                 self.chrome.typography.family = defaults.chrome.typography.family
@@ -245,10 +274,9 @@ impl AppearancePreferences {
             ResetTarget::ChromeHeadingWeight => {
                 self.chrome.typography.heading_weight = defaults.chrome.typography.heading_weight
             }
-            ResetTarget::TerminalSchemeSelection => self.terminal.scheme = defaults.terminal.scheme,
-            ResetTarget::TerminalSchemeChoice => {
-                self.terminal.scheme =
-                    default_scheme_choice(&self.terminal.scheme, SchemeKind::Terminal)
+            ResetTarget::TerminalScheme(appearance) => {
+                *self.terminal.schemes.get_mut(appearance) =
+                    defaults.terminal.schemes.get(appearance).clone();
             }
             ResetTarget::TerminalFontFamily => {
                 self.terminal.typography.family = defaults.terminal.typography.family
@@ -289,13 +317,13 @@ impl AppearancePreferences {
                 }
             }
             ResetTarget::ChromeColors => {
-                self.chrome.scheme = defaults.chrome.scheme;
+                self.chrome.schemes = defaults.chrome.schemes;
                 self.chrome.overrides.clear();
             }
             ResetTarget::ChromeTypography => self.chrome.typography = defaults.chrome.typography,
             ResetTarget::ChromeDensity => self.chrome.density = defaults.chrome.density,
             ResetTarget::TerminalColors => {
-                self.terminal.scheme = defaults.terminal.scheme;
+                self.terminal.schemes = defaults.terminal.schemes;
                 self.terminal.overrides.clear();
             }
             ResetTarget::TerminalTypography => {
@@ -307,43 +335,20 @@ impl AppearancePreferences {
     }
 }
 
-/// The default scheme for every slot the current appearance mode uses, keeping that mode.
-///
-/// A surface's scheme row chooses a scheme, not a mode, so restoring its default leaves the mode
-/// alone. Restoring the whole selection would move one surface to the default mode and leave the
-/// other where it was, which is a state the one shared appearance control cannot present.
-fn default_scheme_choice(current: &SchemeSelection, kind: SchemeKind) -> SchemeSelection {
-    match current {
-        SchemeSelection::Fixed { appearance, .. } => SchemeSelection::Fixed {
-            id: builtin::fallback_id(kind, *appearance),
-            appearance: *appearance,
-        },
-        SchemeSelection::System { .. } => SchemeSelection::System {
-            light: builtin::fallback_id(kind, Appearance::Light),
-            dark: builtin::fallback_id(kind, Appearance::Dark),
-        },
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
     reason = "the Settings Window consumes the field and group targets; the color-role targets await an override editor"
 )]
 pub(crate) enum ResetTarget {
-    /// The appearance mode both surfaces share, and the schemes that mode selects.
-    SchemeSelections,
-    ChromeSchemeSelection,
-    /// The chrome scheme chosen for each appearance slot, keeping the current appearance mode.
-    ChromeSchemeChoice,
+    AppearanceMode,
+    ChromeScheme(Appearance),
     ChromeFontFamily,
     ChromeBaseSize,
     ChromeRegularWeight,
     ChromeEmphasisWeight,
     ChromeHeadingWeight,
-    TerminalSchemeSelection,
-    /// The terminal scheme chosen for each appearance slot, keeping the current appearance mode.
-    TerminalSchemeChoice,
+    TerminalScheme(Appearance),
     TerminalFontFamily,
     TerminalBaseSize,
     TerminalRegularWeight,

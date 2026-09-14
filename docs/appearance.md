@@ -5,10 +5,15 @@ typography independent. A color-scheme import never selects the scheme, changes 
 Workspace, Pane, Terminal Session, filesystem, or terminal-program state.
 
 The native schemas are [`appearance-settings.schema.json`](schema/appearance-settings.schema.json)
-and [`color-schemes.schema.json`](schema/color-schemes.schema.json). Both formats use
-`schema_version: 1`. Implementations also enforce a 4 MiB byte limit, nesting depth 32, at most 32
-schemes per import, and at most 128 installed custom schemes. Unknown and duplicate object keys are
-rejected. Errors are typed and do not include rejected contents, paths, or native errors.
+and [`color-schemes.schema.json`](schema/color-schemes.schema.json). Retained Settings use
+`schema_version: 2`; Color Scheme packages use `schema_version: 1`. Implementations also enforce a
+4 MiB byte limit, nesting depth 32, at most 32 schemes per import, and at most 128 installed custom
+schemes. Unknown and duplicate object keys are rejected. Errors are typed and do not include
+rejected contents, paths, or native errors.
+Both formats resolve their shared Color Scheme shapes through the immutable
+[`color-scheme-definitions-v1.schema.json`](schema/color-scheme-definitions-v1.schema.json)
+resource.
+The unreleased retained Settings v1 development format is not migrated.
 
 ## Definitions and completion
 
@@ -90,9 +95,10 @@ and the entire Settings document.
 
 ## Preferences and defaults
 
-Chrome and terminal scheme selection are independent. Each accepts either a fixed scheme with an
-explicit expected appearance, or separate light and dark IDs selected from the current System
-Appearance. An unavailable request remains visible as the requested ID while rendering uses the
+One Appearance Mode selects Light, Dark or Auto for the whole application. Chrome and Terminal each
+persist their own Light and Dark scheme IDs, so changing the shared mode never replaces either
+surface's scheme choice. Auto resolves one System Appearance fact and selects the matching slot in
+both families. An unavailable request remains visible as the requested ID while rendering uses the
 matching built-in fallback and reports a bounded diagnostic.
 
 Chrome defaults to 13 px system UI text with weights 400/600/600 and compact density. Its size
@@ -101,9 +107,9 @@ range is 10 through 24 px. Terminal defaults to 18 px monospace text, line heigh
 size ranges from 8 through 32 px and line height from 1 through 2. Unavailable font requests retain
 their requested family while resolution supplies a suitable system fallback and Apple Color Emoji.
 
-Reset is typed and independently targets every scheme-selection, per-domain scheme choice, font,
-size, weight, line-height, italic, bold-as-bright, and density field; both domains' scheme
-selections at once; one color override role for an exact scheme ID; each
+Reset is typed and independently targets the shared Appearance Mode, each per-domain Light or Dark
+scheme slot, font, size, weight, line-height, italic, bold-as-bright, and density field; one color
+override role for an exact scheme ID; each
 color, typography, density, or rendering group; or all appearance preferences. Resetting a role
 removes that override so it inherits again. No reset removes installed custom schemes.
 
@@ -123,9 +129,9 @@ a card could only ever be drawn as an outline, and a hairline between every pair
 line for a reading the gap already gives. Rows within a group therefore sit closer together than
 one group sits to the next, which the suite asserts.
 
-Chrome and Terminal Appearance Modes each present Light, Dark and Auto independently. Editing
-one preserves the other domain's policy and scheme choice. Changes preview live and commit shortly
-after the last change, so there is no save action.
+One Appearance Mode presents Light, Dark and Auto for the whole application. Chrome and Terminal
+retain separate Color Scheme choices for each mode. Changes preview live and commit shortly after
+the last change, so there is no save action.
 See [ADR 0005](adr/0005-present-settings-in-a-separate-operating-system-window.md).
 
 Per-role color overrides are not editable from the Settings Window. They remain supported by the
@@ -141,10 +147,10 @@ settings documents carry a separate `u64` revision.
 Run `mise run dev:appearance` for the development-only harness with an isolated retained Config
 root, or `mise run dev:appearance:macos` for the separately identifiable macOS bundle. The harness
 uses the production settings owner and supports preview, cancel, direct save, preview save, reload,
-native and Zed import, complete export, system selection, independent color/font/density toggles,
+native and Zed import, complete export, shared system selection, independent color/font/density toggles,
 typed resets, font refresh, and requested/effective diagnostics. `cmd-alt-a` returns to the harness
-and `cmd-alt-c` toggles its Chrome preview without activating it, so an open menu, focused masked
-input, or modal remains the active acceptance surface. `Reset Next Field` and `Reset Next Group`
+and `cmd-alt-c` toggles the shared Appearance Mode without activating it, so an open menu, focused
+masked input, or modal remains the active acceptance surface. `Reset Next Field` and `Reset Next Group`
 cycle the typed reset surface for manual checks. The terminal and fixture buttons activate a
 live terminal window or open Alert, Dialog,
 ProgressDialog, menu, ComboBox, plain-input, and obscured-input acceptance fixtures. The harness can

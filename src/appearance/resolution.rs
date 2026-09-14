@@ -242,32 +242,29 @@ impl SchemeCatalog {
             .validate()
             .map_err(ResolutionError::Preferences)?;
         let mut diagnostics = Vec::new();
-        if system.0.is_none() {
+        if preferences.mode == super::AppearanceMode::Auto && system.0.is_none() {
             diagnostics.push(AppearanceDiagnostic::SystemAppearanceUnavailable);
         }
         let system = system.effective();
-        let (requested_chrome, chrome_appearance) = preferences.chrome.scheme.select(system);
-        let (requested_terminal, terminal_appearance) = preferences.terminal.scheme.select(system);
+        let appearance = preferences.mode.resolve(system);
+        let requested_chrome = preferences.chrome.schemes.get(appearance);
+        let requested_terminal = preferences.terminal.schemes.get(appearance);
         let (effective_chrome, compiled_chrome, found_chrome) = self.resolve_chrome_scheme(
             requested_chrome,
-            chrome_appearance,
+            appearance,
             preferences.chrome.overrides.get(requested_chrome),
         )?;
         let chrome_colors = compiled_chrome.colors;
         if !found_chrome {
-            diagnostics.push(AppearanceDiagnostic::ChromeSchemeUnavailable {
-                appearance: chrome_appearance,
-            });
+            diagnostics.push(AppearanceDiagnostic::ChromeSchemeUnavailable { appearance });
         }
         chrome_colors
             .validate()
             .map_err(|_| ResolutionError::UnsupportedAlpha)?;
         let (effective_terminal, mut terminal_colors, found_terminal) =
-            self.resolve_terminal_scheme(requested_terminal, terminal_appearance)?;
+            self.resolve_terminal_scheme(requested_terminal, appearance)?;
         if !found_terminal {
-            diagnostics.push(AppearanceDiagnostic::TerminalSchemeUnavailable {
-                appearance: terminal_appearance,
-            });
+            diagnostics.push(AppearanceDiagnostic::TerminalSchemeUnavailable { appearance });
         }
         if found_terminal
             && let Some(overrides) = preferences.terminal.overrides.get(requested_terminal)
@@ -284,7 +281,7 @@ impl SchemeCatalog {
             chrome: Arc::new(ResolvedChromeAppearance {
                 requested_scheme: requested_chrome.clone(),
                 effective_scheme: effective_chrome.clone(),
-                appearance: chrome_appearance,
+                appearance,
                 colors: chrome_colors,
                 provenance: compiled_chrome.provenance,
                 readability: compiled_chrome.readability,
@@ -299,7 +296,7 @@ impl SchemeCatalog {
             terminal: Arc::new(ResolvedTerminalAppearance {
                 requested_scheme: requested_terminal.clone(),
                 effective_scheme: effective_terminal,
-                appearance: terminal_appearance,
+                appearance,
                 colors: terminal_colors,
                 typography: terminal_typography,
                 bold_as_bright: preferences.terminal.rendering.bold_as_bright,

@@ -664,6 +664,13 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
+    crate::ui::settings_window::configure_window_chrome(
+        Rc::clone(&host.window_movement),
+        host.titlebar
+            .as_ref()
+            .and_then(|titlebar| titlebar.traffic_light_position),
+        cx,
+    );
     init(cx, Rc::clone(&host.adapters.application_menu));
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
@@ -949,6 +956,18 @@ mod runtime_tests {
 
         assert_eq!(cx.update(|cx| cx.windows().len()), 2);
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+        let settings = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+                .expect("Settings window")
+        });
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        assert_eq!(
+            settings_cx.window_title().as_deref(),
+            Some("Settings"),
+            "transparent client chrome must retain the native window identity"
+        );
     }
 
     #[gpui::test]

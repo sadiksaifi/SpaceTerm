@@ -304,16 +304,9 @@ impl SettingsWindow {
         let _ = cx;
         let preferences = &self.editor.document().preferences;
         let mut selected = BTreeSet::new();
-        for selection in [&preferences.chrome.scheme, &preferences.terminal.scheme] {
-            match selection {
-                crate::appearance::SchemeSelection::Fixed { id, .. } => {
-                    selected.insert(id.clone());
-                }
-                crate::appearance::SchemeSelection::System { light, dark } => {
-                    selected.insert(light.clone());
-                    selected.insert(dark.clone());
-                }
-            }
+        for slots in [&preferences.chrome.schemes, &preferences.terminal.schemes] {
+            selected.insert(slots.light.clone());
+            selected.insert(slots.dark.clone());
         }
         selected
     }

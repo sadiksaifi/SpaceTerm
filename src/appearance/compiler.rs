@@ -1545,7 +1545,7 @@ mod tests {
     #[test]
     fn schema_lists_exact_registry_and_agrees_on_chrome_alpha_and_null() {
         let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../docs/schema/appearance-settings.schema.json"
+            "../../docs/schema/color-scheme-definitions-v1.schema.json"
         ))
         .unwrap();
         let roles = schema["$defs"]["chromeColors"]["propertyNames"]["enum"]

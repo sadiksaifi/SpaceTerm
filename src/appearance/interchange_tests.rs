@@ -4,8 +4,11 @@ use super::*;
 use std::collections::BTreeSet;
 
 fn selected(catalog: &SchemeCatalog, id: SchemeId, appearance: Appearance) -> ResolvedAppearance {
-    let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::Fixed { id, appearance };
+    let mut preferences = AppearancePreferences {
+        mode: appearance.into(),
+        ..Default::default()
+    };
+    preferences.chrome.schemes.set(appearance, id);
     catalog
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -22,15 +25,15 @@ fn effective_exports_install_fresh_and_reproduce_builtin_paints_and_overrides() 
         let catalog = SchemeCatalog::default();
         let chrome = super::builtin::fallback_id(SchemeKind::Chrome, appearance);
         let terminal = super::builtin::fallback_id(SchemeKind::Terminal, appearance);
-        let mut preferences = AppearancePreferences::default();
-        preferences.chrome.scheme = SchemeSelection::Fixed {
-            id: chrome.clone(),
-            appearance,
+        let mut preferences = AppearancePreferences {
+            mode: appearance.into(),
+            ..Default::default()
         };
-        preferences.terminal.scheme = SchemeSelection::Fixed {
-            id: terminal.clone(),
-            appearance,
-        };
+        preferences.chrome.schemes.set(appearance, chrome.clone());
+        preferences
+            .terminal
+            .schemes
+            .set(appearance, terminal.clone());
         preferences.chrome.overrides.insert(
             chrome.clone(),
             ChromeColorOverrides {
@@ -69,15 +72,18 @@ fn effective_exports_install_fresh_and_reproduce_builtin_paints_and_overrides() 
             .install_batch(&parsed.schemes, fresh.revision(), &BTreeSet::new())
             .unwrap();
         assert!(installed.iter().all(|id| !id.is_reserved()));
-        let mut preferences = AppearancePreferences::default();
-        preferences.chrome.scheme = SchemeSelection::Fixed {
-            id: installed[0].clone(),
-            appearance,
+        let mut preferences = AppearancePreferences {
+            mode: appearance.into(),
+            ..Default::default()
         };
-        preferences.terminal.scheme = SchemeSelection::Fixed {
-            id: installed[1].clone(),
-            appearance,
-        };
+        preferences
+            .chrome
+            .schemes
+            .set(appearance, installed[0].clone());
+        preferences
+            .terminal
+            .schemes
+            .set(appearance, installed[1].clone());
         let after = fresh
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -322,10 +328,7 @@ fn snapshot_export_does_not_apply_unused_builtin_overrides_to_missing_request_fa
     let catalog = SchemeCatalog::default();
     let fallback = super::builtin::fallback_id(SchemeKind::Chrome, Appearance::Dark);
     let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::new("missing.chrome").unwrap(),
-        appearance: Appearance::Dark,
-    };
+    preferences.chrome.schemes.dark = SchemeId::new("missing.chrome").unwrap();
     preferences.chrome.overrides.insert(
         fallback.clone(),
         ChromeColorOverrides {

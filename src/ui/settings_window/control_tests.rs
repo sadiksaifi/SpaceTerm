@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, ChromeFontFamily, SchemeId, SchemeSelection, TerminalFontFamily,
+    Appearance, AppearanceDocument, AppearanceMode, ChromeFontFamily, SchemeId, TerminalFontFamily,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::ui::appearance_runtime;
@@ -200,10 +200,9 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx: &mut TestAppContext,
 ) {
     let mut document = AppearanceDocument::default();
-    document.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::new("builtin.spaceterm.chrome.light").unwrap(),
-        appearance: Appearance::Light,
-    };
+    document.preferences.mode = AppearanceMode::Light;
+    document.preferences.chrome.schemes.light =
+        SchemeId::new("builtin.spaceterm.chrome.light").unwrap();
     let (settings, cx) = open_settings(&document, cx);
     cx.simulate_keystrokes("tab tab");
     cx.run_until_parked();
@@ -395,14 +394,8 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 #[gpui::test]
 fn unavailable_scheme_ids_remain_selected(cx: &mut TestAppContext) {
     let mut document = AppearanceDocument::default();
-    document.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::new("user.missing-interface").unwrap(),
-        appearance: Appearance::Dark,
-    };
-    document.preferences.terminal.scheme = SchemeSelection::Fixed {
-        id: SchemeId::new("user.missing-terminal").unwrap(),
-        appearance: Appearance::Dark,
-    };
+    document.preferences.chrome.schemes.dark = SchemeId::new("user.missing-interface").unwrap();
+    document.preferences.terminal.schemes.dark = SchemeId::new("user.missing-terminal").unwrap();
     let (settings, cx) = open_settings(&document, cx);
 
     click("settings-row-chrome-scheme-control", cx);

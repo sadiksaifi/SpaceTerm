@@ -52,8 +52,8 @@ const SWATCH_WIDTH: f32 = 88.0;
 /// row cannot invent a fifth step and no two roles can land close enough to read as the same
 /// thing.
 pub(super) mod text {
-    /// The page's name.
-    pub(crate) const TITLE: f32 = 17.0;
+    /// The page's name, set as a large title at the head of the content surface.
+    pub(crate) const TITLE: f32 = 22.0;
     /// The title of one run of related rows.
     ///
     /// It is larger and heavier than the labels under it: a heading that a label outweighs is not
@@ -290,12 +290,23 @@ impl SettingsRow {
         // come to rest between two rows, reading as a stray sentence belonging to neither. Stacked
         // with the label it stays anchored to the setting it explains, and it stops where the
         // control begins instead of running the width of the page.
+        // Guidance is measured the same way. A column growing from nothing would wrap it one word
+        // per line when measured, and a centered column that tall rises out of its own row.
+        let label_basis = self
+            .description
+            .as_ref()
+            .filter(|_| !above)
+            .map(|description| appearance.measure(description, text::SMALL, window).ceil())
+            .map_or(px(0.0), |width| {
+                width.max(label_width + appearance.spacing(RESET_GAP) + reset_slot_width(cx))
+            });
         let label = (!full).then(|| {
             div()
                 .flex()
                 .flex_col()
                 .min_w_0()
                 .flex_1()
+                .flex_basis(label_basis)
                 .gap(appearance.spacing(2.0))
                 .child(
                     div()
@@ -369,32 +380,35 @@ impl SettingsRow {
     }
 }
 
-/// A section heading with its explanation.
-pub(super) fn section_header(
+/// The active section's large title with its explanation directly beneath it.
+///
+/// It carries no hitbox of its own, so the window-drag region behind it keeps the whole heading
+/// available for native window movement.
+pub(super) fn section_heading(
     selector: &'static str,
     title: &'static str,
     description: &'static str,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
     div()
-        .debug_selector(move || selector.to_owned())
+        .debug_selector(move || format!("{selector}-heading"))
         .flex()
         .flex_col()
         .w_full()
-        .px(appearance.spacing(ROW_INSET))
-        // The page's own name stands further from the first run than the runs stand from each
-        // other, so the ramp and the spacing say the same thing about what contains what.
-        .pb(appearance.spacing(6.0))
-        .gap(appearance.spacing(3.0))
+        .gap(appearance.spacing(4.0))
         .child(
             div()
+                .debug_selector(move || format!("{selector}-title"))
+                .truncate()
                 .font(appearance.heading.clone())
                 .text_size(appearance.text_size(text::TITLE))
+                .line_height(gpui::relative(1.2))
                 .text_color(gpui_color(appearance.colors.text))
                 .child(title),
         )
         .child(
             div()
+                .debug_selector(move || format!("{selector}-description"))
                 .max_w(appearance.text_size(PROSE_MEASURE))
                 .text_size(appearance.text_size(text::BODY))
                 .text_color(gpui_color(appearance.colors.text_secondary))

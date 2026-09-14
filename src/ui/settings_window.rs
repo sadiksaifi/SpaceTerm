@@ -21,23 +21,30 @@ mod control_tests;
 #[path = "settings_window/tests.rs"]
 mod tests;
 
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Entity, FocusHandle, Global, ScrollHandle,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    actions, div, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels, Point,
+    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, actions, div, px, size,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconButton, IconName, ModalAction,
     ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
     OverlayScrollbarEvent, ScrollMetrics, SegmentedControl, SegmentedOption, SegmentedSize, Switch,
     TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
-    ToggleSize, TooltipLayer,
+    ToggleSize, TooltipLayer, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, ChromeDensity, ChromeFontFamily, Color, FontClass, ResetTarget,
-    SchemeId, SchemeKind, SchemeSelection, TerminalFontFamily, builtin_fallback_scheme,
+    Appearance, AppearanceDocument, AppearanceMode, ChromeDensity, ChromeFontFamily, Color,
+    FontClass, ResetTarget, SchemeId, SchemeKind, TerminalFontFamily,
+};
+#[cfg(test)]
+use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::platform::window_movement::{
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
@@ -45,7 +52,7 @@ use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
     CARD_RADIUS, ROW_INSET, SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
-    gpui_color, reset_button, section_header, text,
+    gpui_color, reset_button, section_heading, text,
 };
 use editor::{SaveStatus, SettingsEditor};
 
@@ -126,6 +133,27 @@ fn navigation_chip_paint(
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
 impl Global for OpenSettingsWindow {}
 
+/// Host-owned capabilities needed by the Settings window's app-drawn titlebar.
+///
+/// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
+/// Settings portable and gives each opened window one independent pointer-interaction owner.
+struct SettingsWindowComposition {
+    window_movement: Rc<dyn WindowMovementFactory>,
+    traffic_light_position: Option<Point<Pixels>>,
+}
+impl Global for SettingsWindowComposition {}
+
+pub(crate) fn configure_window_chrome(
+    window_movement: Rc<dyn WindowMovementFactory>,
+    traffic_light_position: Option<Point<Pixels>>,
+    cx: &mut App,
+) {
+    cx.set_global(SettingsWindowComposition {
+        window_movement,
+        traffic_light_position,
+    });
+}
+
 /// Opens Settings, or activates it when it is already open.
 pub(crate) fn open_or_activate(cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
@@ -144,6 +172,12 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         });
         return;
     }
+    let Some(composition) = cx.try_global::<SettingsWindowComposition>() else {
+        eprintln!("SpaceTerm Settings is unavailable because window chrome is not installed");
+        return;
+    };
+    let window_drag = composition.window_movement.create();
+    let traffic_light_position = composition.traffic_light_position;
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
         WindowOptions {
@@ -152,8 +186,10 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Settings".into()),
-                appears_transparent: false,
-                traffic_light_position: None,
+                // Retain the native title for the Window menu and accessibility while drawing the
+                // visible section title in the client surface.
+                appears_transparent: true,
+                traffic_light_position,
             }),
             // A floating window stays ordinary and modeless: the normal window level and the
             // ordinary window class, with only tabbing, resizing, and minimizing withheld. It is
@@ -166,7 +202,9 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             ..WindowOptions::default()
         },
         |window, cx| {
-            let settings = cx.new(|cx| SettingsWindow::new(window, cx));
+            let settings = cx.new(|cx| {
+                SettingsWindow::new_with_window_drag(Rc::clone(&window_drag), window, cx)
+            });
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
                 let _ = closing.update(cx, |settings, cx| {
@@ -213,114 +251,11 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| open_or_activate(cx));
 }
 
-/// The Light, Dark, or Auto choice governing which Color Scheme slot applies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppearanceMode {
-    Light,
-    Dark,
-    Auto,
-}
-
-impl AppearanceMode {
-    fn of(selection: &SchemeSelection) -> Self {
-        match selection {
-            SchemeSelection::Fixed {
-                appearance: Appearance::Light,
-                ..
-            } => Self::Light,
-            SchemeSelection::Fixed {
-                appearance: Appearance::Dark,
-                ..
-            } => Self::Dark,
-            SchemeSelection::System { .. } => Self::Auto,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-            Self::Auto => "Auto",
-        }
-    }
-}
-
-/// The scheme a domain last used in each appearance slot.
-///
-/// The document stores one selection, so switching from Dark to Light and back would otherwise
-/// forget the dark scheme. These live only as long as the window, which is long enough to make
-/// switching non-destructive.
-#[derive(Clone)]
-struct RememberedSchemes {
-    light: SchemeId,
-    dark: SchemeId,
-}
-
-impl RememberedSchemes {
-    fn capture(selection: &SchemeSelection, kind: SchemeKind) -> Self {
-        let fallback = |appearance| builtin_fallback_scheme(kind, appearance);
-        match selection {
-            SchemeSelection::System { light, dark } => Self {
-                light: light.clone(),
-                dark: dark.clone(),
-            },
-            SchemeSelection::Fixed {
-                id,
-                appearance: Appearance::Light,
-            } => Self {
-                light: id.clone(),
-                dark: fallback(Appearance::Dark),
-            },
-            SchemeSelection::Fixed {
-                id,
-                appearance: Appearance::Dark,
-            } => Self {
-                light: fallback(Appearance::Light),
-                dark: id.clone(),
-            },
-        }
-    }
-
-    fn slot(&self, appearance: Appearance) -> &SchemeId {
-        match appearance {
-            Appearance::Light => &self.light,
-            Appearance::Dark => &self.dark,
-        }
-    }
-
-    fn remember(&mut self, appearance: Appearance, id: SchemeId) {
-        match appearance {
-            Appearance::Light => self.light = id,
-            Appearance::Dark => self.dark = id,
-        }
-    }
-
-    fn reconcile(&mut self, selection: &SchemeSelection) {
-        match selection {
-            SchemeSelection::System { light, dark } => {
-                self.light = light.clone();
-                self.dark = dark.clone();
-            }
-            SchemeSelection::Fixed { id, appearance } => self.remember(*appearance, id.clone()),
-        }
-    }
-
-    /// The selection a mode produces, preserving the other slot's choice.
-    fn selection(&self, mode: AppearanceMode) -> SchemeSelection {
-        match mode {
-            AppearanceMode::Light => SchemeSelection::Fixed {
-                id: self.light.clone(),
-                appearance: Appearance::Light,
-            },
-            AppearanceMode::Dark => SchemeSelection::Fixed {
-                id: self.dark.clone(),
-                appearance: Appearance::Dark,
-            },
-            AppearanceMode::Auto => SchemeSelection::System {
-                light: self.light.clone(),
-                dark: self.dark.clone(),
-            },
-        }
+fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
+    match mode {
+        AppearanceMode::Light => "Light",
+        AppearanceMode::Dark => "Dark",
+        AppearanceMode::Auto => "Auto",
     }
 }
 
@@ -337,18 +272,33 @@ pub(crate) struct SettingsWindow {
     active_section: SettingsSectionId,
     /// The row Settings Search revealed, highlighted so the eye lands on it.
     revealed: Option<SettingsRowId>,
-    chrome_schemes: RememberedSchemes,
-    terminal_schemes: RememberedSchemes,
     interchange_status: Option<SharedString>,
     focus_handle: FocusHandle,
     /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
     navigation_focus: FocusHandle,
     /// Keyboard traversal enables the ring; pointer selection withdraws keyboard focus and the ring.
     navigation_focus_visible: bool,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
 }
 
 impl SettingsWindow {
+    #[cfg(test)]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_window_drag(
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_window_drag(
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Transparent native chrome hides this visually while retaining a stable Operating-System
+        // window identity for the Window menu and accessibility clients.
+        window.set_window_title("Settings");
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
         window_appearance.apply(window, cx);
         let settings = cx
@@ -356,11 +306,6 @@ impl SettingsWindow {
             .settings
             .clone();
         let editor = SettingsEditor::new(settings);
-        let preferences = &editor.document().preferences;
-        let chrome_schemes =
-            RememberedSchemes::capture(&preferences.chrome.scheme, SchemeKind::Chrome);
-        let terminal_schemes =
-            RememberedSchemes::capture(&preferences.terminal.scheme, SchemeKind::Terminal);
         // The window takes focus so its own shortcuts and Tab traversal resolve from the moment it
         // opens, rather than only after something inside it is clicked.
         let focus_handle = cx.focus_handle();
@@ -460,12 +405,11 @@ impl SettingsWindow {
             scrollbar,
             active_section: SettingsSectionId::Appearance,
             revealed: None,
-            chrome_schemes,
-            terminal_schemes,
             interchange_status: None,
             focus_handle,
             navigation_focus,
             navigation_focus_visible: true,
+            operating_system_window_drag_platform,
         }
     }
 
@@ -554,25 +498,25 @@ impl SettingsWindow {
             .collect()
     }
 
-    /// Each surface presents fixed or automatic slots according to its own policy.
+    /// Both scheme engines use the shared mode while retaining their own light and dark slots.
     fn row_applies(&self, row: SettingsRowId) -> bool {
-        let chrome_auto = self.appearance_mode(SchemeKind::Chrome) == AppearanceMode::Auto;
-        let terminal_auto = self.appearance_mode(SchemeKind::Terminal) == AppearanceMode::Auto;
+        let auto = self.editor.document().preferences.mode == AppearanceMode::Auto;
         match row {
-            SettingsRowId::ChromeScheme => !chrome_auto,
-            SettingsRowId::TerminalScheme => !terminal_auto,
-            SettingsRowId::ChromeLightScheme | SettingsRowId::ChromeDarkScheme => chrome_auto,
-            SettingsRowId::TerminalLightScheme | SettingsRowId::TerminalDarkScheme => terminal_auto,
+            SettingsRowId::ChromeScheme | SettingsRowId::TerminalScheme => !auto,
+            SettingsRowId::ChromeLightScheme
+            | SettingsRowId::ChromeDarkScheme
+            | SettingsRowId::TerminalLightScheme
+            | SettingsRowId::TerminalDarkScheme => auto,
             _ => true,
         }
     }
 
-    fn appearance_mode(&self, kind: SchemeKind) -> AppearanceMode {
-        let preferences = &self.editor.document().preferences;
-        AppearanceMode::of(match kind {
-            SchemeKind::Chrome => &preferences.chrome.scheme,
-            SchemeKind::Terminal => &preferences.terminal.scheme,
-        })
+    fn fixed_appearance(&self) -> Appearance {
+        self.editor
+            .document()
+            .preferences
+            .mode
+            .resolve(Appearance::Dark)
     }
 
     fn edit(&mut self, edit: impl FnOnce(&mut AppearanceDocument), cx: &mut Context<Self>) {
@@ -581,7 +525,7 @@ impl SettingsWindow {
 
     /// Whether this row differs from its default, which is when a reset is worth offering.
     fn differs_from_default(&self, row: SettingsRowId) -> bool {
-        let Some(target) = row.reset_target() else {
+        let Some(target) = row.reset_target(self.fixed_appearance()) else {
             return false;
         };
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
@@ -597,7 +541,7 @@ impl SettingsWindow {
         if !self.differs_from_default(row) || !self.editor.editable() {
             return None;
         }
-        let target = row.reset_target()?;
+        let target = row.reset_target(self.fixed_appearance())?;
         let owner = cx.weak_entity();
         Some(
             reset_button(
@@ -639,7 +583,6 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.reconcile_remembered_schemes();
         let appearance = crate::ui::appearance::chrome(cx).clone();
         self.sync_scrollbar(cx);
         let content = div()
@@ -691,6 +634,7 @@ impl Render for SettingsWindow {
             .text_color(gpui_color(appearance.colors.text))
             .text_size(appearance.text_size(text::BODY))
             .font(appearance.regular.clone())
+            // Both columns run to the window's top edge beneath the transparent native titlebar.
             .child(
                 div()
                     .flex()
@@ -706,6 +650,150 @@ impl Render for SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn handle_window_drag_event(
+        &mut self,
+        event: WindowDragRegionEvent,
+        window: &mut Window,
+    ) -> WindowDragRegionResponse {
+        match event {
+            WindowDragRegionEvent::InteractionStarted { .. } => {
+                if let Err(error) = self
+                    .operating_system_window_drag_platform
+                    .interaction_started()
+                {
+                    Self::report_window_drag_error("begin", error);
+                }
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::MoveRequested { .. } => {
+                match self
+                    .operating_system_window_drag_platform
+                    .start_window_move(window)
+                {
+                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
+                    Err(error) => {
+                        Self::report_window_drag_error("start", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                }
+            }
+            WindowDragRegionEvent::DoubleActivationRequested => {
+                window.titlebar_double_click();
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::InteractionFinished { .. } => {
+                self.operating_system_window_drag_platform
+                    .interaction_finished();
+                WindowDragRegionResponse::Continue
+            }
+        }
+    }
+
+    fn report_window_drag_error(operation: &str, error: OperatingSystemWindowDragError) {
+        eprintln!("failed to {operation} Settings Window drag: {error}");
+    }
+
+    /// Wraps client chrome in a native window-movement region.
+    ///
+    /// The sidebar's traffic-light strip and the content column's heading are separate regions so
+    /// Search and every other control stay outside drag ownership, while the uncovered space in
+    /// both behaves as the titlebar, including double-click.
+    fn window_drag_region(
+        &self,
+        id: &'static str,
+        content: impl IntoElement,
+        pointer_insets: Edges<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> WindowDragRegion {
+        let owner = cx.weak_entity();
+        WindowDragRegion::new(
+            id,
+            "Move Operating-System Window from Settings chrome",
+            content,
+        )
+        .pointer_insets(pointer_insets)
+        .debug_selector(id)
+        .on_event(move |event, window, cx| {
+            let event = *event;
+            owner
+                .update(cx, |settings, _| {
+                    settings.handle_window_drag_event(event, window)
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// The sidebar material beneath the native traffic lights, reserved for window movement.
+    fn render_sidebar_titlebar(
+        &self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let region = self.window_drag_region(
+            "settings-sidebar-drag-region",
+            div().size_full(),
+            Edges {
+                left: px(super::workspace_chrome::TRAFFIC_LIGHT_CLEARANCE),
+                ..Edges::default()
+            },
+            cx,
+        );
+        div()
+            .debug_selector(|| "settings-sidebar-titlebar".to_owned())
+            .flex_none()
+            .w_full()
+            .h(appearance.top_height())
+            .child(region)
+            .into_any_element()
+    }
+
+    /// The active section's large title and description at the head of the content surface.
+    ///
+    /// The heading stays fixed while rows scroll beneath it, the way a native Settings pane keeps
+    /// its identity in view. Its top edge shares the traffic-light row, and the whole heading is
+    /// window-movement space; a hairline appears only once content has scrolled under it.
+    fn render_detail_heading(
+        &self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let section = self.active_section;
+        let scrolled =
+            self.scroll.max_offset().height > px(0.0) && self.scroll.offset().y < px(-0.5);
+        let heading = div()
+            .size_full()
+            .px(appearance.spacing(CONTENT_GUTTER))
+            .pt(appearance.spacing(HEADING_TOP_INSET))
+            .pb(appearance.spacing(14.0))
+            .child(section_heading(
+                section.selector(),
+                section.title(),
+                section.description(),
+                appearance,
+            ));
+        let region =
+            self.window_drag_region("settings-detail-drag-region", heading, Edges::default(), cx);
+        div()
+            .debug_selector(|| "settings-detail-heading".to_owned())
+            .relative()
+            .flex_none()
+            .w_full()
+            .child(region)
+            .when(scrolled, |heading| {
+                heading.child(
+                    div()
+                        .debug_selector(|| "settings-detail-heading-divider".to_owned())
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(appearance.spacing(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .bg(gpui_color(appearance.colors.border)),
+                )
+            })
+            .into_any_element()
+    }
+
     fn navigation_has_visible_focus(&self, window: &Window) -> bool {
         self.navigation_focus.is_focused(window) && self.navigation_focus_visible
     }
@@ -869,42 +957,52 @@ impl SettingsWindow {
             })
             .collect::<Vec<_>>();
         div()
+            .debug_selector(|| "settings-sidebar".to_owned())
             .flex()
             .flex_col()
             .flex_none()
             .w(appearance.text_size(SIDEBAR_WIDTH))
             .h_full()
-            .p(appearance.spacing(SIDEBAR_INSET))
             .bg(gpui_color(appearance.colors.panel_background))
-            .child(self.render_search_field(appearance, cx))
+            .child(self.render_sidebar_titlebar(appearance, cx))
             .child(
                 div()
-                    .id("settings-navigation")
-                    .debug_selector(|| "settings-navigation".to_owned())
-                    .when(!available.is_empty(), |navigation| {
-                        navigation.track_focus(&self.navigation_focus)
-                    })
-                    // GPUI track_focus automatically focuses on mouse-down. Suppress that before
-                    // its bubble listener runs: pointer selection does not enter keyboard navigation.
-                    .capture_any_mouse_down(cx.listener(
-                        |settings, event: &gpui::MouseDownEvent, window, cx| {
-                            if event.button != gpui::MouseButton::Left {
-                                return;
-                            }
-                            window.prevent_default();
-                            settings.navigation_focus_visible = false;
-                            settings.focus_handle.focus(window);
-                            cx.notify();
-                        },
-                    ))
-                    .on_key_down(cx.listener(|settings, event, window, cx| {
-                        settings.navigate_sections(event, window, cx);
-                    }))
                     .flex()
                     .flex_col()
-                    .w_full()
-                    .gap(appearance.spacing(2.0))
-                    .children(entries),
+                    .flex_1()
+                    .min_h_0()
+                    .px(appearance.spacing(SIDEBAR_INSET))
+                    .pt(appearance.spacing(SIDEBAR_INSET))
+                    .child(self.render_search_field(appearance, cx))
+                    .child(
+                        div()
+                            .id("settings-navigation")
+                            .debug_selector(|| "settings-navigation".to_owned())
+                            .when(!available.is_empty(), |navigation| {
+                                navigation.track_focus(&self.navigation_focus)
+                            })
+                            // GPUI track_focus automatically focuses on mouse-down. Suppress that before
+                            // its bubble listener runs: pointer selection does not enter keyboard navigation.
+                            .capture_any_mouse_down(cx.listener(
+                                |settings, event: &gpui::MouseDownEvent, window, cx| {
+                                    if event.button != gpui::MouseButton::Left {
+                                        return;
+                                    }
+                                    window.prevent_default();
+                                    settings.navigation_focus_visible = false;
+                                    settings.focus_handle.focus(window);
+                                    cx.notify();
+                                },
+                            ))
+                            .on_key_down(cx.listener(|settings, event, window, cx| {
+                                settings.navigate_sections(event, window, cx);
+                            }))
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .gap(appearance.spacing(2.0))
+                            .children(entries),
+                    ),
             )
             .into_any_element()
     }
@@ -982,6 +1080,7 @@ impl SettingsWindow {
             .flex_1()
             .min_w_0()
             .h_full()
+            .child(self.render_detail_heading(appearance, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -992,13 +1091,15 @@ impl SettingsWindow {
                     .child(
                         div()
                             .id("settings-detail")
+                            .debug_selector(|| "settings-detail".to_owned())
                             .track_scroll(&self.scroll)
                             .size_full()
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
                             .px(appearance.spacing(CONTENT_GUTTER - ROW_INSET))
-                            .py(appearance.spacing(18.0))
+                            .pt(appearance.spacing(8.0))
+                            .pb(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
                                 let _ = revealing.update(cx, |settings, cx| {
                                     settings.reveal_scrollbar(cx);
@@ -1064,12 +1165,6 @@ impl SettingsWindow {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(26.0))
-            .child(section_header(
-                section.selector(),
-                section.title(),
-                section.description(),
-                appearance,
-            ))
             .children(notice)
             .children(rendered)
             .into_any_element()
@@ -1081,6 +1176,12 @@ impl SettingsWindow {
 /// Rows carry part of it themselves so a card's own edge clears the text it holds, and the column
 /// gives back the rest. The two together are what a reader sees as the content's left edge.
 const CONTENT_GUTTER: f32 = 26.0;
+
+/// The heading's distance from the window's top edge, which it shares with the traffic lights.
+///
+/// The title's line box begins just under the controls' top edge, so the large title reads as the
+/// window's own name without crowding the native controls in the neighbouring column.
+const HEADING_TOP_INSET: f32 = 20.0;
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -1132,12 +1233,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
-            SettingsRowId::ChromeAppearanceMode => {
-                self.render_appearance_mode(SchemeKind::Chrome, appearance, cx)
-            }
-            SettingsRowId::TerminalAppearanceMode => {
-                self.render_appearance_mode(SchemeKind::Terminal, appearance, cx)
-            }
+            SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::ChromeScheme => {
                 self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
             }
@@ -1195,18 +1291,11 @@ impl SettingsWindow {
         }
     }
 
-    /// Edits only the selected surface, preserving the other surface and its remembered slots.
-    fn render_appearance_mode(
-        &mut self,
-        kind: SchemeKind,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current = self.appearance_mode(kind);
-        let selector = match kind {
-            SchemeKind::Chrome => "settings-chrome-appearance-mode",
-            SchemeKind::Terminal => "settings-terminal-appearance-mode",
-        };
+    /// One mode chooses the light or dark slot for both independent scheme engines.
+    fn render_appearance_mode(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.editor.document().preferences.mode;
+        let selector = "settings-appearance-mode";
+        let edge = crate::ui::appearance::chrome(cx).colors.border;
         let owner = cx.weak_entity();
         let options = [
             AppearanceMode::Light,
@@ -1215,96 +1304,51 @@ impl SettingsWindow {
         ]
         .into_iter()
         .map(|mode| {
-            let swatches = self.mode_preview_colors(kind, mode, cx);
-            SegmentedOption::new(mode, mode.label())
-                .debug_selector(format!("{selector}-{}", mode.label().to_ascii_lowercase()))
-                .preview(move |_, extent| mode_preview(&swatches, extent).into_any_element())
+            let palettes = self.mode_preview_palettes(mode);
+            let label = appearance_mode_label(mode);
+            SegmentedOption::new(mode, label)
+                .debug_selector(format!("{selector}-{}", label.to_ascii_lowercase()))
+                .preview(move |_, extent| mode_preview(&palettes, edge, extent).into_any_element())
         })
         .collect::<Vec<_>>();
-        let label = match kind {
-            SchemeKind::Chrome => "Interface appearance",
-            SchemeKind::Terminal => "Terminal appearance",
-        };
-        let control = SegmentedControl::new(selector, label, &current, options)
+        SegmentedControl::new(selector, "Appearance", &current, options)
             .expect("three appearance modes are within the bounded option set")
             .size(SegmentedSize::Card)
             .disabled(!self.editor.editable())
             .debug_selector(selector)
             .on_change(move |change, _, cx| {
                 let mode = *change.requested();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.set_appearance_mode(kind, mode, cx)
-                });
-            });
-        let _ = appearance;
-        control.into_any_element()
+                let _ = owner.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx));
+            })
+            .into_any_element()
     }
 
-    /// Representative colors for one mode's preview card.
+    /// The miniature window previews the Interface scheme in each persistent slot.
     ///
-    /// The card depicts SpaceTerm's own windows, so it previews the chrome scheme each mode
-    /// selects.
-    fn mode_preview_colors(
-        &self,
-        kind: SchemeKind,
-        mode: AppearanceMode,
-        cx: &mut Context<Self>,
-    ) -> Vec<Color> {
-        let _ = cx;
-        let remembered = self.remembered(kind);
+    /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
+    fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<Vec<Color>> {
+        let slots = &self.editor.document().preferences.chrome.schemes;
+        let summaries = self.editor.scheme_summaries(SchemeKind::Chrome).ok();
         let pick = |appearance| {
-            self.editor
-                .scheme_summaries(kind)
-                .ok()
+            summaries
+                .as_ref()
                 .and_then(|summaries| {
                     summaries
-                        .into_iter()
-                        .find(|summary| summary.id == *remembered.slot(appearance))
+                        .iter()
+                        .find(|summary| summary.id == *slots.get(appearance))
                 })
-                .map(|summary| summary.swatches)
+                .map(|summary| summary.swatches.clone())
                 .unwrap_or_default()
         };
         match mode {
-            AppearanceMode::Light => pick(Appearance::Light),
-            AppearanceMode::Dark => pick(Appearance::Dark),
-            AppearanceMode::Auto => {
-                let light = pick(Appearance::Light);
-                let dark = pick(Appearance::Dark);
-                let half = light.len().div_ceil(2);
-                light.into_iter().take(half).chain(dark).collect()
-            }
+            AppearanceMode::Light => vec![pick(Appearance::Light)],
+            AppearanceMode::Dark => vec![pick(Appearance::Dark)],
+            AppearanceMode::Auto => vec![pick(Appearance::Light), pick(Appearance::Dark)],
         }
     }
 
-    fn remembered(&self, kind: SchemeKind) -> &RememberedSchemes {
-        match kind {
-            SchemeKind::Chrome => &self.chrome_schemes,
-            SchemeKind::Terminal => &self.terminal_schemes,
-        }
-    }
-
-    fn reconcile_remembered_schemes(&mut self) {
-        let preferences = &self.editor.document().preferences;
-        self.chrome_schemes.reconcile(&preferences.chrome.scheme);
-        self.terminal_schemes
-            .reconcile(&preferences.terminal.scheme);
-    }
-
-    fn set_appearance_mode(
-        &mut self,
-        kind: SchemeKind,
-        mode: AppearanceMode,
-        cx: &mut Context<Self>,
-    ) {
-        self.reconcile_remembered_schemes();
-        let selection = self.remembered(kind).selection(mode);
-        self.edit(
-            move |draft| match kind {
-                SchemeKind::Chrome => draft.preferences.chrome.scheme = selection,
-                SchemeKind::Terminal => draft.preferences.terminal.scheme = selection,
-            },
-            cx,
-        );
+    fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+        self.edit(move |draft| draft.preferences.mode = mode, cx);
     }
 
     fn render_scheme_picker(
@@ -1316,19 +1360,12 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preferences = &self.editor.document().preferences;
-        let selection = match kind {
-            SchemeKind::Chrome => &preferences.chrome.scheme,
-            SchemeKind::Terminal => &preferences.terminal.scheme,
+        let schemes = match kind {
+            SchemeKind::Chrome => &preferences.chrome.schemes,
+            SchemeKind::Terminal => &preferences.terminal.schemes,
         };
-        // A fixed selection restricts the list to its own appearance so a chosen scheme always
-        // matches the mode; Auto restricts each slot to that slot's appearance.
-        let (current, restrict) = match (selection, slot) {
-            (SchemeSelection::Fixed { id, appearance }, _) => (id.clone(), *appearance),
-            (SchemeSelection::System { light, .. }, Some(Appearance::Light)) => {
-                (light.clone(), Appearance::Light)
-            }
-            (SchemeSelection::System { dark, .. }, _) => (dark.clone(), Appearance::Dark),
-        };
+        let restrict = slot.unwrap_or_else(|| self.fixed_appearance());
+        let current = schemes.get(restrict).clone();
         let summaries = self
             .editor
             .scheme_summaries(kind)
@@ -1381,23 +1418,13 @@ impl SettingsWindow {
         id: SchemeId,
         cx: &mut Context<Self>,
     ) {
-        match kind {
-            SchemeKind::Chrome => self.chrome_schemes.remember(slot, id.clone()),
-            SchemeKind::Terminal => self.terminal_schemes.remember(slot, id.clone()),
-        }
         self.edit(
             move |draft| {
-                let selection = match kind {
-                    SchemeKind::Chrome => &mut draft.preferences.chrome.scheme,
-                    SchemeKind::Terminal => &mut draft.preferences.terminal.scheme,
+                let schemes = match kind {
+                    SchemeKind::Chrome => &mut draft.preferences.chrome.schemes,
+                    SchemeKind::Terminal => &mut draft.preferences.terminal.schemes,
                 };
-                match selection {
-                    SchemeSelection::Fixed { id: current, .. } => *current = id,
-                    SchemeSelection::System { light, dark } => match slot {
-                        Appearance::Light => *light = id,
-                        Appearance::Dark => *dark = id,
-                    },
-                }
+                schemes.set(slot, id);
             },
             cx,
         );
@@ -1979,11 +2006,6 @@ impl SettingsWindow {
             }
             let _ = owner.update(cx, |settings, cx| {
                 settings.editor.reset(ResetTarget::AllAppearance, cx);
-                let preferences = &settings.editor.document().preferences;
-                settings.chrome_schemes =
-                    RememberedSchemes::capture(&preferences.chrome.scheme, SchemeKind::Chrome);
-                settings.terminal_schemes =
-                    RememberedSchemes::capture(&preferences.terminal.scheme, SchemeKind::Terminal);
                 cx.notify();
             });
         });
@@ -1994,15 +2016,41 @@ impl SettingsWindow {
 }
 
 /// A miniature scheme preview for one appearance-mode card.
-fn mode_preview(swatches: &[Color], extent: gpui::Pixels) -> impl IntoElement {
+/// A miniature SpaceTerm window for each palette, split evenly when there is more than one.
+///
+/// Each part clips one full-size miniature from its own side, so a split reads as one window
+/// crossing from light to dark. A hairline edge keeps a light miniature visible on a light surface.
+fn mode_preview(palettes: &[Vec<Color>], edge: Color, extent: gpui::Pixels) -> impl IntoElement {
+    let width = extent * 1.5;
+    let last = palettes.len().saturating_sub(1);
+    div()
+        .flex()
+        .flex_row()
+        .w(width)
+        .h(extent)
+        .rounded(px(4.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(gpui_color(edge))
+        .children(palettes.iter().enumerate().map(|(index, swatches)| {
+            let miniature = mode_miniature(swatches, width, extent);
+            div().relative().flex_1().h_full().overflow_hidden().child(
+                if index == last && index > 0 {
+                    miniature.absolute().top_0().right_0()
+                } else {
+                    miniature.absolute().top_0().left_0()
+                },
+            )
+        }))
+}
+
+fn mode_miniature(swatches: &[Color], width: gpui::Pixels, extent: gpui::Pixels) -> gpui::Div {
     let background = swatches.first().copied().unwrap_or(Color::rgb(0x000000));
     let bar = swatches.get(1).copied().unwrap_or(Color::rgb(0xffffff));
     let accent = swatches.get(3).copied().unwrap_or(bar);
     div()
-        .w(extent * 1.5)
+        .w(width)
         .h(extent)
-        .rounded(px(4.0))
-        .overflow_hidden()
         .bg(gpui_color(background))
         .flex()
         .flex_col()
@@ -2099,9 +2147,7 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 /// One line of guidance for the rows that warrant it.
 fn row_description(row: SettingsRowId) -> Option<&'static str> {
     match row {
-        SettingsRowId::ChromeAppearanceMode | SettingsRowId::TerminalAppearanceMode => {
-            Some("Auto follows the system light and dark setting for this surface.")
-        }
+        SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
         SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
         _ => None,
     }

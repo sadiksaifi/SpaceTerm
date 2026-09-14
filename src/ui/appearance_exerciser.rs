@@ -22,8 +22,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeId, SchemeSelection,
-    TerminalFontFamily, ZedImportKind, export_settings, parse_settings,
+    Appearance, AppearanceMode, ChromeDensity, ChromeFontFamily, ResetTarget, TerminalFontFamily,
+    ZedImportKind, export_settings, parse_settings,
 };
 use crate::settings::{PreviewToken, SchemeImport};
 
@@ -202,32 +202,16 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            let chrome_light = matches!(
-                candidate.preferences.chrome.scheme,
-                SchemeSelection::Fixed {
-                    appearance: Appearance::Light,
-                    ..
-                }
-            );
-            candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-                id: SchemeId::new(if chrome_light {
-                    "builtin.vague-pro.chrome.dark"
-                } else {
-                    "builtin.spaceterm.chrome.light"
-                })
-                .unwrap(),
-                appearance: if chrome_light {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                },
+            candidate.preferences.mode = match candidate.preferences.mode {
+                AppearanceMode::Light => AppearanceMode::Dark,
+                AppearanceMode::Dark | AppearanceMode::Auto => AppearanceMode::Light,
             };
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "Scheme preview rejected")
         })();
         self.status = result
-            .map(|()| "Chrome scheme toggled; terminal appearance retained")
+            .map(|()| "Shared appearance toggled for Chrome and Terminal")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -239,32 +223,14 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            let terminal_light = matches!(
-                candidate.preferences.terminal.scheme,
-                SchemeSelection::Fixed {
-                    appearance: Appearance::Light,
-                    ..
-                }
-            );
-            candidate.preferences.terminal.scheme = SchemeSelection::Fixed {
-                id: SchemeId::new(if terminal_light {
-                    "builtin.vague-pro.terminal.dark"
-                } else {
-                    "builtin.spaceterm.terminal.light"
-                })
-                .unwrap(),
-                appearance: if terminal_light {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                },
-            };
+            candidate.preferences.terminal.rendering.bold_as_bright =
+                !candidate.preferences.terminal.rendering.bold_as_bright;
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "Terminal scheme preview rejected")
         })();
         self.status = result
-            .map(|()| "Terminal scheme toggled; chrome appearance retained")
+            .map(|()| "Terminal rendering toggled; Chrome retained")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -318,20 +284,13 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            candidate.preferences.chrome.scheme = SchemeSelection::System {
-                light: SchemeId::new("builtin.spaceterm.chrome.light").unwrap(),
-                dark: SchemeId::new("builtin.vague-pro.chrome.dark").unwrap(),
-            };
-            candidate.preferences.terminal.scheme = SchemeSelection::System {
-                light: SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-                dark: SchemeId::new("builtin.vague-pro.terminal.dark").unwrap(),
-            };
+            candidate.preferences.mode = AppearanceMode::Auto;
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "System policy preview rejected")
         })();
         self.status = result
-            .map(|()| "Chrome and terminal now follow independent system slots")
+            .map(|()| "Chrome and Terminal now follow the shared System Appearance")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -367,22 +326,23 @@ impl AppearanceExerciser {
 
     fn reset_next_field(&mut self, cx: &mut Context<Self>) {
         let resolved = appearance_runtime::current(cx);
-        let target = match self.field_reset_index % 16 {
-            0 => ResetTarget::ChromeSchemeSelection,
-            1 => ResetTarget::ChromeFontFamily,
-            2 => ResetTarget::ChromeBaseSize,
-            3 => ResetTarget::ChromeRegularWeight,
-            4 => ResetTarget::ChromeEmphasisWeight,
-            5 => ResetTarget::ChromeHeadingWeight,
-            6 => ResetTarget::TerminalSchemeSelection,
-            7 => ResetTarget::TerminalFontFamily,
-            8 => ResetTarget::TerminalBaseSize,
-            9 => ResetTarget::TerminalRegularWeight,
-            10 => ResetTarget::TerminalBoldWeight,
-            11 => ResetTarget::TerminalLineHeight,
-            12 => ResetTarget::TerminalItalic,
-            13 => ResetTarget::TerminalBoldAsBright,
-            14 => ResetTarget::chrome_color_override(
+        let target = match self.field_reset_index % 17 {
+            0 => ResetTarget::AppearanceMode,
+            1 => ResetTarget::ChromeScheme(Appearance::Dark),
+            2 => ResetTarget::ChromeFontFamily,
+            3 => ResetTarget::ChromeBaseSize,
+            4 => ResetTarget::ChromeRegularWeight,
+            5 => ResetTarget::ChromeEmphasisWeight,
+            6 => ResetTarget::ChromeHeadingWeight,
+            7 => ResetTarget::TerminalScheme(Appearance::Dark),
+            8 => ResetTarget::TerminalFontFamily,
+            9 => ResetTarget::TerminalBaseSize,
+            10 => ResetTarget::TerminalRegularWeight,
+            11 => ResetTarget::TerminalBoldWeight,
+            12 => ResetTarget::TerminalLineHeight,
+            13 => ResetTarget::TerminalItalic,
+            14 => ResetTarget::TerminalBoldAsBright,
+            15 => ResetTarget::chrome_color_override(
                 resolved.chrome.effective_scheme.clone(),
                 "background",
             )
@@ -744,16 +704,24 @@ impl Render for AppearanceExerciser {
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(action("appearance-apply", "Apply JSON Preview", Self::apply_editor))
                 .child(
-                    action("appearance-toggle-chrome", "Toggle Chrome", Self::toggle_chrome)
+                    action(
+                        "appearance-toggle-chrome",
+                        "Toggle Appearance",
+                        Self::toggle_chrome,
+                    )
                         .tooltip(
                             Tooltip::new(
                                 "appearance-toggle-chrome-tooltip",
-                                "Toggle Chrome Preview Without Activating This Window",
+                                "Toggle Appearance Preview Without Activating This Window",
                             )
                             .keyboard_equivalent(preview_shortcut),
                         ),
                 )
-                .child(action("appearance-toggle-terminal", "Toggle Terminal", Self::toggle_terminal))
+                .child(action(
+                    "appearance-toggle-terminal",
+                    "Toggle Terminal Rendering",
+                    Self::toggle_terminal,
+                ))
                 .child(action("appearance-toggle-type", "Toggle Fonts/Density", Self::toggle_typography))
                 .child(action("appearance-system", "Follow System", Self::follow_system))
                 .child(action("appearance-reset-field", "Reset Next Field", Self::reset_next_field))

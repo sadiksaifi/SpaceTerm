@@ -75,8 +75,8 @@ One labeled Setting control within a Settings Section.
 Literal search over Settings Row labels and keywords that reveals a matching Settings Row.
 
 **Appearance Mode**:
-The Light, Dark, or Auto choice governing which Color Scheme slot applies. Application chrome and
-the terminal each have their own.
+The application-scoped Light, Dark, or Auto choice governing which Color Scheme slot applies to
+both Application Chrome and Terminal appearance.
 
 ## Focus and transient UI
 

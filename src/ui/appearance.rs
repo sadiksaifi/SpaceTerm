@@ -195,11 +195,11 @@ mod typography_tests {
         use crate::appearance::*;
         let document = parse_color_document(br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.translucent","name":"Translucent","appearance":"light","colors":{"background":"#ffffff80","panel_background":"#00000040","input_background":"#00000000"}}]}"##).unwrap();
         let catalog = SchemeCatalog::from_custom_schemes(&document.schemes).unwrap();
-        let mut preferences = AppearancePreferences::default();
-        preferences.chrome.scheme = SchemeSelection::Fixed {
-            id: SchemeId::new("test.translucent").unwrap(),
-            appearance: Appearance::Light,
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Light,
+            ..Default::default()
         };
+        preferences.chrome.schemes.light = SchemeId::new("test.translucent").unwrap();
         let resolved = catalog
             .resolve(
                 AppearanceGeneration::INITIAL,

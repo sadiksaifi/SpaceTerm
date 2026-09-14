@@ -14,7 +14,7 @@ use spaceterm_ui::{
 };
 
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
-use crate::appearance::{Appearance, SchemeId, SchemeSelection, ZedImportKind};
+use crate::appearance::{Appearance, AppearanceMode, SchemeId, ZedImportKind};
 use crate::settings::{PreviewToken, SchemeImport};
 
 gpui::actions!(appearance_gallery, [NextGalleryFixture]);
@@ -243,26 +243,13 @@ impl Gallery {
                 .unwrap()
             };
             let mut candidate = (*settings.snapshot().candidate).clone();
+            candidate.preferences.mode = AppearanceMode::from(appearance);
             candidate.preferences.chrome.overrides.clear();
-            candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-                id: id.clone(),
-                appearance,
-            };
-            // Deliberately pair with the opposite terminal slot. The real Workspace window then
-            // exercises contextual captions rather than a copied caption renderer in this gallery.
-            candidate.preferences.terminal.scheme = SchemeSelection::Fixed {
-                id: SchemeId::new(if appearance == Appearance::Light {
-                    "builtin.vague-pro.terminal.dark"
-                } else {
-                    "builtin.spaceterm.terminal.light"
-                })
-                .unwrap(),
-                appearance: if appearance == Appearance::Light {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                },
-            };
+            candidate
+                .preferences
+                .chrome
+                .schemes
+                .set(appearance, id.clone());
             if fixture == Fixture::Adversarial {
                 let colors = serde_json::json!({
                     "primary_background":"#f7da60","primary_foreground":"#202535","primary_icon":"#643700","primary_hover_background":"#7ae1bc","primary_hover_foreground":"#173d28","primary_hover_icon":"#583375","primary_pressed_background":"#c7a3f1","primary_pressed_foreground":"#271045","primary_pressed_icon":"#083f4c",
@@ -286,7 +273,7 @@ impl Gallery {
             Ok(()) => {
                 self.fixture = fixture;
                 format!(
-                    "{} • production compiler • opposite Terminal slot • preview only",
+                    "{} • production compiler • shared appearance • preview only",
                     fixture.label()
                 )
             }

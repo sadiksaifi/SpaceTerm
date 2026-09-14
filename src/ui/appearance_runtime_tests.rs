@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceDocument, SchemeId, SchemeSelection};
+use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode, SchemeId};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
@@ -35,20 +35,17 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
 }
 
 #[gpui::test]
-fn preview_cancel_reresolves_committed_policy_using_current_system_fact(cx: &mut TestAppContext) {
+fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut TestAppContext) {
     let (settings, platform) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = AppearanceDocument::default();
-    candidate.preferences.chrome.scheme = SchemeSelection::System {
-        light: SchemeId::new("builtin.spaceterm.chrome.light").unwrap(),
-        dark: SchemeId::new("builtin.vague-pro.chrome.dark").unwrap(),
-    };
+    candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
     cx.update(|cx| {
         assert_eq!(current(cx).chrome.appearance, Appearance::Light);
-        assert_eq!(current(cx).terminal.appearance, Appearance::Dark);
+        assert_eq!(current(cx).terminal.appearance, Appearance::Light);
     });
     drop(token);
     cx.run_until_parked();
@@ -65,10 +62,7 @@ fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
     let (settings, _) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = AppearanceDocument::default();
-    candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::new("custom.missing").unwrap(),
-        appearance: Appearance::Dark,
-    };
+    candidate.preferences.chrome.schemes.dark = SchemeId::new("custom.missing").unwrap();
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -127,12 +121,9 @@ fn repeated_system_notifications_without_effective_change_do_not_publish(cx: &mu
 }
 
 #[gpui::test]
-fn cancelling_fixed_preview_resolves_committed_system_policy_again(cx: &mut TestAppContext) {
+fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppContext) {
     let mut committed = AppearanceDocument::default();
-    committed.preferences.chrome.scheme = SchemeSelection::System {
-        light: SchemeId::new("builtin.spaceterm.chrome.light").unwrap(),
-        dark: SchemeId::new("builtin.vague-pro.chrome.dark").unwrap(),
-    };
+    committed.preferences.mode = AppearanceMode::Auto;
     let bytes = crate::appearance::export_settings(&committed)
         .unwrap()
         .into_bytes();

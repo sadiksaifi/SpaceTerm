@@ -1,8 +1,14 @@
 # Compile Chrome themes before presentation
 
-Chrome and Terminal Color Schemes and Appearance Modes are independent. Terminal colors retain
-protocol ownership; Chrome changes do not reinterpret terminal palettes or OSC values. Settings
-presents each Appearance Mode independently. Inactive selected Tabs remain identifiable.
+Chrome and Terminal Color Schemes remain independent under one application-scoped Appearance Mode.
+The shared Light, Dark or Auto choice selects the matching persisted slot from both scheme families.
+Terminal colors retain protocol ownership; Chrome changes do not reinterpret terminal palettes or
+OSC values. Inactive selected Tabs remain identifiable.
+
+Settings persists the Appearance Mode once and persists Light and Dark Color Scheme slots inside
+each appearance family. This makes contradictory Chrome and Terminal modes unrepresentable while
+preserving both families' choices across mode changes and restarts. Resetting the shared mode does
+not reset either family's scheme slots.
 
 The Chrome Theme Compiler owns one ordered dependency program for built-ins, native definitions,
 Zed imports and live overrides. Exact user overrides precede authored values. Missing roles derive

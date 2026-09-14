@@ -200,8 +200,8 @@ pub(crate) use document::{
     parse_color_document, parse_settings,
 };
 pub(crate) use preferences::{
-    AppearancePreferences, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeSelection,
-    TerminalFontFamily,
+    AppearanceMode, AppearancePreferences, ChromeDensity, ChromeFontFamily, ResetTarget,
+    SchemeSlots, TerminalFontFamily,
 };
 pub(crate) use resolution::{
     AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
@@ -216,6 +216,7 @@ pub(crate) use scheme::{
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
 pub(crate) use builtin::chrome_base as builtin_chrome_base;
+#[cfg(test)]
 pub(crate) use builtin::fallback_id as builtin_fallback_scheme;
 pub(crate) use resolution::AppearanceDiagnostic;
 

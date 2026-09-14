@@ -50,8 +50,8 @@ impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
 }
 
 #[gpui::test]
-fn exerciser_diagnostics_repaint_for_terminal_only_system_changes(cx: &mut TestAppContext) {
-    use crate::appearance::{Appearance, AppearanceDocument, SchemeId, SchemeSelection};
+fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
+    use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode};
     use crate::platform::appearance::testing::RecordingAppearancePlatform;
     use crate::ui::appearance_runtime;
 
@@ -73,20 +73,20 @@ fn exerciser_diagnostics_repaint_for_terminal_only_system_changes(cx: &mut TestA
 
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = AppearanceDocument::default();
-    candidate.preferences.terminal.scheme = SchemeSelection::System {
-        light: SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-        dark: SchemeId::new("builtin.vague-pro.terminal.dark").unwrap(),
-    };
+    candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
-    let chrome = cx.update(|_, cx| Arc::clone(&cx.global::<InstalledChrome>().0));
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("appearance-diagnostics-generation-1")
             .is_some()
     );
-    cx.update(|_, cx| assert!(Arc::ptr_eq(&chrome, &cx.global::<InstalledChrome>().0)));
+    cx.update(|_, cx| {
+        let appearance = appearance_runtime::current(cx);
+        assert_eq!(appearance.chrome.appearance, Appearance::Light);
+        assert_eq!(appearance.terminal.appearance, Appearance::Light);
+    });
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.run_until_parked();
     assert!(
