@@ -45,7 +45,7 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
             name: String::from("Vague Pro Dark"),
             appearance: Appearance::Dark,
             metadata: vague_metadata.clone(),
-            colors: ChromeColorOverrides::default(),
+            colors: chrome_definition(Appearance::Dark),
         })),
         CustomScheme::Terminal(Box::new(TerminalScheme {
             id: vague_terminal_id(),
@@ -59,7 +59,7 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
             name: String::from("SpaceTerm Light"),
             appearance: Appearance::Light,
             metadata: spaceterm_metadata.clone(),
-            colors: ChromeColorOverrides::default(),
+            colors: chrome_definition(Appearance::Light),
         })),
         CustomScheme::Terminal(Box::new(TerminalScheme {
             id: light_terminal_id(),
@@ -97,192 +97,50 @@ impl Default for TerminalColors {
     }
 }
 
-struct ChromePalette {
-    background: Color,
-    panel: Color,
-    elevated: Color,
-    raised: Color,
-    /// One step beyond `raised`, for an element that is both selected and hovered.
-    ///
-    /// It is authored rather than borrowed from another role: the value must stay in the chrome
-    /// surface family, and a terminal or selection color carries no authority over chrome.
-    raised_hover: Color,
-    inactive: Color,
-    text: Color,
-    secondary: Color,
-    muted: Color,
-    icon_muted: Color,
-    disabled: Color,
-    accent: Color,
-    accent_hover: Color,
-    border: Color,
-    focus: Color,
-    hover: Color,
-    /// The scrollbar thumb's own fill, which Zed themes author directly.
-    scrollbar_thumb: Color,
-    info: Color,
-    success: Color,
-    warning: Color,
-    error: Color,
-}
-
-fn chrome_from_palette(p: ChromePalette) -> ChromeColors {
-    let transparent = Color::rgba(0x00000000);
-    let selection_overlay = Color {
-        a: 0x66,
-        ..p.accent
-    };
-    let status_background = |color: Color| Color { a: 0x1a, ..color };
-    ChromeColors {
-        background: p.background,
-        panel_background: p.panel,
-        elevated_surface_background: p.elevated,
-        title_bar_background: p.background,
-        title_bar_inactive_background: p.inactive,
-        tab_active_background: p.raised,
-        tab_inactive_background: p.background,
-        text: p.text,
-        text_secondary: p.secondary,
-        text_muted: p.muted,
-        text_placeholder: p.disabled,
-        text_disabled: p.disabled,
-        text_accent: p.accent,
-        link_text: p.accent,
-        link_text_hover: p.accent_hover,
-        icon: p.text,
-        icon_muted: p.icon_muted,
-        icon_disabled: p.disabled,
-        icon_accent: p.accent,
-        border: p.border,
-        border_variant: p.border,
-        border_focused: p.focus,
-        border_selected: p.accent,
-        border_disabled: p.border,
-        border_transparent: transparent,
-        element_background: p.background,
-        element_hover: p.hover,
-        element_active: p.raised,
-        element_selected: p.raised,
-        element_selected_hover: p.raised_hover,
-        element_disabled: p.background,
-        element_foreground: p.text,
-        element_hover_foreground: p.text,
-        element_active_foreground: p.text,
-        element_selected_foreground: p.text,
-        element_selected_hover_foreground: p.text,
-        element_disabled_foreground: p.disabled,
-        ghost_element_background: transparent,
-        ghost_element_hover: p.raised,
-        ghost_element_active: p.raised,
-        ghost_element_selected: p.raised,
-        ghost_element_disabled: p.background,
-        ghost_element_foreground: p.text,
-        ghost_element_hover_foreground: p.text,
-        ghost_element_active_foreground: p.text,
-        ghost_element_selected_foreground: p.text,
-        ghost_element_disabled_foreground: p.disabled,
-        navigation_selection: p.accent,
-        sidebar_focus: p.focus,
-        info: p.info,
-        info_background: status_background(p.info),
-        success: p.success,
-        warning: p.warning,
-        warning_background: status_background(p.warning),
-        warning_border: p.warning,
-        error: p.error,
-        error_background: status_background(p.error),
-        error_border: p.error,
-        input_text: p.text,
-        input_placeholder: p.disabled,
-        input_disabled_text: p.disabled,
-        input_caret: p.text,
-        input_selection_background: selection_overlay,
-        input_background: p.background,
-        input_disabled_background: p.background,
-        input_border: p.border,
-        input_focused_border: p.focus,
-        input_invalid_border: p.error,
-        modal_scrim: Color {
-            a: 0x99,
-            ..p.background
-        },
-        modal_checkbox: p.border,
-        modal_checkbox_selected: p.accent,
-        modal_checkbox_focused: p.focus,
-        modal_checkbox_disabled: p.disabled,
-        scrollbar_track: transparent,
-        scrollbar_track_border: transparent,
-        scrollbar_thumb_background: Color {
-            a: 0x78,
-            ..p.scrollbar_thumb
-        },
-        scrollbar_thumb_border: transparent,
-        scrollbar_thumb_hover_background: Color {
-            a: 0x78,
-            ..p.disabled
-        },
-        resize_idle: p.border,
-        resize_focused: p.focus,
-        resize_hovered: p.accent,
-        resize_dragged: p.accent,
-        resize_disabled: p.border,
-        shadow: Color {
-            a: 0x1a,
-            ..Color::rgb(0x000000)
-        },
-    }
-}
-
 fn vague_dark_chrome() -> ChromeColors {
-    chrome_from_palette(ChromePalette {
-        background: Color::rgb(0x141415),
-        panel: Color::rgb(0x141415),
-        elevated: Color::rgb(0x141415),
-        raised: Color::rgb(0x252530),
-        raised_hover: Color::rgb(0x2f2f3b),
-        inactive: Color::rgb(0x1c1c24),
-        text: Color::rgb(0xcdcdcd),
-        secondary: Color::rgb(0x8f8f8f),
-        muted: Color::rgb(0x878787),
-        icon_muted: Color::rgb(0x606079),
-        disabled: Color::rgb(0x606079),
-        accent: Color::rgb(0x6e94b2),
-        accent_hover: Color::rgb(0x7e98e8),
-        border: Color::rgb(0x252530),
-        focus: Color::rgb(0x405065),
-        hover: Color::rgb(0x252530),
-        scrollbar_thumb: Color::rgb(0x333738),
-        info: Color::rgb(0x7e98e8),
-        success: Color::rgb(0x7fa563),
-        warning: Color::rgb(0xf3be7c),
-        error: Color::rgb(0xd8647e),
-    })
+    super::compiler::compile_chrome(
+        Appearance::Dark,
+        &chrome_definition(Appearance::Dark),
+        &ChromeColorOverrides::default(),
+    )
+    .colors
+}
+fn spaceterm_light_chrome() -> ChromeColors {
+    super::compiler::compile_chrome(
+        Appearance::Light,
+        &chrome_definition(Appearance::Light),
+        &ChromeColorOverrides::default(),
+    )
+    .colors
 }
 
-fn spaceterm_light_chrome() -> ChromeColors {
-    chrome_from_palette(ChromePalette {
-        background: Color::rgb(0xf7f7f9),
-        panel: Color::rgb(0xeeeef2),
-        elevated: Color::rgb(0xffffff),
-        raised: Color::rgb(0xe4e5ea),
-        raised_hover: Color::rgb(0xdadbe2),
-        inactive: Color::rgb(0xededf1),
-        text: Color::rgb(0x202124),
-        secondary: Color::rgb(0x45474d),
-        muted: Color::rgb(0x666a73),
-        icon_muted: Color::rgb(0x666a73),
-        disabled: Color::rgb(0x8d919a),
-        accent: Color::rgb(0x315f91),
-        accent_hover: Color::rgb(0x244d78),
-        border: Color::rgb(0xc9cbd2),
-        focus: Color::rgb(0x315f91),
-        hover: Color::rgb(0xe9eaf0),
-        scrollbar_thumb: Color::rgb(0xd7e5f4),
-        info: Color::rgb(0x285f9e),
-        success: Color::rgb(0x28733d),
-        warning: Color::rgb(0x8a5300),
-        error: Color::rgb(0xa62f43),
-    })
+pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides {
+    let values = match appearance {
+        Appearance::Dark => [
+            0x141415, 0x141415, 0x1c1c24, 0xcdcdcd, 0xa0a0ab, 0x9898a3, 0x606079, 0x6e94b2,
+            0x7e98e8, 0x7fa563, 0xf3be7c, 0xd8647e,
+        ],
+        Appearance::Light => [
+            0xf7f7f9, 0xeeeef2, 0xffffff, 0x202124, 0x45474d, 0x5c6069, 0x8d919a, 0x315f91,
+            0x285f9e, 0x28733d, 0x8a5300, 0xa62f43,
+        ],
+    }
+    .map(Color::rgb);
+    ChromeColorOverrides {
+        background: Some(values[0]),
+        panel_background: Some(values[1]),
+        elevated_surface_background: Some(values[2]),
+        text: Some(values[3]),
+        text_secondary: Some(values[4]),
+        text_muted: Some(values[5]),
+        text_disabled: Some(values[6]),
+        text_accent: Some(values[7]),
+        info: Some(values[8]),
+        success: Some(values[9]),
+        warning: Some(values[10]),
+        error: Some(values[11]),
+        ..ChromeColorOverrides::default()
+    }
 }
 
 fn vague_dark_terminal() -> TerminalColors {

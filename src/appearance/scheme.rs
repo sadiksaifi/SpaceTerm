@@ -155,28 +155,14 @@ macro_rules! define_chrome_colors {
             }
 
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                for color in [self.background, self.panel_background,
-                    self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.tab_active_background,
-                    self.tab_inactive_background,
-                    self.input_background]
-                {
-                    if !color.is_opaque() { return Err(CatalogError::UnsupportedAlpha); }
-                }
+                if self.border_transparent.a != 0 { return Err(CatalogError::UnsupportedAlpha); }
                 Ok(())
             }
         }
 
         impl ChromeColorOverrides {
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                for color in [self.background, self.panel_background,
-                    self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.tab_active_background,
-                    self.tab_inactive_background,
-                    self.input_background].into_iter().flatten()
-                {
-                    if !color.is_opaque() { return Err(CatalogError::UnsupportedAlpha); }
-                }
+                if self.border_transparent.is_some_and(|color| color.a != 0) { return Err(CatalogError::UnsupportedAlpha); }
                 Ok(())
             }
 
@@ -630,8 +616,12 @@ impl SchemeCatalog {
                 .chrome
                 .values()
                 .map(|scheme| {
-                    let mut colors = builtin::chrome_base(scheme.appearance);
-                    colors.apply(&scheme.colors);
+                    let colors = super::compiler::compile_chrome(
+                        scheme.appearance,
+                        &scheme.colors,
+                        &ChromeColorOverrides::default(),
+                    )
+                    .colors;
                     SchemeSummary {
                         id: scheme.id.clone(),
                         name: scheme.name.clone(),
