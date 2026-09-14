@@ -15,7 +15,7 @@ macro_rules! chrome_color_fields {
             icon, icon_muted, icon_disabled, border, border_variant, border_focused, border_selected, border_disabled,
             border_transparent,
             element_background, element_hover, element_active, element_selected,
-            element_selected_hover, element_disabled, element_foreground,
+            element_disabled, element_foreground,
             element_hover_foreground, element_active_foreground,
             element_disabled_foreground,
             ghost_element_background, ghost_element_hover, ghost_element_active,

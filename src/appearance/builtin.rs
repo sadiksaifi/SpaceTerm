@@ -227,12 +227,12 @@ mod tests {
             let colors = chrome_base(appearance);
 
             assert_ne!(
-                colors.element_selected, colors.element_selected_hover,
+                colors.selection_background, colors.selection_hover_background,
                 "{appearance:?} should keep the hovered state of a selected element visible"
             );
             for role in [
-                colors.element_selected,
-                colors.element_selected_hover,
+                colors.selection_background,
+                colors.selection_hover_background,
                 colors.ghost_element_hover,
                 colors.ghost_element_selected,
             ] {

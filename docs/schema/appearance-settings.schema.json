@@ -123,7 +123,6 @@
           "element_hover",
           "element_active",
           "element_selected",
-          "element_selected_hover",
           "element_disabled",
           "element_foreground",
           "element_hover_foreground",

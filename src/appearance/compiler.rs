@@ -141,7 +141,6 @@ pub(crate) fn compile_chrome(
     let element_hover = resolve!(element_hover, element_background.mix(text, 0.08));
     let element_active = resolve!(element_active, element_background.mix(text, 0.14));
     let element_selected = resolve!(element_selected, background.mix(text_accent, 0.16));
-    let element_selected_hover = resolve!(element_selected_hover, element_selected.mix(text, 0.06));
     let element_disabled = resolve!(element_disabled, background);
     let element_foreground = resolve!(element_foreground, contrast(text, element_background, 4.5));
     let element_hover_foreground =
@@ -701,7 +700,6 @@ pub(crate) fn compile_chrome(
         element_hover,
         element_active,
         element_selected,
-        element_selected_hover,
         element_disabled,
         element_foreground,
         element_hover_foreground,
@@ -975,7 +973,6 @@ impl ChromeColors {
             element_hover,
             element_active,
             element_selected,
-            element_selected_hover,
             element_disabled,
             ghost_element_hover,
             ghost_element_active,
