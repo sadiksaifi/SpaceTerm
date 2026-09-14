@@ -507,33 +507,17 @@ fn import_document<'a>(
         Err(SettingsError::Import(ImportError::InvalidJson)) => {}
         Err(error) => return import_failure_message(error).into(),
     }
-    let candidates = match super::editor::SettingsEditor::list_import_candidates(bytes) {
-        Ok(candidates) if !candidates.is_empty() => candidates,
+    match super::editor::SettingsEditor::list_import_candidates(bytes) {
+        Ok(candidates) if !candidates.is_empty() => {}
         _ => return "That file is not a SpaceTerm color package or a Zed theme.".into(),
-    };
-    // Each candidate has its own identity. Import the family without selecting a scheme.
-    let mut installed = 0;
-    let mut failure = None;
-    for candidate in candidates {
-        match install(SchemeImport::Zed {
-            bytes,
-            candidate_index: candidate.index,
-            kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
-        }) {
-            Ok(receipt) => installed += receipt.installed.len(),
-            Err(error) => {
-                failure.get_or_insert(error);
-            }
-        }
     }
-    match failure {
-        Some(error) if installed == 0 => import_failure_message(error).into(),
-        Some(error) => format!(
-            "Installed {installed} schemes. Some could not be imported. {}",
-            import_failure_message(error)
-        )
-        .into(),
-        None => installed_message(installed),
+    // The owner translates and validates every candidate before atomically installing the family.
+    match install(SchemeImport::ZedFamily {
+        bytes,
+        kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
+    }) {
+        Ok(receipt) => installed_message(receipt.installed.len()),
+        Err(error) => import_failure_message(error).into(),
     }
 }
 
@@ -748,6 +732,33 @@ mod tests {
 
         assert_eq!(message, installed_message(2));
         assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+    }
+
+    #[test]
+    fn a_zed_family_failure_is_atomic_and_a_corrected_retry_is_clean() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{"terminal.foreground":"#abcdef"}},{"name":"Broken","appearance":"dark","style":{"terminal.foreground":"not-a-color"}}]}"##;
+        let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{"terminal.foreground":"#abcdef"}},{"name":"Second","appearance":"dark","style":{"terminal.foreground":"#123456"}}]}"##;
+        let install = |bytes| {
+            import_document(bytes, |source| {
+                settings.import_preview(
+                    &token,
+                    settings.snapshot().catalog_revision,
+                    source,
+                    &BTreeSet::new(),
+                )
+            })
+        };
+
+        assert_eq!(
+            install(invalid).as_ref(),
+            "That color package contains invalid schemes."
+        );
+        assert!(settings.snapshot().candidate.custom_schemes.is_empty());
+
+        assert_eq!(install(corrected), installed_message(4));
+        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 4);
     }
 
     #[test]

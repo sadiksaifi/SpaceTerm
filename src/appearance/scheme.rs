@@ -11,6 +11,8 @@ use super::{Color, builtin};
 pub(crate) const MAX_SCHEME_ID_BYTES: usize = 128;
 pub(crate) const MAX_SCHEME_NAME_CHARACTERS: usize = 128;
 pub(crate) const MAX_CUSTOM_SCHEMES: usize = 128;
+/// One Zed family can contain 32 themes and produce one scheme for each of two surfaces.
+const MAX_INSTALL_BATCH_SCHEMES: usize = 64;
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
     deserializer: D,
@@ -766,7 +768,7 @@ impl SchemeCatalog {
         if schemes.is_empty() {
             return Err(CatalogError::EmptyBatch);
         }
-        if schemes.len() > 32 {
+        if schemes.len() > MAX_INSTALL_BATCH_SCHEMES {
             return Err(CatalogError::TooManySchemes);
         }
         let mut seen = BTreeSet::new();

@@ -192,7 +192,7 @@ fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
         ),
         Err(CatalogError::RevisionConflict)
     );
-    let oversized = (0..33)
+    let oversized = (0..65)
         .map(|index| chrome_scheme(format!("custom.batch{index}"), format!("Batch {index}")))
         .collect::<Vec<_>>();
     assert_eq!(

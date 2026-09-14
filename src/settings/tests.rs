@@ -227,6 +227,37 @@ fn zed_candidates_require_explicit_selection_and_install_through_settings() {
 }
 
 #[test]
+fn maximum_zed_family_installs_as_one_bounded_batch() {
+    let themes = (0..32)
+        .map(|index| {
+            serde_json::json!({
+                "name": format!("Theme {index}"),
+                "appearance": if index % 2 == 0 { "dark" } else { "light" },
+                "style": { "terminal.foreground": "#abcdef" }
+            })
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&serde_json::json!({ "themes": themes })).unwrap();
+    let (settings, _) = setup();
+    let token = settings.begin_preview(0).unwrap();
+
+    let receipt = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            SchemeImport::ZedFamily {
+                bytes: &bytes,
+                kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
+            },
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+    assert_eq!(receipt.installed.len(), 64);
+    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 64);
+}
+
+#[test]
 fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback() {
     let (settings, storage) = setup();
     let token = settings.begin_preview(0).unwrap();

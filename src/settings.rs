@@ -134,6 +134,10 @@ pub(crate) enum SchemeImport<'a> {
         candidate_index: usize,
         kinds: &'a [ZedImportKind],
     },
+    ZedFamily {
+        bytes: &'a [u8],
+        kinds: &'a [ZedImportKind],
+    },
 }
 
 impl SchemeImport<'_> {
@@ -145,6 +149,18 @@ impl SchemeImport<'_> {
                 candidate_index,
                 kinds,
             } => crate::appearance::import_zed(bytes, candidate_index, kinds),
+            Self::ZedFamily { bytes, kinds } => {
+                let candidates = crate::appearance::list_zed_candidates(bytes)?;
+                let mut schemes = Vec::with_capacity(candidates.len().saturating_mul(kinds.len()));
+                for candidate in candidates {
+                    schemes.extend(crate::appearance::import_zed(
+                        bytes,
+                        candidate.index,
+                        kinds,
+                    )?);
+                }
+                Ok(schemes)
+            }
         }
     }
 }
