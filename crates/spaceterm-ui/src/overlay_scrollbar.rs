@@ -266,6 +266,12 @@ pub struct ScrollbarTheme {
 }
 
 impl ScrollbarTheme {
+    /// Returns the actual thumb fill, preserving dragging precedence over hover.
+    pub fn thumb_color(self, hovered: bool, dragging: bool) -> Rgba {
+        let (normal, hover) = self.resolve(dragging);
+        if hovered { hover } else { normal }
+    }
+
     /// Creates scrollbar paint for the normal, hovered, and dragging states.
     pub fn new(thumb: Rgba, hovered_thumb: Rgba, dragging_thumb: Rgba) -> Self {
         Self {
@@ -339,6 +345,8 @@ struct ScrollbarDrag<O> {
 /// offset mapping. Callers adapt their scroll model through [`ScrollMetrics`] and apply requested
 /// offsets received through [`OverlayScrollbarEvent`].
 pub struct OverlayScrollbar<O: ScrollOffset> {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
     name: &'static str,
     metrics: Option<ScrollMetrics<O>>,
     visible: bool,
@@ -353,6 +361,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     /// Creates a hidden scrollbar with a stable name used for element identity and diagnostics.
     pub fn new(name: &'static str) -> Self {
         Self {
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
             name,
             metrics: None,
             visible: false,
@@ -362,6 +372,13 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             visibility_generation: 0,
             _hide_task: None,
         }
+    }
+
+    /// Pins only thumb presentation without starting a drag interaction.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.preview_state = Some(state);
+        self
     }
 
     /// Keeps the thumb visible whenever content overflows, suitable for bounded picker lists.
@@ -598,6 +615,13 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let dragging = self.drag.is_some();
         let theme = *cx.global::<ScrollbarTheme>();
         let (thumb_color, hover_color) = theme.resolve(dragging);
+        #[cfg(feature = "appearance-exerciser")]
+        let (thumb_color, hover_color) =
+            self.preview_state
+                .map_or((thumb_color, hover_color), |state| {
+                    let color = theme.thumb_color(state.hovered(), state.pressed());
+                    (color, color)
+                });
         let group = thumb_id.clone();
         let hover_group = group.clone();
         let thumb_debug = thumb_id.clone();

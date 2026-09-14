@@ -23,6 +23,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
+    FieldFrameTheme,
     button::ModalControlScope,
     menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent},
 };
@@ -196,6 +197,7 @@ pub struct TextInputPaint {
     text: Rgba,
     placeholder: Rgba,
     selection: Rgba,
+    selection_foreground: Rgba,
     caret: Rgba,
     disabled_text: Rgba,
     disabled_placeholder: Rgba,
@@ -216,10 +218,16 @@ impl TextInputPaint {
             text,
             placeholder,
             selection,
+            selection_foreground: text,
             caret,
             disabled_text,
             disabled_placeholder,
         }
+    }
+    /// Supplies the foreground of selected glyphs independently from the selection fill.
+    pub fn selection_foreground(mut self, foreground: Rgba) -> Self {
+        self.selection_foreground = foreground;
+        self
     }
 }
 
@@ -286,12 +294,23 @@ impl TextInputMetrics {
 pub struct TextInputTheme {
     variants: TextInputVariants,
     metrics: TextInputMetrics,
+    pub(crate) frame: FieldFrameTheme,
 }
 
 impl TextInputTheme {
     /// Creates a complete text-input theme.
     pub fn new(variants: TextInputVariants, metrics: TextInputMetrics) -> Self {
-        Self { variants, metrics }
+        Self {
+            variants,
+            metrics,
+            frame: FieldFrameTheme::transparent(),
+        }
+    }
+
+    /// Supplies the shared frame used by fields containing this editor.
+    pub fn field_frame(mut self, frame: FieldFrameTheme) -> Self {
+        self.frame = frame;
+        self
     }
 
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
@@ -887,6 +906,7 @@ struct ShapeKey {
 struct GeometryCache {
     key: ShapeKey,
     line: ShapedLine,
+    selected_line: ShapedLine,
 }
 
 #[derive(Clone, Copy)]
@@ -2151,6 +2171,7 @@ impl TextInput {
             strikethrough: None,
         };
         let runs = marked_text_runs(&display, marked_range, base);
+        let selected_runs = recolored_text_runs(&runs, paint.selection_foreground.into());
         #[cfg(test)]
         {
             self.shape_count += 1;
@@ -2158,10 +2179,17 @@ impl TextInput {
         }
         let line = window
             .text_system()
-            .shape_line(display, font_size, &runs, None);
+            .shape_line(display.clone(), font_size, &runs, None);
+        // Only decorations differ. Identical font/run boundaries reuse the text system's shaped
+        // layout, so selection cannot break ligatures or alter contextual-script joining.
+        let selected_line =
+            window
+                .text_system()
+                .shape_line(display, font_size, &selected_runs, None);
         self.geometry = Some(GeometryCache {
             key,
             line: line.clone(),
+            selected_line,
         });
         line
     }
@@ -2530,6 +2558,7 @@ struct TextElement {
 }
 struct TextPrepaint {
     line: ShapedLine,
+    selected_line: ShapedLine,
     caret: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     scroll: Pixels,
@@ -2624,6 +2653,12 @@ impl Element for TextElement {
             };
             TextPrepaint {
                 line,
+                selected_line: input
+                    .geometry
+                    .as_ref()
+                    .expect("geometry was just prepared")
+                    .selected_line
+                    .clone(),
                 caret,
                 selection,
                 scroll,
@@ -2661,11 +2696,47 @@ impl Element for TextElement {
         let origin = point(bounds.origin.x - prepaint.scroll, bounds.origin.y);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(selection) = prepaint.selection.take() {
+                let selection_bounds = selection.bounds;
                 window.paint_quad(selection);
+                for outside in [
+                    Bounds::from_corners(
+                        bounds.origin,
+                        point(
+                            selection_bounds.left().clamp(bounds.left(), bounds.right()),
+                            bounds.bottom(),
+                        ),
+                    ),
+                    Bounds::from_corners(
+                        point(
+                            selection_bounds
+                                .right()
+                                .clamp(bounds.left(), bounds.right()),
+                            bounds.top(),
+                        ),
+                        bounds.bottom_right(),
+                    ),
+                ] {
+                    window.with_content_mask(Some(ContentMask { bounds: outside }), |window| {
+                        _ = prepaint
+                            .line
+                            .paint(origin, window.line_height(), window, cx);
+                    });
+                }
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: selection_bounds,
+                    }),
+                    |window| {
+                        _ = prepaint
+                            .selected_line
+                            .paint(origin, window.line_height(), window, cx);
+                    },
+                );
+            } else {
+                _ = prepaint
+                    .line
+                    .paint(origin, window.line_height(), window, cx);
             }
-            _ = prepaint
-                .line
-                .paint(origin, window.line_height(), window, cx);
             if let Some(caret) = prepaint.caret.take() {
                 window.paint_quad(caret);
             }
@@ -2705,6 +2776,19 @@ fn marked_text_runs(display: &str, marked: Option<Range<usize>>, base: TextRun) 
     .into_iter()
     .filter(|run| run.len > 0)
     .collect()
+}
+
+fn recolored_text_runs(runs: &[TextRun], color: gpui::Hsla) -> Vec<TextRun> {
+    runs.iter()
+        .map(|run| TextRun {
+            color,
+            underline: run.underline.map(|underline| UnderlineStyle {
+                color: Some(color),
+                ..underline
+            }),
+            ..run.clone()
+        })
+        .collect()
 }
 
 fn requires_single_line_normalization(ch: char) -> bool {

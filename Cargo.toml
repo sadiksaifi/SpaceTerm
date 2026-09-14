@@ -41,11 +41,7 @@ resolver = "2"
 [features]
 default = []
 macos-native-tests = []
-appearance-exerciser = []
-
-[build-dependencies]
-serde = "1.0"
-serde_json = "1.0"
+appearance-exerciser = ["spaceterm-ui/appearance-exerciser"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -76,6 +72,33 @@ raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }
+jsonschema = { version = "=0.56.0", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+# Keep local feature-matrix builds compact. SpaceTerm retains line tables for its
+# own crates while dependencies, build scripts, and proc macros omit debug data.
+# Incremental caches are deliberately disabled because repeated check, test, and
+# Clippy variants otherwise retain a separate large cache for each invocation.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.build-override]
+debug = false
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false
+
+[profile.test.package."*"]
+debug = false
+
+[profile.test.build-override]
+debug = false
+incremental = false

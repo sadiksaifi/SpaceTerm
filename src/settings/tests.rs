@@ -1,7 +1,6 @@
 use super::*;
 use crate::appearance::{
-    Appearance, AppearanceGeneration, AvailableFonts, ChromeColorOverrides, SchemeSelection,
-    SystemAppearance,
+    AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeColorOverrides, SystemAppearance,
 };
 use crate::platform::secure_filesystem::PrivateFileSnapshot;
 use storage::StorageCommit;
@@ -115,6 +114,12 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         .export_schemes(&[(SchemeKind::Chrome, id.clone())])
         .unwrap();
     assert!(!exported.contains("typography"));
+    let copy = crate::appearance::parse_color_document(exported.as_bytes()).unwrap();
+    assert_ne!(copy.schemes[0].id(), &id);
+    let mut fresh = SchemeCatalog::default();
+    fresh
+        .install_batch(&copy.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
     assert_eq!(
         settings.import_preview(
             &token,
@@ -132,7 +137,7 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         .import_preview(
             &token,
             imported.catalog_revision,
-            SchemeImport::SpaceTerm(exported.as_bytes()),
+            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
             &BTreeSet::from([id]),
         )
         .unwrap();
@@ -222,6 +227,37 @@ fn zed_candidates_require_explicit_selection_and_install_through_settings() {
 }
 
 #[test]
+fn maximum_zed_family_installs_as_one_bounded_batch() {
+    let themes = (0..32)
+        .map(|index| {
+            serde_json::json!({
+                "name": format!("Theme {index}"),
+                "appearance": if index % 2 == 0 { "dark" } else { "light" },
+                "style": { "terminal.foreground": "#abcdef" }
+            })
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&serde_json::json!({ "themes": themes })).unwrap();
+    let (settings, _) = setup();
+    let token = settings.begin_preview(0).unwrap();
+
+    let receipt = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            SchemeImport::ZedFamily {
+                bytes: &bytes,
+                kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
+            },
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+    assert_eq!(receipt.installed.len(), 64);
+    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 64);
+}
+
+#[test]
 fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback() {
     let (settings, storage) = setup();
     let token = settings.begin_preview(0).unwrap();
@@ -235,10 +271,8 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
         .unwrap();
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: selected.clone(),
-        appearance: Appearance::Light,
-    };
+    candidate.preferences.mode = AppearanceMode::Light;
+    candidate.preferences.chrome.schemes.light = selected.clone();
     candidate
         .preferences
         .chrome

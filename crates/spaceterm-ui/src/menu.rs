@@ -219,6 +219,8 @@ pub enum MenuSize {
 /// Bounded paint values shared by menus, context menus, and pickers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuPaint {
+    rows: Option<crate::ListRowPaints>,
+    destructive_rows: Option<crate::ListRowPaints>,
     background: Rgba,
     border: Rgba,
     foreground: Rgba,
@@ -254,6 +256,8 @@ impl MenuPaint {
         separator: Rgba,
     ) -> Self {
         Self {
+            rows: None,
+            destructive_rows: None,
             background,
             border,
             foreground,
@@ -270,6 +274,18 @@ impl MenuPaint {
             trigger_border: border,
             focus_border: selected_background,
         }
+    }
+
+    /// Installs complete semantic list row states.
+    pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
+        self.rows = Some(rows);
+        self
+    }
+
+    /// Supplies destructive action row states independently from ordinary navigation rows.
+    pub fn destructive_rows(mut self, rows: crate::ListRowPaints) -> Self {
+        self.destructive_rows = Some(rows);
+        self
     }
 
     /// Sets row hover independently of keyboard selection.
@@ -3008,6 +3024,12 @@ fn render_row(
     hovered: bool,
     style: MenuStyle,
 ) -> AnyElement {
+    let rows = if destructive {
+        style.paint.destructive_rows
+    } else {
+        style.paint.rows
+    };
+    let row_paint = resolve_row_paint(rows, !disabled, highlighted, hovered);
     let foreground = if hovered && !disabled && !destructive {
         style.paint.hover_foreground
     } else {
@@ -3018,6 +3040,9 @@ fn render_row(
     } else {
         row_secondary_foreground(style.paint, disabled, destructive, highlighted)
     };
+    let foreground = row_paint.map_or(foreground, |paint| paint.foreground);
+    let secondary_foreground = row_paint.map_or(secondary_foreground, |paint| paint.secondary);
+    let icon_foreground = row_paint.map_or(foreground, |paint| paint.icon);
     let hover_state = state.clone();
     let pointer_state = state;
     let logical_name = label.clone();
@@ -3038,6 +3063,11 @@ fn render_row(
         .when(hovered && !disabled, |row| {
             row.bg(style.paint.hover_background)
         })
+        .when_some(row_paint, |row, paint| {
+            row.bg(paint.background)
+                .border(style.metrics.border_width)
+                .border_color(paint.border)
+        })
         .when(!disabled, |row| {
             row.on_hover(move |hovered, _, cx| {
                 let _ = hover_state.update(cx, |state, cx| {
@@ -3052,9 +3082,13 @@ fn render_row(
         .items_center()
         .justify_center();
     if let Some(indicator) = mark_icon(mark) {
-        leading = leading.child(Icon::new(indicator, style.metrics.icon_size, foreground));
+        leading = leading.child(Icon::new(
+            indicator,
+            style.metrics.icon_size,
+            icon_foreground,
+        ));
     } else if let Some(icon) = icon {
-        leading = leading.child(icon(foreground, style.metrics.icon_size));
+        leading = leading.child(icon(icon_foreground, style.metrics.icon_size));
     }
     row = row
         .child(leading)
@@ -3071,7 +3105,7 @@ fn render_row(
             row.child(Icon::new(
                 IconName::ChevronRight,
                 style.metrics.icon_size,
-                secondary_foreground,
+                icon_foreground,
             ))
         });
     if !disabled {
@@ -3159,6 +3193,15 @@ fn render_row(
         row = row.child(pointer_tracker);
     }
     row.into_any_element()
+}
+
+fn resolve_row_paint(
+    rows: Option<crate::ListRowPaints>,
+    enabled: bool,
+    selected: bool,
+    hovered: bool,
+) -> Option<crate::ListRowPaint> {
+    rows.map(|rows| rows.resolve(enabled, selected, hovered))
 }
 
 fn mark_icon(mark: EntryMark) -> Option<IconName> {
@@ -3303,6 +3346,28 @@ mod tests {
         );
         let metrics = MenuMetrics::new(px(160.0), px(28.0));
         MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
+    }
+
+    fn row_paint(seed: u32) -> crate::ListRowPaint {
+        let colors = [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5].map(rgba);
+        crate::ListRowPaint::new(
+            colors[0], colors[1], colors[2], colors[3], colors[4], colors[5],
+        )
+    }
+
+    #[test]
+    fn renderer_should_reach_selected_hovered_row_paint() {
+        let normal = row_paint(10);
+        let hovered = row_paint(20);
+        let selected = row_paint(30);
+        let selected_hovered = row_paint(40);
+        let disabled = row_paint(50);
+        let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
+
+        assert_eq!(
+            resolve_row_paint(Some(rows), true, true, true),
+            Some(selected_hovered)
+        );
     }
 
     #[test]

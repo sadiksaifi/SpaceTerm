@@ -1482,3 +1482,80 @@ fn unrelated_menu_causes_focus_lost_without_owned_context_events(cx: &mut TestAp
         TextInputEvent::ContextMenuOpened | TextInputEvent::ContextMenuClosed
     )));
 }
+
+#[test]
+fn selected_text_recolors_existing_ime_runs_without_changing_shaping_boundaries() {
+    let ordinary = rgba(0xffffffff).into();
+    let selected = rgba(0x000000ff).into();
+    let base = TextRun {
+        len: 8,
+        font: gpui::font(".SystemUIFont"),
+        color: ordinary,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let normal = marked_text_runs("aé界bc", Some(1..7), base);
+    let selected = recolored_text_runs(&normal, selected);
+    assert_eq!(
+        normal.iter().map(|run| run.len).collect::<Vec<_>>(),
+        selected.iter().map(|run| run.len).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        normal.iter().map(|run| &run.font).collect::<Vec<_>>(),
+        selected.iter().map(|run| &run.font).collect::<Vec<_>>()
+    );
+    assert!(
+        selected
+            .iter()
+            .all(|run| run.color == rgba(0x000000ff).into())
+    );
+    assert_eq!(
+        selected[1].underline.unwrap().color,
+        Some(rgba(0x000000ff).into())
+    );
+}
+
+#[gpui::test]
+fn selecting_ligatures_and_joined_script_preserves_the_exact_shaped_geometry(
+    cx: &mut TestAppContext,
+) {
+    let (input, cx) = input(cx, "office العربية ﬁ á");
+    let (positions, shapes) = input.read_with(cx, |input, _| {
+        let geometry = input.geometry.as_ref().unwrap();
+        let positions = input
+            .buffer
+            .text
+            .char_indices()
+            .map(|(offset, _)| {
+                assert_eq!(
+                    geometry.line.x_for_index(offset),
+                    geometry.selected_line.x_for_index(offset)
+                );
+                geometry.line.x_for_index(offset)
+            })
+            .collect::<Vec<_>>();
+        (positions, input.shape_count)
+    });
+    input.update(cx, |input, cx| {
+        input.buffer.selection.range = 2..input.buffer.text.len();
+        input.restart_caret(cx);
+    });
+    cx.run_until_parked();
+    input.read_with(cx, |input, _| {
+        assert_eq!(input.shape_count, shapes);
+        let geometry = input.geometry.as_ref().unwrap();
+        assert_eq!(
+            input
+                .buffer
+                .text
+                .char_indices()
+                .map(|(offset, _)| geometry.line.x_for_index(offset))
+                .collect::<Vec<_>>(),
+            positions
+        );
+    });
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert_eq!(input.read_with(cx, |input, _| input.shape_count), shapes);
+}

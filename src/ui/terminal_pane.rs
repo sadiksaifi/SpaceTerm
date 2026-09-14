@@ -3211,24 +3211,27 @@ impl TerminalPane {
                     cx.stop_propagation();
                 })
                 .child(
-                    div()
-                        .id("terminal-find-field")
-                        .relative()
-                        .h(appearance.height(24.0, 13.0))
-                        .w(appearance.text_size(120.0))
-                        .max_w_full()
-                        .min_w(px(0.0))
-                        .flex_grow()
-                        .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .px(appearance.spacing(5.0))
-                        .rounded(px(4.0))
-                        .bg(gpui_color(appearance.colors.element_background))
-                        .text_size(appearance.text_size(13.0))
-                        .text_color(gpui_color(appearance.colors.text))
-                        .whitespace_nowrap()
-                        .child(input),
+                    spaceterm_ui::field_frame(
+                        "terminal-find-field",
+                        &input.read(cx).focus_handle(),
+                        spaceterm_ui::FieldState::default(),
+                        cx,
+                    )
+                    .relative()
+                    .h(appearance.height(24.0, 13.0))
+                    .w(appearance.text_size(120.0))
+                    .max_w_full()
+                    .min_w(px(0.0))
+                    .flex_grow()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .px(appearance.spacing(5.0))
+                    .rounded(px(4.0))
+                    .text_size(appearance.text_size(13.0))
+                    .text_color(gpui_color(appearance.colors.text))
+                    .whitespace_nowrap()
+                    .child(input),
                 )
                 .child(
                     div()
@@ -3850,8 +3853,8 @@ impl Render for TerminalPane {
                             .rounded(px(4.0))
                             .border_1()
                             .border_color(gpui_color(appearance.colors.border))
-                            .bg(gpui_color(appearance.colors.element_active))
-                            .text_color(gpui_color(appearance.colors.text_muted))
+                            .bg(gpui_color(appearance.colors.preview_background))
+                            .text_color(gpui_color(appearance.colors.preview_foreground))
                             .text_size(appearance.text_size(13.0))
                             .overflow_hidden()
                             .child(div().truncate().child(link.target.value)),

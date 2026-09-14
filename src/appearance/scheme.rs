@@ -9,8 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use super::{Color, builtin};
 
 pub(crate) const MAX_SCHEME_ID_BYTES: usize = 128;
-pub(crate) const MAX_SCHEME_NAME_BYTES: usize = 128;
+pub(crate) const MAX_SCHEME_NAME_CHARACTERS: usize = 128;
 pub(crate) const MAX_CUSTOM_SCHEMES: usize = 128;
+/// One Zed family can contain 32 themes and produce one scheme for each of two surfaces.
+const MAX_INSTALL_BATCH_SCHEMES: usize = 64;
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
     deserializer: D,
@@ -111,9 +113,37 @@ fn valid_scheme_id(value: &str) -> bool {
     })
 }
 
+/// Imported source descriptors are attribution, never authority to replace an installed scheme.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemeOrigin {
+    pub(crate) format: SchemeSourceFormat,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) package_id: Option<String>,
+    pub(crate) family: String,
+    pub(crate) theme: String,
+    pub(crate) fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SchemeSourceFormat {
+    Zed,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SchemeMetadata {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) origin: Option<SchemeOrigin>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
@@ -150,33 +180,20 @@ macro_rules! define_chrome_colors {
         }
 
         impl ChromeColors {
+            #[cfg(test)]
             pub(crate) fn apply(&mut self, overrides: &ChromeColorOverrides) {
                 $(if let Some(value) = overrides.$field { self.$field = value; })+
             }
 
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                for color in [self.background, self.panel_background,
-                    self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.tab_active_background,
-                    self.tab_inactive_background,
-                    self.input_background]
-                {
-                    if !color.is_opaque() { return Err(CatalogError::UnsupportedAlpha); }
-                }
+                if self.border_transparent.a != 0 { return Err(CatalogError::UnsupportedAlpha); }
                 Ok(())
             }
         }
 
         impl ChromeColorOverrides {
             pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                for color in [self.background, self.panel_background,
-                    self.elevated_surface_background, self.title_bar_background,
-                    self.title_bar_inactive_background, self.tab_active_background,
-                    self.tab_inactive_background,
-                    self.input_background].into_iter().flatten()
-                {
-                    if !color.is_opaque() { return Err(CatalogError::UnsupportedAlpha); }
-                }
+                if self.border_transparent.is_some_and(|color| color.a != 0) { return Err(CatalogError::UnsupportedAlpha); }
                 Ok(())
             }
 
@@ -282,9 +299,6 @@ impl TerminalColors {
         apply!(
             foreground,
             background,
-            normal,
-            bright,
-            dim,
             bright_foreground,
             dim_foreground,
             cursor,
@@ -294,6 +308,15 @@ impl TerminalColors {
             hyperlink,
             visual_bell
         );
+        if let Some(palette) = &overrides.normal {
+            palette.apply(&mut self.normal);
+        }
+        if let Some(palette) = &overrides.bright {
+            palette.apply(&mut self.bright);
+        }
+        if let Some(palette) = &overrides.dim {
+            palette.apply(&mut self.dim);
+        }
         overrides.cursor_text.apply(&mut self.cursor_text);
         overrides
             .selection_foreground
@@ -328,6 +351,33 @@ impl TerminalColors {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct TerminalPaletteOverrides([Option<Color>; 8]);
+
+impl TerminalPaletteOverrides {
+    pub(crate) fn sparse(colors: [Option<Color>; 8]) -> Option<Self> {
+        colors.iter().any(Option::is_some).then_some(Self(colors))
+    }
+
+    pub(crate) fn complete(colors: [Color; 8]) -> Self {
+        Self(colors.map(Some))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, index: usize) -> Option<Color> {
+        self.0.get(index).copied().flatten()
+    }
+
+    fn apply(&self, target: &mut [Color; 8]) {
+        for (target, authored) in target.iter_mut().zip(self.0) {
+            if let Some(color) = authored {
+                *target = color;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TerminalColorOverrides {
@@ -348,19 +398,19 @@ pub(crate) struct TerminalColorOverrides {
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) normal: Option<[Color; 8]>,
+    pub(crate) normal: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) bright: Option<[Color; 8]>,
+    pub(crate) bright: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) dim: Option<[Color; 8]>,
+    pub(crate) dim: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
@@ -497,9 +547,9 @@ impl TerminalColorOverrides {
         Self {
             foreground: Some(colors.foreground),
             background: Some(colors.background),
-            normal: Some(colors.normal),
-            bright: Some(colors.bright),
-            dim: Some(colors.dim),
+            normal: Some(TerminalPaletteOverrides::complete(colors.normal)),
+            bright: Some(TerminalPaletteOverrides::complete(colors.bright)),
+            dim: Some(TerminalPaletteOverrides::complete(colors.dim)),
             bright_foreground: Some(colors.bright_foreground),
             dim_foreground: Some(colors.dim_foreground),
             cursor: Some(colors.cursor),
@@ -538,6 +588,12 @@ pub(crate) struct SchemeSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChromeScheme {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) window_background: Option<super::WindowBackgroundAppearance>,
     pub(crate) id: SchemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
@@ -630,8 +686,12 @@ impl SchemeCatalog {
                 .chrome
                 .values()
                 .map(|scheme| {
-                    let mut colors = builtin::chrome_base(scheme.appearance);
-                    colors.apply(&scheme.colors);
+                    let colors = super::compiler::compile_chrome(
+                        scheme.appearance,
+                        &scheme.colors,
+                        &ChromeColorOverrides::default(),
+                    )
+                    .colors;
                     SchemeSummary {
                         id: scheme.id.clone(),
                         name: scheme.name.clone(),
@@ -708,7 +768,7 @@ impl SchemeCatalog {
         if schemes.is_empty() {
             return Err(CatalogError::EmptyBatch);
         }
-        if schemes.len() > 32 {
+        if schemes.len() > MAX_INSTALL_BATCH_SCHEMES {
             return Err(CatalogError::TooManySchemes);
         }
         let mut seen = BTreeSet::new();
@@ -792,7 +852,22 @@ pub(super) fn validate_scheme(scheme: &CustomScheme, custom: bool) -> Result<(),
             (&value.name, &value.metadata)
         }
     };
-    validate_text(name, MAX_SCHEME_NAME_BYTES)?;
+    validate_text(name, MAX_SCHEME_NAME_CHARACTERS)?;
+    if let Some(origin) = &metadata.origin {
+        if let Some(id) = &origin.package_id {
+            validate_text(id, 256)?;
+        }
+        validate_text(&origin.family, 256)?;
+        validate_text(&origin.theme, 128)?;
+        if origin.fingerprint.len() != 64
+            || !origin
+                .fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CatalogError::InvalidMetadata);
+        }
+    }
     if let Some(value) = &metadata.author {
         validate_text(value, 256)?;
     }
@@ -806,7 +881,7 @@ pub(super) fn validate_scheme(scheme: &CustomScheme, custom: bool) -> Result<(),
 }
 
 pub(super) fn validate_text(value: &str, max: usize) -> Result<(), CatalogError> {
-    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+    if value.is_empty() || value.chars().count() > max || value.chars().any(char::is_control) {
         Err(CatalogError::InvalidMetadata)
     } else {
         Ok(())

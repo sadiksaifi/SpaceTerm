@@ -17,10 +17,11 @@ use crate::settings::{ImportReceipt, SchemeImport, SettingsError};
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use super::controls::{
-    ROW_INSET, TRAILING_WIDTH, action_button, badge, gpui_color, swatch_strip, text,
-};
+use super::controls::{CARD_RADIUS, action_button, badge, gpui_color, swatch_strip, text};
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
+
+/// The column a scheme's removal takes at the end of its line in a list.
+const TRAILING_WIDTH: f32 = 28.0;
 
 /// A weak-owner handler, so a button outlives one render without borrowing the window.
 fn owned(
@@ -43,8 +44,8 @@ enum RemovalChoice {
 impl SettingsWindow {
     /// One surface's installed schemes.
     ///
-    /// The group's own title names the surface, so the list adds no heading of its own: it is a
-    /// run of rows separated by hairlines, like every other row on every other page.
+    /// The group's own title names the surface, so the list adds no heading of its own: it is a run
+    /// of rows on the group's card, like every other row on every other page.
     pub(super) fn render_installed_schemes(
         &mut self,
         kind: SchemeKind,
@@ -91,9 +92,9 @@ impl SettingsWindow {
                 .flex_row()
                 .items_start()
                 .gap(appearance.spacing(8.0))
-                .mx(appearance.spacing(ROW_INSET))
                 .p(appearance.spacing(10.0))
-                .rounded(px(8.0))
+                // The notice spans the column the cards under it span, so the page has one edge.
+                .rounded(appearance.spacing(CARD_RADIUS))
                 .bg(gpui_color(appearance.colors.warning_background))
                 .border_1()
                 .border_color(gpui_color(appearance.colors.warning_border))
@@ -114,7 +115,7 @@ impl SettingsWindow {
                         .children(diagnostics.into_iter().map(|diagnostic| {
                             div()
                                 .text_size(appearance.text_size(text::SMALL))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
+                                .text_color(gpui_color(appearance.colors.warning))
                                 .whitespace_normal()
                                 .child(diagnostic_message(diagnostic))
                         })),
@@ -183,8 +184,8 @@ impl SettingsWindow {
                     .child(SharedString::from(classification)),
             )
             .child(
-                // Every row on every page ends with this column, so nothing shifts when an action
-                // is present on one row and absent on the next.
+                // Every scheme in a list ends with this column, so the classifications stay in
+                // one column whether a scheme can be removed or not.
                 div()
                     .w(appearance.text_size(TRAILING_WIDTH))
                     .flex_none()
@@ -259,10 +260,18 @@ impl SettingsWindow {
                     ))
                     .child(action_button(
                         "settings-scheme-export",
-                        "Export Schemes in Use…",
+                        "Export Effective Schemes…",
                         true,
                         owned(cx, |window, gpui_window, cx| {
                             window.begin_scheme_export(gpui_window, cx);
+                        }),
+                    ))
+                    .child(action_button(
+                        "settings-definition-export",
+                        "Export Scheme Definitions…",
+                        true,
+                        owned(cx, |window, gpui_window, cx| {
+                            window.begin_definition_export(gpui_window, cx);
                         }),
                     ))
                     .child(action_button(
@@ -295,16 +304,9 @@ impl SettingsWindow {
         let _ = cx;
         let preferences = &self.editor.document().preferences;
         let mut selected = BTreeSet::new();
-        for selection in [&preferences.chrome.scheme, &preferences.terminal.scheme] {
-            match selection {
-                crate::appearance::SchemeSelection::Fixed { id, .. } => {
-                    selected.insert(id.clone());
-                }
-                crate::appearance::SchemeSelection::System { light, dark } => {
-                    selected.insert(light.clone());
-                    selected.insert(dark.clone());
-                }
-            }
+        for slots in [&preferences.chrome.schemes, &preferences.terminal.schemes] {
+            selected.insert(slots.light.clone());
+            selected.insert(slots.dark.clone());
         }
         selected
     }
@@ -426,6 +428,19 @@ impl SettingsWindow {
     fn begin_scheme_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
         let resolved = crate::ui::appearance_runtime::current(cx);
+        match self.editor.export_appearance(&resolved) {
+            Ok(contents) => self.write_export("SpaceTerm-color-schemes.json", contents, cx),
+            Err(_) => {
+                self.interchange_status =
+                    Some(SharedString::from("Those schemes could not be exported."));
+                cx.notify();
+            }
+        }
+    }
+
+    fn begin_definition_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        let resolved = crate::ui::appearance_runtime::current(cx);
         let schemes = [
             (SchemeKind::Chrome, resolved.chrome.effective_scheme.clone()),
             (
@@ -433,11 +448,12 @@ impl SettingsWindow {
                 resolved.terminal.effective_scheme.clone(),
             ),
         ];
-        match self.editor.export_schemes(&schemes) {
-            Ok(contents) => self.write_export("SpaceTerm-color-schemes.json", contents, cx),
+        match self.editor.export_definitions(&schemes) {
+            Ok(contents) => self.write_export("SpaceTerm-scheme-definitions.json", contents, cx),
             Err(_) => {
-                self.interchange_status =
-                    Some(SharedString::from("Those schemes could not be exported."));
+                self.interchange_status = Some(SharedString::from(
+                    "Those definitions could not be exported.",
+                ));
                 cx.notify();
             }
         }
@@ -491,33 +507,17 @@ fn import_document<'a>(
         Err(SettingsError::Import(ImportError::InvalidJson)) => {}
         Err(error) => return import_failure_message(error).into(),
     }
-    let candidates = match super::editor::SettingsEditor::list_import_candidates(bytes) {
-        Ok(candidates) if !candidates.is_empty() => candidates,
+    match super::editor::SettingsEditor::list_import_candidates(bytes) {
+        Ok(candidates) if !candidates.is_empty() => {}
         _ => return "That file is not a SpaceTerm color package or a Zed theme.".into(),
-    };
-    // Each candidate has its own identity. Import the family without selecting a scheme.
-    let mut installed = 0;
-    let mut failure = None;
-    for candidate in candidates {
-        match install(SchemeImport::Zed {
-            bytes,
-            candidate_index: candidate.index,
-            kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
-        }) {
-            Ok(receipt) => installed += receipt.installed.len(),
-            Err(error) => {
-                failure.get_or_insert(error);
-            }
-        }
     }
-    match failure {
-        Some(error) if installed == 0 => import_failure_message(error).into(),
-        Some(error) => format!(
-            "Installed {installed} schemes. Some could not be imported. {}",
-            import_failure_message(error)
-        )
-        .into(),
-        None => installed_message(installed),
+    // The owner translates and validates every candidate before atomically installing the family.
+    match install(SchemeImport::ZedFamily {
+        bytes,
+        kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
+    }) {
+        Ok(receipt) => installed_message(receipt.installed.len()),
+        Err(error) => import_failure_message(error).into(),
     }
 }
 
@@ -732,6 +732,33 @@ mod tests {
 
         assert_eq!(message, installed_message(2));
         assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+    }
+
+    #[test]
+    fn a_zed_family_failure_is_atomic_and_a_corrected_retry_is_clean() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{"terminal.foreground":"#abcdef"}},{"name":"Broken","appearance":"dark","style":{"terminal.foreground":"not-a-color"}}]}"##;
+        let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{"terminal.foreground":"#abcdef"}},{"name":"Second","appearance":"dark","style":{"terminal.foreground":"#123456"}}]}"##;
+        let install = |bytes| {
+            import_document(bytes, |source| {
+                settings.import_preview(
+                    &token,
+                    settings.snapshot().catalog_revision,
+                    source,
+                    &BTreeSet::new(),
+                )
+            })
+        };
+
+        assert_eq!(
+            install(invalid).as_ref(),
+            "That color package contains invalid schemes."
+        );
+        assert!(settings.snapshot().candidate.custom_schemes.is_empty());
+
+        assert_eq!(install(corrected), installed_message(4));
+        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 4);
     }
 
     #[test]

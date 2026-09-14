@@ -1,16 +1,20 @@
 use std::{rc::Rc, sync::Arc};
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px};
+use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, ChromeDensity, SchemeKind, SchemeSelection,
+    Appearance, AppearanceDocument, AppearanceMode, ChromeDensity, SchemeKind,
+    builtin_fallback_scheme,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
+use crate::platform::window_movement::{
+    OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
+};
 use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
 use super::editor::{COMMIT_DELAY, SaveStatus};
-use super::{SettingsRowId, SettingsSectionId, SettingsWindow, builtin_fallback_scheme};
+use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 
 use super::test_support::MemoryStorage;
 
@@ -32,6 +36,18 @@ fn open_settings_with(
     cx: &mut TestAppContext,
     storage: Arc<MemoryStorage>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
+    open_settings_with_drag(
+        cx,
+        storage,
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+    )
+}
+
+fn open_settings_with_drag(
+    cx: &mut TestAppContext,
+    storage: Arc<MemoryStorage>,
+    window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
+) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     let (settings, changed) = crate::settings::UserSettings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
@@ -40,7 +56,9 @@ fn open_settings_with(
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
-    let (window, cx) = cx.add_window_view(SettingsWindow::new);
+    let (window, cx) = cx.add_window_view(|window, cx| {
+        SettingsWindow::new_with_window_drag(window_drag, window, cx)
+    });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     (window, Harness { storage, settings }, cx)
@@ -301,180 +319,181 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
 // Appearance Mode ----------------------------------------------------------------------------
 
 #[gpui::test]
-fn appearance_mode_switches_between_fixed_slots_and_auto(cx: &mut TestAppContext) {
+fn appearance_mode_switches_both_surfaces_without_changing_any_scheme_slot(
+    cx: &mut TestAppContext,
+) {
     let (window, _harness, cx) = open_settings(cx);
+    let before = document_of(&window, cx).preferences;
+    for (selector, mode) in [
+        ("settings-appearance-mode-light", AppearanceMode::Light),
+        ("settings-appearance-mode-auto", AppearanceMode::Auto),
+        ("settings-appearance-mode-dark", AppearanceMode::Dark),
+    ] {
+        click(selector, cx);
+        let after = document_of(&window, cx).preferences;
+        assert_eq!(after.mode, mode);
+        assert_eq!(after.chrome, before.chrome);
+        assert_eq!(after.terminal, before.terminal);
+    }
+}
 
-    click("settings-appearance-mode-light", cx);
-    assert!(matches!(
-        document_of(&window, cx).preferences.chrome.scheme,
-        SchemeSelection::Fixed {
-            appearance: Appearance::Light,
-            ..
+#[gpui::test]
+fn fixed_mode_offers_two_scheme_rows_and_auto_offers_four(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    for (selector, automatic) in [
+        ("settings-appearance-mode-light", false),
+        ("settings-appearance-mode-auto", true),
+        ("settings-appearance-mode-dark", false),
+    ] {
+        click(selector, cx);
+        let rows = window.read_with(cx, |settings, _| {
+            settings.rows_for(SettingsSectionId::Appearance)
+        });
+        for row in [SettingsRowId::ChromeScheme, SettingsRowId::TerminalScheme] {
+            assert_eq!(rows.contains(&row), !automatic);
         }
-    ));
-
-    click("settings-appearance-mode-auto", cx);
-    assert!(matches!(
-        document_of(&window, cx).preferences.chrome.scheme,
-        SchemeSelection::System { .. }
-    ));
-
-    click("settings-appearance-mode-dark", cx);
-    assert!(matches!(
-        document_of(&window, cx).preferences.chrome.scheme,
-        SchemeSelection::Fixed {
-            appearance: Appearance::Dark,
-            ..
+        for row in [
+            SettingsRowId::ChromeLightScheme,
+            SettingsRowId::ChromeDarkScheme,
+            SettingsRowId::TerminalLightScheme,
+            SettingsRowId::TerminalDarkScheme,
+        ] {
+            assert_eq!(rows.contains(&row), automatic);
         }
-    ));
-}
-
-#[gpui::test]
-fn switching_appearance_mode_preserves_the_other_slots_scheme(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    let dark = match document_of(&window, cx).preferences.chrome.scheme {
-        SchemeSelection::Fixed { id, .. } => id,
-        SchemeSelection::System { dark, .. } => dark,
-    };
-
-    click("settings-appearance-mode-light", cx);
-    click("settings-appearance-mode-dark", cx);
-
-    // Returning to Dark restores the scheme that slot held, rather than a fallback.
-    assert!(matches!(
-        document_of(&window, cx).preferences.chrome.scheme,
-        SchemeSelection::Fixed { ref id, .. } if *id == dark
-    ));
-}
-
-#[gpui::test]
-fn a_fixed_appearance_offers_one_scheme_row_and_auto_offers_two(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    let fixed = window.read_with(cx, |window, _| {
-        window.rows_for(SettingsSectionId::Appearance)
-    });
-    assert!(fixed.contains(&SettingsRowId::ChromeScheme));
-    assert!(!fixed.contains(&SettingsRowId::ChromeLightScheme));
-
-    click("settings-appearance-mode-auto", cx);
-
-    let auto = window.read_with(cx, |window, _| {
-        window.rows_for(SettingsSectionId::Appearance)
-    });
-    assert!(!auto.contains(&SettingsRowId::ChromeScheme));
-    assert!(auto.contains(&SettingsRowId::ChromeLightScheme));
-    assert!(auto.contains(&SettingsRowId::ChromeDarkScheme));
-}
-
-/// One control, both surfaces.
-///
-/// Chrome and terminal hold separate selections, but nobody wants light chrome around a dark
-/// terminal, so the one control writes the mode to both.
-#[gpui::test]
-fn the_appearance_mode_moves_both_surfaces_together(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    click("settings-appearance-mode-light", cx);
-
-    let preferences = document_of(&window, cx).preferences;
-    for selection in [&preferences.chrome.scheme, &preferences.terminal.scheme] {
-        assert!(
-            matches!(
-                selection,
-                SchemeSelection::Fixed {
-                    appearance: Appearance::Light,
-                    ..
-                }
-            ),
-            "both surfaces follow the one appearance control, got {selection:?}"
+        assert_eq!(
+            rows.iter()
+                .filter(|row| **row == SettingsRowId::AppearanceMode)
+                .count(),
+            1
         );
     }
-
-    click("settings-appearance-mode-auto", cx);
-
-    let preferences = document_of(&window, cx).preferences;
-    assert!(matches!(
-        preferences.chrome.scheme,
-        SchemeSelection::System { .. }
-    ));
-    assert!(matches!(
-        preferences.terminal.scheme,
-        SchemeSelection::System { .. }
-    ));
 }
 
-/// A shared mode is not a shared scheme: each surface still wears its own within that mode.
 #[gpui::test]
-fn each_surface_keeps_its_own_scheme_under_the_shared_mode(cx: &mut TestAppContext) {
+fn changing_one_scheme_slot_preserves_the_mode_and_other_three_slots(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-
-    let preferences = document_of(&window, cx).preferences;
-    let (chrome, terminal) = (
-        match preferences.chrome.scheme {
-            SchemeSelection::Fixed { ref id, .. } => id.clone(),
-            SchemeSelection::System { ref dark, .. } => dark.clone(),
-        },
-        match preferences.terminal.scheme {
-            SchemeSelection::Fixed { ref id, .. } => id.clone(),
-            SchemeSelection::System { ref dark, .. } => dark.clone(),
-        },
-    );
-
-    assert_ne!(
-        chrome, terminal,
-        "the interface and the terminal draw from separate scheme kinds"
-    );
-
-    click("settings-appearance-mode-auto", cx);
-
-    let preferences = document_of(&window, cx).preferences;
-    assert!(
-        matches!(preferences.chrome.scheme, SchemeSelection::System { ref dark, .. } if *dark == chrome)
-    );
-    assert!(
-        matches!(preferences.terminal.scheme, SchemeSelection::System { ref dark, .. } if *dark == terminal)
-    );
-}
-
-/// A hand-edited document can disagree with itself. The window presents the chrome policy, and the
-/// next change writes both surfaces back into agreement.
-#[gpui::test]
-fn a_disagreeing_document_is_reconciled_by_the_next_change(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    cx.update(|_, cx| {
-        window.update(cx, |window, cx| {
-            window.edit(
-                |draft| {
-                    draft.preferences.terminal.scheme = SchemeSelection::System {
-                        light: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Light),
-                        dark: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
-                    };
-                },
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-
-    // Chrome is still fixed, so the window presents a fixed mode and one scheme row per surface.
-    let rows = window.read_with(cx, |window, _| {
-        window.rows_for(SettingsSectionId::Appearance)
-    });
-    assert!(rows.contains(&SettingsRowId::TerminalScheme));
-    assert!(!rows.contains(&SettingsRowId::TerminalLightScheme));
-
-    click("settings-appearance-mode-light", cx);
-
-    let preferences = document_of(&window, cx).preferences;
-    assert!(matches!(
-        preferences.terminal.scheme,
-        SchemeSelection::Fixed {
-            appearance: Appearance::Light,
-            ..
+    for mode in [
+        AppearanceMode::Light,
+        AppearanceMode::Dark,
+        AppearanceMode::Auto,
+    ] {
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
+        for kind in [SchemeKind::Chrome, SchemeKind::Terminal] {
+            for slot in [Appearance::Light, Appearance::Dark] {
+                let before = document_of(&window, cx).preferences;
+                let id = crate::appearance::SchemeId::new(
+                    format!("custom.{kind:?}.{slot:?}").to_ascii_lowercase(),
+                )
+                .unwrap();
+                let mut expected = before.clone();
+                match kind {
+                    SchemeKind::Chrome => expected.chrome.schemes.set(slot, id.clone()),
+                    SchemeKind::Terminal => expected.terminal.schemes.set(slot, id.clone()),
+                }
+                cx.update(|_, cx| {
+                    window.update(cx, |settings, cx| settings.set_scheme(kind, slot, id, cx))
+                });
+                assert_eq!(document_of(&window, cx).preferences, expected);
+            }
         }
-    ));
+    }
+}
+
+#[gpui::test]
+fn resetting_appearance_mode_preserves_all_scheme_choices(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    click("settings-appearance-mode-light", cx);
+    let mut expected = document_of(&window, cx).preferences;
+    expected.mode = AppearanceMode::default();
+    click("settings-row-appearance-mode-reset", cx);
+    assert_eq!(document_of(&window, cx).preferences, expected);
+}
+
+/// Exercise the actual pickers and reset buttons, including fixed rows whose slot comes from mode.
+#[gpui::test]
+fn scheme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    for (mode, kind, slot, row) in [
+        (
+            AppearanceMode::Light,
+            SchemeKind::Chrome,
+            Appearance::Light,
+            SettingsRowId::ChromeScheme,
+        ),
+        (
+            AppearanceMode::Dark,
+            SchemeKind::Terminal,
+            Appearance::Dark,
+            SettingsRowId::TerminalScheme,
+        ),
+        (
+            AppearanceMode::Auto,
+            SchemeKind::Chrome,
+            Appearance::Light,
+            SettingsRowId::ChromeLightScheme,
+        ),
+        (
+            AppearanceMode::Auto,
+            SchemeKind::Chrome,
+            Appearance::Dark,
+            SettingsRowId::ChromeDarkScheme,
+        ),
+        (
+            AppearanceMode::Auto,
+            SchemeKind::Terminal,
+            Appearance::Light,
+            SettingsRowId::TerminalLightScheme,
+        ),
+        (
+            AppearanceMode::Auto,
+            SchemeKind::Terminal,
+            Appearance::Dark,
+            SettingsRowId::TerminalDarkScheme,
+        ),
+    ] {
+        cx.update(|_, cx| {
+            window.update(cx, |settings, cx| {
+                settings.set_appearance_mode(mode, cx);
+                settings.set_scheme(
+                    kind,
+                    slot,
+                    crate::appearance::SchemeId::new("user.unavailable").unwrap(),
+                    cx,
+                );
+            })
+        });
+        set_query(&window, row.descriptor().label, cx);
+        let before = document_of(&window, cx).preferences;
+        let selector = super::control_selector(row);
+        click(leaked_owned(selector.clone()), cx);
+        let chosen = builtin_fallback_scheme(kind, slot);
+        click(leaked_owned(format!("{selector}-{}", chosen.as_str())), cx);
+        let mut expected = before;
+        match kind {
+            SchemeKind::Chrome => expected.chrome.schemes.set(slot, chosen),
+            SchemeKind::Terminal => expected.terminal.schemes.set(slot, chosen),
+        }
+        assert_eq!(document_of(&window, cx).preferences, expected);
+
+        // Use a different unavailable choice so reset exists for both builtin-default and alternate slots.
+        cx.update(|_, cx| {
+            window.update(cx, |settings, cx| {
+                settings.set_scheme(
+                    kind,
+                    slot,
+                    crate::appearance::SchemeId::new("user.reset-me").unwrap(),
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        click(
+            leaked_owned(format!("{}-reset", row.descriptor().selector)),
+            cx,
+        );
+        expected.reset(row.reset_target(slot).unwrap());
+        assert_eq!(document_of(&window, cx).preferences, expected);
+    }
 }
 
 // Reset --------------------------------------------------------------------------------------
@@ -501,6 +520,198 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
     assert!(!window.read_with(cx, |window, _| {
         window.differs_from_default(SettingsRowId::ChromeDensity)
     }));
+}
+
+/// A reset follows the name it restores, and the control holds the row's right edge either way.
+///
+/// Most rows never carry a reset. A column held open for one would stop every control short of
+/// the edge and leave more space on the right of the form than on its left, and a reset that took
+/// its place only when present would move the control out from under the pointer that changed it.
+#[gpui::test]
+fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"))
+    };
+    let row = bounds("settings-row-terminal-italic", cx);
+    let label = bounds("settings-row-terminal-italic-label", cx);
+    let control = bounds("settings-terminal-italic", cx);
+    assert!(
+        cx.debug_bounds("settings-row-terminal-italic-reset")
+            .is_none()
+    );
+    assert_eq!(
+        row.right() - control.right(),
+        label.left() - row.left(),
+        "a control should keep the same inset from the right as its label keeps from the left"
+    );
+
+    click("settings-terminal-italic", cx);
+
+    let reset = bounds("settings-row-terminal-italic-reset", cx);
+    assert_eq!(
+        bounds("settings-terminal-italic", cx),
+        control,
+        "a control should not move when its reset appears"
+    );
+    assert_eq!(
+        bounds("settings-row-terminal-italic", cx).size.height,
+        row.size.height,
+        "a row should keep its height when its reset appears"
+    );
+    let label = bounds("settings-row-terminal-italic-label", cx);
+    assert!(
+        reset.left() >= label.right() && reset.left() - label.right() < px(12.0),
+        "a reset should follow its label closely, got {reset:?} after {label:?}"
+    );
+    assert!(
+        reset.right() < control.left(),
+        "a reset should stay clear of the control it restores"
+    );
+    let label_middle = label.top() + label.size.height / 2.0;
+    let reset_middle = reset.top() + reset.size.height / 2.0;
+    assert!(
+        (label_middle - reset_middle).abs() < px(1.0),
+        "a reset should sit on its label's line, got {reset:?} beside {label:?}"
+    );
+
+    click("settings-row-terminal-italic-reset", cx);
+
+    // A test frame keeps every selector it has ever drawn, so the reset's absence is read from the
+    // row's state rather than from its bounds.
+    assert!(!window.read_with(cx, |window, _| {
+        window.differs_from_default(SettingsRowId::TerminalItalic)
+    }));
+    assert_eq!(bounds("settings-terminal-italic", cx), control);
+}
+
+/// A reset that appears beside a label never changes where that label wraps.
+///
+/// A long label at a large size sits at its wrapping threshold across a band of window widths. If
+/// the reset took its space only when present, the label would gain a line inside that band as
+/// soon as the setting changed, growing the row and moving the control centered beside it. The
+/// reset scales with the type, so its held slot has to scale with it too, or the visible button
+/// would spill out of the slot and over the gap beside the label.
+#[gpui::test]
+fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestAppContext) {
+    const ROW: &str = "settings-row-terminal-bold-as-bright";
+    const LABEL: &str = "settings-row-terminal-bold-as-bright-label";
+    const CONTROL: &str = "settings-terminal-bold-as-bright";
+    const RESET: &str = "settings-row-terminal-bold-as-bright-reset";
+    const RESET_SLOT: &str = "settings-row-terminal-bold-as-bright-reset-slot";
+
+    let mut document = AppearanceDocument::default();
+    // The largest chrome type with the roomiest density, where the reset is furthest from its
+    // default size.
+    document.preferences.chrome.typography.base_size = 24.0;
+    document.preferences.chrome.density = ChromeDensity::Comfortable;
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Terminal, cx);
+
+    // A tall window keeps the row on screen at every width, so only the width decides wrapping.
+    let resize = |width: f32, cx: &mut VisualTestContext| {
+        cx.simulate_resize(gpui::size(px(width), px(2400.0)));
+        cx.run_until_parked();
+    };
+    let geometry = |cx: &mut VisualTestContext| {
+        let mut bounds = |selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should render"))
+        };
+        (bounds(ROW), bounds(LABEL), bounds(CONTROL))
+    };
+
+    // Find where the label first wraps, then look across a band wider than a reset on either side.
+    let mut widths = (560..=1400).step_by(8).map(|width| width as f32);
+    let single_line = {
+        resize(1400.0, cx);
+        geometry(cx).1.size.height
+    };
+    let threshold = widths
+        .find(|&width| {
+            resize(width, cx);
+            geometry(cx).1.size.height < single_line * 1.5
+        })
+        .expect("the label should fit on one line in a wide window");
+    let band: Vec<f32> = (-40..=40)
+        .step_by(4)
+        .map(|offset| threshold + offset as f32)
+        .collect();
+    let measure = |cx: &mut VisualTestContext| {
+        band.iter()
+            .map(|&width| {
+                resize(width, cx);
+                geometry(cx)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let without_reset = measure(cx);
+    assert!(
+        without_reset
+            .iter()
+            .any(|(_, label, _)| label.size.height > single_line * 1.5)
+            && without_reset
+                .iter()
+                .any(|(_, label, _)| label.size.height < single_line * 1.5),
+        "the band should cross the label's wrapping threshold"
+    );
+
+    resize(1400.0, cx);
+    click(CONTROL, cx);
+    assert!(window.read_with(cx, |window, _| {
+        window.differs_from_default(SettingsRowId::TerminalBoldAsBright)
+    }));
+    let with_reset = measure(cx);
+
+    for ((width, before), after) in band.iter().zip(&without_reset).zip(&with_reset) {
+        assert_eq!(
+            before, after,
+            "at width {width}, the row, its label, and its control should not move when a reset \
+             appears"
+        );
+    }
+    let (row, label, control) = with_reset[0];
+    assert_eq!(
+        row.right() - control.right(),
+        label.left() - row.left(),
+        "a control should keep the same inset from the right as its label keeps from the left"
+    );
+
+    for &width in &band {
+        resize(width, cx);
+        let mut bounds = |selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should render"))
+        };
+        let (label, slot, reset, control) = (
+            bounds(LABEL),
+            bounds(RESET_SLOT),
+            bounds(RESET),
+            bounds(CONTROL),
+        );
+        assert!(
+            reset.size.width > px(20.0),
+            "at width {width}, the reset should have scaled past its default size, got {reset:?}"
+        );
+        assert!(
+            slot.left() <= reset.left() && reset.right() <= slot.right(),
+            "at width {width}, the reset should stay within its held slot, got {reset:?} in \
+             {slot:?}"
+        );
+        assert!(
+            slot.left() > label.right() && reset.left() > label.right(),
+            "at width {width}, the reset should keep its gap after the label, got {reset:?} after \
+             {label:?}"
+        );
+        assert!(
+            reset.right() < control.left(),
+            "at width {width}, the reset should stay clear of the control it restores"
+        );
+    }
 }
 
 #[gpui::test]
@@ -805,6 +1016,141 @@ fn the_scheme_library_warns_only_when_something_could_not_be_resolved(cx: &mut T
 
 // Layout ---------------------------------------------------------------------------------------
 
+#[gpui::test]
+fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
+    cx: &mut TestAppContext,
+) {
+    use crate::appearance::{ChromeColors, Color};
+    use gpui::prelude::*;
+    use gpui::{DivInspectorState, ScrollDelta, ScrollWheelEvent, TouchPhase, div, point};
+    use std::cell::RefCell;
+
+    let (settings, harness, cx) = open_settings(cx);
+    harness.storage.fail_writes(Some(StorageError::Unavailable));
+    click("settings-chrome-density-comfortable", cx);
+    settle(cx);
+    assert!(matches!(status(&settings, cx), SaveStatus::Failed(_)));
+    let colors = ChromeColors {
+        background: Color::rgb(0x101010),
+        text: Color::rgb(0xfefefe),
+        text_muted: Color::rgb(0xdedede),
+        panel_background: Color::rgb(0xffffff),
+        elevated_surface_background: Color::rgb(0xffffff),
+        row_background: Color::rgb(0x111122),
+        row_foreground: Color::rgb(0xeeeeff),
+        row_selected_background: Color::rgb(0xffffdd),
+        row_selected_foreground: Color::rgb(0x111111),
+        row_selected_secondary: Color::rgb(0x333333),
+        info_background: Color::rgb(0xfefefe),
+        error: Color::rgb(0x101010),
+        error_background: Color::rgb(0xffffff),
+        warning: Color::rgb(0x101010),
+        warning_background: Color::rgb(0xffffff),
+        ..ChromeColors::default()
+    };
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let observed_styles = observed.clone();
+    cx.update(|window, cx| {
+        let mut appearance = crate::ui::appearance::chrome(cx).clone();
+        appearance.colors = colors.clone();
+        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            observed_styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    set_query(&settings, "line height", cx);
+    for (selector, expected_background, expected_foreground) in [
+        ("settings-window-surface", Some(colors.background), None),
+        (
+            "settings-navigation-chip-settings-section-interface",
+            Some(colors.row_background),
+            None,
+        ),
+        (
+            "settings-section-terminal-group-font-card",
+            Some(colors.background),
+            None,
+        ),
+        (
+            "settings-row-terminal-line-height",
+            Some(colors.row_selected_background),
+            None,
+        ),
+        (
+            "settings-row-terminal-line-height-label",
+            None,
+            Some(colors.row_selected_foreground),
+        ),
+        ("settings-save-status", None, Some(colors.text_muted)),
+    ] {
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"));
+        let position = bounds.center();
+        observed.borrow_mut().clear();
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.run_until_parked();
+        let matches = || {
+            observed.borrow().iter().any(|state| {
+                state.bounds == bounds
+                    && expected_background.is_none_or(|color| {
+                        state.base_style.background
+                            == Some(super::controls::gpui_color(color).into())
+                    })
+                    && expected_foreground.is_none_or(|color| {
+                        state.base_style.text.as_ref().and_then(|text| text.color)
+                            == Some(super::controls::gpui_color(color).into())
+                    })
+            })
+        };
+        for _ in 0..24 {
+            if matches() {
+                break;
+            }
+            cx.simulate_event(ScrollWheelEvent {
+                position,
+                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        }
+        assert!(
+            matches(),
+            "{selector} must render its complete authored paint pair"
+        );
+        if selector == "settings-section-terminal-group-font-card" {
+            assert!(
+                observed
+                    .borrow()
+                    .iter()
+                    .filter(|state| state.bounds == bounds)
+                    .all(|state| {
+                        let widths = &state.base_style.border_widths;
+                        [widths.top, widths.right, widths.bottom, widths.left]
+                            .into_iter()
+                            .all(|width| {
+                                width.is_none_or(|width| width.to_pixels(px(16.0)) == px(0.0))
+                            })
+                    }),
+                "a Settings group must not paint an enclosing outline"
+            );
+        }
+        cx.update(|window, cx| window.toggle_inspector(cx));
+        cx.run_until_parked();
+    }
+}
+
 /// Every row belongs to a titled box, and every box frames the rows the catalog put in it.
 ///
 /// Grouping is the structure the page is read by, so a row that escapes its box, or a box drawn
@@ -839,6 +1185,251 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
             );
         }
     }
+}
+
+/// Removing the group outline must preserve its content inset, row alignment, and separation.
+#[gpui::test]
+fn borderless_groups_preserve_content_alignment_and_spacing(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Terminal, cx);
+
+    let pane = cx
+        .debug_bounds("settings-section-terminal")
+        .expect("the section should render");
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let mut cards: Vec<(String, gpui::Bounds<gpui::Pixels>)> = Vec::new();
+    for row in &rows {
+        let group = super::group_selector(SettingsSectionId::Terminal, row.descriptor().group);
+        let card = cx
+            .debug_bounds(leaked_owned(format!("{group}-card")))
+            .unwrap_or_else(|| panic!("{group} should rest on a card"));
+        let label = cx
+            .debug_bounds(leaked_owned(format!("{}-label", row.descriptor().selector)))
+            .unwrap_or_else(|| panic!("{row:?} should carry a label"));
+
+        assert!(
+            card.left() < label.left() && card.right() > label.right(),
+            "{group} should clear the text it holds, got {card:?} around {label:?}"
+        );
+        assert!(
+            card.left() >= pane.left() && card.right() <= pane.right(),
+            "{group} should stay inside the content column, got {card:?} in {pane:?}"
+        );
+        if cards.last().is_none_or(|(last, _)| *last != group) {
+            cards.push((group, card));
+        }
+    }
+
+    assert!(
+        cards.len() > 1,
+        "the Terminal section should present more than one card"
+    );
+    let widest_row_gap = rows
+        .windows(2)
+        .filter(|pair| pair[0].descriptor().group == pair[1].descriptor().group)
+        .map(|pair| {
+            let top = cx
+                .debug_bounds(leaked(pair[0].descriptor().selector))
+                .expect("row bounds");
+            let bottom = cx
+                .debug_bounds(leaked(pair[1].descriptor().selector))
+                .expect("row bounds");
+            bottom.top() - top.bottom()
+        })
+        .fold(px(0.0), gpui::Pixels::max);
+    for pair in cards.windows(2) {
+        let gap = pair[1].1.top() - pair[0].1.bottom();
+        assert!(
+            gap > widest_row_gap,
+            "cards should separate more than the rows inside one do, got {gap:?} against \
+             {widest_row_gap:?}"
+        );
+        assert_eq!(
+            pair[0].1.left(),
+            pair[1].1.left(),
+            "every card should share one left edge"
+        );
+    }
+}
+
+fn assert_reset_all_matches_sidebar(document: AppearanceDocument, cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+        let search = cx.debug_bounds("settings-search-frame").unwrap();
+        let navigation = cx.debug_bounds("settings-navigation").unwrap();
+        let reset = cx.debug_bounds("settings-reset-all").unwrap();
+        let footer = cx.debug_bounds("settings-footer").unwrap();
+        let status = cx.debug_bounds("settings-save-status").unwrap();
+        assert_eq!(
+            (reset.left(), reset.right()),
+            (search.left(), search.right()),
+            "Reset All should fill the search column in {section:?}"
+        );
+        assert_eq!(
+            (reset.left(), reset.right()),
+            (navigation.left(), navigation.right()),
+            "Reset All should fill the navigation column in {section:?}"
+        );
+        assert!(reset.top() >= footer.top() && reset.bottom() <= footer.bottom());
+        assert!(
+            status.left() > reset.right() && status.right() < footer.right(),
+            "save status should stay in the right footer column"
+        );
+    }
+}
+
+#[gpui::test]
+fn reset_all_fills_the_sidebar_column_on_every_settings_page(cx: &mut TestAppContext) {
+    assert_reset_all_matches_sidebar(AppearanceDocument::default(), cx);
+}
+
+#[gpui::test]
+fn reset_all_tracks_sidebar_width_with_larger_type_and_comfortable_density(
+    cx: &mut TestAppContext,
+) {
+    let mut document = AppearanceDocument::default();
+    document.preferences.chrome.typography.base_size = 20.0;
+    document.preferences.chrome.density = ChromeDensity::Comfortable;
+    assert_reset_all_matches_sidebar(document, cx);
+}
+
+fn assert_client_chrome_geometry(document: AppearanceDocument, cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    let surface = cx
+        .debug_bounds("settings-window-surface")
+        .expect("window surface");
+    let sidebar = cx.debug_bounds("settings-sidebar").expect("sidebar");
+    let sidebar_titlebar = cx
+        .debug_bounds("settings-sidebar-titlebar")
+        .expect("traffic-light strip");
+    let search = cx
+        .debug_bounds("settings-search-frame")
+        .expect("search field");
+    let heading = cx
+        .debug_bounds("settings-detail-heading")
+        .expect("detail heading");
+    let title = cx
+        .debug_bounds("settings-section-appearance-title")
+        .expect("section title");
+    let description = cx
+        .debug_bounds("settings-section-appearance-description")
+        .expect("section description");
+    let detail = cx.debug_bounds("settings-detail").expect("detail pane");
+    let expected_height = cx.update(|_, cx| crate::ui::appearance::chrome(cx).top_height());
+
+    assert_eq!(
+        (sidebar.top(), heading.top()),
+        (surface.top(), surface.top()),
+        "sidebar and content surfaces must both reach the window's top edge"
+    );
+    assert_eq!(
+        (sidebar_titlebar.left(), sidebar_titlebar.right()),
+        (sidebar.left(), sidebar.right()),
+        "the traffic-light strip must be the sidebar's own material"
+    );
+    assert!(
+        (sidebar_titlebar.size.height - expected_height).abs() <= px(1.0),
+        "the traffic-light strip should preserve its scaled height after pixel rounding"
+    );
+    assert!(
+        search.top() >= sidebar_titlebar.bottom(),
+        "Search must be the first control below the traffic lights"
+    );
+    assert_eq!(
+        (heading.left(), heading.right()),
+        (detail.left(), detail.right())
+    );
+    assert!(
+        title.left() > sidebar.right() && description.top() >= title.bottom(),
+        "the title leads the content column with its description directly below"
+    );
+    assert!(
+        detail.top() >= heading.bottom(),
+        "settings content follows the fixed heading"
+    );
+}
+
+#[gpui::test]
+fn client_chrome_extends_both_columns_to_the_top_edge(cx: &mut TestAppContext) {
+    assert_client_chrome_geometry(AppearanceDocument::default(), cx);
+}
+
+#[gpui::test]
+fn client_chrome_geometry_tracks_larger_type_and_comfortable_density(cx: &mut TestAppContext) {
+    let mut document = AppearanceDocument::default();
+    document.preferences.chrome.typography.base_size = 20.0;
+    document.preferences.chrome.density = ChromeDensity::Comfortable;
+    assert_client_chrome_geometry(document, cx);
+}
+
+#[gpui::test]
+fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+
+    for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+        let title_selector = leaked_owned(format!("{}-title", section.selector()));
+        let description_selector = leaked_owned(format!("{}-description", section.selector()));
+        let title = cx
+            .debug_bounds(title_selector)
+            .unwrap_or_else(|| panic!("{section:?} must own the visible heading"));
+        let description = cx
+            .debug_bounds(description_selector)
+            .unwrap_or_else(|| panic!("{section:?} must retain its description"));
+        assert!(
+            description.top() >= title.bottom() && description.left() == title.left(),
+            "{section:?} description should sit directly below its title on one edge"
+        );
+    }
+}
+
+#[gpui::test]
+fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
+    cx: &mut TestAppContext,
+) {
+    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let window_drag: Rc<dyn OperatingSystemWindowDragPlatform> = records.clone();
+    let (_window, _harness, cx) = open_settings_with_drag(
+        cx,
+        MemoryStorage::with_document(&AppearanceDocument::default()),
+        window_drag,
+    );
+    let drag_target = cx
+        .debug_bounds("settings-detail-drag-region-hitbox")
+        .expect("Settings heading drag target")
+        .center();
+
+    cx.simulate_mouse_down(drag_target, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(2.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(8.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(16.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::none());
+
+    assert_eq!(records.counts(), (1, 1, 1, 0));
+
+    let search = cx
+        .debug_bounds("settings-search-frame")
+        .expect("search field")
+        .center();
+    cx.simulate_click(search, Modifiers::none());
+    assert_eq!(
+        records.counts(),
+        (1, 1, 1, 0),
+        "Search interaction must remain outside the titlebar drag owner"
+    );
 }
 
 /// A run's title outranks every label inside it, and shares the labels' left edge.
@@ -1111,19 +1702,15 @@ fn every_scheme_strip_shares_one_width(cx: &mut TestAppContext) {
     );
 }
 
-/// One appearance control exists at all, so no surface can be pointed at its own mode.
 #[gpui::test]
-fn no_surface_carries_an_appearance_mode_of_its_own(cx: &mut TestAppContext) {
+fn one_appearance_mode_is_presented_for_both_surfaces(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-
-    for section in SettingsSectionId::ALL {
-        select_section(section, cx);
-    }
-
     assert!(cx.debug_bounds("settings-appearance-mode").is_some());
-    // Never rendered in this window's lifetime, which is what makes their absence provable.
-    assert_eq!(cx.debug_bounds("settings-chrome-appearance-mode"), None);
-    assert_eq!(cx.debug_bounds("settings-terminal-appearance-mode"), None);
+    assert!(cx.debug_bounds("settings-chrome-appearance-mode").is_none());
+    assert!(
+        cx.debug_bounds("settings-terminal-appearance-mode")
+            .is_none()
+    );
 }
 
 /// The library groups schemes by the surface they dress, so the two kinds never run together.
@@ -1575,41 +2162,103 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
 #[gpui::test]
 fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
     let mut document = AppearanceDocument::default();
-    document.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: crate::appearance::SchemeId::new("custom.previous.chrome").unwrap(),
-        appearance: Appearance::Dark,
-    };
-    document.preferences.terminal.scheme = SchemeSelection::Fixed {
-        id: crate::appearance::SchemeId::new("custom.previous.terminal").unwrap(),
-        appearance: Appearance::Dark,
-    };
+    document.preferences.chrome.schemes.dark =
+        crate::appearance::SchemeId::new("custom.previous.chrome").unwrap();
+    document.preferences.terminal.schemes.dark =
+        crate::appearance::SchemeId::new("custom.previous.terminal").unwrap();
     let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            settings
-                .editor
-                .reset(crate::appearance::ResetTarget::ChromeSchemeChoice, cx);
-            settings
-                .editor
-                .reset(crate::appearance::ResetTarget::TerminalSchemeChoice, cx);
-            // Exercise the next action immediately, before a render can refresh remembered slots.
-            settings.set_appearance_mode(super::AppearanceMode::Light, cx);
-            settings.set_appearance_mode(super::AppearanceMode::Dark, cx);
+            settings.editor.reset(
+                crate::appearance::ResetTarget::ChromeScheme(Appearance::Dark),
+                cx,
+            );
+            settings.editor.reset(
+                crate::appearance::ResetTarget::TerminalScheme(Appearance::Dark),
+                cx,
+            );
+            // Reset persistent slots, then switch modes before the next render.
+            settings.set_appearance_mode(AppearanceMode::Light, cx);
+            settings.set_appearance_mode(AppearanceMode::Dark, cx);
         })
     });
     let preferences = document_of(&window, cx).preferences;
-    assert_eq!(
-        preferences.chrome.scheme,
-        SchemeSelection::Fixed {
-            id: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
-            appearance: Appearance::Dark,
-        }
-    );
-    assert_eq!(
-        preferences.terminal.scheme,
-        SchemeSelection::Fixed {
-            id: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
-            appearance: Appearance::Dark,
-        }
+    let defaults = AppearanceDocument::default().preferences;
+    assert_eq!(preferences.chrome.schemes, defaults.chrome.schemes);
+    assert_eq!(preferences.terminal.schemes, defaults.terminal.schemes);
+}
+
+#[gpui::test]
+fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            for kind in [SchemeKind::Chrome, SchemeKind::Terminal] {
+                for slot in [Appearance::Light, Appearance::Dark] {
+                    settings.set_scheme(
+                        kind,
+                        slot,
+                        crate::appearance::SchemeId::new(
+                            format!("user.saved.{kind:?}.{slot:?}").to_ascii_lowercase(),
+                        )
+                        .unwrap(),
+                        cx,
+                    );
+                }
+            }
+        })
+    });
+    cx.run_until_parked();
+    click("settings-appearance-mode-light", cx);
+    click("settings-appearance-mode-auto", cx);
+    let expected = document_of(&window, cx).preferences;
+    settle(cx);
+    assert_eq!(harness.storage.document().unwrap().preferences, expected);
+    cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
+    cx.run_until_parked();
+    assert_eq!(document_of(&window, cx).preferences, expected);
+    let (restarted, _) = crate::settings::UserSettings::load(harness.storage);
+    assert_eq!(restarted.snapshot().candidate.preferences, expected);
+}
+
+#[gpui::test]
+fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestAppContext) {
+    let (window, _, cx) = open_settings(cx);
+    set_query(&window, "terminal", cx);
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.search.read(cx).focus_handle().focus(native);
+            settings.set_appearance_mode(AppearanceMode::Light, cx);
+        })
+    });
+    cx.run_until_parked();
+    window.read_with(cx, |settings, cx| {
+        assert_eq!(settings.search.read(cx).value(), "terminal");
+        assert!(settings.search.read(cx).is_focused());
+    });
+}
+
+/// A described row beside a tall control keeps its label and guidance inside the row at the
+/// window's minimum width, rather than rising out of the group that clips it.
+#[gpui::test]
+fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    cx.simulate_resize(gpui::size(
+        px(super::WINDOW_WIDTH),
+        px(super::WINDOW_HEIGHT),
+    ));
+    cx.run_until_parked();
+    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Appearance, cx);
+
+    let row = cx
+        .debug_bounds("settings-row-appearance-mode")
+        .expect("appearance mode row");
+    let label = cx
+        .debug_bounds("settings-row-appearance-mode-label")
+        .expect("appearance mode label");
+    assert!(
+        label.top() >= row.top() && label.bottom() <= row.bottom(),
+        "label {label:?} must stay inside its row {row:?}"
     );
 }

@@ -666,9 +666,9 @@ impl Render for SshHostForm {
                 true,
                 self.alias.clone(),
                 self.alias.read(cx).focus_handle(),
-                self.alias.read(cx).is_focused(),
                 self.visible_error(SshHostFormField::Alias),
                 "managed-ssh-host-alias-error",
+                cx,
             ))
             .child(form_field(
                 &appearance,
@@ -677,9 +677,9 @@ impl Render for SshHostForm {
                 true,
                 self.host_name.clone(),
                 self.host_name.read(cx).focus_handle(),
-                self.host_name.read(cx).is_focused(),
                 self.visible_error(SshHostFormField::HostName),
                 "managed-ssh-host-name-error",
+                cx,
             ))
             .child(
                 div()
@@ -694,9 +694,9 @@ impl Render for SshHostForm {
                         false,
                         self.user.clone(),
                         self.user.read(cx).focus_handle(),
-                        self.user.read(cx).is_focused(),
                         self.visible_error(SshHostFormField::User),
                         "managed-ssh-host-user-error",
+                        cx,
                     )))
                     .child(
                         div()
@@ -709,9 +709,9 @@ impl Render for SshHostForm {
                                 false,
                                 self.port.clone(),
                                 self.port.read(cx).focus_handle(),
-                                self.port.read(cx).is_focused(),
                                 self.visible_error(SshHostFormField::Port),
                                 "managed-ssh-host-port-error",
+                                cx,
                             )),
                     ),
             )
@@ -722,9 +722,9 @@ impl Render for SshHostForm {
                 false,
                 self.identity_file.clone(),
                 self.identity_file.read(cx).focus_handle(),
-                self.identity_file.read(cx).is_focused(),
                 self.visible_error(SshHostFormField::IdentityFile),
                 "managed-ssh-host-identity-file-error",
+                cx,
             ))
             .child(
                 spaceterm_ui::Button::new("choose-ssh-identity-file", "Choose Identity File")
@@ -777,17 +777,10 @@ fn form_field(
     required: bool,
     input: Entity<TextInput>,
     input_focus: gpui::FocusHandle,
-    focused: bool,
     error: Option<&'static str>,
     error_selector: &'static str,
+    cx: &App,
 ) -> impl IntoElement {
-    let border_color = if error.is_some() {
-        appearance.colors.input_invalid_border
-    } else if focused {
-        appearance.colors.input_focused_border
-    } else {
-        appearance.colors.input_border
-    };
     div()
         .font(appearance.regular.clone())
         .flex()
@@ -811,31 +804,30 @@ fn form_field(
                 }),
         )
         .child(
-            div()
-                .id(error_selector)
-                .h(appearance.height(28.0, 13.0))
-                .w_full()
-                .min_w_0()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .px(appearance.spacing(8.0))
-                .rounded(px(4.0))
-                .border(px(1.0))
-                .border_color(gpui_color(border_color))
-                .bg(gpui_color(if enabled {
-                    appearance.colors.input_background
-                } else {
-                    appearance.colors.input_disabled_background
-                }))
-                .text_size(appearance.text_size(13.0))
-                .text_color(gpui_color(appearance.colors.text))
-                .on_click(move |_, window, cx| {
-                    input_focus.focus(window);
-                    cx.stop_propagation();
-                })
-                .child(input),
+            spaceterm_ui::field_frame(
+                error_selector,
+                &input_focus,
+                spaceterm_ui::FieldState::default()
+                    .disabled(!enabled)
+                    .invalid(error.is_some()),
+                cx,
+            )
+            .h(appearance.height(28.0, 13.0))
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .px(appearance.spacing(8.0))
+            .rounded(px(4.0))
+            .text_size(appearance.text_size(13.0))
+            .text_color(gpui_color(appearance.colors.text))
+            .on_click(move |_, window, cx| {
+                input_focus.focus(window);
+                cx.stop_propagation();
+            })
+            .child(input),
         )
         .when_some(error, |field, error| {
             field.child(

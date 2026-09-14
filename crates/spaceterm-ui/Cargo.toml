@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 license = "GPL-3.0-only"
 
+[features]
+appearance-exerciser = []
+
 [dependencies]
 gpui = "=0.2.2"
 lucide-icons = { version = "=1.34.0", default-features = false }

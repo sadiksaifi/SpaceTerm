@@ -12,7 +12,9 @@ mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
 mod command_palette;
+mod field_frame;
 mod icon;
+mod list_row;
 mod menu;
 mod middle_truncated_text;
 mod modal;
@@ -51,7 +53,9 @@ pub use command_palette::{
     CommandPalettePaint, CommandPaletteQuery, CommandPaletteReplacementFocus, CommandPaletteTheme,
     install_command_palette_keybindings,
 };
+pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
+pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent, MenuMetrics, MenuPaint,
@@ -111,6 +115,30 @@ pub use window_drag_region::{
     WindowDragFinishReason, WindowDragInteractionId, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
+
+/// Development-only visual state pinning for the production renderer.
+///
+/// This does not arm interaction or acquire keyboard focus. Production builds omit the Interface.
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlPreviewState {
+    Normal,
+    Hovered,
+    Pressed,
+    Focused,
+}
+#[cfg(feature = "appearance-exerciser")]
+impl ControlPreviewState {
+    pub(crate) fn hovered(self) -> bool {
+        matches!(self, Self::Hovered | Self::Pressed)
+    }
+    pub(crate) fn pressed(self) -> bool {
+        self == Self::Pressed
+    }
+    pub(crate) fn focused(self) -> bool {
+        self == Self::Focused
+    }
+}
 
 /// Bounded application-owned presentation catalog for every reusable control family.
 ///

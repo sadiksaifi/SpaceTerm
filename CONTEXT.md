@@ -75,8 +75,8 @@ One labeled Setting control within a Settings Section.
 Literal search over Settings Row labels and keywords that reveals a matching Settings Row.
 
 **Appearance Mode**:
-The Light, Dark, or Auto choice governing which Color Scheme slot applies. Application chrome and
-the terminal each have their own.
+The application-scoped Light, Dark, or Auto choice governing which Color Scheme slot applies to
+both Application Chrome and Terminal appearance.
 
 ## Focus and transient UI
 
@@ -176,3 +176,20 @@ Bounded content-free failure and unhandled-key metadata exported after an explic
 
 **Close Confirmation**:
 One authorization for an exact user-requested close that may discard running work.
+
+## Color Schemes
+
+**Color Scheme**:
+Identifying metadata and authored color decisions for either Chrome or Terminal appearance.
+
+**Authored Definition**:
+Color decisions intentionally supplied by a built-in author, imported source or native theme author.
+
+**Resolved Theme**:
+Complete validated presentation colors after override precedence and semantic dependency completion.
+
+**Scheme Origin**:
+Source identity and attribution, separate from the installed identifier and display name.
+
+**Window Background Appearance**:
+Opaque, transparent or blurred native presentation, independent of Light/Dark and color alpha.

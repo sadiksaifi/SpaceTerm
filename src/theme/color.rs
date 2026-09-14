@@ -86,3 +86,106 @@ impl<'de> serde::Deserialize<'de> for Color {
         Self::parse(&value).map_err(|()| serde::de::Error::custom("invalid color"))
     }
 }
+
+impl Color {
+    /// Replace straight alpha without changing color channels.
+    pub(crate) const fn with_alpha(self, alpha: u8) -> Self {
+        Self { a: alpha, ..self }
+    }
+
+    /// Scale existing alpha, retaining authored translucency.
+    pub(crate) const fn multiply_opacity(self, opacity: u8) -> Self {
+        Self {
+            a: ((self.a as u16 * opacity as u16 + 127) / 255) as u8,
+            ..self
+        }
+    }
+
+    /// Straight-alpha source-over, including when both layers are translucent.
+    pub(crate) fn source_over(self, destination: Self) -> Self {
+        let source_alpha = f64::from(self.a) / 255.0;
+        let destination_alpha = f64::from(destination.a) / 255.0;
+        let alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+        if alpha == 0.0 {
+            return Self::rgba(0);
+        }
+        let channel = |source: u8, dest: u8| {
+            ((f64::from(source) * source_alpha
+                + f64::from(dest) * destination_alpha * (1.0 - source_alpha))
+                / alpha)
+                .round() as u8
+        };
+        Self {
+            r: channel(self.r, destination.r),
+            g: channel(self.g, destination.g),
+            b: channel(self.b, destination.b),
+            a: (alpha * 255.0).round() as u8,
+        }
+    }
+
+    /// Interpolate straight RGBA values for authored surface ramps.
+    pub(crate) fn mix(self, other: Self, amount: f64) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let channel =
+            |a: u8, b: u8| (f64::from(a) * (1.0 - amount) + f64::from(b) * amount).round() as u8;
+        Self {
+            r: channel(self.r, other.r),
+            g: channel(self.g, other.g),
+            b: channel(self.b, other.b),
+            a: channel(self.a, other.a),
+        }
+    }
+
+    /// sRGB contrast of opaque presentation colors. Composite alpha before calling.
+    pub(crate) fn contrast_ratio(self, other: Self) -> f64 {
+        let luminance = |color: Self| {
+            let linear = |channel: u8| {
+                let v = f64::from(channel) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        };
+        let (a, b) = (luminance(self), luminance(other));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::Color;
+    #[test]
+    fn alpha_replacement_and_multiplication_have_distinct_meanings() {
+        let color = Color::rgba(0x12345680);
+        assert_eq!(color.with_alpha(128), color);
+        assert_eq!(color.multiply_opacity(128), Color::rgba(0x12345640));
+    }
+    #[test]
+    fn source_over_retains_correct_alpha_for_two_translucent_layers() {
+        assert_eq!(
+            Color::rgba(0xff000080).source_over(Color::rgba(0x0000ff80)),
+            Color::rgba(0xaa0055c0)
+        );
+        assert_eq!(Color::rgba(0).source_over(Color::rgba(0)), Color::rgba(0));
+        assert_eq!(
+            Color::rgb(0xabcdef).source_over(Color::rgba(0x12345680)),
+            Color::rgb(0xabcdef)
+        );
+        assert_eq!(
+            Color::rgba(0).source_over(Color::rgb(0xabcdef)),
+            Color::rgb(0xabcdef)
+        );
+    }
+    #[test]
+    fn source_over_handles_multiple_layers_on_an_opaque_surface() {
+        let red_blue = Color::rgba(0xff000080).source_over(Color::rgba(0x0000ff80));
+        assert_eq!(
+            red_blue.source_over(Color::rgb(0xffffff)),
+            Color::rgb(0xbf3f7f)
+        );
+        assert_eq!(Color::rgb(0).contrast_ratio(Color::rgb(0xffffff)), 21.0);
+    }
+}

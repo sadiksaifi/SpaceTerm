@@ -200,6 +200,20 @@ fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme
 
 fn install_test_catalogs(cx: &mut TestAppContext) {
     cx.set_global(test_button_theme());
+    let toggle_paint = crate::TogglePaint::new(
+        rgba(0x202020ff),
+        rgba(0xffffffff),
+        rgba(0x606060ff),
+        rgba(0xffffffff),
+    );
+    let toggle_values = crate::ToggleValuePaints::new(toggle_paint, toggle_paint);
+    let toggle_metrics = crate::ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+    cx.set_global(crate::ToggleTheme::new(
+        crate::TogglePaints::new(toggle_values, toggle_values, toggle_values, toggle_values),
+        crate::ToggleSizes::new(toggle_metrics, toggle_metrics),
+        rgba(0x606060ff),
+    ));
+
     cx.set_global(test_menu_theme());
     let input_paint = TextInputPaint::new(
         rgba(0xffffffff),

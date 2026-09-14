@@ -139,6 +139,7 @@ impl Render for CatalogObserver {
         let _ = cx.global::<ToggleTheme>();
         let _ = cx.global::<ScrollbarTheme>();
         let _ = cx.global::<ResizeHandleTheme>();
+        let _ = cx.global::<SegmentedControlTheme>();
         let _ = cx.global::<MenuTheme>();
         let _ = cx.global::<CommandPaletteTheme>();
         let _ = cx.global::<ComboBoxTheme>();
@@ -203,6 +204,10 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         assert_eq!(cx.global::<ToggleTheme>(), &replacement.toggle);
         assert_eq!(cx.global::<ScrollbarTheme>(), &replacement.scrollbar);
         assert_eq!(cx.global::<ResizeHandleTheme>(), &replacement.resize_handle);
+        assert_eq!(
+            cx.global::<SegmentedControlTheme>(),
+            &replacement.segmented_control
+        );
         assert_eq!(cx.global::<MenuTheme>(), &replacement.menu);
         assert_eq!(
             cx.global::<CommandPaletteTheme>(),

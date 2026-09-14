@@ -1,14 +1,53 @@
 use super::*;
+use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
+
+/// The chip carrying a Workspace row's hover and persistent selection.
+///
+/// The geometry and the paints are read together so the fill, the hover state, and the keyboard
+/// focus ring cannot drift apart.
+fn row_chip(selected: bool, appearance: &crate::ui::appearance::ChromeAppearance) -> SelectionChip {
+    let colors = &appearance.colors;
+    let paint = if selected {
+        ChipPaint {
+            fill: Some(colors.row_selected_background),
+            rim: Some(colors.row_selected_border),
+            hover_fill: Some(colors.row_selected_hover_background),
+            hover_rim: Some(colors.row_selected_hover_border),
+        }
+    } else {
+        ChipPaint {
+            fill: None,
+            rim: None,
+            hover_fill: Some(colors.row_hover_background),
+            hover_rim: Some(colors.row_hover_border),
+        }
+    };
+    SelectionChip::new(
+        ChipShape {
+            inset_x: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_X),
+            inset_y: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
+            radius: appearance.spacing(SIDEBAR_ROW_SELECTION_RADIUS),
+        },
+        paint,
+    )
+}
+
+struct WorkspaceRowLayout {
+    row: WorkspaceRowViewModel,
+    divider: bool,
+}
 
 impl WorkspaceSidebar {
     fn render_workspace_row(
         &self,
-        row: WorkspaceRowViewModel,
+        layout: WorkspaceRowLayout,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
     ) -> AnyElement {
+        let WorkspaceRowLayout { row, divider } = layout;
         let WorkspaceRowViewModel {
             workspace_id,
             name,
@@ -22,6 +61,22 @@ impl WorkspaceSidebar {
             pane_count,
             active,
         } = row;
+        let mut appearance = appearance.clone();
+        let row_group = format!("workspace-row-state-{}", workspace_id.get());
+        // Hover and selection are carried by an inset chip rather than by the row's own fill, so
+        // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
+        // with air around it. The chip's paints are read before the selected roles are promoted
+        // below, because that promotion is what the row's text and icons consume.
+        let chip = row_chip(active, &appearance);
+        if active {
+            appearance.colors.row_foreground = appearance.colors.row_selected_foreground;
+            appearance.colors.row_secondary = appearance.colors.row_selected_secondary;
+            appearance.colors.row_icon = appearance.colors.row_selected_icon;
+            appearance.colors.row_hover_foreground =
+                appearance.colors.row_selected_hover_foreground;
+            appearance.colors.row_hover_secondary = appearance.colors.row_selected_hover_secondary;
+            appearance.colors.row_hover_icon = appearance.colors.row_selected_hover_icon;
+        }
         let click_sidebar = sidebar.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color =
@@ -47,6 +102,13 @@ impl WorkspaceSidebar {
         } else {
             (path, None, None)
         };
+        let detail_paint = detail_color
+            .map(|color| workspace_row_status_paint(color, active, 4.5, &appearance.colors));
+        let remote_icon_paint = remote_color
+            .map(|color| workspace_row_status_paint(color, active, 3.0, &appearance.colors));
+        let unavailable_icon_paint = (!available).then(|| {
+            workspace_row_status_paint(appearance.colors.warning, active, 3.0, &appearance.colors)
+        });
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -59,28 +121,29 @@ impl WorkspaceSidebar {
         let first_line = if let Some(rename) = rename {
             let input = rename.input.clone();
             let focus_handle = rename.focus_handle.clone();
-            div()
-                .id(("workspace-rename-input", workspace_id.get()))
-                .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-                .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
-                .w_full()
-                .px(appearance.spacing(5.0))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(appearance.spacing(4.0))
-                .border(px(1.0))
-                .border_color(gpui_color(appearance.colors.border_focused))
-                .bg(gpui_color(appearance.colors.element_background))
-                .font(appearance.regular.clone())
-                .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(appearance.colors.text))
-                .on_click(move |_, window, cx| {
-                    focus_handle.focus(window);
-                    cx.stop_propagation();
-                })
-                .child(input)
-                .into_any_element()
+            spaceterm_ui::field_frame(
+                ("workspace-rename-input", workspace_id.get()),
+                &focus_handle,
+                spaceterm_ui::FieldState::default(),
+                cx,
+            )
+            .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
+            .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
+            .w_full()
+            .px(appearance.spacing(5.0))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .rounded(appearance.spacing(4.0))
+            .font(appearance.regular.clone())
+            .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
+            .text_color(gpui_color(appearance.colors.text))
+            .on_click(move |_, window, cx| {
+                focus_handle.focus(window);
+                cx.stop_propagation();
+            })
+            .child(input)
+            .into_any_element()
         } else {
             div()
                 .id(("workspace-row-name", workspace_id.get()))
@@ -89,11 +152,10 @@ impl WorkspaceSidebar {
                 .truncate()
                 .font(appearance.emphasis.clone())
                 .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(if active {
-                    appearance.colors.text_accent
-                } else {
-                    appearance.colors.text
-                }))
+                .text_color(gpui_color(appearance.colors.row_foreground))
+                .group_hover(row_group.clone(), |style| {
+                    style.text_color(gpui_color(appearance.colors.row_hover_foreground))
+                })
                 .child(name.clone())
                 .into_any_element()
         };
@@ -131,10 +193,12 @@ impl WorkspaceSidebar {
             .items_center()
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
-            .when(active, |row| {
-                row.bg(gpui_color(appearance.colors.ghost_element_selected))
-            })
-            .hover(|row| row.bg(gpui_color(appearance.colors.ghost_element_hover)))
+            .group(row_group.clone())
+            .bg(gpui_color(appearance.colors.row_background))
+            .child(chip.render(
+                format!("workspace-row-selection-{}", workspace_id.get()),
+                &row_group,
+            ))
             .on_click(move |_, _, cx| {
                 let _ = click_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Activate {
@@ -154,33 +218,51 @@ impl WorkspaceSidebar {
                     .child(
                         div()
                             .relative()
-                            .child(Icon::new(
+                            .text_color(gpui_color(
+                                remote_icon_paint
+                                    .map_or(appearance.colors.row_icon, |paint| paint.normal),
+                            ))
+                            .group_hover(row_group.clone(), |style| {
+                                style.text_color(gpui_color(
+                                    remote_icon_paint
+                                        .map_or(appearance.colors.row_hover_icon, |paint| {
+                                            paint.hovered
+                                        }),
+                                ))
+                            })
+                            .child(Icon::inherited(
                                 if remote_connection_phase.is_some() {
                                     IconName::Globe
                                 } else {
                                     IconName::Terminal
                                 },
                                 appearance.spacing(SIDEBAR_ROW_ICON_SIZE),
-                                gpui_color(if let Some(color) = remote_color {
-                                    color
-                                } else if available {
-                                    if active {
-                                        appearance.colors.icon_accent
-                                    } else {
-                                        appearance.colors.icon
-                                    }
-                                } else {
-                                    appearance.colors.warning
-                                }),
                             ))
                             .when(!available, |icon| {
-                                icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
-                                    Icon::new(
-                                        IconName::TriangleAlert,
-                                        appearance.spacing(10.0),
-                                        gpui_color(appearance.colors.warning),
-                                    ),
-                                ))
+                                icon.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-5.0))
+                                        .bottom(px(-4.0))
+                                        .text_color(gpui_color(
+                                            unavailable_icon_paint
+                                                .map_or(appearance.colors.warning, |paint| {
+                                                    paint.normal
+                                                }),
+                                        ))
+                                        .group_hover(row_group.clone(), |style| {
+                                            style.text_color(gpui_color(
+                                                unavailable_icon_paint
+                                                    .map_or(appearance.colors.warning, |paint| {
+                                                        paint.hovered
+                                                    }),
+                                            ))
+                                        })
+                                        .child(Icon::inherited(
+                                            IconName::TriangleAlert,
+                                            appearance.spacing(10.0),
+                                        )),
+                                )
                             }),
                     ),
             )
@@ -202,32 +284,39 @@ impl WorkspaceSidebar {
                         detail,
                         format!("{tab_count}T · {pane_count}P").into(),
                         pinned && detail_color.is_none(),
-                        detail_color,
+                        detail_paint,
                         detail_selector,
                         workspace_id.get(),
                         appearance.clone(),
                     )),
             )
-            .child(
-                div()
-                    .id(("workspace-row-divider", workspace_id.get()))
-                    .debug_selector(move || format!("workspace-row-divider-{}", workspace_id.get()))
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(appearance.colors.border_variant)),
-            )
-            .when(active && self.focus.is_focused(window), |row| {
+            // A divider that runs up to a selected chip fences it in. Both seams that touch the
+            // selection are left open instead, so the chip keeps the air that makes it read as one
+            // resting shape rather than as a band cut out of the list.
+            .when(divider, |row| {
                 row.child(
                     div()
+                        .id(("workspace-row-divider", workspace_id.get()))
+                        .debug_selector(move || {
+                            format!("workspace-row-divider-{}", workspace_id.get())
+                        })
                         .absolute()
-                        .inset_0()
-                        .border(px(1.0))
-                        .border_color(gpui_color(appearance.colors.sidebar_focus))
-                        .debug_selector(|| "workspace-sidebar-focus-indicator".to_owned()),
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(CHROME_DIVIDER_SIZE))
+                        .bg(gpui_color(appearance.colors.border_variant)),
                 )
+            })
+            // Keyboard focus rides just outside the chip it belongs to, with a hairline of the
+            // sidebar surface between the two. A ring drawn on the row's own edges would box the
+            // whole strip and say nothing about which shape the keyboard is pointing at.
+            .when(active && self.focus.is_focused(window), |row| {
+                row.child(chip.ring(
+                    appearance.spacing(SIDEBAR_ROW_SELECTION_RING_GAP),
+                    appearance.colors.sidebar_focus,
+                    "workspace-sidebar-focus-indicator",
+                ))
             });
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
@@ -322,13 +411,18 @@ impl WorkspaceSidebar {
                 });
             })
             .occlude();
-        for row in &self.rows {
+        for (index, row) in self.rows.iter().enumerate() {
+            let next_selected = self.rows.get(index + 1).is_some_and(|next| next.active);
             rows = rows.child(self.render_workspace_row(
-                row.clone(),
+                WorkspaceRowLayout {
+                    row: row.clone(),
+                    divider: !row.active && !next_selected,
+                },
                 sidebar.clone(),
                 presentation,
                 window,
                 appearance,
+                cx,
             ));
         }
 

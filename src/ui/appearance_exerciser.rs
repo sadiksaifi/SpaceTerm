@@ -4,6 +4,8 @@
 #[path = "appearance_exerciser_tests.rs"]
 mod tests;
 
+mod gallery;
+
 use std::{collections::BTreeSet, time::Duration};
 
 use gpui::prelude::*;
@@ -20,8 +22,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeId, SchemeKind,
-    SchemeSelection, TerminalFontFamily, ZedImportKind, export_settings, parse_settings,
+    Appearance, AppearanceMode, ChromeDensity, ChromeFontFamily, ResetTarget, TerminalFontFamily,
+    ZedImportKind, export_settings, parse_settings,
 };
 use crate::settings::{PreviewToken, SchemeImport};
 
@@ -41,6 +43,24 @@ struct ExerciserWindows {
 }
 impl Global for ExerciserWindows {}
 
+struct GalleryCaptionFixture;
+impl Global for GalleryCaptionFixture {}
+
+/// Synthetic display facts keep native acceptance captures independent of the host account.
+pub(crate) fn caption_fixture(cx: &App) -> Option<super::terminal_pane::PaneCaptionFacts> {
+    cx.has_global::<GalleryCaptionFixture>()
+        .then(|| super::terminal_pane::PaneCaptionFacts {
+            origin: super::terminal_pane::PaneOrigin {
+                user: "fixture".into(),
+                host: "local".into(),
+                remote: false,
+            },
+            directory: "appearance-fixture".into(),
+            label: "Appearance acceptance".into(),
+            running: false,
+        })
+}
+
 pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> gpui::Result<()> {
     if std::env::var(ENABLE_VARIABLE).as_deref() != Ok("1") {
         return Ok(());
@@ -51,6 +71,7 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     let bounds = Bounds::centered(None, size(px(920.0), px(420.0)), cx);
     let appearance = cx.open_window(
         WindowOptions {
+            window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.0), px(320.0))),
             titlebar: Some(TitlebarOptions {
@@ -68,6 +89,10 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     });
     cx.on_action(show_appearance_exerciser);
     cx.on_action(toggle_appearance_preview);
+    if std::env::var("SPACETERM_APPEARANCE_GALLERY").as_deref() == Ok("1") {
+        cx.set_global(GalleryCaptionFixture);
+        gallery::open(cx)?;
+    }
     Ok(())
 }
 
@@ -86,6 +111,7 @@ fn toggle_appearance_preview(_: &ToggleAppearancePreview, cx: &mut App) {
 }
 
 struct AppearanceExerciser {
+    window_appearance: appearance_runtime::WindowAppearanceOwner,
     editor: Entity<TextInput>,
     preview: Option<PreviewToken>,
     status: String,
@@ -97,8 +123,16 @@ struct AppearanceExerciser {
 
 impl AppearanceExerciser {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_global::<appearance_runtime::InstalledAppearance>(|_, cx| cx.notify())
-            .detach();
+        let mut window_appearance = appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
+        cx.observe_global_in::<appearance_runtime::InstalledAppearance>(
+            window,
+            |exerciser, window, cx| {
+                exerciser.window_appearance.apply(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         let settings = Self::settings(cx);
         let initial = settings
             .export_document()
@@ -109,6 +143,7 @@ impl AppearanceExerciser {
                 .input_length_limit(Some(64 * 1024))
         });
         Self {
+            window_appearance,
             editor,
             preview: None,
             status: String::from("Ready. Storage is isolated."),
@@ -167,32 +202,16 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            let chrome_light = matches!(
-                candidate.preferences.chrome.scheme,
-                SchemeSelection::Fixed {
-                    appearance: Appearance::Light,
-                    ..
-                }
-            );
-            candidate.preferences.chrome.scheme = SchemeSelection::Fixed {
-                id: SchemeId::new(if chrome_light {
-                    "builtin.vague-pro.chrome.dark"
-                } else {
-                    "builtin.spaceterm.chrome.light"
-                })
-                .unwrap(),
-                appearance: if chrome_light {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                },
+            candidate.preferences.mode = match candidate.preferences.mode {
+                AppearanceMode::Light => AppearanceMode::Dark,
+                AppearanceMode::Dark | AppearanceMode::Auto => AppearanceMode::Light,
             };
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "Scheme preview rejected")
         })();
         self.status = result
-            .map(|()| "Chrome scheme toggled; terminal appearance retained")
+            .map(|()| "Shared appearance toggled for Chrome and Terminal")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -204,32 +223,14 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            let terminal_light = matches!(
-                candidate.preferences.terminal.scheme,
-                SchemeSelection::Fixed {
-                    appearance: Appearance::Light,
-                    ..
-                }
-            );
-            candidate.preferences.terminal.scheme = SchemeSelection::Fixed {
-                id: SchemeId::new(if terminal_light {
-                    "builtin.vague-pro.terminal.dark"
-                } else {
-                    "builtin.spaceterm.terminal.light"
-                })
-                .unwrap(),
-                appearance: if terminal_light {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                },
-            };
+            candidate.preferences.terminal.rendering.bold_as_bright =
+                !candidate.preferences.terminal.rendering.bold_as_bright;
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "Terminal scheme preview rejected")
         })();
         self.status = result
-            .map(|()| "Terminal scheme toggled; chrome appearance retained")
+            .map(|()| "Terminal rendering toggled; Chrome retained")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -283,20 +284,13 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            candidate.preferences.chrome.scheme = SchemeSelection::System {
-                light: SchemeId::new("builtin.spaceterm.chrome.light").unwrap(),
-                dark: SchemeId::new("builtin.vague-pro.chrome.dark").unwrap(),
-            };
-            candidate.preferences.terminal.scheme = SchemeSelection::System {
-                light: SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-                dark: SchemeId::new("builtin.vague-pro.terminal.dark").unwrap(),
-            };
+            candidate.preferences.mode = AppearanceMode::Auto;
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
                 .map_err(|_| "System policy preview rejected")
         })();
         self.status = result
-            .map(|()| "Chrome and terminal now follow independent system slots")
+            .map(|()| "Chrome and Terminal now follow the shared System Appearance")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -332,22 +326,23 @@ impl AppearanceExerciser {
 
     fn reset_next_field(&mut self, cx: &mut Context<Self>) {
         let resolved = appearance_runtime::current(cx);
-        let target = match self.field_reset_index % 16 {
-            0 => ResetTarget::ChromeSchemeSelection,
-            1 => ResetTarget::ChromeFontFamily,
-            2 => ResetTarget::ChromeBaseSize,
-            3 => ResetTarget::ChromeRegularWeight,
-            4 => ResetTarget::ChromeEmphasisWeight,
-            5 => ResetTarget::ChromeHeadingWeight,
-            6 => ResetTarget::TerminalSchemeSelection,
-            7 => ResetTarget::TerminalFontFamily,
-            8 => ResetTarget::TerminalBaseSize,
-            9 => ResetTarget::TerminalRegularWeight,
-            10 => ResetTarget::TerminalBoldWeight,
-            11 => ResetTarget::TerminalLineHeight,
-            12 => ResetTarget::TerminalItalic,
-            13 => ResetTarget::TerminalBoldAsBright,
-            14 => ResetTarget::chrome_color_override(
+        let target = match self.field_reset_index % 17 {
+            0 => ResetTarget::AppearanceMode,
+            1 => ResetTarget::ChromeScheme(Appearance::Dark),
+            2 => ResetTarget::ChromeFontFamily,
+            3 => ResetTarget::ChromeBaseSize,
+            4 => ResetTarget::ChromeRegularWeight,
+            5 => ResetTarget::ChromeEmphasisWeight,
+            6 => ResetTarget::ChromeHeadingWeight,
+            7 => ResetTarget::TerminalScheme(Appearance::Dark),
+            8 => ResetTarget::TerminalFontFamily,
+            9 => ResetTarget::TerminalBaseSize,
+            10 => ResetTarget::TerminalRegularWeight,
+            11 => ResetTarget::TerminalBoldWeight,
+            12 => ResetTarget::TerminalLineHeight,
+            13 => ResetTarget::TerminalItalic,
+            14 => ResetTarget::TerminalBoldAsBright,
+            15 => ResetTarget::chrome_color_override(
                 resolved.chrome.effective_scheme.clone(),
                 "background",
             )
@@ -573,11 +568,23 @@ impl AppearanceExerciser {
         cx.notify();
     }
 
+    fn show_gallery(&mut self, cx: &mut Context<Self>) {
+        self.status = if gallery::open(cx).is_ok() {
+            "Opened deterministic state gallery"
+        } else {
+            "Gallery unavailable"
+        }
+        .to_owned();
+        cx.notify();
+    }
+
     fn show_fixture_window(&mut self, cx: &mut Context<Self>) {
         let bounds = Bounds::centered(None, size(px(640.0), px(440.0)), cx);
+        let window_background = appearance_runtime::window_background(cx);
         self.status = if cx
             .open_window(
                 WindowOptions {
+                    window_background,
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(480.0), px(320.0))),
                     titlebar: Some(TitlebarOptions {
@@ -608,13 +615,7 @@ impl AppearanceExerciser {
     fn export_effective_schemes(&mut self, cx: &mut Context<Self>) {
         let settings = Self::settings(cx);
         let current = appearance_runtime::current(cx);
-        match settings.export_schemes(&[
-            (SchemeKind::Chrome, current.chrome.effective_scheme.clone()),
-            (
-                SchemeKind::Terminal,
-                current.terminal.effective_scheme.clone(),
-            ),
-        ]) {
+        match settings.export_appearance(&current) {
             Ok(output) => {
                 self.set_editor(output, cx);
                 self.status = String::from("Exported complete effective color schemes");
@@ -648,8 +649,6 @@ impl Render for AppearanceExerciser {
         let background = rgba(appearance.colors.background.rgba_hex());
         let foreground = rgba(appearance.colors.text.rgba_hex());
         let muted = rgba(appearance.colors.text_muted.rgba_hex());
-        let editor_background = rgba(appearance.colors.input_background.rgba_hex());
-        let editor_border = rgba(appearance.colors.input_border.rgba_hex());
         let weak = cx.weak_entity();
         let preview_shortcut =
             crate::desktop_profile::DesktopPresentation::get(cx).shortcut(&ToggleAppearancePreview);
@@ -701,20 +700,28 @@ impl Render for AppearanceExerciser {
                 let generation = appearance_runtime::current(cx).generation.get();
                 move || format!("appearance-diagnostics-generation-{generation}")
             }).text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
-            .child(div().h(appearance.height(32.0, 13.0)).bg(editor_background).border_1().border_color(editor_border).child(self.editor.clone()))
+            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.height(32.0, 13.0)).child(self.editor.clone()))
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(action("appearance-apply", "Apply JSON Preview", Self::apply_editor))
                 .child(
-                    action("appearance-toggle-chrome", "Toggle Chrome", Self::toggle_chrome)
+                    action(
+                        "appearance-toggle-chrome",
+                        "Toggle Appearance",
+                        Self::toggle_chrome,
+                    )
                         .tooltip(
                             Tooltip::new(
                                 "appearance-toggle-chrome-tooltip",
-                                "Toggle Chrome Preview Without Activating This Window",
+                                "Toggle Appearance Preview Without Activating This Window",
                             )
                             .keyboard_equivalent(preview_shortcut),
                         ),
                 )
-                .child(action("appearance-toggle-terminal", "Toggle Terminal", Self::toggle_terminal))
+                .child(action(
+                    "appearance-toggle-terminal",
+                    "Toggle Terminal Rendering",
+                    Self::toggle_terminal,
+                ))
                 .child(action("appearance-toggle-type", "Toggle Fonts/Density", Self::toggle_typography))
                 .child(action("appearance-system", "Follow System", Self::follow_system))
                 .child(action("appearance-reset-field", "Reset Next Field", Self::reset_next_field))
@@ -727,6 +734,7 @@ impl Render for AppearanceExerciser {
                 .child(action("appearance-import-zed", "Import Zed Candidate 0", Self::import_zed_editor))
                 .child(action("appearance-export", "Export Effective Schemes", Self::export_effective_schemes))
                 .child(action("appearance-reload-fonts", "Reload Fonts", Self::reload_fonts))
+                .child(action("appearance-show-gallery", "Show State Gallery", Self::show_gallery))
                 .child(action("appearance-show-fixtures", "Show Acceptance Fixtures", Self::show_fixture_window))
                 .child(action("appearance-show-terminal", "Show Terminal Window", Self::show_terminal_window)))
             .child(
@@ -758,12 +766,24 @@ impl Render for AppearanceDialogBody {
 }
 
 struct AppearanceFixtures {
+    window_appearance: appearance_runtime::WindowAppearanceOwner,
     input: Entity<TextInput>,
 }
 
 impl AppearanceFixtures {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut window_appearance = appearance_runtime::WindowAppearanceOwner::default();
+        window_appearance.apply(window, cx);
+        cx.observe_global_in::<appearance_runtime::InstalledAppearance>(
+            window,
+            |fixtures, window, cx| {
+                fixtures.window_appearance.apply(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         Self {
+            window_appearance,
             input: cx.new(|cx| {
                 TextInput::new(
                     "appearance-obscured-input",

@@ -145,6 +145,11 @@ impl ButtonPaint {
         self
     }
 
+    /// Returns the state's icon foreground.
+    pub fn icon_color(self) -> Rgba {
+        self.icon_foreground
+    }
+
     /// Returns the state's border color.
     pub fn border(self) -> Rgba {
         self.border
@@ -394,6 +399,11 @@ impl ButtonTheme {
             sizes,
             focus_border,
         }
+    }
+
+    /// Returns the resolved state paints for a semantic variant.
+    pub fn paints(self, variant: ButtonVariant) -> ButtonVariantStyle {
+        self.variants.resolve(variant)
     }
 
     /// Returns the outer side length of an icon button in this theme.
@@ -738,6 +748,13 @@ pub struct Button {
 }
 
 impl Button {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a small secondary text button. Its label is also its logical accessibility name.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
@@ -857,7 +874,7 @@ impl RenderOnce for Button {
         let full_width = self.full_width;
         let multiline = self.multiline;
         let has_trailing = self.trailing.is_some();
-        let content = move |foreground| {
+        let content = move |_foreground, icon_foreground| {
             div()
                 .flex()
                 .min_w_0()
@@ -866,7 +883,7 @@ impl RenderOnce for Button {
                 .gap(style.gap)
                 .when(full_width, |content| content.w_full())
                 .when_some(self.leading, |content, build| {
-                    content.child(build(foreground))
+                    content.child(build(icon_foreground))
                 })
                 .child(
                     div()
@@ -883,7 +900,7 @@ impl RenderOnce for Button {
                     content.child(div().flex_grow())
                 })
                 .when_some(self.trailing, |content, build| {
-                    content.child(build(foreground))
+                    content.child(build(icon_foreground))
                 })
                 .into_any_element()
         };
@@ -914,6 +931,20 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
+    /// Supplies complete paints resolved for a contextual host surface, such as a Pane Caption.
+    /// Interaction, disabled state, focus geometry, and metrics remain owned by the button.
+    pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.core.contextual_style = Some((style, focus_border));
+        self
+    }
+
     /// Creates a small secondary icon button with a mandatory logical accessibility name.
     pub fn new(
         id: impl Into<ElementId>,
@@ -1003,7 +1034,7 @@ impl RenderOnce for IconButton {
                 full_width: false,
                 multiline: false,
             },
-            self.icon,
+            move |_, icon_foreground| (self.icon)(icon_foreground),
             window,
             cx,
         )
@@ -1033,6 +1064,9 @@ struct ButtonCore {
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
+    contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
 }
 
 impl ButtonCore {
@@ -1053,19 +1087,31 @@ impl ButtonCore {
             modal_borderless: false,
             modal_press_owner: None,
             preserve_ancestor_hover: false,
+            contextual_style: None,
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
         }
     }
 
     fn resolve_style(&self, cx: &App) -> ButtonStyle {
-        cx.global::<ButtonTheme>()
-            .resolve(self.variant, self.size, self.shape)
+        let mut style = cx
+            .global::<ButtonTheme>()
+            .resolve(self.variant, self.size, self.shape);
+        if let Some((paints, focus_border)) = self.contextual_style {
+            style.normal = paints.normal;
+            style.hovered = paints.hovered;
+            style.pressed = paints.pressed;
+            style.disabled = paints.disabled;
+            style.focus_border = focus_border;
+        }
+        style
     }
 
     fn render(
         self,
         style: ButtonStyle,
         layout: ButtonLayout,
-        build_content: impl FnOnce(Rgba) -> AnyElement + 'static,
+        build_content: impl FnOnce(Rgba, Rgba) -> AnyElement + 'static,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
@@ -1099,6 +1145,11 @@ impl ButtonCore {
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
         let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
+        #[cfg(feature = "appearance-exerciser")]
+        let (pressed, hovered, focused) = self
+            .preview_state
+            .map(|state| (state.pressed(), state.hovered(), state.focused()))
+            .unwrap_or((pressed, hovered, focused));
         let paint = resolve_paint(style, enabled, pressed, hovered);
         let focus_ring = focused.then_some(style.focus_border);
         let focus_ring_offset = style.border_width * 2.0;
@@ -1197,11 +1248,7 @@ impl ButtonCore {
             .map(|selector| format!("{selector}-keyboard-focus"))
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let tooltip = self.tooltip;
-        let content = build_content(if layout.icon_only {
-            paint.icon_foreground
-        } else {
-            paint.foreground
-        });
+        let content = build_content(paint.foreground, paint.icon_foreground);
         let preserve_ancestor_hover = self.preserve_ancestor_hover;
 
         let button = div()
@@ -1716,6 +1763,64 @@ mod tests {
         state.cancel_all();
 
         assert!(!state.is_pressed());
+    }
+
+    struct PaintProbeRoot {
+        icon_color: Rc<Cell<Rgba>>,
+        disabled: bool,
+    }
+    impl Render for PaintProbeRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let observed = self.icon_color.clone();
+            Button::new("paint-probe", "Label")
+                .variant(ButtonVariant::Primary)
+                .debug_selector("paint-probe")
+                .disabled(self.disabled)
+                .leading(move |color| {
+                    observed.set(color);
+                    div().into_any_element()
+                })
+                .on_activate(|_, _, _| {})
+        }
+    }
+
+    #[gpui::test]
+    fn rendered_button_accessories_follow_each_state_icon_channel(cx: &mut TestAppContext) {
+        let icons = [0x11223344, 0x55667788, 0x99aabbcc, 0x12345678].map(rgba);
+        let base = test_variant_style();
+        let paints = ButtonVariantStyle::new(
+            base.normal.icon_foreground(icons[0]),
+            base.hovered.icon_foreground(icons[1]),
+            base.pressed.icon_foreground(icons[2]),
+            base.disabled.icon_foreground(icons[3]),
+        );
+        let mut theme = test_theme();
+        theme.variants.primary = paints;
+        cx.set_global(theme);
+        let observed = Rc::new(Cell::new(rgba(0)));
+        let root_observed = observed.clone();
+        let (root, cx) = cx.add_window_view(move |_, _| PaintProbeRoot {
+            icon_color: root_observed,
+            disabled: false,
+        });
+        cx.run_until_parked();
+        assert_eq!(observed.get(), icons[0]);
+        let center = cx
+            .debug_bounds("paint-probe")
+            .expect("button is rendered")
+            .center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(observed.get(), icons[1]);
+        cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(observed.get(), icons[2]);
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(observed.get(), icons[3]);
     }
 
     struct TestRoot {

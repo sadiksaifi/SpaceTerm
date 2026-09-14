@@ -4,6 +4,7 @@ mod text;
 mod view;
 
 use super::workspace_chrome::WorkspaceChromeLayout;
+use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -51,6 +52,15 @@ pub(super) const SIDEBAR_FOOTER_ICON_SIZE: f32 = 15.0;
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 pub(super) const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
+/// The inset, radius, and focus-ring gap of the chip that carries a row's selection.
+///
+/// The horizontal inset stays inside the row's own padding so the chip has a gutter on both sides
+/// of the sidebar, and the radius stays close to the one the shared list controls already use for
+/// their rows, so a selected Workspace and a selected menu entry read as the same kind of shape.
+pub(super) const SIDEBAR_ROW_SELECTION_INSET_X: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
+pub(super) const SIDEBAR_ROW_SELECTION_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
+pub(super) const SIDEBAR_ROW_SELECTION_RING_GAP: f32 = 2.0;
 pub(super) const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
@@ -432,6 +442,28 @@ pub(super) fn remote_connection_color(
     }
 }
 
+fn workspace_row_status_paint(
+    proposed: Color,
+    selected: bool,
+    minimum_contrast: f64,
+    colors: &ChromeColors,
+) -> WorkspaceStatusPaint {
+    let (normal_background, hovered_background) = if selected {
+        (
+            colors.row_selected_background,
+            colors.row_selected_hover_background,
+        )
+    } else {
+        (colors.row_background, colors.row_hover_background)
+    };
+    resolve_workspace_status(
+        proposed,
+        normal_background,
+        hovered_background,
+        minimum_contrast,
+    )
+}
+
 impl WorkspaceSidebar {
     pub(super) fn set_rows(
         &mut self,
@@ -595,11 +627,6 @@ impl WorkspaceSidebar {
     }
 }
 
-// Preserve the muted hierarchy while keeping small text readable on selected and hovered rows.
-fn secondary_text_color(colors: &ChromeColors) -> Color {
-    colors.text_secondary
-}
-
 impl WorkspaceSidebar {
     pub(super) fn layout(&self) -> SidebarLayout {
         self.layout
@@ -684,30 +711,22 @@ impl WorkspaceSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn luminance(color: Color) -> f64 {
-        let linear = |channel: u8| {
-            let c = f64::from(channel) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        linear(color.r) * 0.2126 + linear(color.g) * 0.7152 + linear(color.b) * 0.0722
-    }
     #[test]
     fn secondary_text_should_be_readable_on_every_row_background() {
         let colors = ChromeColors::default();
-        let foreground = luminance(secondary_text_color(&colors));
-        for background in [
-            colors.panel_background,
-            colors.ghost_element_selected,
-            colors.ghost_element_hover,
+        for (foreground, background) in [
+            (colors.row_secondary, colors.row_background),
+            (colors.row_hover_secondary, colors.row_hover_background),
+            (
+                colors.row_selected_secondary,
+                colors.row_selected_background,
+            ),
+            (
+                colors.row_selected_hover_secondary,
+                colors.row_selected_hover_background,
+            ),
         ] {
-            let background = luminance(background);
-            assert!(
-                (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05) >= 4.5
-            );
+            assert!(foreground.contrast_ratio(background) >= 4.5);
         }
     }
     #[test]
@@ -734,5 +753,39 @@ mod tests {
             remote_connection_color(RemoteConnectionPhase::Closing, &ChromeColors::default()),
             ChromeColors::default().icon_muted
         );
+    }
+
+    #[test]
+    fn semantic_status_paints_should_remain_readable_in_every_row_state() {
+        for colors in [
+            crate::appearance::builtin_chrome_base(crate::appearance::Appearance::Dark),
+            crate::appearance::builtin_chrome_base(crate::appearance::Appearance::Light),
+        ] {
+            for selected in [false, true] {
+                let (normal_background, hovered_background) = if selected {
+                    (
+                        colors.row_selected_background,
+                        colors.row_selected_hover_background,
+                    )
+                } else {
+                    (colors.row_background, colors.row_hover_background)
+                };
+                for semantic in [colors.info, colors.success, colors.warning, colors.error] {
+                    let paint = workspace_row_status_paint(semantic, selected, 4.5, &colors);
+                    assert!(paint.normal.contrast_ratio(normal_background) >= 4.5);
+                    assert!(paint.hovered.contrast_ratio(hovered_background) >= 4.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_status_paints_should_preserve_distinct_semantic_states() {
+        let colors = ChromeColors::default();
+        for selected in [false, true] {
+            let reconnecting = workspace_row_status_paint(colors.info, selected, 4.5, &colors);
+            let failed = workspace_row_status_paint(colors.error, selected, 4.5, &colors);
+            assert_ne!(reconnecting, failed);
+        }
     }
 }

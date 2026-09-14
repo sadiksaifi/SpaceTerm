@@ -38,7 +38,7 @@ run = "cargo fetch --locked"
 
 [tasks."deps:build"]
 description = "Build the pinned Ghostty source and SpaceTerm C bindings"
-run = "cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
 
 [tasks."deps:engine"]
 description = "Build a prepared Ghostty source copy while updating native patches"
@@ -53,7 +53,7 @@ zig build -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=b
 
 [tasks."deps:bindings"]
 description = "Regenerate Rust bindings from the matching patched Ghostty headers"
-run = "cargo run --package libghostty-vt-sys --features bindgen-tool,kitty-graphics --bin gen-bindings --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo run --package libghostty-vt-sys --features bindgen-tool,kitty-graphics --bin gen-bindings --locked"
 
 [tasks."deps:engine:test"]
 description = "Run upstream native VT tests in a prepared Ghostty source copy"
@@ -67,7 +67,7 @@ zig build test-lib-vt -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=
 
 [tasks."deps:check"]
 description = "Check every feature of the locally maintained Ghostty wrappers"
-run = "cargo check --package libghostty-vt --all-features --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo check --package libghostty-vt --all-features --locked"
 
 [tasks."deps:lock"]
 description = "Refresh the local Ghostty dependency entries without upgrading unrelated packages"
@@ -83,29 +83,50 @@ run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
 [tasks.dev]
 description = "Run SpaceTerm from source"
-run = "cargo run --locked"
+run = '''
+set -eu
+artifact_path=$(mktemp "${TMPDIR:-/tmp}/spaceterm-executable.XXXXXX")
+trap 'rm -f -- "$artifact_path"' EXIT HUP INT TERM
+./scripts/cargo-artifacts.sh run -- python3 scripts/cargo-build-executable.py \
+  --output "$artifact_path" --bin spaceterm -- --locked
+executable=$(cat "$artifact_path")
+rm -f -- "$artifact_path"
+exec "$executable"
+'''
 
 [tasks."dev:appearance"]
 description = "Run the appearance exerciser with isolated retained settings"
 run = '''
 set -eu
 root="${TMPDIR:-/tmp}/spaceterm-appearance-exerciser"
+artifact_path=$(mktemp "${TMPDIR:-/tmp}/spaceterm-appearance-executable.XXXXXX")
+trap 'rm -f -- "$artifact_path"' EXIT HUP INT TERM
 SPACETERM_APPEARANCE_EXERCISER=1 \
 SPACETERM_APPEARANCE_CONFIG="$root" \
-cargo run --features appearance-exerciser --locked
+./scripts/cargo-artifacts.sh run -- python3 scripts/cargo-build-executable.py \
+  --output "$artifact_path" --bin spaceterm -- --features appearance-exerciser --locked
+executable=$(cat "$artifact_path")
+rm -f -- "$artifact_path"
+exec env \
+  SPACETERM_APPEARANCE_EXERCISER=1 \
+  SPACETERM_APPEARANCE_CONFIG="$root" \
+  "$executable"
 '''
 
 [tasks.check]
 description = "Check every target and feature"
-run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
 [tasks."dev:appearance:macos"]
 description = "Run the source appearance exerciser as a separate inspectable macOS app"
-run = "bash scripts/dev-appearance-macos.sh"
+run = '''
+set -eu
+exec bash scripts/dev-appearance-macos.sh
+'''
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks.fmt]
 description = "Format shared Rust sources"
@@ -124,45 +145,46 @@ run = "cargo fmt --package spaceterm --package spaceterm-directories --package s
 
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
-run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks."test:one"]
 description = "Run tests matching a filter"
 usage = '''
 arg "<filter>" help="Test name filter"
 '''
-run = 'cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
+run = './scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
 
 [tasks."test:vendor"]
 description = "Test terminal-library patches with the application feature set"
-run = "cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
 
 [tasks."test:vendor:no-graphics"]
 description = "Test the owned Rust wrappers with graphics disabled"
-run = "cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt-sys/vendored --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt-sys/vendored --locked"
 
 [tasks."test:conformance"]
 description = "Run terminal protocol conformance tests"
-run = "cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
 
 [tasks."lint:rust"]
 description = "Lint every target and feature for the current platform"
-run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked --no-deps -- -D warnings"
+run = "./scripts/cargo-artifacts.sh run -- cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "./scripts/cargo-artifacts.sh run -- cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:scripts"]
 description = "Check shared scripts"
 run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
+shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
 '''
 
 [tasks."lint:diff"]
@@ -180,6 +202,7 @@ run = [
 [tasks."validate:portable"]
 description = "Run checks without native tooling"
 run = [
+  { task = "artifacts:test" },
   { task = "fmt:check" },
   { task = "check:portable" },
   { task = "test:portable" },
@@ -190,6 +213,7 @@ run = [
 [tasks.validate]
 description = "Run the full validation gate for the current platform"
 run = [
+  { task = "artifacts:test" },
   { task = "fmt:check" },
   { task = "check" },
   { task = "test" },
@@ -215,7 +239,19 @@ fi
 
 [tasks."build:release"]
 description = "Build the optimized executable for the current platform"
-run = "cargo build --release --locked"
+run = "./scripts/cargo-artifacts.sh run -- cargo build --release --locked"
+
+[tasks."artifacts:status"]
+description = "Show Cargo artifact usage and the enforced disk budget"
+run = "./scripts/cargo-artifacts.sh status"
+
+[tasks."artifacts:clean"]
+description = "Remove Cargo build artifacts from the active target directory"
+run = "./scripts/cargo-artifacts.sh clean"
+
+[tasks."artifacts:test"]
+description = "Test Cargo artifact budget and cleanup behavior"
+run = "./scripts/test-cargo-artifacts.sh"
 
 [tasks."bench:workload"]
 description = "Run a paced workload in a dedicated terminal Pane"
@@ -261,7 +297,7 @@ run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
 
 [tasks."test:macos"]
 description = "Run native macOS Adapter tests"
-run = "cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
 
 [tasks."lint:macos:scripts"]
 description = "Check macOS scripts and package metadata"
@@ -297,7 +333,7 @@ description = "Build and verify the macOS app and disk image"
 usage = '''
 arg "[build_number]" help="Application build number" default="1"
 '''
-run = './scripts/package-macos.sh --build-number "${usage_build_number}"'
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --build-number "${usage_build_number}"'
 
 [tasks."package:macos:install"]
 description = "Build, verify, and install the macOS app"
@@ -312,7 +348,7 @@ description = "Build universal macOS Apple Silicon and Intel artifacts"
 usage = '''
 arg "[build_number]" help="Application build number" default="1"
 '''
-run = './scripts/package-macos.sh --universal --build-number "${usage_build_number}"'
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --universal --build-number "${usage_build_number}"'
 
 [tasks."package:macos:verify"]
 description = "Verify existing macOS artifacts"

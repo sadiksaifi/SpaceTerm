@@ -1,5 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::ui::workspace_sidebar::{SIDEBAR_ROW_SELECTION_INSET_X, SIDEBAR_ROW_SELECTION_INSET_Y};
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
@@ -2666,8 +2667,9 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
     assert!(
-        cx.debug_bounds("workspace-chip-remote-status").is_none(),
-        "the collapsed chip conveys connection state through its tooltip"
+        cx.debug_bounds("workspace-switcher-status-disconnected")
+            .is_some(),
+        "the collapsed identity must keep the Active Remote Workspace's disconnected state visible"
     );
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
@@ -2730,6 +2732,14 @@ fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &m
         Some(RemoteConnectionState::failed(2))
     );
     click("modal-action-remote-workspace-reconnect-error-ok", cx);
+    redraw(cx);
+    click("toggle-sidebar-button", cx);
+    assert!(
+        cx.debug_bounds("workspace-switcher-status-failed")
+            .is_some(),
+        "the collapsed identity must keep the Active Remote Workspace's failed state visible"
+    );
+    click("toggle-sidebar-button", cx);
     redraw(cx);
     right_click(row_selector, cx);
     click("workspace-menu-row-reconnect", cx);
@@ -4149,11 +4159,10 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     cx.run_until_parked();
     assert_eq!(records.starts().len(), 2);
     assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .active_workspace()
-            .availability()
-            .is_available()
+        matches!(
+            manager.workspaces.active_workspace().availability(),
+            crate::domain::DirectoryAvailability::Available
+        )
     }));
     fs::remove_dir_all(root).unwrap();
 }
@@ -5626,42 +5635,53 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 }
 
 #[gpui::test]
-fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
+fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n cmd-n");
     cx.run_until_parked();
 
     let first_row = cx
         .debug_bounds("workspace-row-1-inactive")
         .expect("the inactive Workspace row was not rendered");
-    let first_divider = cx
-        .debug_bounds("workspace-row-divider-1")
-        .expect("the first Workspace divider was not rendered");
     let second_row = cx
-        .debug_bounds("workspace-row-2-active")
+        .debug_bounds("workspace-row-2-inactive")
+        .expect("the second inactive Workspace row was not rendered");
+    let third_row = cx
+        .debug_bounds("workspace-row-3-active")
         .expect("the Active Workspace row was not rendered");
-    let second_divider = cx
-        .debug_bounds("workspace-row-divider-2")
-        .expect("the second Workspace divider was not rendered");
+    let selection = cx
+        .debug_bounds("workspace-row-selection-3")
+        .expect("the Active Workspace selection was not rendered");
 
     assert_eq!(
-        (first_divider, second_divider),
-        (
-            gpui::bounds(
-                point(
-                    first_row.origin.x,
-                    first_row.origin.y + first_row.size.height - px(1.0)
-                ),
-                gpui::size(first_row.size.width, px(CHROME_DIVIDER_SIZE)),
+        selection,
+        gpui::bounds(
+            point(
+                third_row.origin.x + px(SIDEBAR_ROW_SELECTION_INSET_X),
+                third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
-            gpui::bounds(
-                point(
-                    second_row.origin.x,
-                    second_row.origin.y + second_row.size.height - px(1.0),
-                ),
-                gpui::size(second_row.size.width, px(CHROME_DIVIDER_SIZE)),
+            gpui::size(
+                third_row.size.width - px(SIDEBAR_ROW_SELECTION_INSET_X * 2.0),
+                third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
-        )
+        ),
+        "the selected Workspace material should float inside its row"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-1").is_some(),
+        "unrelated Workspace rows should retain their divider"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-2").is_none(),
+        "the divider before the selected Workspace should leave the material open"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-3").is_none(),
+        "the selected Workspace should not draw a divider through its material"
+    );
+    assert_eq!(
+        (first_row.size, second_row.size),
+        (third_row.size, third_row.size)
     );
 }
 
@@ -5930,6 +5950,28 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             root.origin.x + px(212.0),
             root.origin.x + px(212.0),
         )
+    );
+}
+
+#[gpui::test]
+fn collapsed_identity_should_keep_an_unavailable_local_workspace_visible(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        let workspace_id = manager.workspaces.active_workspace_id();
+        manager
+            .workspaces
+            .set_directory_unavailable(workspace_id, "Directory unavailable".to_owned())
+            .expect("the Active Workspace should remain present");
+        cx.notify();
+    });
+
+    click("toggle-sidebar-button", cx);
+
+    assert!(cx.debug_bounds("workspace-chip-label").is_some());
+    assert!(
+        cx.debug_bounds("workspace-switcher-status-unavailable")
+            .is_some(),
+        "the collapsed identity must keep the Active Workspace's unavailable state visible"
     );
 }
 

@@ -249,6 +249,7 @@ pub(crate) fn open(
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
+            window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.0), px(260.0))),
             titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
@@ -663,6 +664,13 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
+    crate::ui::settings_window::configure_window_chrome(
+        Rc::clone(&host.window_movement),
+        host.titlebar
+            .as_ref()
+            .and_then(|titlebar| titlebar.traffic_light_position),
+        cx,
+    );
     init(cx, Rc::clone(&host.adapters.application_menu));
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
@@ -948,6 +956,18 @@ mod runtime_tests {
 
         assert_eq!(cx.update(|cx| cx.windows().len()), 2);
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+        let settings = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+                .expect("Settings window")
+        });
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        assert_eq!(
+            settings_cx.window_title().as_deref(),
+            Some("Settings"),
+            "transparent client chrome must retain the native window identity"
+        );
     }
 
     #[gpui::test]

@@ -13,7 +13,21 @@ use crate::ui::appearance::{ChromeAppearance, InstalledChrome};
 
 const INPUT_VALUE: &str = "nonsecret-sample";
 
-struct ReadOnlyExerciserStorage;
+#[gpui::test]
+fn caption_fixture_requires_explicit_gallery_activation(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        assert!(super::caption_fixture(cx).is_none());
+        cx.set_global(super::GalleryCaptionFixture);
+        let facts = super::caption_fixture(cx).expect("gallery should supply display facts");
+        assert_eq!(facts.origin.user.as_ref(), "fixture");
+        assert_eq!(facts.origin.host.as_ref(), "local");
+        assert!(!facts.origin.remote);
+        assert_eq!(facts.directory.as_ref(), "appearance-fixture");
+        assert_eq!(facts.label.as_ref(), "Appearance acceptance");
+    });
+}
+
+pub(super) struct ReadOnlyExerciserStorage;
 
 impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
     fn read(
@@ -36,8 +50,8 @@ impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
 }
 
 #[gpui::test]
-fn exerciser_diagnostics_repaint_for_terminal_only_system_changes(cx: &mut TestAppContext) {
-    use crate::appearance::{Appearance, AppearanceDocument, SchemeId, SchemeSelection};
+fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
+    use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode};
     use crate::platform::appearance::testing::RecordingAppearancePlatform;
     use crate::ui::appearance_runtime;
 
@@ -59,20 +73,20 @@ fn exerciser_diagnostics_repaint_for_terminal_only_system_changes(cx: &mut TestA
 
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = AppearanceDocument::default();
-    candidate.preferences.terminal.scheme = SchemeSelection::System {
-        light: SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-        dark: SchemeId::new("builtin.vague-pro.terminal.dark").unwrap(),
-    };
+    candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
-    let chrome = cx.update(|_, cx| Arc::clone(&cx.global::<InstalledChrome>().0));
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("appearance-diagnostics-generation-1")
             .is_some()
     );
-    cx.update(|_, cx| assert!(Arc::ptr_eq(&chrome, &cx.global::<InstalledChrome>().0)));
+    cx.update(|_, cx| {
+        let appearance = appearance_runtime::current(cx);
+        assert_eq!(appearance.chrome.appearance, Appearance::Light);
+        assert_eq!(appearance.terminal.appearance, Appearance::Light);
+    });
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.run_until_parked();
     assert!(

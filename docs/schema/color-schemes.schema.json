@@ -4,14 +4,21 @@
   "title": "SpaceTerm color-scheme package",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "schemes"],
+  "required": [
+    "schema_version",
+    "schemes"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": {
+      "const": 1
+    },
     "schemes": {
       "type": "array",
       "minItems": 1,
       "maxItems": 32,
-      "items": { "$ref": "appearance-settings.schema.json#/$defs/customScheme" }
+      "items": {
+        "$ref": "color-scheme-definitions-v1.schema.json#/$defs/customScheme"
+      }
     }
   }
 }

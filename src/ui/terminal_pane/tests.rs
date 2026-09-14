@@ -2101,10 +2101,9 @@ fn color_only_terminal_change_preserves_geometry_and_prepared_fonts(cx: &mut Tes
                 pane.cell_width,
             )
         });
-        let mut preferences = crate::appearance::AppearancePreferences::default();
-        preferences.terminal.scheme = crate::appearance::SchemeSelection::Fixed {
-            id: crate::appearance::SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-            appearance: crate::appearance::Appearance::Light,
+        let preferences = crate::appearance::AppearancePreferences {
+            mode: crate::appearance::AppearanceMode::Light,
+            ..Default::default()
         };
         publish_terminal_preferences(preferences, cx);
         pane.update(cx, |pane, cx| {
@@ -5316,10 +5315,9 @@ fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut Te
     });
 
     cx.update(|window, cx| {
-        let mut preferences = crate::appearance::AppearancePreferences::default();
-        preferences.terminal.scheme = crate::appearance::SchemeSelection::Fixed {
-            id: crate::appearance::SchemeId::new("builtin.spaceterm.terminal.light").unwrap(),
-            appearance: crate::appearance::Appearance::Light,
+        let preferences = crate::appearance::AppearancePreferences {
+            mode: crate::appearance::AppearanceMode::Light,
+            ..Default::default()
         };
         publish_terminal_preferences(preferences, cx);
         pane.update(cx, |pane, cx| pane.refresh_appearance(window, cx));

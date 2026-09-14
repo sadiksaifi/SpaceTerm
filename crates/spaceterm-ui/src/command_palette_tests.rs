@@ -38,12 +38,18 @@ fn test_theme() -> CommandPaletteTheme {
 fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
     let paint = test_theme().paint;
 
-    assert_eq!(row_foreground(paint, false, false), paint.foreground);
     assert_eq!(
-        row_foreground(paint, false, true),
+        paint.row_paint(false, false, false).foreground,
+        paint.foreground
+    );
+    assert_eq!(
+        paint.row_paint(false, true, false).foreground,
         paint.selected_foreground
     );
-    assert_eq!(row_foreground(paint, true, true), paint.disabled);
+    assert_eq!(
+        paint.row_paint(true, true, false).foreground,
+        paint.disabled
+    );
 }
 
 fn items() -> Vec<CommandPaletteItem<u8>> {

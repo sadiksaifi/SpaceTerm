@@ -1,10 +1,13 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
+#[cfg(test)]
+use std::cell::Cell;
 use std::rc::Rc;
 
 use thiserror::Error;
 
+use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
@@ -55,7 +58,7 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render, Rgba,
+    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
     ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
@@ -70,21 +73,59 @@ const TAB_BAR_DIVIDER_SIZE: f32 = 1.0;
 const TAB_ITEM_WIDTH: f32 = 132.0;
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
-const TAB_ITEM_RIGHT_PADDING: f32 = 6.0;
+/// The title starts as far inside the chip as a Settings navigation label does inside its own, and
+/// Close keeps the same air to the chip's right edge as it keeps above and below.
+const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
+const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
+/// The inset, radius, and focus gap of the chip carrying one Tab's material.
+///
+/// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
+/// paint moves inward. The vertical inset is the larger one, because that is the air that turns a
+/// full-height strip into a row of shapes resting inside the title bar, and it leaves the seam
+/// under the bar free for the one divider that still describes real structure.
+///
+/// Inside the title bar that inset leaves a chip as tall as a Settings navigation row, and the
+/// radius is the one both sidebars select with, so a Tab is the same shape rather than a cousin.
+const TAB_CHIP_INSET_X: f32 = 3.0;
+const TAB_CHIP_INSET_Y: f32 = 4.0;
+const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
+/// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
+///
+/// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
+/// ends. The Active Tab's chip already has an edge, so no mark touches it. Like the chip insets,
+/// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
+/// keeps its proportion to a Tab that grows with density.
+const TAB_SEPARATOR_LENGTH: f32 = 18.0;
+/// The mark's thickness: one logical point at every density, the same hairline as the chip rim and
+/// the Tab bar divider.
+///
+/// Density lengthens the mark but never thickens it. A whole point covers at least one whole device
+/// pixel at every supported display scale, so the mark stays thin on a 1x display without ever
+/// dropping below a pixel on a fractional one, and a width derived from the scale would leave
+/// layout rounding to decide which side of an edge it lands on.
+const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
     window_active: bool,
     background: Color,
     active_tab_background: Color,
+    active_tab_border: Color,
+    active_tab_hover_background: Color,
+    active_tab_hover_border: Color,
+    active_tab_hover_foreground: Color,
+    active_tab_hover_icon: Color,
     inactive_tab_background: Color,
     active_tab_foreground: Color,
     inactive_tab_foreground: Color,
-    icon_foreground: Color,
+    active_tab_icon: Color,
+    inactive_tab_icon: Color,
     hover_background: Color,
-    active_tab_underline: Color,
+    hover_foreground: Color,
+    hover_icon: Color,
     divider: Color,
+    tab_separator: Color,
 }
 
 impl TabChromePresentation {
@@ -94,35 +135,88 @@ impl TabChromePresentation {
                 window_active,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
+                active_tab_border: colors.tab_active_border,
+                active_tab_hover_background: colors.tab_active_hover_background,
+                active_tab_hover_border: colors.tab_active_border,
+                active_tab_hover_foreground: colors.tab_active_hover_foreground,
+                active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.tab_inactive_background,
-                active_tab_foreground: colors.text_accent,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
-                active_tab_underline: colors.navigation_selection,
+                active_tab_foreground: colors.tab_active_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_active_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.tab_separator,
             }
         } else {
             Self {
                 window_active,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.title_bar_inactive_background,
+                active_tab_background: colors.tab_inactive_selected_background,
+                active_tab_border: colors.tab_inactive_selected_border,
+                // Only the resting identity steps back with the window. A pointer over the Active
+                // Tab gets the same answer as in a focused window, just as an inactive Tab does.
+                active_tab_hover_background: colors.tab_active_hover_background,
+                active_tab_hover_border: colors.tab_active_border,
+                active_tab_hover_foreground: colors.tab_active_hover_foreground,
+                active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.text_muted,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.text_muted,
-                hover_background: colors.title_bar_inactive_background,
-                active_tab_underline: colors.border,
+                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_inactive_selected_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.tab_separator,
             }
         }
     }
 
-    fn tab_background(&self, active: bool) -> Color {
+    /// The material one Tab rests on, as an inset chip within the title-bar surface.
+    ///
+    /// The Active Tab is the selected row of the navigation sidebars moved into the title bar: the
+    /// same fill, the same lit rim, and the same heavier fill under the pointer. Only the Active Tab
+    /// carries a rim, so the row of Tabs never turns back into a row of boxes.
+    ///
+    /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
+    /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
+    /// title bar itself, which leaves an inactive Tab as text on the bar and the Active Tab as the
+    /// one shape on it.
+    fn tab_chip(
+        &self,
+        active: bool,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> SelectionChip {
+        SelectionChip::new(
+            ChipShape {
+                inset_x: appearance.spacing(TAB_CHIP_INSET_X),
+                inset_y: appearance.spacing(TAB_CHIP_INSET_Y),
+                radius: appearance.spacing(TAB_CHIP_RADIUS),
+            },
+            self.tab_chip_paint(active),
+        )
+    }
+
+    fn tab_chip_paint(&self, active: bool) -> ChipPaint {
         if active {
-            self.active_tab_background
+            ChipPaint {
+                fill: Some(self.active_tab_background),
+                rim: Some(self.active_tab_border),
+                hover_fill: Some(self.active_tab_hover_background),
+                hover_rim: Some(self.active_tab_hover_border),
+            }
         } else {
-            self.inactive_tab_background
+            ChipPaint {
+                fill: Some(self.inactive_tab_background),
+                rim: None,
+                hover_fill: Some(self.hover_background),
+                hover_rim: None,
+            }
         }
     }
 
@@ -134,12 +228,42 @@ impl TabChromePresentation {
         }
     }
 
-    fn resolved_icon_foreground(&self, button_state_foreground: Rgba) -> Rgba {
-        if self.window_active {
-            button_state_foreground
+    /// The text a Tab's title takes while the pointer is over its chip.
+    fn tab_hover_foreground(&self, active: bool) -> Color {
+        if active {
+            self.active_tab_hover_foreground
         } else {
-            gpui_color(self.icon_foreground)
+            self.hover_foreground
         }
+    }
+
+    fn control_style(
+        &self,
+        active: bool,
+        ancestor_hovered: bool,
+        colors: &ChromeColors,
+    ) -> spaceterm_ui::ButtonVariantStyle {
+        let clear = gpui::rgba(0);
+        let icon = if ancestor_hovered {
+            if active {
+                self.active_tab_hover_icon
+            } else {
+                self.hover_icon
+            }
+        } else if active {
+            self.active_tab_icon
+        } else {
+            self.inactive_tab_icon
+        };
+        let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
+        let hover = spaceterm_ui::ButtonPaint::new(
+            gpui_color(self.hover_background),
+            gpui_color(self.hover_icon),
+            clear,
+        );
+        let disabled =
+            spaceterm_ui::ButtonPaint::new(clear, gpui_color(colors.text_disabled), clear);
+        spaceterm_ui::ButtonVariantStyle::new(normal, hover, hover, disabled)
     }
 }
 
@@ -172,6 +296,7 @@ pub(crate) struct TabManager {
     top_chrome_width: Pixels,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
+    hovered_tab: Option<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
@@ -179,6 +304,10 @@ pub(crate) struct TabManager {
     remote_lifecycle: RemoteHierarchyLifecycle,
     #[cfg(test)]
     rendered_window_active: bool,
+    #[cfg(test)]
+    rendered_active_close_icon: Rc<Cell<gpui::Rgba>>,
+    #[cfg(test)]
+    rendered_inactive_close_icon: Rc<Cell<gpui::Rgba>>,
 }
 
 impl TabManager {
@@ -249,6 +378,7 @@ impl TabManager {
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             parent_focus_blocker: None,
             tab_selector_pressed: None,
+            hovered_tab: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -256,6 +386,10 @@ impl TabManager {
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
+            #[cfg(test)]
+            rendered_active_close_icon: Rc::new(Cell::new(rgba(0))),
+            #[cfg(test)]
+            rendered_inactive_close_icon: Rc::new(Cell::new(rgba(0))),
         }
     }
 
@@ -1033,20 +1167,25 @@ impl TabManager {
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
-    ) -> AnyElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
+        let hover_manager = manager.clone();
         let close_manager = manager;
-        let background = presentation.tab_background(active);
+        let chip = presentation.tab_chip(active, appearance);
         let foreground = presentation.tab_foreground(active);
-        let icon_presentation = presentation.clone();
-        let hover_background = presentation.hover_background;
-        let active_tab_underline = presentation.active_tab_underline;
-        let divider = presentation.divider;
+        let ancestor_hovered = self.hovered_tab == Some(tab_id);
+        let control_style =
+            presentation.control_style(active, ancestor_hovered, &appearance.colors);
+        let hover_foreground = presentation.tab_hover_foreground(active);
         let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
+        #[cfg(test)]
+        let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
+        #[cfg(test)]
+        let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
         let tab_group = format!("tab-item-{}", tab_id.get());
-        let item = div()
+        div()
             .id(("tab-item", tab_id.get()))
             .debug_selector(move || {
                 format!(
@@ -1062,17 +1201,36 @@ impl TabManager {
             .w(appearance.spacing(TAB_ITEM_WIDTH))
             .min_w(appearance.spacing(TAB_ITEM_MINIMUM_WIDTH))
             .max_w(appearance.spacing(TAB_ITEM_MAXIMUM_WIDTH))
-            .pl(appearance.spacing(12.0))
+            .pl(appearance.spacing(TAB_ITEM_LEFT_PADDING))
             .pr(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
             .flex()
             .items_center()
             .cursor_pointer()
             .block_mouse_except_scroll()
-            .bg(gpui_color(background))
-            .font(appearance.emphasis.clone())
+            .on_hover(move |hovered, _, cx| {
+                let _ = hover_manager.update(cx, |manager, cx| {
+                    if *hovered {
+                        if manager.hovered_tab != Some(tab_id) {
+                            manager.hovered_tab = Some(tab_id);
+                            cx.notify();
+                        }
+                    } else if manager.hovered_tab == Some(tab_id) {
+                        manager.hovered_tab = None;
+                        cx.notify();
+                    }
+                });
+            })
+            // Weight marks the Active Tab exactly as it marks the current Settings section.
+            .font(if active {
+                appearance.emphasis.clone()
+            } else {
+                appearance.regular.clone()
+            })
             .text_size(appearance.text_size(12.0))
             .text_color(gpui_color(foreground))
-            .hover(move |item| item.bg(gpui_color(hover_background)))
+            // Content follows the chip's paired hover paint, preserving selected identity.
+            .hover(move |item| item.text_color(gpui_color(hover_foreground)))
+            .child(chip.render(format!("tab-item-{}-chip", tab_id.get()), &tab_group))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1113,15 +1271,21 @@ impl TabManager {
                             ("tab-close-button", tab_id.get()),
                             "Close Tab",
                             move |foreground| {
-                                Icon::new(
-                                    IconName::X,
-                                    close_icon_size,
-                                    icon_presentation.resolved_icon_foreground(foreground),
-                                )
-                                .into_any_element()
+                                #[cfg(test)]
+                                if active {
+                                    rendered_active_close_icon.set(foreground);
+                                } else {
+                                    rendered_inactive_close_icon.set(foreground);
+                                }
+                                Icon::new(IconName::X, close_icon_size, foreground)
+                                    .into_any_element()
                             },
                         )
                         .variant(ButtonVariant::Ghost)
+                        .contextual_style(
+                            control_style,
+                            gpui_color(appearance.colors.border_focused),
+                        )
                         .size(ButtonSize::Compact)
                         .preserve_ancestor_hover()
                         .debug_selector(format!("tab-close-button-{}", tab_id.get()))
@@ -1136,43 +1300,6 @@ impl TabManager {
                         }),
                     ),
             )
-            .child(
-                div()
-                    .id(("tab-item-divider", tab_id.get()))
-                    .debug_selector(move || format!("tab-item-{}-divider", tab_id.get()))
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(divider)),
-            )
-            .child(
-                div()
-                    .id(("tab-item-bottom-divider", tab_id.get()))
-                    .debug_selector(move || format!("tab-item-{}-bottom-divider", tab_id.get()))
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(divider)),
-            )
-            .when(active, |item| {
-                item.child(
-                    div()
-                        .id(("tab-item-underline", tab_id.get()))
-                        .debug_selector(move || format!("tab-item-{}-underline", tab_id.get()))
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(TAB_BAR_DIVIDER_SIZE))
-                        .bg(gpui_color(active_tab_underline)),
-                )
-            });
-
-        item.into_any_element()
     }
 
     fn render_tab_bar(
@@ -1194,15 +1321,27 @@ impl TabManager {
             .flex_row()
             .overflow_x_scroll()
             .track_scroll(&self.tab_bar_scroll_handle);
+        let mut previous_inactive_tab = None;
         for (tab_id, pane_host) in self.tabs.iter() {
-            items = items.child(self.render_tab_item(
-                tab_id,
-                pane_host.read(cx).tab_title(),
-                tab_id == active_tab_id,
-                presentation,
-                manager.clone(),
-                appearance,
-            ));
+            let active = tab_id == active_tab_id;
+            let leading_separator =
+                previous_inactive_tab
+                    .filter(|_| !active)
+                    .map(|leading_tab_id| {
+                        render_tab_separator(leading_tab_id, tab_id, presentation, appearance)
+                    });
+            previous_inactive_tab = (!active).then_some(tab_id);
+            items = items.child(
+                self.render_tab_item(
+                    tab_id,
+                    pane_host.read(cx).tab_title(),
+                    active,
+                    presentation,
+                    manager.clone(),
+                    appearance,
+                )
+                .children(leading_separator),
+            );
         }
 
         let drag_manager = manager.clone();
@@ -1241,6 +1380,10 @@ impl TabManager {
                                 .into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
+                        .contextual_style(
+                            presentation.control_style(false, false, &appearance.colors),
+                            gpui_color(appearance.colors.border_focused),
+                        )
                         .size(ButtonSize::Regular)
                         .debug_selector("create-tab-button")
                         .tooltip(
@@ -1365,6 +1508,46 @@ impl Render for TabManager {
 impl EventEmitter<TabManagerEvent> for TabManager {}
 impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
 
+/// The quiet mark at the boundary between two neighbouring inactive Tabs.
+///
+/// The trailing Tab carries the mark as paint just inside its own edge on the shared boundary, so
+/// the row keeps one scroll child per Tab and both Tabs keep their spacing, hit targets, and hover
+/// regions. Staying inside the Tab's bounds and on whole points leaves layout rounding nothing to
+/// move, and the chip inset keeps hover paint clear of it.
+///
+/// The mark paints its own `tab_separator` role. `border` describes full-length structure and is
+/// too close to the bar to show on a mark this short, and an outlined control's ring is a separate
+/// decision a scheme must be able to retune without moving the Tab strip.
+fn render_tab_separator(
+    leading_tab_id: TabId,
+    trailing_tab_id: TabId,
+    presentation: &TabChromePresentation,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(px(TAB_SEPARATOR_WIDTH))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .debug_selector(move || {
+                    format!(
+                        "tab-separator-{}-{}",
+                        leading_tab_id.get(),
+                        trailing_tab_id.get()
+                    )
+                })
+                .w_full()
+                .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
+                .bg(gpui_color(presentation.tab_separator)),
+        )
+        .into_any_element()
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -1407,19 +1590,27 @@ mod tests {
                 window_active: true,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
+                active_tab_border: colors.tab_active_border,
+                active_tab_hover_background: colors.tab_active_hover_background,
+                active_tab_hover_border: colors.tab_active_border,
+                active_tab_hover_foreground: colors.tab_active_hover_foreground,
+                active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.tab_inactive_background,
-                active_tab_foreground: colors.text_accent,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.icon,
-                hover_background: colors.ghost_element_hover,
-                active_tab_underline: colors.border_selected,
+                active_tab_foreground: colors.tab_active_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_active_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.tab_separator,
             }
         );
     }
 
     #[test]
-    fn inactive_window_tab_chrome_should_be_one_muted_title_bar_band() {
+    fn inactive_window_preserves_selected_tab_identity() {
         let colors = ChromeColors::default();
         let presentation = TabChromePresentation::resolve(false, &colors);
 
@@ -1428,58 +1619,300 @@ mod tests {
             TabChromePresentation {
                 window_active: false,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.title_bar_inactive_background,
+                active_tab_background: colors.tab_inactive_selected_background,
+                active_tab_border: colors.tab_inactive_selected_border,
+                active_tab_hover_background: colors.tab_active_hover_background,
+                active_tab_hover_border: colors.tab_active_border,
+                active_tab_hover_foreground: colors.tab_active_hover_foreground,
+                active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.text_muted,
-                inactive_tab_foreground: colors.text_muted,
-                icon_foreground: colors.text_muted,
-                hover_background: colors.title_bar_inactive_background,
-                active_tab_underline: colors.border,
+                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                inactive_tab_foreground: colors.tab_inactive_foreground,
+                active_tab_icon: colors.tab_inactive_selected_icon,
+                inactive_tab_icon: colors.tab_inactive_icon,
+                hover_background: colors.tab_hover_background,
+                hover_foreground: colors.tab_hover_foreground,
+                hover_icon: colors.tab_hover_icon,
                 divider: colors.border,
+                tab_separator: colors.tab_separator,
             }
         );
     }
 
     #[test]
-    fn tab_icon_foreground_should_follow_button_state_only_while_window_active() {
-        let colors = ChromeColors::default();
-        let button_state_foreground = rgba(0x1234_56ff);
+    fn selected_tab_hover_should_gain_weight_from_its_own_roles_in_both_window_states() {
+        let colors = ChromeColors {
+            tab_active_background: Color::rgb(0x112233),
+            tab_active_border: Color::rgb(0x223344),
+            tab_active_hover_background: Color::rgb(0x2a3b4c),
+            tab_active_hover_foreground: Color::rgb(0xeef0ff),
+            tab_active_foreground: Color::rgb(0xddeeff),
+            tab_inactive_selected_background: Color::rgb(0x334455),
+            tab_inactive_selected_border: Color::rgb(0x3a4b5c),
+            tab_inactive_selected_foreground: Color::rgb(0xbbccdd),
+            tab_hover_background: Color::rgb(0x556677),
+            tab_hover_foreground: Color::rgb(0x99aabb),
+            tab_hover_icon: Color::rgb(0x778899),
+            ..ChromeColors::default()
+        };
 
-        assert_eq!(
-            TabChromePresentation::resolve(true, &colors)
-                .resolved_icon_foreground(button_state_foreground),
-            button_state_foreground
+        for window_active in [true, false] {
+            let presentation = TabChromePresentation::resolve(window_active, &colors);
+            let (fill, rim) = if window_active {
+                (colors.tab_active_background, colors.tab_active_border)
+            } else {
+                (
+                    colors.tab_inactive_selected_background,
+                    colors.tab_inactive_selected_border,
+                )
+            };
+            let selected = presentation.tab_chip_paint(true);
+            assert_eq!(
+                (
+                    selected.fill,
+                    selected.rim,
+                    selected.hover_fill,
+                    selected.hover_rim
+                ),
+                (
+                    Some(fill),
+                    Some(rim),
+                    Some(colors.tab_active_hover_background),
+                    Some(colors.tab_active_border),
+                ),
+                "window_active={window_active}: the Active Tab should rest on its rim and gain \
+                 weight under the pointer rather than freezing"
+            );
+            assert_eq!(
+                presentation.tab_hover_foreground(true),
+                colors.tab_active_hover_foreground
+            );
+            let inactive = presentation.tab_chip_paint(false);
+            assert_eq!(
+                (inactive.rim, inactive.hover_fill, inactive.hover_rim),
+                (None, Some(colors.tab_hover_background), None),
+                "window_active={window_active}: only the Active Tab should carry a rim"
+            );
+            assert_eq!(
+                presentation.tab_hover_foreground(false),
+                colors.tab_hover_foreground
+            );
+            let close = presentation.control_style(true, false, &colors);
+            assert_eq!(
+                close.hovered().background(),
+                gpui_color(colors.tab_hover_background)
+            );
+            assert_eq!(
+                close.hovered().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+            assert_eq!(
+                presentation
+                    .control_style(false, true, &colors)
+                    .normal()
+                    .foreground(),
+                gpui_color(colors.tab_hover_icon),
+                "window_active={window_active}: the revealed inactive-Tab Close glyph should follow the Tab hover paint"
+            );
+        }
+    }
+
+    /// The Active Tab is the navigation sidebars' selected row, placed in the title bar.
+    ///
+    /// The Workspace sidebar and the Settings navigation paint their current item from the
+    /// selected-row roles. A focused window's Active Tab must resolve to exactly those paints at rest
+    /// and under the pointer, so the three surfaces cannot drift back into near-matches.
+    #[test]
+    fn built_in_active_tab_should_paint_the_selected_row_hierarchy() {
+        use crate::appearance::{Appearance, builtin_chrome_base};
+
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin_chrome_base(appearance);
+            let presentation = TabChromePresentation::resolve(true, &colors);
+            let chip = presentation.tab_chip_paint(true);
+
+            assert_eq!(
+                (chip.fill, chip.rim, chip.hover_fill, chip.hover_rim),
+                (
+                    Some(colors.row_selected_background),
+                    Some(colors.row_selected_border),
+                    Some(colors.row_selected_hover_background),
+                    Some(colors.row_selected_hover_border),
+                ),
+                "{appearance:?} Active Tab chip should match a selected navigation row"
+            );
+            assert_eq!(
+                (
+                    presentation.tab_foreground(true),
+                    presentation.tab_hover_foreground(true),
+                ),
+                (
+                    colors.row_selected_foreground,
+                    colors.row_selected_hover_foreground,
+                ),
+                "{appearance:?} Active Tab title should match a selected navigation label"
+            );
+            assert_ne!(
+                chip.rim, chip.fill,
+                "{appearance:?} Active Tab rim should describe an edge"
+            );
+            assert_ne!(
+                chip.hover_fill, chip.fill,
+                "{appearance:?} Active Tab should answer hover"
+            );
+        }
+    }
+
+    /// A separator is a short hairline, so it needs more contrast than a full-length divider to be
+    /// seen at all, yet it must stay a step quieter than the titles it sits between. The mark rests
+    /// on the title bar in a focused window and on the inactive title bar in an unfocused one, so
+    /// both surfaces are held to the same band.
+    #[test]
+    fn built_in_tab_separator_should_be_visible_but_quiet_on_both_title_bar_surfaces() {
+        use crate::appearance::{Appearance, builtin_chrome_base};
+
+        const MINIMUM_SEPARATOR_CONTRAST: f64 = 1.4;
+        const MAXIMUM_SEPARATOR_CONTRAST: f64 = 3.0;
+
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin_chrome_base(appearance).opaque_presentation();
+            for (window_active, surface) in [
+                (true, colors.title_bar_background),
+                (false, colors.title_bar_inactive_background),
+            ] {
+                let presentation = TabChromePresentation::resolve(window_active, &colors);
+                let bar = presentation.background;
+                assert_eq!(bar, surface);
+                let separator = presentation.tab_separator.source_over(bar);
+                let contrast = separator.contrast_ratio(bar);
+                assert!(
+                    (MINIMUM_SEPARATOR_CONTRAST..=MAXIMUM_SEPARATOR_CONTRAST).contains(&contrast),
+                    "{appearance:?} window_active={window_active}: separator contrast {contrast:.2} \
+                     should be visible but quiet"
+                );
+                assert!(
+                    contrast
+                        < presentation
+                            .tab_foreground(false)
+                            .source_over(bar)
+                            .contrast_ratio(bar),
+                    "{appearance:?} window_active={window_active}: separator should stay quieter \
+                     than an inactive Tab title"
+                );
+                assert!(
+                    contrast > presentation.divider.source_over(bar).contrast_ratio(bar),
+                    "{appearance:?} window_active={window_active}: a short separator should read \
+                     stronger than the full-length Tab bar divider"
+                );
+            }
+        }
+    }
+
+    /// A custom scheme tunes the Tab separator and outlined controls as two decisions.
+    ///
+    /// The scheme travels the production path, from a native color document through the catalog
+    /// and prepared Chrome into both consumers, so an alias anywhere along it would tie a retuned
+    /// outline ring to the Tab strip or the reverse.
+    #[test]
+    fn custom_scheme_should_tune_tab_separators_independently_of_outlined_controls() {
+        use crate::appearance::{
+            AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+            SchemeCatalog, SchemeId, SystemAppearance, parse_color_document,
+        };
+
+        let prepare = |outline: &str, separator: &str| {
+            let document = format!(
+                r##"{{"schema_version":1,"schemes":[{{"kind":"chrome","id":"test.tab-separator","name":"Tab separator","appearance":"light","colors":{{"background":"#fbfbfc","text":"#1d1f23","outline_border":"{outline}","tab_separator":"{separator}"}}}}]}}"##
+            );
+            let document = parse_color_document(document.as_bytes()).unwrap();
+            let catalog = SchemeCatalog::from_custom_schemes(&document.schemes).unwrap();
+            let mut preferences = AppearancePreferences {
+                mode: AppearanceMode::Light,
+                ..Default::default()
+            };
+            preferences.chrome.schemes.light = SchemeId::new("test.tab-separator").unwrap();
+            let resolved = catalog
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable(),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            super::super::appearance::ChromeAppearance::prepare(&resolved.chrome).colors
+        };
+        let separators = |colors: &ChromeColors| {
+            [true, false].map(|window_active| {
+                TabChromePresentation::resolve(window_active, colors).tab_separator
+            })
+        };
+
+        let baseline = prepare("#c8cbd3", "#b9bcc4");
+        assert_eq!(separators(&baseline), [Color::rgb(0xb9bcc4); 2]);
+
+        let retuned_outline = prepare("#5a5e66", "#b9bcc4");
+        assert_ne!(
+            super::super::button_theme::theme(&retuned_outline),
+            super::super::button_theme::theme(&baseline),
+            "the outlined control should follow its own ring"
         );
         assert_eq!(
-            TabChromePresentation::resolve(false, &colors)
-                .resolved_icon_foreground(button_state_foreground),
-            gpui_color(colors.text_muted)
+            separators(&retuned_outline),
+            separators(&baseline),
+            "retuning outlined controls should leave the Tab separator alone"
+        );
+
+        let retuned_separator = prepare("#c8cbd3", "#d4d6dc");
+        assert_eq!(separators(&retuned_separator), [Color::rgb(0xd4d6dc); 2]);
+        assert_eq!(
+            super::super::button_theme::theme(&retuned_separator),
+            super::super::button_theme::theme(&baseline),
+            "retuning the Tab separator should leave outlined controls alone"
         );
     }
 
-    fn tab_icon_test_theme(
-        normal: Rgba,
-        hovered: Rgba,
-        pressed: Rgba,
-    ) -> spaceterm_ui::ButtonTheme {
-        use spaceterm_ui::{
-            ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle,
-            ButtonVariants,
-        };
+    /// The separator keeps one logical point at every supported display scale, which never
+    /// rasterises below one whole device pixel: a single crisp pixel at 1x and more on denser
+    /// displays, so the mark stays thin without disappearing.
+    #[test]
+    fn tab_separator_width_should_cover_at_least_one_device_pixel_at_every_display_scale() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            let device = TAB_SEPARATOR_WIDTH * scale;
+            assert!(
+                device.floor() >= 1.0,
+                "a {TAB_SEPARATOR_WIDTH}-point separator covers {device} device pixels at {scale}x"
+            );
+        }
+    }
 
-        let paint = |icon_foreground| {
-            ButtonPaint::new(rgba(0), rgba(0), rgba(0)).icon_foreground(icon_foreground)
+    #[test]
+    fn tab_control_styles_keep_state_foregrounds_in_both_window_states() {
+        let colors = ChromeColors {
+            tab_active_icon: Color::rgb(0x112233),
+            tab_inactive_selected_icon: Color::rgb(0x223344),
+            tab_hover_icon: Color::rgb(0x334455),
+            ..ChromeColors::default()
         };
-        let neutral =
-            ButtonVariantStyle::new(paint(normal), paint(normal), paint(normal), paint(normal));
-        let ghost =
-            ButtonVariantStyle::new(paint(normal), paint(hovered), paint(pressed), paint(normal));
-        let metrics = ButtonMetrics::new(px(28.0));
-        ButtonTheme::new(
-            ButtonVariants::new(neutral, neutral, neutral, ghost, neutral, neutral, neutral),
-            ButtonSizes::new(metrics, metrics, metrics, metrics),
-            normal,
-        )
+        for window_active in [false, true] {
+            let style = TabChromePresentation::resolve(window_active, &colors)
+                .control_style(true, false, &colors);
+            assert_eq!(
+                style.normal().foreground(),
+                gpui_color(if window_active {
+                    colors.tab_active_icon
+                } else {
+                    colors.tab_inactive_selected_icon
+                })
+            );
+            assert_eq!(
+                style.hovered().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+            assert_eq!(
+                style.pressed().foreground(),
+                gpui_color(colors.tab_hover_icon)
+            );
+        }
     }
 
     struct InspectedIconStyle {
@@ -1565,11 +1998,12 @@ mod tests {
         let (_manager, _records, cx) = tab_manager(cx);
         let normal = rgba(0x11_22_33_ff);
         let hovered = rgba(0x22_cc_44_ff);
-        let pressed = rgba(0x44_66_ee_ff);
         let observed = Rc::new(RefCell::new(Vec::new()));
         let observed_styles = Rc::clone(&observed);
         cx.update(|window, cx| {
-            cx.set_global(tab_icon_test_theme(normal, hovered, pressed));
+            let mut appearance = crate::ui::appearance::chrome(cx).clone();
+            appearance.colors.tab_hover_icon = Color::rgb(0x22cc44);
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
             cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
                 observed_styles.borrow_mut().push(InspectedIconStyle {
                     family: state
@@ -1599,13 +2033,15 @@ mod tests {
             );
             assert_eq!(
                 inspect_icon_foreground(selector, true, &observed, cx),
-                Hsla::from(pressed),
+                Hsla::from(hovered),
                 "{selector} must paint its glyph with the pressed IconButton foreground"
             );
         }
 
         cx.update(|window, cx| {
-            cx.set_global(tab_icon_test_theme(normal, normal, normal));
+            let mut appearance = crate::ui::appearance::chrome(cx).clone();
+            appearance.colors.tab_hover_icon = Color::rgb(0x112233);
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
             window.refresh();
         });
         cx.deactivate_window();
@@ -1615,6 +2051,113 @@ mod tests {
             Hsla::from(normal),
             "the new-tab SVG must retain the shared icon tint in an inactive window"
         );
+    }
+
+    #[gpui::test]
+    fn tab_close_glyph_should_follow_parent_hover_in_both_window_states(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        let parent_hover = rgba(0x11_22_33_ff);
+        let direct_hover = rgba(0x44_55_66_ff);
+        let rendered = manager.read_with(cx, |manager, _| {
+            Rc::clone(&manager.rendered_active_close_icon)
+        });
+        let rendered_inactive = manager.read_with(cx, |manager, _| {
+            Rc::clone(&manager.rendered_inactive_close_icon)
+        });
+        cx.update(|window, cx| {
+            let mut appearance = crate::ui::appearance::chrome(cx).clone();
+            appearance.colors.tab_active_background = Color::rgb(0x000000);
+            appearance.colors.tab_active_icon = Color::rgb(0xffffff);
+            appearance.colors.tab_inactive_selected_background = Color::rgb(0x000000);
+            appearance.colors.tab_inactive_selected_icon = Color::rgb(0xffffff);
+            appearance.colors.tab_active_hover_background = Color::rgb(0xffffff);
+            appearance.colors.tab_active_hover_foreground = Color::rgb(0x000000);
+            appearance.colors.tab_active_hover_icon = Color::rgb(0x112233);
+            appearance.colors.tab_hover_icon = Color::rgb(0x445566);
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let title = cx
+            .debug_bounds("tab-title-1")
+            .expect("the Active Tab title was not rendered")
+            .center();
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the Active Tab close button was not rendered")
+            .center();
+
+        cx.simulate_mouse_move(title, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            rendered.get(),
+            parent_hover,
+            "hovering the Active Tab title should repaint its rendered close glyph for the selected-hover fill"
+        );
+
+        cx.simulate_mouse_move(close, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            rendered.get(),
+            direct_hover,
+            "direct close hover should retain the IconButton's own foreground"
+        );
+
+        cx.simulate_mouse_move(title, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.deactivate_window();
+        cx.simulate_mouse_move(title, None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(!manager.read_with(cx, |manager, _| manager.rendered_window_active));
+        assert_eq!(
+            rendered.get(),
+            parent_hover,
+            "an inactive OS window should use the same selected-hover close glyph over the selected-hover fill"
+        );
+
+        cx.simulate_mouse_move(close, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            rendered.get(),
+            direct_hover,
+            "direct close hover should remain independent in an inactive OS window"
+        );
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+        let inactive_title = cx
+            .debug_bounds("tab-title-1")
+            .expect("the inactive Tab title was not rendered")
+            .center();
+        let inactive_close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the inactive Tab close button was not rendered")
+            .center();
+
+        for window_active in [false, true] {
+            if window_active {
+                cx.update(|window, _| window.activate_window());
+                cx.run_until_parked();
+            }
+            cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(
+                rendered_inactive.get(),
+                direct_hover,
+                "window_active={window_active}: hovering an inactive Tab title should use the Tab hover icon on its revealed Close control"
+            );
+
+            cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(
+                rendered_inactive.get(),
+                direct_hover,
+                "window_active={window_active}: direct hover should retain the Close control's own Tab hover icon"
+            );
+        }
     }
     use crate::domain::PaneId;
     use crate::domain::ZoomState;
@@ -1865,6 +2408,16 @@ mod tests {
     ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        open_tab_manager(cx)
+    }
+
+    fn open_tab_manager(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TabManager>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2052,10 +2605,14 @@ mod tests {
         assert_eq!(records.commands().len(), commands_before);
     }
 
+    /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
+    ///
+    /// The chip is what carries that reading, and it only works while it keeps air on every side:
+    /// against its own item, against the chip beside it, and against the one seam still drawn under
+    /// the bar. The item itself keeps the full height of the bar, because the inset is paint and
+    /// must never shrink what a pointer can hit.
     #[gpui::test]
-    fn tab_bar_should_keep_dim_dividers_beneath_every_item_and_accent_the_active_tab(
-        cx: &mut TestAppContext,
-    ) {
+    fn every_tab_should_float_as_an_inset_chip_over_one_structural_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
@@ -2065,52 +2622,273 @@ mod tests {
         let divider = cx
             .debug_bounds("tab-bar-divider")
             .expect("the Tab bar divider was not rendered");
-        let underline = cx
-            .debug_bounds("tab-item-2-underline")
-            .expect("the Active Tab underline was not rendered");
-        let inactive_item = cx
-            .debug_bounds("tab-item-1-inactive")
-            .expect("the inactive Tab item was not rendered");
         let active_item = cx
             .debug_bounds("tab-item-2-active")
             .expect("the Active Tab item was not rendered");
-        let item_divider = cx
-            .debug_bounds("tab-item-1-divider")
-            .expect("the Tab item divider was not rendered");
-        let inactive_bottom_divider = cx
-            .debug_bounds("tab-item-1-bottom-divider")
-            .expect("the inactive Tab bottom divider was not rendered");
-        let active_bottom_divider = cx
-            .debug_bounds("tab-item-2-bottom-divider")
-            .expect("the Active Tab bottom divider was not rendered");
+        let inactive_chip = cx
+            .debug_bounds("tab-item-1-chip")
+            .expect("the inactive Tab chip was not rendered");
+        let active_chip = cx
+            .debug_bounds("tab-item-2-chip")
+            .expect("the Active Tab chip was not rendered");
 
         assert_eq!(
-            (
-                bar.size.height,
-                divider.size.height,
-                underline.size.height,
-                divider.origin.y + divider.size.height,
-                item_divider.size.width,
-                item_divider.size.height,
-                item_divider.origin.x + item_divider.size.width,
-                inactive_bottom_divider.origin.y,
-                inactive_bottom_divider.size,
-                active_bottom_divider.origin.y,
-                active_bottom_divider.size,
+            (active_item.size.height, bar.size.height),
+            (px(TAB_BAR_HEIGHT), px(TAB_BAR_HEIGHT)),
+            "a Tab should keep the full height of the bar as its hit target"
+        );
+        assert_eq!(
+            active_chip,
+            gpui::bounds(
+                gpui::point(
+                    active_item.origin.x + px(TAB_CHIP_INSET_X),
+                    active_item.origin.y + px(TAB_CHIP_INSET_Y),
+                ),
+                gpui::size(
+                    active_item.size.width - px(TAB_CHIP_INSET_X * 2.0),
+                    active_item.size.height - px(TAB_CHIP_INSET_Y * 2.0),
+                ),
             ),
-            (
-                px(TAB_BAR_HEIGHT),
-                px(TAB_BAR_DIVIDER_SIZE),
-                px(TAB_BAR_DIVIDER_SIZE),
-                underline.origin.y + underline.size.height,
-                px(TAB_BAR_DIVIDER_SIZE),
-                inactive_item.size.height,
-                inactive_item.origin.x + inactive_item.size.width,
-                divider.origin.y,
-                gpui::size(inactive_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
-                divider.origin.y,
-                gpui::size(active_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
-            )
+            "the Active Tab material should float inside its item"
+        );
+        assert_eq!(
+            active_chip.left() - inactive_chip.right(),
+            px(TAB_CHIP_INSET_X * 2.0),
+            "neighbouring Tabs should leave the bar visible between them"
+        );
+        assert!(
+            active_chip.bottom() < divider.origin.y,
+            "the Active Tab should clear the seam under the bar, got {active_chip:?} against \
+             {divider:?}"
+        );
+        assert_eq!(
+            (divider.size.height, divider.size.width),
+            (px(TAB_BAR_DIVIDER_SIZE), bar.size.width),
+            "the one seam under the bar should run its whole width"
+        );
+        for stale in [
+            "tab-item-1-divider",
+            "tab-item-1-bottom-divider",
+            "tab-item-2-underline",
+        ] {
+            assert!(
+                cx.debug_bounds(stale).is_none(),
+                "{stale} should no longer be drawn beside the chip"
+            );
+        }
+    }
+
+    fn leaked_selector(selector: String) -> &'static str {
+        Box::leak(selector.into_boxed_str())
+    }
+
+    /// Opens a fresh four-Tab row for each density and selected position and checks every
+    /// boundary.
+    ///
+    /// Each position gets its own window because rendered debug bounds outlive the frame that drew
+    /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
+    ///
+    /// A boundary is marked only while both of its Tabs are inactive. The mark is a hairline one
+    /// logical point wide at every density, whose length scales with density from its 18-point
+    /// Compact baseline to 22.5 points at Comfortable. It is laid out on whole device pixels, painted entirely inside one of
+    /// the two Tabs against their shared edge and clear of both chips, so neither layout rounding,
+    /// an ancestor's clip, nor a neighbour's paint can take it away. It carries no hit target of its
+    /// own. The shared edge is found from the rendered items rather than assumed to run left to
+    /// right.
+    fn assert_separators_mark_only_inactive_neighbours(
+        cx: &mut TestAppContext,
+        direction: spaceterm_ui::TextDirection,
+    ) {
+        use crate::appearance::ChromeDensity;
+
+        cx.update(|cx| crate::ui::init_with_text_direction(cx, direction))
+            .expect("UI initialization should succeed");
+        let within = |inner: gpui::Bounds<Pixels>, outer: gpui::Bounds<Pixels>| {
+            inner.left() >= outer.left()
+                && inner.right() <= outer.right()
+                && inner.top() >= outer.top()
+                && inner.bottom() <= outer.bottom()
+        };
+        let overlaps = |a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>| {
+            a.left() < b.right()
+                && b.left() < a.right()
+                && a.top() < b.bottom()
+                && b.top() < a.bottom()
+        };
+        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+            let expected_length = match density {
+                ChromeDensity::Compact => px(18.0),
+                ChromeDensity::Comfortable => px(22.5),
+            };
+            cx.update(|cx| {
+                let mut appearance = crate::ui::appearance::chrome(cx).clone();
+                appearance.spacing_scale =
+                    crate::ui::appearance::ChromeAppearance::density_spacing_scale(density);
+                cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            });
+            for selected in 1..=4_u64 {
+                let (manager, _records, cx) = open_tab_manager(cx);
+                cx.update(|window, cx| {
+                    manager.update(cx, |manager, cx| {
+                        for _ in 1..4 {
+                            manager.create_tab(window, cx);
+                        }
+                        manager.activate_tab_at(selected as usize - 1, window, cx);
+                    });
+                });
+                cx.run_until_parked();
+                assert_eq!(
+                    manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+                    TabId::new(selected)
+                );
+                let scale_factor = cx.update(|window, _| window.scale_factor());
+                let on_device_pixels = |value: Pixels| {
+                    let device = f32::from(value) * scale_factor;
+                    (device - device.round()).abs() < 1e-3
+                };
+                let item = |tab: u64, cx: &mut VisualTestContext| {
+                    let state = if tab == selected {
+                        "active"
+                    } else {
+                        "inactive"
+                    };
+                    cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-{state}")))
+                        .unwrap_or_else(|| panic!("Tab {tab} was not rendered"))
+                };
+                let chip = |tab: u64, cx: &mut VisualTestContext| {
+                    cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-chip")))
+                        .unwrap_or_else(|| panic!("Tab {tab} chip was not rendered"))
+                };
+
+                for leading in 1..4_u64 {
+                    let trailing = leading + 1;
+                    let separator = cx.debug_bounds(leaked_selector(format!(
+                        "tab-separator-{leading}-{trailing}"
+                    )));
+                    let leading_item = item(leading, cx);
+                    let trailing_item = item(trailing, cx);
+                    let shared_edge = if leading_item.right() == trailing_item.left() {
+                        leading_item.right()
+                    } else {
+                        assert_eq!(
+                            trailing_item.right(),
+                            leading_item.left(),
+                            "neighbouring Tabs {leading} and {trailing} should keep contiguous hit \
+                         targets with Tab {selected} selected"
+                        );
+                        leading_item.left()
+                    };
+
+                    let touches_selected = leading == selected || trailing == selected;
+                    match (separator, touches_selected) {
+                        (Some(separator), false) => {
+                            assert_eq!(
+                                separator.size.width,
+                                px(TAB_SEPARATOR_WIDTH),
+                                "the separator should stay a one-point hairline at {density:?} \
+                             density, got {separator:?}"
+                            );
+                            assert!(
+                                on_device_pixels(separator.left())
+                                    && on_device_pixels(separator.size.width),
+                                "the separator should be laid out on whole device pixels at scale \
+                             {scale_factor}, got {separator:?}"
+                            );
+                            assert!(
+                                separator.size.height == expected_length
+                                    && separator.size.height < leading_item.size.height,
+                                "the separator should scale to {expected_length:?} at {density:?} \
+                             density and stay shorter than the Tab, got {separator:?}"
+                            );
+                            assert!(
+                                (separator.center().y - leading_item.center().y).abs() <= px(0.5),
+                                "the separator should be centred on the bar, got {separator:?}"
+                            );
+                            assert!(
+                                within(separator, leading_item) || within(separator, trailing_item),
+                                "the separator should paint inside one of Tabs {leading} and \
+                             {trailing} rather than across their edge, got {separator:?} between \
+                             {leading_item:?} and {trailing_item:?}"
+                            );
+                            assert!(
+                                separator.left() == shared_edge || separator.right() == shared_edge,
+                                "the separator should rest against the shared edge of Tabs {leading} \
+                             and {trailing}, got {separator:?} at {shared_edge:?}"
+                            );
+                            for tab in [leading, trailing] {
+                                let chip = chip(tab, cx);
+                                assert!(
+                                    !overlaps(separator, chip),
+                                    "the separator should stay clear of Tab {tab}'s chip, got \
+                                 {separator:?} and {chip:?}"
+                                );
+                            }
+                        }
+                        (None, true) => {}
+                        (Some(_), true) => panic!(
+                            "no separator should touch selected Tab {selected} at boundary \
+                         {leading}-{trailing}"
+                        ),
+                        (None, false) => panic!(
+                            "inactive Tabs {leading} and {trailing} should be separated with Tab \
+                         {selected} selected"
+                        ),
+                    }
+                }
+
+                // The mark is paint only: a press on it lands on the Tab that contains it, and a press
+                // just across the shared edge lands on the neighbour.
+                let (leading, trailing, across) = match selected {
+                    4 => (1, 2, false),
+                    1 => (3, 4, true),
+                    _ => continue,
+                };
+                let separator = cx
+                    .debug_bounds(leaked_selector(format!(
+                        "tab-separator-{leading}-{trailing}"
+                    )))
+                    .expect("the boundary between two inactive Tabs should be marked");
+                let leading_item = item(leading, cx);
+                let (owner, neighbour) = if within(separator, leading_item) {
+                    (leading, trailing)
+                } else {
+                    (trailing, leading)
+                };
+                let position = if across {
+                    let owner_item = item(owner, cx);
+                    let x = if separator.center().x > owner_item.center().x {
+                        separator.right() + px(1.0)
+                    } else {
+                        separator.left() - px(1.0)
+                    };
+                    point(x, separator.center().y)
+                } else {
+                    separator.center()
+                };
+                cx.simulate_mouse_move(position, None, Modifiers::none());
+                cx.simulate_click(position, Modifiers::none());
+                cx.run_until_parked();
+                assert_eq!(
+                    manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+                    TabId::new(if across { neighbour } else { owner })
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn separators_should_mark_only_boundaries_between_inactive_tabs(cx: &mut TestAppContext) {
+        assert_separators_mark_only_inactive_neighbours(
+            cx,
+            spaceterm_ui::TextDirection::LeftToRight,
+        );
+    }
+
+    #[gpui::test]
+    fn separators_should_follow_tab_boundaries_under_right_to_left_text(cx: &mut TestAppContext) {
+        assert_separators_mark_only_inactive_neighbours(
+            cx,
+            spaceterm_ui::TextDirection::RightToLeft,
         );
     }
 

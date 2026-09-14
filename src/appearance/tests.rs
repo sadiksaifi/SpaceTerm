@@ -39,7 +39,7 @@ fn builtin_list_hover_and_selection_match_without_aliasing_the_roles() {
     for appearance in [Appearance::Dark, Appearance::Light] {
         let mut colors = super::builtin::chrome_base(appearance);
         let selected = colors.ghost_element_selected;
-        assert_eq!(colors.ghost_element_hover, selected);
+        assert_ne!(colors.primary_background, selected);
         colors.apply(&ChromeColorOverrides {
             ghost_element_hover: Some(Color::rgba(0x12345680)),
             ..ChromeColorOverrides::default()
@@ -78,193 +78,21 @@ fn dark_defaults_match_the_consumed_vague_pro_values() {
         terminal.dim_foreground,
         crate::theme::ACTIVE_THEME.terminal_dim_foreground
     );
-
-    let chrome = ChromeColors::default();
-    let legacy = &*crate::theme::ACTIVE_THEME;
-    let equivalent = [
-        ("background", chrome.background, legacy.background),
-        (
-            "panel_background",
-            chrome.panel_background,
-            legacy.panel_background,
-        ),
-        (
-            "elevated_surface_background",
-            chrome.elevated_surface_background,
-            legacy.elevated_surface_background,
-        ),
-        (
-            "title_bar_background",
-            chrome.title_bar_background,
-            legacy.title_bar_background,
-        ),
-        (
-            "title_bar_inactive_background",
-            chrome.title_bar_inactive_background,
-            legacy.title_bar_inactive_background,
-        ),
-        (
-            "tab_active_background",
-            chrome.tab_active_background,
-            legacy.tab_active_background,
-        ),
-        (
-            "tab_inactive_background",
-            chrome.tab_inactive_background,
-            legacy.tab_inactive_background,
-        ),
-        ("text", chrome.text, legacy.text),
-        ("text_muted", chrome.text_muted, legacy.text_muted),
-        (
-            "text_placeholder",
-            chrome.text_placeholder,
-            legacy.text_placeholder,
-        ),
-        ("text_disabled", chrome.text_disabled, legacy.text_disabled),
-        ("text_accent", chrome.text_accent, legacy.text_accent),
-        (
-            "link_text_hover",
-            chrome.link_text_hover,
-            legacy.link_text_hover,
-        ),
-        ("icon", chrome.icon, legacy.icon),
-        ("icon_muted", chrome.icon_muted, legacy.icon_muted),
-        ("icon_disabled", chrome.icon_disabled, legacy.icon_disabled),
-        ("icon_accent", chrome.icon_accent, legacy.icon_accent),
-        ("border", chrome.border, legacy.border),
-        (
-            "border_variant",
-            chrome.border_variant,
-            legacy.border_variant,
-        ),
-        (
-            "border_focused",
-            chrome.border_focused,
-            legacy.border_focused,
-        ),
-        (
-            "border_selected",
-            chrome.border_selected,
-            legacy.border_selected,
-        ),
-        (
-            "border_disabled",
-            chrome.border_disabled,
-            legacy.border_disabled,
-        ),
-        (
-            "border_transparent",
-            chrome.border_transparent,
-            legacy.border_transparent,
-        ),
-        (
-            "element_background",
-            chrome.element_background,
-            legacy.element_background,
-        ),
-        ("element_hover", chrome.element_hover, legacy.element_hover),
-        (
-            "element_active",
-            chrome.element_active,
-            legacy.element_active,
-        ),
-        (
-            "element_selected",
-            chrome.element_selected,
-            legacy.element_selected,
-        ),
-        (
-            "element_disabled",
-            chrome.element_disabled,
-            legacy.element_disabled,
-        ),
-        (
-            "ghost_element_background",
-            chrome.ghost_element_background,
-            legacy.ghost_element_background,
-        ),
-        (
-            "ghost_element_hover",
-            chrome.ghost_element_hover,
-            legacy.ghost_element_hover,
-        ),
-        (
-            "ghost_element_active",
-            chrome.ghost_element_active,
-            legacy.ghost_element_active,
-        ),
-        (
-            "ghost_element_selected",
-            chrome.ghost_element_selected,
-            legacy.ghost_element_selected,
-        ),
-        (
-            "ghost_element_disabled",
-            chrome.ghost_element_disabled,
-            legacy.ghost_element_disabled,
-        ),
-        ("info", chrome.info, legacy.info),
-        (
-            "info_background",
-            chrome.info_background,
-            legacy.info_background,
-        ),
-        ("success", chrome.success, legacy.success),
-        ("warning", chrome.warning, legacy.warning),
-        (
-            "warning_background",
-            chrome.warning_background,
-            legacy.warning_background,
-        ),
-        (
-            "warning_border",
-            chrome.warning_border,
-            legacy.warning_border,
-        ),
-        ("error", chrome.error, legacy.error),
-        (
-            "error_background",
-            chrome.error_background,
-            legacy.error_background,
-        ),
-        ("error_border", chrome.error_border, legacy.error_border),
-        ("modal_scrim", chrome.modal_scrim, legacy.modal_scrim),
-        (
-            "scrollbar_track_border",
-            chrome.scrollbar_track_border,
-            legacy.scrollbar_track_border,
-        ),
-        (
-            "scrollbar_thumb_background",
-            chrome.scrollbar_thumb_background,
-            legacy.scrollbar_thumb_background,
-        ),
-        (
-            "scrollbar_thumb_border",
-            chrome.scrollbar_thumb_border,
-            legacy.scrollbar_thumb_border,
-        ),
-        (
-            "scrollbar_thumb_hover_background",
-            chrome.scrollbar_thumb_hover_background,
-            legacy.scrollbar_thumb_hover_background,
-        ),
-    ];
-    for (role, actual, expected) in equivalent {
-        assert_eq!(actual, expected, "{role}");
-    }
 }
 
 #[test]
-fn four_dimensions_resolve_independently() {
+fn color_and_typography_dimensions_resolve_independently() {
     let defaults = AppearancePreferences::default();
     let baseline = resolve(&defaults);
 
     let mut chrome_colors = defaults.clone();
-    chrome_colors.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.spaceterm.chrome.light"),
-        appearance: Appearance::Light,
-    };
+    chrome_colors.chrome.overrides.insert(
+        builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+        ChromeColorOverrides {
+            background: Some(Color::rgb(0x121314)),
+            ..Default::default()
+        },
+    );
     let changed = resolve(&chrome_colors);
     assert_ne!(changed.chrome.colors, baseline.chrome.colors);
     assert_eq!(changed.chrome.typography, baseline.chrome.typography);
@@ -278,10 +106,13 @@ fn four_dimensions_resolve_independently() {
     assert_eq!(changed.terminal, baseline.terminal);
 
     let mut terminal_colors = defaults.clone();
-    terminal_colors.terminal.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.spaceterm.terminal.light"),
-        appearance: Appearance::Light,
-    };
+    terminal_colors.terminal.overrides.insert(
+        builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
+        TerminalColorOverrides {
+            foreground: Some(Color::rgb(0xaabbcc)),
+            ..Default::default()
+        },
+    );
     let changed = resolve(&terminal_colors);
     assert_ne!(changed.terminal.colors, baseline.terminal.colors);
     assert_eq!(changed.terminal.typography, baseline.terminal.typography);
@@ -296,34 +127,28 @@ fn four_dimensions_resolve_independently() {
 }
 
 #[test]
-fn fixed_and_system_policies_cover_all_light_dark_pairs() {
-    for chrome in [Appearance::Light, Appearance::Dark] {
-        for terminal in [Appearance::Light, Appearance::Dark] {
-            let mut preferences = AppearancePreferences::default();
-            preferences.chrome.scheme = SchemeSelection::Fixed {
-                id: match chrome {
-                    Appearance::Light => SchemeId::builtin("builtin.spaceterm.chrome.light"),
-                    Appearance::Dark => SchemeId::builtin("builtin.vague-pro.chrome.dark"),
-                },
-                appearance: chrome,
-            };
-            preferences.terminal.scheme = SchemeSelection::Fixed {
-                id: match terminal {
-                    Appearance::Light => SchemeId::builtin("builtin.spaceterm.terminal.light"),
-                    Appearance::Dark => SchemeId::builtin("builtin.vague-pro.terminal.dark"),
-                },
-                appearance: terminal,
-            };
-            let resolved = resolve(&preferences);
-            assert_eq!(resolved.chrome.appearance, chrome);
-            assert_eq!(resolved.terminal.appearance, terminal);
-        }
+fn one_mode_selects_the_matching_slot_for_both_domains() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let preferences = AppearancePreferences {
+            mode: appearance.into(),
+            ..Default::default()
+        };
+        let resolved = resolve(&preferences);
+        assert_eq!(resolved.chrome.appearance, appearance);
+        assert_eq!(resolved.terminal.appearance, appearance);
+        assert_eq!(
+            resolved.chrome.requested_scheme,
+            *preferences.chrome.schemes.get(appearance)
+        );
+        assert_eq!(
+            resolved.terminal.requested_scheme,
+            *preferences.terminal.schemes.get(appearance)
+        );
     }
 
-    let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::System {
-        light: SchemeId::builtin("builtin.spaceterm.chrome.light"),
-        dark: SchemeId::builtin("builtin.vague-pro.chrome.dark"),
+    let preferences = AppearancePreferences {
+        mode: AppearanceMode::Auto,
+        ..Default::default()
     };
     let catalog = SchemeCatalog::default();
     let light = catalog
@@ -343,18 +168,56 @@ fn fixed_and_system_policies_cover_all_light_dark_pairs() {
         )
         .unwrap();
     assert_eq!(light.chrome.appearance, Appearance::Light);
+    assert_eq!(light.terminal.appearance, Appearance::Light);
     assert_eq!(dark.chrome.appearance, Appearance::Dark);
-    assert_eq!(light.terminal, dark.terminal);
+    assert_eq!(dark.terminal.appearance, Appearance::Dark);
+}
+
+#[test]
+fn missing_system_appearance_is_diagnostic_only_for_auto() {
+    let catalog = SchemeCatalog::default();
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        let preferences = AppearancePreferences {
+            mode,
+            ..Default::default()
+        };
+        let resolved = catalog
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable(),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        assert!(
+            !resolved
+                .diagnostics
+                .contains(&AppearanceDiagnostic::SystemAppearanceUnavailable)
+        );
+    }
+
+    let preferences = AppearancePreferences {
+        mode: AppearanceMode::Auto,
+        ..Default::default()
+    };
+    let resolved = resolve(&preferences);
+    assert!(
+        resolved
+            .diagnostics
+            .contains(&AppearanceDiagnostic::SystemAppearanceUnavailable)
+    );
+    assert_eq!(resolved.chrome.appearance, Appearance::Dark);
+    assert_eq!(resolved.terminal.appearance, Appearance::Dark);
 }
 
 #[test]
 fn unavailable_resources_preserve_requests_and_report_effective_fallbacks() {
     let missing = SchemeId::new("missing.chrome").unwrap();
-    let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: missing.clone(),
-        appearance: Appearance::Light,
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
     };
+    preferences.chrome.schemes.light = missing.clone();
     preferences.terminal.typography.family = TerminalFontFamily::Named {
         family: String::from("Unavailable Mono"),
     };
@@ -449,10 +312,7 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
 #[test]
 fn a_known_wrong_kind_or_classification_is_rejected() {
     let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.vague-pro.terminal.dark"),
-        appearance: Appearance::Dark,
-    };
+    preferences.chrome.schemes.dark = SchemeId::builtin("builtin.vague-pro.terminal.dark");
     assert!(matches!(
         SchemeCatalog::default().resolve(
             AppearanceGeneration::INITIAL,
@@ -463,10 +323,8 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
         Err(ResolutionError::WrongSchemeKind)
     ));
 
-    preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.vague-pro.chrome.dark"),
-        appearance: Appearance::Light,
-    };
+    preferences.mode = AppearanceMode::Light;
+    preferences.chrome.schemes.light = SchemeId::builtin("builtin.vague-pro.chrome.dark");
     assert!(matches!(
         SchemeCatalog::default().resolve(
             AppearanceGeneration::INITIAL,
@@ -500,10 +358,8 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
 
 fn reset_fixture() -> AppearanceDocument {
     let mut document = AppearanceDocument::default();
-    document.preferences.chrome.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.spaceterm.chrome.light"),
-        appearance: Appearance::Light,
-    };
+    document.preferences.mode = AppearanceMode::Light;
+    document.preferences.chrome.schemes.light = SchemeId::new("missing.reset.chrome").unwrap();
     document.preferences.chrome.typography.family = ChromeFontFamily::Named {
         family: String::from("Helvetica Neue"),
     };
@@ -517,10 +373,7 @@ fn reset_fixture() -> AppearanceDocument {
         ChromeColorOverrides::complete(&ChromeColors::default()),
     );
 
-    document.preferences.terminal.scheme = SchemeSelection::Fixed {
-        id: SchemeId::builtin("builtin.spaceterm.terminal.light"),
-        appearance: Appearance::Light,
-    };
+    document.preferences.terminal.schemes.light = SchemeId::new("missing.reset.terminal").unwrap();
     document.preferences.terminal.typography.family = TerminalFontFamily::Named {
         family: String::from("Menlo"),
     };
@@ -538,6 +391,7 @@ fn reset_fixture() -> AppearanceDocument {
     document
         .custom_schemes
         .push(CustomScheme::Chrome(Box::new(ChromeScheme {
+            window_background: None,
             id: SchemeId::new("custom.reset-fixture").unwrap(),
             name: String::from("Reset Fixture"),
             appearance: Appearance::Dark,
@@ -553,50 +407,40 @@ fn reset_fixture() -> AppearanceDocument {
 /// The appearance mode belongs to the one control spanning both surfaces, so restoring one
 /// surface's scheme must not move that surface to a different mode and leave the other behind.
 #[test]
-fn resetting_a_surfaces_scheme_keeps_the_appearance_mode() {
-    for mode in [
-        SchemeSelection::Fixed {
-            id: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
-            appearance: Appearance::Light,
-        },
-        SchemeSelection::System {
-            light: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
-            dark: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
-        },
-    ] {
-        let mut preferences = AppearancePreferences::default();
-        preferences.chrome.scheme = mode.clone();
-        let before = preferences.clone();
+fn resetting_a_scheme_slot_keeps_the_mode_and_other_slots() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Auto,
+        ..Default::default()
+    };
+    preferences.chrome.schemes.light = SchemeId::new("missing.changed.chrome").unwrap();
+    let dark = preferences.chrome.schemes.dark.clone();
+    let terminal = preferences.terminal.schemes.clone();
 
-        preferences.reset(ResetTarget::ChromeSchemeChoice);
+    preferences.reset(ResetTarget::ChromeScheme(Appearance::Light));
 
-        assert_eq!(
-            preferences, before,
-            "a default scheme under {mode:?} should already be at its default"
-        );
-        assert_eq!(
-            preferences.terminal.scheme, before.terminal.scheme,
-            "the other surface is untouched"
-        );
-    }
+    assert_eq!(preferences.mode, AppearanceMode::Auto);
+    assert_eq!(
+        preferences.chrome.schemes.light,
+        AppearancePreferences::default().chrome.schemes.light
+    );
+    assert_eq!(preferences.chrome.schemes.dark, dark);
+    assert_eq!(preferences.terminal.schemes, terminal);
 }
 
-/// Restoring the whole selection is still available, and it does move the mode.
 #[test]
-fn resetting_both_selections_restores_the_default_mode() {
-    let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::System {
-        light: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
-        dark: builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Dark),
+fn resetting_the_mode_preserves_every_scheme_slot() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Auto,
+        ..Default::default()
     };
-    preferences.terminal.scheme = SchemeSelection::System {
-        light: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Light),
-        dark: builtin_fallback_scheme(SchemeKind::Terminal, Appearance::Dark),
-    };
+    let chrome = preferences.chrome.schemes.clone();
+    let terminal = preferences.terminal.schemes.clone();
 
-    preferences.reset(ResetTarget::SchemeSelections);
+    preferences.reset(ResetTarget::AppearanceMode);
 
-    assert_eq!(preferences, AppearancePreferences::default());
+    assert_eq!(preferences.mode, AppearanceMode::Dark);
+    assert_eq!(preferences.chrome.schemes, chrome);
+    assert_eq!(preferences.terminal.schemes, terminal);
 }
 
 #[test]
@@ -604,8 +448,11 @@ fn every_individual_preference_reset_changes_only_its_field() {
     type ExpectedEdit = fn(&mut AppearancePreferences);
     let defaults = AppearancePreferences::default();
     let cases: Vec<(ResetTarget, ExpectedEdit)> = vec![
-        (ResetTarget::ChromeSchemeSelection, |value| {
-            value.chrome.scheme = AppearancePreferences::default().chrome.scheme;
+        (ResetTarget::AppearanceMode, |value| {
+            value.mode = AppearancePreferences::default().mode;
+        }),
+        (ResetTarget::ChromeScheme(Appearance::Light), |value| {
+            value.chrome.schemes.light = AppearancePreferences::default().chrome.schemes.light;
         }),
         (ResetTarget::ChromeFontFamily, |value| {
             value.chrome.typography.family =
@@ -633,13 +480,9 @@ fn every_individual_preference_reset_changes_only_its_field() {
                 .typography
                 .heading_weight;
         }),
-        (ResetTarget::TerminalSchemeSelection, |value| {
-            value.terminal.scheme = AppearancePreferences::default().terminal.scheme;
+        (ResetTarget::TerminalScheme(Appearance::Light), |value| {
+            value.terminal.schemes.light = AppearancePreferences::default().terminal.schemes.light;
         }),
-        // The fixture already holds each slot's default scheme, so what these two prove is what
-        // they leave alone: the appearance mode, and the other surface.
-        (ResetTarget::ChromeSchemeChoice, |_| {}),
-        (ResetTarget::TerminalSchemeChoice, |_| {}),
         (ResetTarget::TerminalFontFamily, |value| {
             value.terminal.typography.family =
                 AppearancePreferences::default().terminal.typography.family;
@@ -679,7 +522,7 @@ fn every_individual_preference_reset_changes_only_its_field() {
                 .bold_as_bright;
         }),
     ];
-    assert_eq!(cases.len(), 16);
+    assert_eq!(cases.len(), 15);
 
     for (target, expected_edit) in cases {
         let mut actual = reset_fixture();
@@ -700,7 +543,7 @@ fn group_and_all_resets_have_exact_scope_and_retain_custom_schemes() {
     let cases: Vec<(ResetTarget, ExpectedEdit)> = vec![
         (ResetTarget::ChromeColors, |value| {
             let defaults = AppearancePreferences::default();
-            value.chrome.scheme = defaults.chrome.scheme;
+            value.chrome.schemes = defaults.chrome.schemes;
             value.chrome.overrides.clear();
         }),
         (ResetTarget::ChromeTypography, |value| {
@@ -711,7 +554,7 @@ fn group_and_all_resets_have_exact_scope_and_retain_custom_schemes() {
         }),
         (ResetTarget::TerminalColors, |value| {
             let defaults = AppearancePreferences::default();
-            value.terminal.scheme = defaults.terminal.scheme;
+            value.terminal.schemes = defaults.terminal.schemes;
             value.terminal.overrides.clear();
         }),
         (ResetTarget::TerminalTypography, |value| {
@@ -719,11 +562,6 @@ fn group_and_all_resets_have_exact_scope_and_retain_custom_schemes() {
         }),
         (ResetTarget::TerminalRendering, |value| {
             value.terminal.rendering = AppearancePreferences::default().terminal.rendering;
-        }),
-        (ResetTarget::SchemeSelections, |value| {
-            let defaults = AppearancePreferences::default();
-            value.chrome.scheme = defaults.chrome.scheme;
-            value.terminal.scheme = defaults.terminal.scheme;
         }),
         (ResetTarget::AllAppearance, |value| {
             *value = AppearancePreferences::default();
@@ -875,10 +713,22 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
 
 #[test]
 fn native_settings_are_canonical_strict_and_round_trip() {
-    let document = AppearanceDocument::default();
+    let mut document = AppearanceDocument::default();
+    document.preferences.mode = AppearanceMode::Auto;
+    document.preferences.chrome.schemes.light = SchemeId::new("missing.chrome.light").unwrap();
+    document.preferences.chrome.schemes.dark = SchemeId::new("missing.chrome.dark").unwrap();
+    document.preferences.terminal.schemes.light = SchemeId::new("missing.terminal.light").unwrap();
+    document.preferences.terminal.schemes.dark = SchemeId::new("missing.terminal.dark").unwrap();
     let encoded = export_settings(&document).unwrap();
+    let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(encoded_value["schema_version"], 2);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    assert!(matches!(parse_settings(br#"{"schema_version":1,"schema_version":1,"revision":0,"preferences":{},"custom_schemes":[]}"#),
+    let unsupported = encoded.replacen("\"schema_version\": 2", "\"schema_version\": 1", 1);
+    assert!(matches!(
+        parse_settings(unsupported.as_bytes()),
+        Err(AppearanceDocumentError::UnsupportedVersion)
+    ));
+    assert!(matches!(parse_settings(br#"{"schema_version":2,"schema_version":2,"revision":0,"preferences":{},"custom_schemes":[]}"#),
         Err(AppearanceDocumentError::DuplicateKey)));
 
     let unknown = encoded.replacen(
@@ -924,6 +774,7 @@ fn invalid_bounds_and_protocol_alpha_are_rejected() {
 #[test]
 fn catalog_batch_install_is_atomic_and_revision_checked() {
     let scheme = CustomScheme::Chrome(Box::new(ChromeScheme {
+        window_background: None,
         id: SchemeId::new("custom.blue").unwrap(),
         name: String::from("Blue"),
         appearance: Appearance::Dark,
@@ -963,8 +814,8 @@ fn zed_import_uses_explicit_candidate_and_deterministic_kind_ids() {
     .unwrap();
     assert_eq!(first, again);
     assert_eq!(first.len(), 2);
-    assert!(first[0].id().as_str().ends_with(".0.chrome"));
-    assert!(first[1].id().as_str().ends_with(".0.terminal"));
+    assert!(first[0].id().as_str().ends_with(".chrome"));
+    assert!(first[1].id().as_str().ends_with(".terminal"));
 
     let duplicate = br##"{
         "themes": [
@@ -996,10 +847,7 @@ fn zed_list_states_remain_distinct_through_native_export_and_resolution() {
         .install_batch(&exported.schemes, 0, &BTreeSet::new())
         .unwrap();
     let mut preferences = AppearancePreferences::default();
-    preferences.chrome.scheme = SchemeSelection::Fixed {
-        id,
-        appearance: Appearance::Dark,
-    };
+    preferences.chrome.schemes.dark = id;
     let resolved = reloaded
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -1044,6 +892,8 @@ fn native_examples_and_complete_export_follow_the_runtime_contract() {
         ],
     )
     .unwrap();
+    let encoded: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(encoded["schema_version"], 1);
     let exported = parse_color_document(output.as_bytes()).unwrap();
     match &exported.schemes[0] {
         CustomScheme::Chrome(scheme) => assert!(scheme.colors.background.is_some()),

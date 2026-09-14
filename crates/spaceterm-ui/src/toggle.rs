@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
 
-const INTERACTION_GROUP: &str = "spaceterm-toggle";
+pub(crate) const INTERACTION_GROUP: &str = "spaceterm-toggle";
 
 /// The state represented by a checkbox.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -342,6 +342,25 @@ impl ToggleTheme {
         }
     }
 
+    /// Returns the exact value and interaction paint without changing authored color channels.
+    pub fn paint(self, on: bool, enabled: bool, hovered: bool, pressed: bool) -> TogglePaint {
+        let paints = if !enabled {
+            self.paints.disabled
+        } else if pressed {
+            self.paints.pressed
+        } else if hovered {
+            self.paints.hovered
+        } else {
+            self.paints.normal
+        };
+        paints.resolve(on)
+    }
+
+    /// Returns the independent keyboard focus outline color.
+    pub fn focus_border(self) -> Rgba {
+        self.focus_border
+    }
+
     fn resolve(self, size: ToggleSize, on: bool) -> ToggleStyle {
         ToggleStyle {
             normal: self.paints.normal.resolve(on),
@@ -368,6 +387,13 @@ pub struct Checkbox {
 }
 
 impl Checkbox {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a regular checkbox. The complete labeled row is its hit target and a Tab stop.
     pub fn new(
         id: impl Into<ElementId>,
@@ -476,6 +502,13 @@ pub struct Switch {
 }
 
 impl Switch {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a regular binary switch. The complete labeled row is its hit target and a Tab stop.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Self {
         Self {
@@ -571,6 +604,8 @@ enum ToggleKind {
 }
 
 struct ToggleCore {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     label: SharedString,
     label_hidden: bool,
@@ -587,6 +622,8 @@ struct ToggleCore {
 impl ToggleCore {
     fn new(id: ElementId, label: SharedString) -> Self {
         Self {
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
             id,
             label,
             label_hidden: false,
@@ -630,6 +667,15 @@ impl ToggleCore {
         } else {
             style.normal
         };
+        #[cfg(feature = "appearance-exerciser")]
+        let focused = self.preview_state.map_or(focused, |state| state.focused());
+        #[cfg(feature = "appearance-exerciser")]
+        let paint = self.preview_state.map_or(paint, |state| {
+            cx.global::<ToggleTheme>()
+                .paint(on, enabled, state.hovered(), state.pressed())
+        });
+        #[cfg(feature = "appearance-exerciser")]
+        let keyboard_pressed = keyboard_pressed || self.preview_state.is_some();
         let selector = self
             .debug_selector
             .unwrap_or_else(|| self.label.to_string());
@@ -819,6 +865,31 @@ impl TogglePaintRefinement {
     ) -> StyleRefinement {
         crate::refine_control_text(style, font, size, line_height, self.0.label)
     }
+}
+
+/// Shares checkbox presentation with composites that retain specialized interaction ownership.
+pub(crate) fn modal_checkbox_indicator(
+    theme: ToggleTheme,
+    selected: bool,
+    enabled: bool,
+    pressed: bool,
+    selector: String,
+) -> gpui::AnyElement {
+    let style = theme.resolve(ToggleSize::Regular, selected);
+    checkbox_indicator(
+        if selected {
+            CheckboxState::Checked
+        } else {
+            CheckboxState::Unchecked
+        },
+        style,
+        theme.paint(selected, enabled, false, pressed),
+        enabled,
+        pressed,
+        false,
+        selector,
+        String::new(),
+    )
 }
 
 #[expect(

@@ -175,7 +175,17 @@ impl SettingsDraft {
         Ok(crate::appearance::export_settings(&self.draft)?)
     }
 
-    pub(super) fn export_schemes(
+    pub(super) fn export_appearance(
+        &self,
+        resolved: &crate::appearance::ResolvedAppearance,
+    ) -> Result<String, SettingsError> {
+        let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
+        Ok(crate::appearance::export_resolved_schemes(
+            &catalog, resolved,
+        )?)
+    }
+
+    pub(super) fn export_definitions(
         &self,
         schemes: &[(SchemeKind, SchemeId)],
     ) -> Result<String, SettingsError> {

@@ -160,6 +160,10 @@ pub(crate) struct ResolvedChromeAppearance {
     pub(crate) effective_scheme: SchemeId,
     pub(crate) appearance: Appearance,
     pub(crate) colors: ChromeColors,
+    pub(crate) provenance:
+        std::collections::BTreeMap<&'static str, super::compiler::ColorProvenance>,
+    pub(crate) readability: Vec<super::compiler::ChromeReadabilityDiagnostic>,
+    pub(crate) composition: super::ResolvedWindowComposition,
     pub(crate) typography: ResolvedChromeTypography,
     pub(crate) density: ChromeDensity,
 }
@@ -195,6 +199,8 @@ pub(crate) struct ResolvedAppearance {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AppearanceChangeSet {
     pub(crate) chrome_colors: bool,
+    pub(crate) native_appearance: bool,
+    pub(crate) window_composition: bool,
     pub(crate) chrome_typography: bool,
     pub(crate) chrome_metrics: bool,
     pub(crate) terminal_protocol_colors: bool,
@@ -206,8 +212,10 @@ pub(crate) struct AppearanceChangeSet {
 impl AppearanceChangeSet {
     pub(crate) fn between(previous: &ResolvedAppearance, next: &ResolvedAppearance) -> Self {
         Self {
-            chrome_colors: previous.chrome.colors != next.chrome.colors
-                || previous.chrome.appearance != next.chrome.appearance,
+            chrome_colors: previous.chrome.colors != next.chrome.colors,
+            native_appearance: previous.chrome.appearance != next.chrome.appearance,
+            window_composition: previous.chrome.composition.effective
+                != next.chrome.composition.effective,
             chrome_typography: previous.chrome.typography != next.chrome.typography,
             chrome_metrics: previous.chrome.typography != next.chrome.typography
                 || previous.chrome.density != next.chrome.density,
@@ -234,32 +242,29 @@ impl SchemeCatalog {
             .validate()
             .map_err(ResolutionError::Preferences)?;
         let mut diagnostics = Vec::new();
-        if system.0.is_none() {
+        if preferences.mode == super::AppearanceMode::Auto && system.0.is_none() {
             diagnostics.push(AppearanceDiagnostic::SystemAppearanceUnavailable);
         }
         let system = system.effective();
-        let (requested_chrome, chrome_appearance) = preferences.chrome.scheme.select(system);
-        let (requested_terminal, terminal_appearance) = preferences.terminal.scheme.select(system);
-        let (effective_chrome, mut chrome_colors, found_chrome) =
-            self.resolve_chrome_scheme(requested_chrome, chrome_appearance)?;
+        let appearance = preferences.mode.resolve(system);
+        let requested_chrome = preferences.chrome.schemes.get(appearance);
+        let requested_terminal = preferences.terminal.schemes.get(appearance);
+        let (effective_chrome, compiled_chrome, found_chrome) = self.resolve_chrome_scheme(
+            requested_chrome,
+            appearance,
+            preferences.chrome.overrides.get(requested_chrome),
+        )?;
+        let chrome_colors = compiled_chrome.colors;
         if !found_chrome {
-            diagnostics.push(AppearanceDiagnostic::ChromeSchemeUnavailable {
-                appearance: chrome_appearance,
-            });
-        }
-        if found_chrome && let Some(overrides) = preferences.chrome.overrides.get(requested_chrome)
-        {
-            chrome_colors.apply(overrides);
+            diagnostics.push(AppearanceDiagnostic::ChromeSchemeUnavailable { appearance });
         }
         chrome_colors
             .validate()
             .map_err(|_| ResolutionError::UnsupportedAlpha)?;
         let (effective_terminal, mut terminal_colors, found_terminal) =
-            self.resolve_terminal_scheme(requested_terminal, terminal_appearance)?;
+            self.resolve_terminal_scheme(requested_terminal, appearance)?;
         if !found_terminal {
-            diagnostics.push(AppearanceDiagnostic::TerminalSchemeUnavailable {
-                appearance: terminal_appearance,
-            });
+            diagnostics.push(AppearanceDiagnostic::TerminalSchemeUnavailable { appearance });
         }
         if found_terminal
             && let Some(overrides) = preferences.terminal.overrides.get(requested_terminal)
@@ -275,16 +280,23 @@ impl SchemeCatalog {
             generation,
             chrome: Arc::new(ResolvedChromeAppearance {
                 requested_scheme: requested_chrome.clone(),
-                effective_scheme: effective_chrome,
-                appearance: chrome_appearance,
+                effective_scheme: effective_chrome.clone(),
+                appearance,
                 colors: chrome_colors,
+                provenance: compiled_chrome.provenance,
+                readability: compiled_chrome.readability,
+                composition: super::ResolvedWindowComposition::foundation(
+                    self.chrome(&effective_chrome)
+                        .and_then(|scheme| scheme.window_background)
+                        .unwrap_or_default(),
+                ),
                 typography: chrome_typography,
                 density: preferences.chrome.density,
             }),
             terminal: Arc::new(ResolvedTerminalAppearance {
                 requested_scheme: requested_terminal.clone(),
                 effective_scheme: effective_terminal,
-                appearance: terminal_appearance,
+                appearance,
                 colors: terminal_colors,
                 typography: terminal_typography,
                 bold_as_bright: preferences.terminal.rendering.bold_as_bright,
@@ -297,20 +309,32 @@ impl SchemeCatalog {
         &self,
         requested: &SchemeId,
         appearance: Appearance,
-    ) -> Result<(SchemeId, ChromeColors, bool), ResolutionError> {
+        overrides: Option<&super::scheme::ChromeColorOverrides>,
+    ) -> Result<(SchemeId, super::compiler::CompiledChrome, bool), ResolutionError> {
         if let Some(scheme) = self.chrome(requested) {
             if scheme.appearance != appearance {
                 return Err(ResolutionError::AppearanceMismatch);
             }
-            let mut colors = builtin::chrome_base(appearance);
-            colors.apply(&scheme.colors);
+            let colors = super::compiler::compile_chrome(
+                appearance,
+                &scheme.colors,
+                overrides.unwrap_or(&super::scheme::ChromeColorOverrides::default()),
+            );
             return Ok((requested.clone(), colors, true));
         }
         if self.terminal(requested).is_some() {
             return Err(ResolutionError::WrongSchemeKind);
         }
         let id = builtin::fallback_id(SchemeKind::Chrome, appearance);
-        Ok((id, builtin::chrome_base(appearance), false))
+        Ok((
+            id,
+            super::compiler::compile_chrome(
+                appearance,
+                &builtin::chrome_definition(appearance),
+                &super::scheme::ChromeColorOverrides::default(),
+            ),
+            false,
+        ))
     }
 
     fn resolve_terminal_scheme(

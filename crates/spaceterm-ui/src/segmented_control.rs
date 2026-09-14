@@ -391,6 +391,26 @@ impl SegmentedControlTheme {
         }
     }
 
+    /// Resolves value and interaction together, with disabled state taking precedence.
+    pub fn paint(
+        self,
+        selected: bool,
+        enabled: bool,
+        hovered: bool,
+        pressed: bool,
+    ) -> SegmentedPaint {
+        let paints = if !enabled {
+            self.paints.disabled
+        } else if pressed {
+            self.paints.pressed
+        } else if hovered {
+            self.paints.hovered
+        } else {
+            self.paints.normal
+        };
+        paints.resolve(selected)
+    }
+
     /// Sets the semantic shadow lifting the selected segment out of its track.
     pub const fn selected_shadow(mut self, shadow: ControlShadow) -> Self {
         self.selected_shadow = shadow;
@@ -448,6 +468,8 @@ impl std::error::Error for SegmentedBuildError {}
 /// then carries no previous value.
 #[derive(IntoElement)]
 pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     accessibility_name: SharedString,
     options: Vec<SegmentedOption<T>>,
@@ -463,6 +485,13 @@ pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
 }
 
 impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
+    /// Pins only segment presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.preview_state = Some(state);
+        self
+    }
+
     /// Creates a control presenting at most one option as current.
     ///
     /// # Errors
@@ -483,6 +512,8 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         }
         let selected = options.iter().position(|option| &option.value == current);
         Ok(Self {
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
             id: id.into(),
             accessibility_name: accessibility_name.into(),
             options,
@@ -570,6 +601,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             state.synchronize(enabled, self.tab_stop, cx);
         });
         let focused = focus_handle.is_focused(window) && state.read(cx).focus_visible;
+        #[cfg(feature = "appearance-exerciser")]
+        let focused = self.preview_state.map_or(focused, |state| state.focused());
         let selector = self
             .debug_selector
             .clone()
@@ -623,6 +656,23 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 } else {
                     style.paints.disabled.resolve(selected)
                 };
+                #[cfg(feature = "appearance-exerciser")]
+                let paint = self
+                    .preview_state
+                    .filter(|_| option_enabled)
+                    .map_or(paint, |state| {
+                        let paints = if state.pressed() {
+                            style.paints.pressed
+                        } else if state.hovered() {
+                            style.paints.hovered
+                        } else {
+                            style.paints.normal
+                        };
+                        paints.resolve(selected)
+                    });
+                let refine_interaction = option_enabled;
+                #[cfg(feature = "appearance-exerciser")]
+                let refine_interaction = refine_interaction && self.preview_state.is_none();
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
                     paint,
                     font: crate::control_typography(cx).regular().clone(),
@@ -669,7 +719,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     })
                     // Pointer feedback belongs to the segment under the pointer. Reacting to the
                     // track's hover instead would light every segment at once.
-                    .when(option_enabled, |segment| {
+                    .when(refine_interaction, |segment| {
                         segment
                             .hover(move |style| hovered.segment(style))
                             .active(move |style| pressed.segment(style))

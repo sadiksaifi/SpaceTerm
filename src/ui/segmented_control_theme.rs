@@ -16,9 +16,9 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                     colors.border_transparent,
                 ),
                 paint(
-                    colors.element_selected,
-                    colors.element_selected_foreground,
-                    colors.border_selected,
+                    colors.selection_background,
+                    colors.selection_foreground,
+                    colors.selection_border,
                 ),
             ),
             values(
@@ -28,9 +28,9 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                     colors.border_transparent,
                 ),
                 paint(
-                    colors.element_selected_hover,
-                    colors.element_selected_hover_foreground,
-                    colors.border_selected,
+                    colors.selection_hover_background,
+                    colors.selection_hover_foreground,
+                    colors.selection_hover_border,
                 ),
             ),
             values(
@@ -40,9 +40,9 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                     colors.border_variant,
                 ),
                 paint(
-                    colors.element_active,
-                    colors.element_active_foreground,
-                    colors.border_focused,
+                    colors.selection_pressed_background,
+                    colors.selection_pressed_foreground,
+                    colors.selection_pressed_border,
                 ),
             ),
             values(
@@ -52,9 +52,9 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                     colors.border_transparent,
                 ),
                 paint(
-                    colors.element_disabled,
-                    colors.element_disabled_foreground,
-                    colors.border_disabled,
+                    colors.selection_disabled_background,
+                    colors.selection_disabled_foreground,
+                    colors.selection_disabled_border,
                 ),
             ),
         ),
@@ -102,6 +102,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_pressed_and_disabled_remain_selection_paints() {
+        let colors = ChromeColors {
+            selection_pressed_background: Color::rgba(0x11223344),
+            selection_pressed_foreground: Color::rgba(0x55667788),
+            selection_pressed_border: Color::rgba(0x99aabbcc),
+            selection_disabled_background: Color::rgba(0x12345678),
+            selection_disabled_foreground: Color::rgba(0x23456789),
+            selection_disabled_border: Color::rgba(0x3456789a),
+            ..ChromeColors::default()
+        };
+        assert_eq!(
+            theme(&colors).paint(true, true, true, true),
+            paint(
+                colors.selection_pressed_background,
+                colors.selection_pressed_foreground,
+                colors.selection_pressed_border
+            )
+        );
+        assert_eq!(
+            theme(&colors).paint(true, false, true, true),
+            paint(
+                colors.selection_disabled_background,
+                colors.selection_disabled_foreground,
+                colors.selection_disabled_border
+            )
+        );
+    }
+
+    #[test]
     fn theme_should_scale_segmented_geometry() {
         let theme = theme(&ChromeColors::default());
 
@@ -112,7 +141,7 @@ mod tests {
     fn selected_and_unselected_options_should_consume_distinct_roles() {
         let base = ChromeColors::default();
         let selected = ChromeColors {
-            element_selected: Color::rgb(0x123456),
+            selection_background: Color::rgb(0x123456),
             ..base.clone()
         };
         let unselected_label = ChromeColors {
@@ -125,7 +154,7 @@ mod tests {
         };
         // A selected option consumes its own hovered role, so a scheme can distinguish the two.
         let selected_hovered = ChromeColors {
-            element_selected_hover: Color::rgb(0x654322),
+            selection_hover_background: Color::rgb(0x654322),
             ..base.clone()
         };
 

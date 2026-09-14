@@ -19,9 +19,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 
+#[cfg(test)]
+use crate::appearance::SchemeKind;
 use crate::appearance::{
     AppearanceDocument, AppearanceDocumentError, CatalogError, CustomScheme, ImportCandidate,
-    ImportError, ResetTarget, SchemeCatalog, SchemeId, SchemeKind, ZedImportKind, export_settings,
+    ImportError, ResetTarget, SchemeCatalog, SchemeId, ZedImportKind, export_settings,
     parse_settings,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
@@ -132,6 +134,10 @@ pub(crate) enum SchemeImport<'a> {
         candidate_index: usize,
         kinds: &'a [ZedImportKind],
     },
+    ZedFamily {
+        bytes: &'a [u8],
+        kinds: &'a [ZedImportKind],
+    },
 }
 
 impl SchemeImport<'_> {
@@ -143,6 +149,18 @@ impl SchemeImport<'_> {
                 candidate_index,
                 kinds,
             } => crate::appearance::import_zed(bytes, candidate_index, kinds),
+            Self::ZedFamily { bytes, kinds } => {
+                let candidates = crate::appearance::list_zed_candidates(bytes)?;
+                let mut schemes = Vec::with_capacity(candidates.len().saturating_mul(kinds.len()));
+                for candidate in candidates {
+                    schemes.extend(crate::appearance::import_zed(
+                        bytes,
+                        candidate.index,
+                        kinds,
+                    )?);
+                }
+                Ok(schemes)
+            }
         }
     }
 }
@@ -451,13 +469,30 @@ impl UserSettings {
         Ok(crate::appearance::list_zed_candidates(bytes)?)
     }
 
+    #[cfg(feature = "appearance-exerciser")]
+    pub(crate) fn export_appearance(
+        &self,
+        resolved: &crate::appearance::ResolvedAppearance,
+    ) -> Result<String, SettingsError> {
+        let snapshot = self.snapshot();
+        let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
+        Ok(crate::appearance::export_resolved_schemes(
+            &catalog, resolved,
+        )?)
+    }
+
+    #[cfg(test)]
     pub(crate) fn export_schemes(
         &self,
         schemes: &[(SchemeKind, SchemeId)],
     ) -> Result<String, SettingsError> {
         let snapshot = self.snapshot();
         let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
-        Ok(crate::appearance::export_schemes(&catalog, schemes)?)
+        Ok(crate::appearance::export_effective_schemes(
+            &catalog,
+            &snapshot.candidate.preferences,
+            schemes,
+        )?)
     }
 
     pub(crate) fn export_document(&self) -> Result<String, SettingsError> {

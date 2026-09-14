@@ -19,6 +19,7 @@ mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
 mod segmented_control_theme;
+mod selection_chip;
 pub(crate) mod settings_window;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
@@ -37,6 +38,7 @@ mod tooltip_theme;
 mod workspace_chrome;
 mod workspace_manager;
 mod workspace_sidebar;
+mod workspace_status;
 
 use gpui::{App, actions};
 
