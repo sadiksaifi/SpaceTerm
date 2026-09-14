@@ -896,6 +896,23 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
             matches(),
             "{selector} must render its complete authored paint pair"
         );
+        if selector == "settings-section-terminal-group-font-card" {
+            assert!(
+                observed
+                    .borrow()
+                    .iter()
+                    .filter(|state| state.bounds == bounds)
+                    .all(|state| {
+                        let widths = &state.base_style.border_widths;
+                        [widths.top, widths.right, widths.bottom, widths.left]
+                            .into_iter()
+                            .all(|width| {
+                                width.is_none_or(|width| width.to_pixels(px(16.0)) == px(0.0))
+                            })
+                    }),
+                "a Settings group must not paint an enclosing outline"
+            );
+        }
         cx.update(|window, cx| window.toggle_inspector(cx));
         cx.run_until_parked();
     }
@@ -937,13 +954,9 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
     }
 }
 
-/// A run of rows rests on a card that spans the content column and clears the text inside it.
-///
-/// The card is what carries grouping now that nothing is ruled off, so it has to be a shape a
-/// reader can see: wider than the text it holds, narrower than the pane it sits in, and separated
-/// from the next card by more than its own rows are separated from each other.
+/// Removing the group outline must preserve its content inset, row alignment, and separation.
 #[gpui::test]
-fn a_group_rests_on_a_card_that_spans_the_column_and_clears_its_rows(cx: &mut TestAppContext) {
+fn borderless_groups_preserve_content_alignment_and_spacing(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Terminal, cx);
 
@@ -1004,6 +1017,48 @@ fn a_group_rests_on_a_card_that_spans_the_column_and_clears_its_rows(cx: &mut Te
             "every card should share one left edge"
         );
     }
+}
+
+fn assert_reset_all_matches_sidebar(document: AppearanceDocument, cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    for section in SettingsSectionId::ALL {
+        select_section(section, cx);
+        let search = cx.debug_bounds("settings-search-frame").unwrap();
+        let navigation = cx.debug_bounds("settings-navigation").unwrap();
+        let reset = cx.debug_bounds("settings-reset-all").unwrap();
+        let footer = cx.debug_bounds("settings-footer").unwrap();
+        let status = cx.debug_bounds("settings-save-status").unwrap();
+        assert_eq!(
+            (reset.left(), reset.right()),
+            (search.left(), search.right()),
+            "Reset All should fill the search column in {section:?}"
+        );
+        assert_eq!(
+            (reset.left(), reset.right()),
+            (navigation.left(), navigation.right()),
+            "Reset All should fill the navigation column in {section:?}"
+        );
+        assert!(reset.top() >= footer.top() && reset.bottom() <= footer.bottom());
+        assert!(
+            status.left() > reset.right() && status.right() < footer.right(),
+            "save status should stay in the right footer column"
+        );
+    }
+}
+
+#[gpui::test]
+fn reset_all_fills_the_sidebar_column_on_every_settings_page(cx: &mut TestAppContext) {
+    assert_reset_all_matches_sidebar(AppearanceDocument::default(), cx);
+}
+
+#[gpui::test]
+fn reset_all_tracks_sidebar_width_with_larger_type_and_comfortable_density(
+    cx: &mut TestAppContext,
+) {
+    let mut document = AppearanceDocument::default();
+    document.preferences.chrome.typography.base_size = 20.0;
+    document.preferences.chrome.density = ChromeDensity::Comfortable;
+    assert_reset_all_matches_sidebar(document, cx);
 }
 
 /// A run's title outranks every label inside it, and shares the labels' left edge.

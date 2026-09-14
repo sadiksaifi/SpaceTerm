@@ -66,6 +66,7 @@ pub(crate) const SETTINGS_KEY_CONTEXT: &str = "Settings";
 const WINDOW_WIDTH: f32 = 880.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
+const SIDEBAR_INSET: f32 = 10.0;
 /// The strip under the window carrying the save status and the one application-wide action.
 const FOOTER_HEIGHT: f32 = 40.0;
 /// The height of one navigation entry and of the search field above it, so the sidebar runs on one
@@ -872,7 +873,7 @@ impl SettingsWindow {
             .flex_none()
             .w(appearance.text_size(SIDEBAR_WIDTH))
             .h_full()
-            .p(appearance.spacing(10.0))
+            .p(appearance.spacing(SIDEBAR_INSET))
             .bg(gpui_color(appearance.colors.panel_background))
             .child(self.render_search_field(appearance, cx))
             .child(
@@ -920,6 +921,7 @@ impl SettingsWindow {
             spaceterm_ui::FieldState::default(),
             cx,
         )
+        .debug_selector(|| "settings-search-frame".to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -1876,8 +1878,8 @@ impl SettingsWindow {
 
     /// The window's own strip: what the last edit did, and the one action that undoes all of them.
     ///
-    /// Reset All belongs here rather than under the navigation list, which leaves the sidebar to
-    /// navigation alone and puts an application-wide action on the application-wide strip.
+    /// Reset All sits at the foot of the sidebar column, filling its width, so the sidebar surface
+    /// runs to the window's bottom edge. Only the content column is ruled off from the save status.
     fn render_footer(
         &mut self,
         appearance: &ChromeAppearance,
@@ -1889,35 +1891,53 @@ impl SettingsWindow {
             .debug_selector(|| "settings-footer".to_owned())
             .flex()
             .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(appearance.spacing(12.0))
             .w_full()
             .flex_none()
             .h(appearance.height(FOOTER_HEIGHT, text::BODY))
-            // The strip ends on the content column's edges rather than short of them.
-            .px(appearance.spacing(CONTENT_GUTTER))
-            .border_t_1()
-            .border_color(gpui_color(appearance.colors.border))
-            .child(action_button(
-                "settings-reset-all",
-                "Reset All…",
-                self.editor.editable(),
-                move |window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.confirm_reset_all(window, cx);
-                    });
-                },
-            ))
             .child(
                 div()
-                    .debug_selector(|| "settings-save-status".to_owned())
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .h_full()
+                    .w(appearance.text_size(SIDEBAR_WIDTH))
+                    .px(appearance.spacing(SIDEBAR_INSET))
+                    .bg(gpui_color(appearance.colors.panel_background))
+                    .child(
+                        action_button(
+                            "settings-reset-all",
+                            "Reset All…",
+                            self.editor.editable(),
+                            move |window, cx| {
+                                let _ = owner.update(cx, |settings, cx| {
+                                    settings.confirm_reset_all(window, cx);
+                                });
+                            },
+                        )
+                        .full_width(true),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(appearance.text_size(text::SMALL))
-                    // The recovery banner owns semantic emphasis on its paired surface.
-                    .text_color(gpui_color(appearance.colors.text_muted))
-                    .child(status.message()),
+                    .h_full()
+                    .items_center()
+                    .justify_end()
+                    .px(appearance.spacing(CONTENT_GUTTER))
+                    .border_t_1()
+                    .border_color(gpui_color(appearance.colors.border))
+                    .child(
+                        div()
+                            .debug_selector(|| "settings-save-status".to_owned())
+                            .min_w_0()
+                            .truncate()
+                            .text_size(appearance.text_size(text::SMALL))
+                            // The recovery banner owns semantic emphasis on its paired surface.
+                            .text_color(gpui_color(appearance.colors.text_muted))
+                            .child(status.message()),
+                    ),
             )
             .into_any_element()
     }

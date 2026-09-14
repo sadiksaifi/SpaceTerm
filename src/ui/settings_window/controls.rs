@@ -107,11 +107,11 @@ pub(super) enum SettingsRowLayout {
 pub(super) const CARD_RADIUS: f32 = 10.0;
 const CARD_PADDING_Y: f32 = 4.0;
 
-/// One titled run of related rows, resting on a card.
+/// One titled run of related rows.
 ///
-/// The card uses the document surface and its text pair. Its rounded hairline and the title above
-/// it carry grouping without requiring another surface's foreground policy. Nothing inside the
-/// card is ruled off: the space between rows already says where one ends.
+/// The group uses the document surface and its text pair. Its title and surrounding space carry
+/// grouping without an enclosing outline, so the only strokes on a page belong to controls. The
+/// card remains as a clip for revealed rows.
 pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
@@ -164,17 +164,7 @@ impl SettingsGroup {
                     // its corners instead of letting a square fill escape a rounded shape.
                     .overflow_hidden()
                     .bg(gpui_color(appearance.colors.background))
-                    .children(self.rows)
-                    // The hairline is painted over the card rather than added to it, so the rows
-                    // inside start on exactly the edge the title above them starts on.
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(radius)
-                            .border_1()
-                            .border_color(gpui_color(appearance.colors.border)),
-                    ),
+                    .children(self.rows),
             )
     }
 }
@@ -570,7 +560,7 @@ pub(super) fn action_button(
     label: &'static str,
     enabled: bool,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> Button {
     Button::new(selector, label)
         .variant(ButtonVariant::Outline)
         .size(ButtonSize::Regular)
