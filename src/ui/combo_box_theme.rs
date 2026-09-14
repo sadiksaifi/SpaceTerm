@@ -19,7 +19,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
             gpui_color(colors.border_focused),
         )
         .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
-        .rows(super::control_theme_catalog::list_rows(colors))
+        .rows(super::control_theme_catalog::overlay_list_rows(colors))
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
         ComboBoxMetrics::new(px(240.0), px(28.0))
