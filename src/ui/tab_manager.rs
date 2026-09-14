@@ -90,6 +90,11 @@ const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 const TAB_CHIP_INSET_X: f32 = 3.0;
 const TAB_CHIP_INSET_Y: f32 = 4.0;
 const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
+/// The visible length of the quiet mark between two neighbouring inactive Tabs.
+///
+/// Inactive Tabs rest as text on the bar, so a short one-device-pixel stroke is enough to say where
+/// one title ends. The Active Tab's chip already has an edge, so no mark touches it.
+const TAB_SEPARATOR_LENGTH: f32 = 12.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
@@ -1149,7 +1154,7 @@ impl TabManager {
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
-    ) -> AnyElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
@@ -1167,7 +1172,7 @@ impl TabManager {
         #[cfg(test)]
         let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
         let tab_group = format!("tab-item-{}", tab_id.get());
-        let item = div()
+        div()
             .id(("tab-item", tab_id.get()))
             .debug_selector(move || {
                 format!(
@@ -1281,15 +1286,14 @@ impl TabManager {
                             });
                         }),
                     ),
-            );
-
-        item.into_any_element()
+            )
     }
 
     fn render_tab_bar(
         &self,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
+        device_pixel: Pixels,
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
@@ -1305,15 +1309,33 @@ impl TabManager {
             .flex_row()
             .overflow_x_scroll()
             .track_scroll(&self.tab_bar_scroll_handle);
+        let mut previous_inactive_tab = None;
         for (tab_id, pane_host) in self.tabs.iter() {
-            items = items.child(self.render_tab_item(
-                tab_id,
-                pane_host.read(cx).tab_title(),
-                tab_id == active_tab_id,
-                presentation,
-                manager.clone(),
-                appearance,
-            ));
+            let active = tab_id == active_tab_id;
+            let leading_separator =
+                previous_inactive_tab
+                    .filter(|_| !active)
+                    .map(|leading_tab_id| {
+                        render_tab_separator(
+                            leading_tab_id,
+                            tab_id,
+                            presentation,
+                            device_pixel,
+                            appearance,
+                        )
+                    });
+            previous_inactive_tab = (!active).then_some(tab_id);
+            items = items.child(
+                self.render_tab_item(
+                    tab_id,
+                    pane_host.read(cx).tab_title(),
+                    active,
+                    presentation,
+                    manager.clone(),
+                    appearance,
+                )
+                .children(leading_separator),
+            );
         }
 
         let drag_manager = manager.clone();
@@ -1419,7 +1441,12 @@ impl Render for TabManager {
         let appearance = super::appearance::chrome(cx);
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
-        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
+        let tab_bar = self.render_tab_bar(
+            &presentation,
+            manager.clone(),
+            px(1.0 / window.scale_factor()),
+            cx,
+        );
 
         div()
             .id("tab-manager")
@@ -1479,6 +1506,41 @@ impl Render for TabManager {
 
 impl EventEmitter<TabManagerEvent> for TabManager {}
 impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
+
+/// The quiet mark at the boundary between two neighbouring inactive Tabs.
+///
+/// The trailing Tab carries the mark as paint straddling its shared edge, so the row keeps one
+/// scroll child per Tab and both Tabs keep their spacing, hit targets, and hover regions.
+fn render_tab_separator(
+    leading_tab_id: TabId,
+    trailing_tab_id: TabId,
+    presentation: &TabChromePresentation,
+    device_pixel: Pixels,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(-device_pixel / 2.0)
+        .w(device_pixel)
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .debug_selector(move || {
+                    format!(
+                        "tab-separator-{}-{}",
+                        leading_tab_id.get(),
+                        trailing_tab_id.get()
+                    )
+                })
+                .w_full()
+                .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
+                .bg(gpui_color(presentation.divider)),
+        )
+        .into_any_element()
+}
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
@@ -2216,6 +2278,16 @@ mod tests {
     ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        open_tab_manager(cx)
+    }
+
+    fn open_tab_manager(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TabManager>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2474,6 +2546,138 @@ mod tests {
                 "{stale} should no longer be drawn beside the chip"
             );
         }
+    }
+
+    fn leaked_selector(selector: String) -> &'static str {
+        Box::leak(selector.into_boxed_str())
+    }
+
+    /// Opens a fresh four-Tab row for each selected position and checks every boundary.
+    ///
+    /// Each position gets its own window because rendered debug bounds outlive the frame that drew
+    /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
+    ///
+    /// A boundary is marked only while both of its Tabs are inactive, and the mark straddles their
+    /// shared edge as a thin short stroke without opening a gap between their hit targets. The
+    /// shared edge is found from the rendered items rather than assumed to run left to right.
+    fn assert_separators_mark_only_inactive_neighbours(
+        cx: &mut TestAppContext,
+        direction: spaceterm_ui::TextDirection,
+    ) {
+        cx.update(|cx| crate::ui::init_with_text_direction(cx, direction))
+            .expect("UI initialization should succeed");
+        for selected in 1..=4_u64 {
+            let (manager, _records, cx) = open_tab_manager(cx);
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    for _ in 1..4 {
+                        manager.create_tab(window, cx);
+                    }
+                    manager.activate_tab_at(selected as usize - 1, window, cx);
+                });
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+                TabId::new(selected)
+            );
+            let item = |tab: u64, cx: &mut VisualTestContext| {
+                let state = if tab == selected {
+                    "active"
+                } else {
+                    "inactive"
+                };
+                cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-{state}")))
+                    .unwrap_or_else(|| panic!("Tab {tab} was not rendered"))
+            };
+
+            for leading in 1..4_u64 {
+                let trailing = leading + 1;
+                let separator = cx.debug_bounds(leaked_selector(format!(
+                    "tab-separator-{leading}-{trailing}"
+                )));
+                let leading_item = item(leading, cx);
+                let trailing_item = item(trailing, cx);
+                let shared_edge = if leading_item.right() == trailing_item.left() {
+                    leading_item.right()
+                } else {
+                    assert_eq!(
+                        trailing_item.right(),
+                        leading_item.left(),
+                        "neighbouring Tabs {leading} and {trailing} should keep contiguous hit \
+                         targets with Tab {selected} selected"
+                    );
+                    leading_item.left()
+                };
+
+                let touches_selected = leading == selected || trailing == selected;
+                match (separator, touches_selected) {
+                    (Some(separator), false) => {
+                        assert!(
+                            separator.size.width > px(0.0) && separator.size.width <= px(1.0),
+                            "the separator should be a hairline, got {separator:?}"
+                        );
+                        assert!(
+                            separator.size.height < leading_item.size.height / 2.0,
+                            "the separator should stay short of the bar, got {separator:?}"
+                        );
+                        assert!(
+                            (separator.center().x - shared_edge).abs() <= px(0.5)
+                                && (separator.center().y - leading_item.center().y).abs()
+                                    <= px(0.5),
+                            "the separator should sit on the shared edge of Tabs {leading} and \
+                             {trailing}, got {separator:?} at {shared_edge:?}"
+                        );
+                    }
+                    (None, true) => {}
+                    (Some(_), true) => panic!(
+                        "no separator should touch selected Tab {selected} at boundary \
+                         {leading}-{trailing}"
+                    ),
+                    (None, false) => panic!(
+                        "inactive Tabs {leading} and {trailing} should be separated with Tab \
+                         {selected} selected"
+                    ),
+                }
+            }
+
+            if selected == 4 {
+                // A press right beside a mark still lands on the Tab it borders.
+                let separator = cx
+                    .debug_bounds("tab-separator-1-2")
+                    .expect("the boundary between inactive Tabs 1 and 2 should be marked");
+                let second = item(2, cx);
+                let beside = if second.center().x > separator.center().x {
+                    separator.right() + px(1.0)
+                } else {
+                    separator.left() - px(1.0)
+                };
+                let position = point(beside, separator.center().y);
+                cx.simulate_mouse_move(position, None, Modifiers::none());
+                cx.simulate_click(position, Modifiers::none());
+                cx.run_until_parked();
+                assert_eq!(
+                    manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+                    TabId::new(2)
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn separators_should_mark_only_boundaries_between_inactive_tabs(cx: &mut TestAppContext) {
+        assert_separators_mark_only_inactive_neighbours(
+            cx,
+            spaceterm_ui::TextDirection::LeftToRight,
+        );
+    }
+
+    #[gpui::test]
+    fn separators_should_follow_tab_boundaries_under_right_to_left_text(cx: &mut TestAppContext) {
+        assert_separators_mark_only_inactive_neighbours(
+            cx,
+            spaceterm_ui::TextDirection::RightToLeft,
+        );
     }
 
     #[gpui::test]
