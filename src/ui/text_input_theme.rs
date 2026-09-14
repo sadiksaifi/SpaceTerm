@@ -15,7 +15,8 @@ pub(super) fn theme(colors: &ChromeColors) -> TextInputTheme {
         gpui_color(colors.input_caret),
         gpui_color(colors.input_disabled_text),
         gpui_color(colors.input_disabled_text),
-    );
+    )
+    .selection_foreground(gpui_color(colors.input_selection_foreground));
     TextInputTheme::new(
         TextInputVariants::new(paint, paint),
         TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(24.0)),

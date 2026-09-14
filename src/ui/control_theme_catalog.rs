@@ -85,31 +85,33 @@ mod tests {
     fn list_rows_preserve_every_authored_channel_for_combined_states() {
         use gpui::rgba;
         use spaceterm_ui::ListRowPaint;
-        let mut colors = ChromeColors::default();
-        colors.row_background = Color::rgba(0x10203040);
-        colors.row_foreground = Color::rgba(0x14233142);
-        colors.row_secondary = Color::rgba(0x18263244);
-        colors.row_icon = Color::rgba(0x1c293346);
-        colors.row_match = Color::rgba(0x202c3448);
-        colors.row_border = Color::rgba(0x242f354a);
-        colors.row_hover_background = Color::rgba(0x2832364c);
-        colors.row_hover_foreground = Color::rgba(0x2c35374e);
-        colors.row_hover_secondary = Color::rgba(0x30383850);
-        colors.row_hover_icon = Color::rgba(0x343b3952);
-        colors.row_hover_match = Color::rgba(0x383e3a54);
-        colors.row_hover_border = Color::rgba(0x3c413b56);
-        colors.row_selected_background = Color::rgba(0x40443c58);
-        colors.row_selected_foreground = Color::rgba(0x44473d5a);
-        colors.row_selected_secondary = Color::rgba(0x484a3e5c);
-        colors.row_selected_icon = Color::rgba(0x4c4d3f5e);
-        colors.row_selected_match = Color::rgba(0x50504060);
-        colors.row_selected_border = Color::rgba(0x54534162);
-        colors.row_selected_hover_background = Color::rgba(0x58564264);
-        colors.row_selected_hover_foreground = Color::rgba(0x5c594366);
-        colors.row_selected_hover_secondary = Color::rgba(0x605c4468);
-        colors.row_selected_hover_icon = Color::rgba(0x645f456a);
-        colors.row_selected_hover_match = Color::rgba(0x6862466c);
-        colors.row_selected_hover_border = Color::rgba(0x6c65476e);
+        let colors = ChromeColors {
+            row_background: Color::rgba(0x10203040),
+            row_foreground: Color::rgba(0x14233142),
+            row_secondary: Color::rgba(0x18263244),
+            row_icon: Color::rgba(0x1c293346),
+            row_match: Color::rgba(0x202c3448),
+            row_border: Color::rgba(0x242f354a),
+            row_hover_background: Color::rgba(0x2832364c),
+            row_hover_foreground: Color::rgba(0x2c35374e),
+            row_hover_secondary: Color::rgba(0x30383850),
+            row_hover_icon: Color::rgba(0x343b3952),
+            row_hover_match: Color::rgba(0x383e3a54),
+            row_hover_border: Color::rgba(0x3c413b56),
+            row_selected_background: Color::rgba(0x40443c58),
+            row_selected_foreground: Color::rgba(0x44473d5a),
+            row_selected_secondary: Color::rgba(0x484a3e5c),
+            row_selected_icon: Color::rgba(0x4c4d3f5e),
+            row_selected_match: Color::rgba(0x50504060),
+            row_selected_border: Color::rgba(0x54534162),
+            row_selected_hover_background: Color::rgba(0x58564264),
+            row_selected_hover_foreground: Color::rgba(0x5c594366),
+            row_selected_hover_secondary: Color::rgba(0x605c4468),
+            row_selected_hover_icon: Color::rgba(0x645f456a),
+            row_selected_hover_match: Color::rgba(0x6862466c),
+            row_selected_hover_border: Color::rgba(0x6c65476e),
+            ..ChromeColors::default()
+        };
         let rows = list_rows(&colors);
         assert_eq!(
             rows.resolve(true, false, false),

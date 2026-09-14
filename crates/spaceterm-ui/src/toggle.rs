@@ -387,6 +387,13 @@ pub struct Checkbox {
 }
 
 impl Checkbox {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a regular checkbox. The complete labeled row is its hit target and a Tab stop.
     pub fn new(
         id: impl Into<ElementId>,
@@ -495,6 +502,13 @@ pub struct Switch {
 }
 
 impl Switch {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a regular binary switch. The complete labeled row is its hit target and a Tab stop.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Self {
         Self {
@@ -590,6 +604,8 @@ enum ToggleKind {
 }
 
 struct ToggleCore {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     label: SharedString,
     label_hidden: bool,
@@ -606,6 +622,8 @@ struct ToggleCore {
 impl ToggleCore {
     fn new(id: ElementId, label: SharedString) -> Self {
         Self {
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
             id,
             label,
             label_hidden: false,
@@ -649,6 +667,15 @@ impl ToggleCore {
         } else {
             style.normal
         };
+        #[cfg(feature = "appearance-exerciser")]
+        let focused = self.preview_state.map_or(focused, |state| state.focused());
+        #[cfg(feature = "appearance-exerciser")]
+        let paint = self.preview_state.map_or(paint, |state| {
+            cx.global::<ToggleTheme>()
+                .paint(on, enabled, state.hovered(), state.pressed())
+        });
+        #[cfg(feature = "appearance-exerciser")]
+        let keyboard_pressed = keyboard_pressed || self.preview_state.is_some();
         let selector = self
             .debug_selector
             .unwrap_or_else(|| self.label.to_string());

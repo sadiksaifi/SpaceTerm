@@ -4,6 +4,8 @@
 #[path = "appearance_exerciser_tests.rs"]
 mod tests;
 
+mod gallery;
+
 use std::{collections::BTreeSet, time::Duration};
 
 use gpui::prelude::*;
@@ -20,8 +22,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeId, SchemeKind,
-    SchemeSelection, TerminalFontFamily, ZedImportKind, export_settings, parse_settings,
+    Appearance, ChromeDensity, ChromeFontFamily, ResetTarget, SchemeId, SchemeSelection,
+    TerminalFontFamily, ZedImportKind, export_settings, parse_settings,
 };
 use crate::settings::{PreviewToken, SchemeImport};
 
@@ -40,6 +42,24 @@ struct ExerciserWindows {
     workspace: WindowHandle<WorkspaceManager>,
 }
 impl Global for ExerciserWindows {}
+
+struct GalleryCaptionFixture;
+impl Global for GalleryCaptionFixture {}
+
+/// Synthetic display facts keep native acceptance captures independent of the host account.
+pub(crate) fn caption_fixture(cx: &App) -> Option<super::terminal_pane::PaneCaptionFacts> {
+    cx.has_global::<GalleryCaptionFixture>()
+        .then(|| super::terminal_pane::PaneCaptionFacts {
+            origin: super::terminal_pane::PaneOrigin {
+                user: "fixture".into(),
+                host: "local".into(),
+                remote: false,
+            },
+            directory: "appearance-fixture".into(),
+            label: "Appearance acceptance".into(),
+            running: false,
+        })
+}
 
 pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> gpui::Result<()> {
     if std::env::var(ENABLE_VARIABLE).as_deref() != Ok("1") {
@@ -69,6 +89,10 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     });
     cx.on_action(show_appearance_exerciser);
     cx.on_action(toggle_appearance_preview);
+    if std::env::var("SPACETERM_APPEARANCE_GALLERY").as_deref() == Ok("1") {
+        cx.set_global(GalleryCaptionFixture);
+        gallery::open(cx)?;
+    }
     Ok(())
 }
 
@@ -584,6 +608,16 @@ impl AppearanceExerciser {
         cx.notify();
     }
 
+    fn show_gallery(&mut self, cx: &mut Context<Self>) {
+        self.status = if gallery::open(cx).is_ok() {
+            "Opened deterministic state gallery"
+        } else {
+            "Gallery unavailable"
+        }
+        .to_owned();
+        cx.notify();
+    }
+
     fn show_fixture_window(&mut self, cx: &mut Context<Self>) {
         let bounds = Bounds::centered(None, size(px(640.0), px(440.0)), cx);
         let window_background = appearance_runtime::window_background(cx);
@@ -621,13 +655,7 @@ impl AppearanceExerciser {
     fn export_effective_schemes(&mut self, cx: &mut Context<Self>) {
         let settings = Self::settings(cx);
         let current = appearance_runtime::current(cx);
-        match settings.export_schemes(&[
-            (SchemeKind::Chrome, current.chrome.effective_scheme.clone()),
-            (
-                SchemeKind::Terminal,
-                current.terminal.effective_scheme.clone(),
-            ),
-        ]) {
+        match settings.export_appearance(&current) {
             Ok(output) => {
                 self.set_editor(output, cx);
                 self.status = String::from("Exported complete effective color schemes");
@@ -738,6 +766,7 @@ impl Render for AppearanceExerciser {
                 .child(action("appearance-import-zed", "Import Zed Candidate 0", Self::import_zed_editor))
                 .child(action("appearance-export", "Export Effective Schemes", Self::export_effective_schemes))
                 .child(action("appearance-reload-fonts", "Reload Fonts", Self::reload_fonts))
+                .child(action("appearance-show-gallery", "Show State Gallery", Self::show_gallery))
                 .child(action("appearance-show-fixtures", "Show Acceptance Fixtures", Self::show_fixture_window))
                 .child(action("appearance-show-terminal", "Show Terminal Window", Self::show_terminal_window)))
             .child(

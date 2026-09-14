@@ -102,39 +102,41 @@ mod tests {
 
     #[test]
     fn every_toggle_value_and_interaction_uses_its_exact_paint() {
-        let mut colors = ChromeColors::default();
-        colors.toggle_off_background = Color::rgba(0x10203040);
-        colors.toggle_off_mark = Color::rgba(0x14233142);
-        colors.toggle_off_border = Color::rgba(0x18263244);
-        colors.toggle_off_label = Color::rgba(0x1c293346);
-        colors.toggle_off_hover_background = Color::rgba(0x202c3448);
-        colors.toggle_off_hover_mark = Color::rgba(0x242f354a);
-        colors.toggle_off_hover_border = Color::rgba(0x2832364c);
-        colors.toggle_off_hover_label = Color::rgba(0x2c35374e);
-        colors.toggle_off_pressed_background = Color::rgba(0x30383850);
-        colors.toggle_off_pressed_mark = Color::rgba(0x343b3952);
-        colors.toggle_off_pressed_border = Color::rgba(0x383e3a54);
-        colors.toggle_off_pressed_label = Color::rgba(0x3c413b56);
-        colors.toggle_off_disabled_background = Color::rgba(0x40443c58);
-        colors.toggle_off_disabled_mark = Color::rgba(0x44473d5a);
-        colors.toggle_off_disabled_border = Color::rgba(0x484a3e5c);
-        colors.toggle_off_disabled_label = Color::rgba(0x4c4d3f5e);
-        colors.toggle_on_background = Color::rgba(0x50504060);
-        colors.toggle_on_mark = Color::rgba(0x54534162);
-        colors.toggle_on_border = Color::rgba(0x58564264);
-        colors.toggle_on_label = Color::rgba(0x5c594366);
-        colors.toggle_on_hover_background = Color::rgba(0x605c4468);
-        colors.toggle_on_hover_mark = Color::rgba(0x645f456a);
-        colors.toggle_on_hover_border = Color::rgba(0x6862466c);
-        colors.toggle_on_hover_label = Color::rgba(0x6c65476e);
-        colors.toggle_on_pressed_background = Color::rgba(0x70684870);
-        colors.toggle_on_pressed_mark = Color::rgba(0x746b4972);
-        colors.toggle_on_pressed_border = Color::rgba(0x786e4a74);
-        colors.toggle_on_pressed_label = Color::rgba(0x7c714b76);
-        colors.toggle_on_disabled_background = Color::rgba(0x80744c78);
-        colors.toggle_on_disabled_mark = Color::rgba(0x84774d7a);
-        colors.toggle_on_disabled_border = Color::rgba(0x887a4e7c);
-        colors.toggle_on_disabled_label = Color::rgba(0x8c7d4f7e);
+        let colors = ChromeColors {
+            toggle_off_background: Color::rgba(0x10203040),
+            toggle_off_mark: Color::rgba(0x14233142),
+            toggle_off_border: Color::rgba(0x18263244),
+            toggle_off_label: Color::rgba(0x1c293346),
+            toggle_off_hover_background: Color::rgba(0x202c3448),
+            toggle_off_hover_mark: Color::rgba(0x242f354a),
+            toggle_off_hover_border: Color::rgba(0x2832364c),
+            toggle_off_hover_label: Color::rgba(0x2c35374e),
+            toggle_off_pressed_background: Color::rgba(0x30383850),
+            toggle_off_pressed_mark: Color::rgba(0x343b3952),
+            toggle_off_pressed_border: Color::rgba(0x383e3a54),
+            toggle_off_pressed_label: Color::rgba(0x3c413b56),
+            toggle_off_disabled_background: Color::rgba(0x40443c58),
+            toggle_off_disabled_mark: Color::rgba(0x44473d5a),
+            toggle_off_disabled_border: Color::rgba(0x484a3e5c),
+            toggle_off_disabled_label: Color::rgba(0x4c4d3f5e),
+            toggle_on_background: Color::rgba(0x50504060),
+            toggle_on_mark: Color::rgba(0x54534162),
+            toggle_on_border: Color::rgba(0x58564264),
+            toggle_on_label: Color::rgba(0x5c594366),
+            toggle_on_hover_background: Color::rgba(0x605c4468),
+            toggle_on_hover_mark: Color::rgba(0x645f456a),
+            toggle_on_hover_border: Color::rgba(0x6862466c),
+            toggle_on_hover_label: Color::rgba(0x6c65476e),
+            toggle_on_pressed_background: Color::rgba(0x70684870),
+            toggle_on_pressed_mark: Color::rgba(0x746b4972),
+            toggle_on_pressed_border: Color::rgba(0x786e4a74),
+            toggle_on_pressed_label: Color::rgba(0x7c714b76),
+            toggle_on_disabled_background: Color::rgba(0x80744c78),
+            toggle_on_disabled_mark: Color::rgba(0x84774d7a),
+            toggle_on_disabled_border: Color::rgba(0x887a4e7c),
+            toggle_on_disabled_label: Color::rgba(0x8c7d4f7e),
+            ..ChromeColors::default()
+        };
         let theme = theme(&colors);
         assert_eq!(
             theme.paint(false, true, false, false),

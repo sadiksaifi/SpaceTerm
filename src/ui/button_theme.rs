@@ -263,39 +263,41 @@ mod tests {
     #[test]
     fn primary_and_destructive_consume_complete_independent_state_tuples() {
         use spaceterm_ui::ButtonVariant;
-        let mut colors = ChromeColors::default();
-        colors.primary_background = Color::rgba(0x10203040);
-        colors.primary_foreground = Color::rgba(0x14233142);
-        colors.primary_icon = Color::rgba(0x18263244);
-        colors.primary_border = Color::rgba(0x1c293346);
-        colors.primary_hover_background = Color::rgba(0x202c3448);
-        colors.primary_hover_foreground = Color::rgba(0x242f354a);
-        colors.primary_hover_icon = Color::rgba(0x2832364c);
-        colors.primary_hover_border = Color::rgba(0x2c35374e);
-        colors.primary_pressed_background = Color::rgba(0x30383850);
-        colors.primary_pressed_foreground = Color::rgba(0x343b3952);
-        colors.primary_pressed_icon = Color::rgba(0x383e3a54);
-        colors.primary_pressed_border = Color::rgba(0x3c413b56);
-        colors.primary_disabled_background = Color::rgba(0x40443c58);
-        colors.primary_disabled_foreground = Color::rgba(0x44473d5a);
-        colors.primary_disabled_icon = Color::rgba(0x484a3e5c);
-        colors.primary_disabled_border = Color::rgba(0x4c4d3f5e);
-        colors.destructive_background = Color::rgba(0x50504060);
-        colors.destructive_foreground = Color::rgba(0x54534162);
-        colors.destructive_icon = Color::rgba(0x58564264);
-        colors.destructive_border = Color::rgba(0x5c594366);
-        colors.destructive_hover_background = Color::rgba(0x605c4468);
-        colors.destructive_hover_foreground = Color::rgba(0x645f456a);
-        colors.destructive_hover_icon = Color::rgba(0x6862466c);
-        colors.destructive_hover_border = Color::rgba(0x6c65476e);
-        colors.destructive_pressed_background = Color::rgba(0x70684870);
-        colors.destructive_pressed_foreground = Color::rgba(0x746b4972);
-        colors.destructive_pressed_icon = Color::rgba(0x786e4a74);
-        colors.destructive_pressed_border = Color::rgba(0x7c714b76);
-        colors.destructive_disabled_background = Color::rgba(0x80744c78);
-        colors.destructive_disabled_foreground = Color::rgba(0x84774d7a);
-        colors.destructive_disabled_icon = Color::rgba(0x887a4e7c);
-        colors.destructive_disabled_border = Color::rgba(0x8c7d4f7e);
+        let mut colors = ChromeColors {
+            primary_background: Color::rgba(0x10203040),
+            primary_foreground: Color::rgba(0x14233142),
+            primary_icon: Color::rgba(0x18263244),
+            primary_border: Color::rgba(0x1c293346),
+            primary_hover_background: Color::rgba(0x202c3448),
+            primary_hover_foreground: Color::rgba(0x242f354a),
+            primary_hover_icon: Color::rgba(0x2832364c),
+            primary_hover_border: Color::rgba(0x2c35374e),
+            primary_pressed_background: Color::rgba(0x30383850),
+            primary_pressed_foreground: Color::rgba(0x343b3952),
+            primary_pressed_icon: Color::rgba(0x383e3a54),
+            primary_pressed_border: Color::rgba(0x3c413b56),
+            primary_disabled_background: Color::rgba(0x40443c58),
+            primary_disabled_foreground: Color::rgba(0x44473d5a),
+            primary_disabled_icon: Color::rgba(0x484a3e5c),
+            primary_disabled_border: Color::rgba(0x4c4d3f5e),
+            destructive_background: Color::rgba(0x50504060),
+            destructive_foreground: Color::rgba(0x54534162),
+            destructive_icon: Color::rgba(0x58564264),
+            destructive_border: Color::rgba(0x5c594366),
+            destructive_hover_background: Color::rgba(0x605c4468),
+            destructive_hover_foreground: Color::rgba(0x645f456a),
+            destructive_hover_icon: Color::rgba(0x6862466c),
+            destructive_hover_border: Color::rgba(0x6c65476e),
+            destructive_pressed_background: Color::rgba(0x70684870),
+            destructive_pressed_foreground: Color::rgba(0x746b4972),
+            destructive_pressed_icon: Color::rgba(0x786e4a74),
+            destructive_pressed_border: Color::rgba(0x7c714b76),
+            destructive_disabled_background: Color::rgba(0x80744c78),
+            destructive_disabled_foreground: Color::rgba(0x84774d7a),
+            destructive_disabled_icon: Color::rgba(0x887a4e7c),
+            destructive_disabled_border: Color::rgba(0x8c7d4f7e),
+            ..ChromeColors::default()
+        };
         for (actual, expected) in [
             (
                 theme(&colors).paints(ButtonVariant::Primary).normal(),

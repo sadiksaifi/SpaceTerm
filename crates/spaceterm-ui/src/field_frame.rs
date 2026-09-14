@@ -5,11 +5,20 @@ use gpui::{App, BoxShadow, Div, ElementId, FocusHandle, Stateful, div, point, px
 /// Caller-owned validation and availability, independent of keyboard focus.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FieldState {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_focused: bool,
     disabled: bool,
     invalid: bool,
 }
 
 impl FieldState {
+    /// Pins focus decoration without acquiring keyboard focus in the development gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_focus(mut self, focused: bool) -> Self {
+        self.preview_focused = focused;
+        self
+    }
+
     /// Disables the complete frame, including hover and focus decoration.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
@@ -100,29 +109,40 @@ pub fn field_frame(
 /// Creates shared input presentation for a composite without one editor focus handle.
 pub fn field_surface(id: impl Into<ElementId>, state: FieldState, cx: &App) -> Stateful<Div> {
     let theme = cx.global::<crate::TextInputTheme>().frame;
-    let (background, border) = theme.paint(state, false);
+    #[cfg(not(feature = "appearance-exerciser"))]
+    let focused = false;
+    #[cfg(feature = "appearance-exerciser")]
+    let focused = state.preview_focused;
+    let (background, border) = theme.paint(state, focused);
     div()
         .id(id)
         .relative()
         .border(px(1.0))
         .bg(background)
         .border_color(border)
+        .when(focused && state.invalid && !state.disabled, |frame| {
+            frame.shadow(vec![focus_shadow(theme)])
+        })
         .when(!state.disabled, |frame| {
             frame.in_focus(move |style| {
                 let (_, border) = theme.paint(state, true);
                 let style = style.border_color(border);
                 if state.invalid {
-                    style.shadow(vec![BoxShadow {
-                        color: theme.focused_border.into(),
-                        offset: point(px(0.0), px(0.0)),
-                        blur_radius: px(0.0),
-                        spread_radius: px(2.0),
-                    }])
+                    style.shadow(vec![focus_shadow(theme)])
                 } else {
                     style
                 }
             })
         })
+}
+
+fn focus_shadow(theme: FieldFrameTheme) -> BoxShadow {
+    BoxShadow {
+        color: theme.focused_border.into(),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(2.0),
+    }
 }
 
 #[cfg(test)]

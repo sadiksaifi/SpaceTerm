@@ -13,7 +13,21 @@ use crate::ui::appearance::{ChromeAppearance, InstalledChrome};
 
 const INPUT_VALUE: &str = "nonsecret-sample";
 
-struct ReadOnlyExerciserStorage;
+#[gpui::test]
+fn caption_fixture_requires_explicit_gallery_activation(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        assert!(super::caption_fixture(cx).is_none());
+        cx.set_global(super::GalleryCaptionFixture);
+        let facts = super::caption_fixture(cx).expect("gallery should supply display facts");
+        assert_eq!(facts.origin.user.as_ref(), "fixture");
+        assert_eq!(facts.origin.host.as_ref(), "local");
+        assert!(!facts.origin.remote);
+        assert_eq!(facts.directory.as_ref(), "appearance-fixture");
+        assert_eq!(facts.label.as_ref(), "Appearance acceptance");
+    });
+}
+
+pub(super) struct ReadOnlyExerciserStorage;
 
 impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
     fn read(

@@ -316,6 +316,8 @@ type ResizeHandler = Rc<dyn Fn(&ResizeHandleEvent, &mut Window, &mut App)>;
 /// interface keeps handles named and makes the framework seam explicit.
 #[derive(IntoElement)]
 pub struct ResizeHandle {
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     accessibility_name: SharedString,
     axis: ResizeAxis,
@@ -332,6 +334,13 @@ pub struct ResizeHandle {
 }
 
 impl ResizeHandle {
+    /// Pins only divider presentation without owning pointer or keyboard interaction.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.preview_state = Some(state);
+        self
+    }
+
     /// Creates a resize handle with stable identity and a mandatory logical accessibility name.
     pub fn new(
         id: impl Into<ElementId>,
@@ -340,6 +349,8 @@ impl ResizeHandle {
         current_value: f32,
     ) -> Self {
         Self {
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
             id: id.into(),
             accessibility_name: accessibility_name.into(),
             axis,
@@ -462,6 +473,11 @@ impl RenderOnce for ResizeHandle {
             }
         }
         let focused = focus_handle.is_focused(window);
+        #[cfg(feature = "appearance-exerciser")]
+        let (hovered, active, focused) = self
+            .preview_state
+            .map(|state| (state.hovered(), state.pressed(), state.focused()))
+            .unwrap_or((hovered, active, focused));
         let (color, divider_thickness) =
             resolve_presentation(theme, enabled, hovered, active, focused);
         let root_selector = self

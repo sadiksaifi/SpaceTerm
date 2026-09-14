@@ -116,6 +116,30 @@ pub use window_drag_region::{
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
+/// Development-only visual state pinning for the production renderer.
+///
+/// This does not arm interaction or acquire keyboard focus. Production builds omit the Interface.
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlPreviewState {
+    Normal,
+    Hovered,
+    Pressed,
+    Focused,
+}
+#[cfg(feature = "appearance-exerciser")]
+impl ControlPreviewState {
+    pub(crate) fn hovered(self) -> bool {
+        matches!(self, Self::Hovered | Self::Pressed)
+    }
+    pub(crate) fn pressed(self) -> bool {
+        self == Self::Pressed
+    }
+    pub(crate) fn focused(self) -> bool {
+        self == Self::Focused
+    }
+}
+
 /// Bounded application-owned presentation catalog for every reusable control family.
 ///
 /// The catalog keeps initialization stable as the library gains cohesive control families and

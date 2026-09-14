@@ -748,6 +748,13 @@ pub struct Button {
 }
 
 impl Button {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Creates a small secondary text button. Its label is also its logical accessibility name.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
@@ -924,6 +931,13 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    /// Pins only presentation for the development acceptance gallery.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
+        self.core.preview_state = Some(state);
+        self
+    }
+
     /// Supplies complete paints resolved for a contextual host surface, such as a Pane Caption.
     /// Interaction, disabled state, focus geometry, and metrics remain owned by the button.
     pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
@@ -1051,6 +1065,8 @@ struct ButtonCore {
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    #[cfg(feature = "appearance-exerciser")]
+    preview_state: Option<crate::ControlPreviewState>,
 }
 
 impl ButtonCore {
@@ -1072,6 +1088,8 @@ impl ButtonCore {
             modal_press_owner: None,
             preserve_ancestor_hover: false,
             contextual_style: None,
+            #[cfg(feature = "appearance-exerciser")]
+            preview_state: None,
         }
     }
 
@@ -1127,6 +1145,11 @@ impl ButtonCore {
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
         let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
+        #[cfg(feature = "appearance-exerciser")]
+        let (pressed, hovered, focused) = self
+            .preview_state
+            .map(|state| (state.pressed(), state.hovered(), state.focused()))
+            .unwrap_or((pressed, hovered, focused));
         let paint = resolve_paint(style, enabled, pressed, hovered);
         let focus_ring = focused.then_some(style.focus_border);
         let focus_ring_offset = style.border_width * 2.0;
