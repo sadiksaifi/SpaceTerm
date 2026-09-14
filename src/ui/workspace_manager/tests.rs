@@ -1,5 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::ui::workspace_sidebar::{SIDEBAR_ROW_SELECTION_INSET_X, SIDEBAR_ROW_SELECTION_INSET_Y};
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
@@ -5625,42 +5626,53 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 }
 
 #[gpui::test]
-fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
+fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n cmd-n");
     cx.run_until_parked();
 
     let first_row = cx
         .debug_bounds("workspace-row-1-inactive")
         .expect("the inactive Workspace row was not rendered");
-    let first_divider = cx
-        .debug_bounds("workspace-row-divider-1")
-        .expect("the first Workspace divider was not rendered");
     let second_row = cx
-        .debug_bounds("workspace-row-2-active")
+        .debug_bounds("workspace-row-2-inactive")
+        .expect("the second inactive Workspace row was not rendered");
+    let third_row = cx
+        .debug_bounds("workspace-row-3-active")
         .expect("the Active Workspace row was not rendered");
-    let second_divider = cx
-        .debug_bounds("workspace-row-divider-2")
-        .expect("the second Workspace divider was not rendered");
+    let selection = cx
+        .debug_bounds("workspace-row-selection-3")
+        .expect("the Active Workspace selection was not rendered");
 
     assert_eq!(
-        (first_divider, second_divider),
-        (
-            gpui::bounds(
-                point(
-                    first_row.origin.x,
-                    first_row.origin.y + first_row.size.height - px(1.0)
-                ),
-                gpui::size(first_row.size.width, px(CHROME_DIVIDER_SIZE)),
+        selection,
+        gpui::bounds(
+            point(
+                third_row.origin.x + px(SIDEBAR_ROW_SELECTION_INSET_X),
+                third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
-            gpui::bounds(
-                point(
-                    second_row.origin.x,
-                    second_row.origin.y + second_row.size.height - px(1.0),
-                ),
-                gpui::size(second_row.size.width, px(CHROME_DIVIDER_SIZE)),
+            gpui::size(
+                third_row.size.width - px(SIDEBAR_ROW_SELECTION_INSET_X * 2.0),
+                third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
-        )
+        ),
+        "the selected Workspace material should float inside its row"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-1").is_some(),
+        "unrelated Workspace rows should retain their divider"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-2").is_none(),
+        "the divider before the selected Workspace should leave the material open"
+    );
+    assert!(
+        cx.debug_bounds("workspace-row-divider-3").is_none(),
+        "the selected Workspace should not draw a divider through its material"
+    );
+    assert_eq!(
+        (first_row.size, second_row.size),
+        (third_row.size, third_row.size)
     );
 }
 

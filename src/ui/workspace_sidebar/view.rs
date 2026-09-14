@@ -1,15 +1,108 @@
 use super::*;
 
+/// The inset rounded chip that carries a Workspace row's hover and persistent selection.
+///
+/// A navigation row that fills its strip edge to edge reads as a band laid over the sidebar, and a
+/// band has no front or back. Pulling the paint into a chip with a small inset and a modest radius
+/// gives the current Workspace a shape of its own, and gives hover somewhere to land that does not
+/// contradict it. The geometry lives here so the fill, the hover state, and the keyboard focus ring
+/// cannot drift apart.
+#[derive(Clone, Copy)]
+struct SelectionChip {
+    inset_x: Pixels,
+    inset_y: Pixels,
+    radius: Pixels,
+    ring_gap: Pixels,
+    fill: Option<Color>,
+    hover_fill: Color,
+    rim: Color,
+    hover_rim: Color,
+}
+
+impl SelectionChip {
+    fn of(selected: bool, appearance: &crate::ui::appearance::ChromeAppearance) -> Self {
+        let colors = &appearance.colors;
+        let (fill, hover_fill, rim, hover_rim) = if selected {
+            (
+                Some(colors.row_selected_background),
+                colors.row_selected_hover_background,
+                colors.row_selected_border,
+                colors.row_selected_hover_border,
+            )
+        } else {
+            (
+                None,
+                colors.row_hover_background,
+                colors.row_hover_border,
+                colors.row_hover_border,
+            )
+        };
+        Self {
+            inset_x: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_X),
+            inset_y: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
+            radius: appearance.spacing(SIDEBAR_ROW_SELECTION_RADIUS),
+            ring_gap: appearance.spacing(SIDEBAR_ROW_SELECTION_RING_GAP),
+            fill,
+            hover_fill,
+            rim,
+            hover_rim,
+        }
+    }
+
+    fn shape(inset_x: Pixels, inset_y: Pixels, radius: Pixels) -> gpui::Div {
+        div()
+            .absolute()
+            .top(inset_y)
+            .bottom(inset_y)
+            .left(inset_x)
+            .right(inset_x)
+            .rounded(radius)
+    }
+
+    fn render(self, id: u64, group: &str) -> AnyElement {
+        let hover_fill = gpui_color(self.hover_fill);
+        let hover_rim = gpui_color(self.hover_rim);
+        Self::shape(self.inset_x, self.inset_y, self.radius)
+            .id(("workspace-row-selection", id))
+            .debug_selector(move || format!("workspace-row-selection-{id}"))
+            .when_some(self.fill, |chip, fill| {
+                // The rim is authored to sit darker than its fill in light Chrome and lighter in
+                // dark, so one role describes a lit edge in both rather than an outline.
+                chip.bg(gpui_color(fill))
+                    .border(px(1.0))
+                    .border_color(gpui_color(self.rim))
+            })
+            .group_hover(group.to_owned(), move |style| {
+                style.bg(hover_fill).border(px(1.0)).border_color(hover_rim)
+            })
+            .into_any_element()
+    }
+
+    fn ring(self) -> gpui::Div {
+        Self::shape(
+            self.inset_x - self.ring_gap,
+            self.inset_y - self.ring_gap,
+            self.radius + self.ring_gap,
+        )
+    }
+}
+
+struct WorkspaceRowLayout {
+    row: WorkspaceRowViewModel,
+    divider: bool,
+}
+
 impl WorkspaceSidebar {
     fn render_workspace_row(
         &self,
-        row: WorkspaceRowViewModel,
+        layout: WorkspaceRowLayout,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
     ) -> AnyElement {
+        let WorkspaceRowLayout { row, divider } = layout;
         let WorkspaceRowViewModel {
             workspace_id,
             name,
@@ -25,13 +118,15 @@ impl WorkspaceSidebar {
         } = row;
         let mut appearance = appearance.clone();
         let row_group = format!("workspace-row-state-{}", workspace_id.get());
+        // Hover and selection are carried by an inset chip rather than by the row's own fill, so
+        // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
+        // with air around it. The chip's paints are read before the selected roles are promoted
+        // below, because that promotion is what the row's text and icons consume.
+        let chip = SelectionChip::of(active, &appearance);
         if active {
-            appearance.colors.row_background = appearance.colors.row_selected_background;
             appearance.colors.row_foreground = appearance.colors.row_selected_foreground;
             appearance.colors.row_secondary = appearance.colors.row_selected_secondary;
             appearance.colors.row_icon = appearance.colors.row_selected_icon;
-            appearance.colors.row_hover_background =
-                appearance.colors.row_selected_hover_background;
             appearance.colors.row_hover_foreground =
                 appearance.colors.row_selected_hover_foreground;
             appearance.colors.row_hover_secondary = appearance.colors.row_selected_hover_secondary;
@@ -148,7 +243,7 @@ impl WorkspaceSidebar {
             .block_mouse_except_scroll()
             .group(row_group.clone())
             .bg(gpui_color(appearance.colors.row_background))
-            .hover(|row| row.bg(gpui_color(appearance.colors.row_hover_background)))
+            .child(chip.render(workspace_id.get(), &row_group))
             .on_click(move |_, _, cx| {
                 let _ = click_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Activate {
@@ -215,22 +310,30 @@ impl WorkspaceSidebar {
                         appearance.clone(),
                     )),
             )
-            .child(
-                div()
-                    .id(("workspace-row-divider", workspace_id.get()))
-                    .debug_selector(move || format!("workspace-row-divider-{}", workspace_id.get()))
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(appearance.colors.border_variant)),
-            )
-            .when(active && self.focus.is_focused(window), |row| {
+            // A divider that runs up to a selected chip fences it in. Both seams that touch the
+            // selection are left open instead, so the chip keeps the air that makes it read as one
+            // resting shape rather than as a band cut out of the list.
+            .when(divider, |row| {
                 row.child(
                     div()
+                        .id(("workspace-row-divider", workspace_id.get()))
+                        .debug_selector(move || {
+                            format!("workspace-row-divider-{}", workspace_id.get())
+                        })
                         .absolute()
-                        .inset_0()
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(CHROME_DIVIDER_SIZE))
+                        .bg(gpui_color(appearance.colors.border_variant)),
+                )
+            })
+            // Keyboard focus rides just outside the chip it belongs to, with a hairline of the
+            // sidebar surface between the two. A ring drawn on the row's own edges would box the
+            // whole strip and say nothing about which shape the keyboard is pointing at.
+            .when(active && self.focus.is_focused(window), |row| {
+                row.child(
+                    chip.ring()
                         .border(px(1.0))
                         .border_color(gpui_color(appearance.colors.sidebar_focus))
                         .debug_selector(|| "workspace-sidebar-focus-indicator".to_owned()),
@@ -329,9 +432,13 @@ impl WorkspaceSidebar {
                 });
             })
             .occlude();
-        for row in &self.rows {
+        for (index, row) in self.rows.iter().enumerate() {
+            let next_selected = self.rows.get(index + 1).is_some_and(|next| next.active);
             rows = rows.child(self.render_workspace_row(
-                row.clone(),
+                WorkspaceRowLayout {
+                    row: row.clone(),
+                    divider: !row.active && !next_selected,
+                },
                 sidebar.clone(),
                 presentation,
                 window,

@@ -51,6 +51,15 @@ pub(super) const SIDEBAR_FOOTER_ICON_SIZE: f32 = 15.0;
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 pub(super) const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
+/// The inset, radius, and focus-ring gap of the chip that carries a row's selection.
+///
+/// The horizontal inset stays inside the row's own padding so the chip has a gutter on both sides
+/// of the sidebar, and the radius stays close to the one the shared list controls already use for
+/// their rows, so a selected Workspace and a selected menu entry read as the same kind of shape.
+pub(super) const SIDEBAR_ROW_SELECTION_INSET_X: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
+pub(super) const SIDEBAR_ROW_SELECTION_RADIUS: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_SELECTION_RING_GAP: f32 = 2.0;
 pub(super) const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;

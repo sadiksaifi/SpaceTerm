@@ -1355,8 +1355,21 @@ mod tests {
                 (c.row_selected_foreground, c.row_selected_background),
                 (c.row_selected_secondary, c.row_selected_background),
                 (c.row_selected_match, c.row_selected_background),
+                (
+                    c.row_selected_hover_foreground,
+                    c.row_selected_hover_background,
+                ),
+                (
+                    c.row_selected_hover_secondary,
+                    c.row_selected_hover_background,
+                ),
+                (c.row_selected_hover_match, c.row_selected_hover_background),
                 (c.toggle_on_mark, c.toggle_on_background),
+                (c.toggle_on_hover_mark, c.toggle_on_hover_background),
+                (c.toggle_on_pressed_mark, c.toggle_on_pressed_background),
                 (c.toggle_off_mark, c.toggle_off_background),
+                (c.toggle_off_hover_mark, c.toggle_off_hover_background),
+                (c.toggle_off_pressed_mark, c.toggle_off_pressed_background),
                 (
                     c.tab_inactive_selected_foreground,
                     c.tab_inactive_selected_background,
@@ -1374,6 +1387,9 @@ mod tests {
                 (c.scrollbar_thumb_background, c.panel_background),
                 (c.scrollbar_thumb_hover_background, c.panel_background),
                 (c.scrollbar_thumb_active_background, c.panel_background),
+                (c.toggle_off_border, c.toggle_off_background),
+                (c.toggle_off_hover_border, c.toggle_off_hover_background),
+                (c.toggle_off_pressed_border, c.toggle_off_pressed_background),
             ] {
                 assert!(
                     indicator.source_over(surface).contrast_ratio(surface) >= 3.0,
