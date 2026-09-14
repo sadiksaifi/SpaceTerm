@@ -89,9 +89,43 @@ fn published_schemas_resolve_external_draft_2020_12_references() {
         .build(&package_schema)
         .expect("color-scheme schema must resolve the shared definitions");
     assert!(package_validator.is_valid(&package));
+    assert!(super::parse_color_document(&serde_json::to_vec(&package).unwrap()).is_ok());
+    let mut reserved_package = package.clone();
+    reserved_package["schemes"][0]["id"] = serde_json::json!("builtin.claimed-by-custom-scheme");
+    assert!(!package_validator.is_valid(&reserved_package));
+    assert!(super::parse_color_document(&serde_json::to_vec(&reserved_package).unwrap()).is_err());
     let mut invalid_package = package;
     invalid_package["schemes"][0]["appearance"] = serde_json::json!("auto");
     assert!(!package_validator.is_valid(&invalid_package));
+}
+
+#[test]
+fn published_schema_accepts_sparse_terminal_palettes() {
+    let definitions: serde_json::Value = serde_json::from_str(include_str!(
+        "../../docs/schema/color-scheme-definitions-v1.schema.json"
+    ))
+    .unwrap();
+    let package_schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../docs/schema/color-schemes.schema.json")).unwrap();
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(PublishedSchemaRetriever(definitions))
+        .build(&package_schema)
+        .unwrap();
+    let package = serde_json::json!({
+        "schema_version": 1,
+        "schemes": [{
+            "kind": "terminal",
+            "id": "custom.sparse-ansi",
+            "name": "Sparse ANSI",
+            "appearance": "dark",
+            "colors": {
+                "normal": [null, "#dd1133", null, null, null, null, null, null]
+            }
+        }]
+    });
+
+    assert!(validator.is_valid(&package));
+    assert!(super::parse_color_document(&serde_json::to_vec(&package).unwrap()).is_ok());
 }
 
 struct PublishedSchemaRetriever(serde_json::Value);

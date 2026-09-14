@@ -290,7 +290,7 @@ fn validate_color_document(document: &ColorSchemeDocument) -> Result<(), ImportE
     }
     let mut ids = BTreeSet::new();
     for scheme in &document.schemes {
-        validate_scheme(scheme, false).map_err(|_| ImportError::InvalidScheme)?;
+        validate_scheme(scheme, true).map_err(|_| ImportError::InvalidScheme)?;
         if !ids.insert(scheme.id().clone()) {
             return Err(ImportError::DuplicateId);
         }
@@ -417,7 +417,7 @@ pub(crate) fn import_zed(
                     name: name.to_owned(),
                     appearance,
                     metadata: metadata.clone(),
-                    colors: zed_terminal(style, appearance)?,
+                    colors: zed_terminal(style)?,
                 })))
             }
         }
@@ -525,7 +525,7 @@ fn zed_chrome(style: &serde_json::Map<String, Value>) -> Result<ChromeColorOverr
         scrollbar_track => "scrollbar.track.background", success_background => "success.background",
         success_border => "success.border", info_border => "info.border",
         row_hover_background => "ghost_element.hover",
-        row_selected_background => "ghost_element.selected", row_selected_hover_background => "ghost_element.hover"
+        row_selected_background => "ghost_element.selected"
 
     }
     if let Some(players) = style.get("players").and_then(Value::as_array)
@@ -547,7 +547,6 @@ fn zed_chrome(style: &serde_json::Map<String, Value>) -> Result<ChromeColorOverr
 
 fn zed_terminal(
     style: &serde_json::Map<String, Value>,
-    appearance: Appearance,
 ) -> Result<TerminalColorOverrides, ImportError> {
     let mut colors = TerminalColorOverrides::default();
     macro_rules! map { ($($field:ident => $key:literal),+ $(,)?) => { $(colors.$field = zed_color(style, $key)?;)+ }; }
@@ -555,14 +554,12 @@ fn zed_terminal(
     bright_foreground => "terminal.bright_foreground", dim_foreground => "terminal.dim_foreground",
     find_match_background => "search.match_background",
     find_active_match_background => "search.active_match_background", hyperlink => "link_text.hover" }
-    let base = super::builtin::terminal_base(appearance);
     colors.normal = zed_palette(
         style,
         "terminal.ansi.",
         [
             "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
         ],
-        base.normal,
     )?;
     colors.bright = zed_palette(
         style,
@@ -570,7 +567,6 @@ fn zed_terminal(
         [
             "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
         ],
-        base.bright,
     )?;
     colors.dim = zed_palette(
         style,
@@ -578,7 +574,6 @@ fn zed_terminal(
         [
             "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
         ],
-        base.dim,
     )?;
     if let Some(foreground) = colors.foreground {
         colors.cursor = Some(foreground);
@@ -608,16 +603,12 @@ fn zed_palette(
     style: &serde_json::Map<String, Value>,
     prefix: &str,
     names: [&str; 8],
-    mut base: [Color; 8],
-) -> Result<Option<[Color; 8]>, ImportError> {
-    let mut changed = false;
+) -> Result<Option<super::scheme::TerminalPaletteOverrides>, ImportError> {
+    let mut authored = [None; 8];
     for (index, name) in names.into_iter().enumerate() {
-        if let Some(color) = zed_color(style, &format!("{prefix}{name}"))? {
-            base[index] = color;
-            changed = true;
-        }
+        authored[index] = zed_color(style, &format!("{prefix}{name}"))?;
     }
-    Ok(changed.then_some(base))
+    Ok(super::scheme::TerminalPaletteOverrides::sparse(authored))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

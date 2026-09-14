@@ -33,8 +33,9 @@ opaque. Rendering prepares one canonical backing: root uses its own RGB opaque, 
 surfaces compose on that root, and fields compose on the canonical panel. The prepared field is
 fully backed even when hosted on another surface, so derived text sees exactly that paint. Structural
 no-paint ghost backgrounds remain transparent. Authored RGBA stays retained for export and later
-native transparency delivery. Terminal protocol foreground/background, ANSI arrays, cursor and optional interaction
-foregrounds remain opaque. Optional terminal foreground roles alone accept null.
+native transparency delivery. Authored Terminal colors remain opaque. ANSI arrays use eight
+nullable slots, where `null` inherits that slot from the built-in fallback. Optional scalar
+terminal foreground roles also accept null.
 
 Chrome family dependencies are intentionally small:
 
@@ -64,7 +65,8 @@ silently enabling native transparency. See [ADR 0006](adr/0006-compile-chrome-th
 ## Terminal roles
 
 `foreground`, `background`, and `cursor` are host defaults. `normal`, `bright`, and `dim` each have
-exactly eight entries ordered black, red, green, yellow, blue, magenta, cyan, white.
+exactly eight slots ordered black, red, green, yellow, blue, magenta, cyan, white. A color authors
+that slot; `null` retains its built-in fallback.
 `bright_foreground` and `dim_foreground` retain the explicit default choices. `cursor_text`,
 `selection_foreground`, `find_match_foreground`, and `find_active_match_foreground` accept `null`;
 null means the documented effective underlying color. `selection_background`,

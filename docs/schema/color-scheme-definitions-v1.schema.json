@@ -8,6 +8,18 @@
       "maxLength": 128,
       "pattern": "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$"
     },
+    "customId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "not": {
+            "pattern": "^builtin\\."
+          }
+        }
+      ]
+    },
     "color": {
       "type": "string",
       "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
@@ -322,7 +334,14 @@
       "minItems": 8,
       "maxItems": 8,
       "items": {
-        "$ref": "#/$defs/opaqueColor"
+        "oneOf": [
+          {
+            "$ref": "#/$defs/opaqueColor"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "customScheme": {
@@ -342,7 +361,7 @@
               "const": "chrome"
             },
             "id": {
-              "$ref": "#/$defs/id"
+              "$ref": "#/$defs/customId"
             },
             "name": {
               "type": "string",
@@ -397,7 +416,7 @@
               "const": "terminal"
             },
             "id": {
-              "$ref": "#/$defs/id"
+              "$ref": "#/$defs/customId"
             },
             "name": {
               "type": "string",

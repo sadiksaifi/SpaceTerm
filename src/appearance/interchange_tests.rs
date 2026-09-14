@@ -1,4 +1,4 @@
-use super::compiler::compile_chrome;
+use super::compiler::{ColorProvenance, compile_chrome};
 use super::document::export_effective_schemes;
 use super::*;
 use std::collections::BTreeSet;
@@ -225,6 +225,100 @@ fn sparse_zed_and_native_intent_compile_identically_after_overrides() {
 }
 
 #[test]
+fn zed_selected_hover_keeps_the_selected_surface_when_hover_differs() {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "themes": [{
+            "name": "Distinct interaction states",
+            "appearance": "dark",
+            "style": {
+                "ghost_element.hover": "#112233",
+                "ghost_element.selected": "#aabbcc"
+            }
+        }]
+    }))
+    .unwrap();
+
+    let imported = import_zed(&bytes, 0, &[ZedImportKind::Chrome]).unwrap();
+    let CustomScheme::Chrome(scheme) = &imported[0] else {
+        panic!()
+    };
+
+    assert!(scheme.colors.row_selected_hover_background.is_none());
+    let compiled = compile_chrome(scheme.appearance, &scheme.colors, &Default::default());
+    assert_eq!(
+        compiled.colors.row_selected_hover_background,
+        compiled
+            .colors
+            .row_selected_background
+            .mix(compiled.colors.text, 0.06)
+    );
+    assert_ne!(
+        compiled.colors.row_selected_hover_background,
+        compiled.colors.row_hover_background
+    );
+    assert_eq!(
+        compiled.provenance["row_selected_hover_background"],
+        ColorProvenance::Derived
+    );
+}
+
+#[test]
+fn one_entry_zed_ansi_palette_stays_sparse_through_export_and_reinstall() {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "themes": [{
+            "name": "Sparse ANSI",
+            "appearance": "dark",
+            "style": { "terminal.ansi.red": "#dd1133" }
+        }]
+    }))
+    .unwrap();
+    let imported = import_zed(&bytes, 0, &[ZedImportKind::Terminal]).unwrap();
+    let CustomScheme::Terminal(imported_scheme) = &imported[0] else {
+        panic!()
+    };
+    let authored = imported_scheme.colors.normal.as_ref().unwrap();
+    assert_eq!(authored.get(1), Some(Color::rgb(0xdd1133)));
+    assert_eq!(authored.get(0), None);
+    assert!(imported_scheme.colors.bright.is_none());
+    assert!(imported_scheme.colors.dim.is_none());
+
+    let catalog = SchemeCatalog::from_custom_schemes(&imported).unwrap();
+    let encoded = export_schemes(
+        &catalog,
+        &[(SchemeKind::Terminal, imported_scheme.id.clone())],
+    )
+    .unwrap();
+    let parsed = parse_color_document(encoded.as_bytes()).unwrap();
+    assert_eq!(parsed.schemes, imported);
+
+    let mut fresh = SchemeCatalog::default();
+    let installed = fresh
+        .install_batch(&parsed.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
+    let mut preferences = AppearancePreferences {
+        mode: Appearance::Dark.into(),
+        ..Default::default()
+    };
+    preferences
+        .terminal
+        .schemes
+        .set(Appearance::Dark, installed[0].clone());
+    let resolved = fresh
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    assert_eq!(resolved.terminal.colors.normal[1], Color::rgb(0xdd1133));
+    assert_eq!(
+        resolved.terminal.colors.normal[0],
+        super::builtin::terminal_base(Appearance::Dark).normal[0]
+    );
+}
+
+#[test]
 fn zed_null_missing_unknown_and_invalid_inputs_have_bounded_behavior() {
     let absent=br##"{"themes":[{"name":"Sparse","appearance":"dark","style":{"background":"#010203","text":"#fefefe"}}]}"##;
     let null=br##"{"themes":[{"name":"Sparse","appearance":"dark","style":{"background":"#010203","text":"#fefefe","element.selected":null,"future.role":{"opaque":false}}}]}"##;
@@ -312,15 +406,21 @@ fn pinned_upstream_roles_cross_the_production_importer_and_compiler() {
     let CustomScheme::Terminal(terminal) = &imported[1] else {
         panic!()
     };
-    assert_eq!(
-        terminal.colors.normal.unwrap(),
-        TerminalColors::default().normal
-    );
-    assert_eq!(
-        terminal.colors.bright.unwrap(),
-        TerminalColors::default().bright
-    );
-    assert_eq!(terminal.colors.dim.unwrap(), TerminalColors::default().dim);
+    let expected = TerminalColors::default();
+    for index in 0..8 {
+        assert_eq!(
+            terminal.colors.normal.as_ref().unwrap().get(index),
+            Some(expected.normal[index])
+        );
+        assert_eq!(
+            terminal.colors.bright.as_ref().unwrap().get(index),
+            Some(expected.bright[index])
+        );
+        assert_eq!(
+            terminal.colors.dim.as_ref().unwrap().get(index),
+            Some(expected.dim[index])
+        );
+    }
 }
 
 #[test]

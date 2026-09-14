@@ -297,9 +297,6 @@ impl TerminalColors {
         apply!(
             foreground,
             background,
-            normal,
-            bright,
-            dim,
             bright_foreground,
             dim_foreground,
             cursor,
@@ -309,6 +306,15 @@ impl TerminalColors {
             hyperlink,
             visual_bell
         );
+        if let Some(palette) = &overrides.normal {
+            palette.apply(&mut self.normal);
+        }
+        if let Some(palette) = &overrides.bright {
+            palette.apply(&mut self.bright);
+        }
+        if let Some(palette) = &overrides.dim {
+            palette.apply(&mut self.dim);
+        }
         overrides.cursor_text.apply(&mut self.cursor_text);
         overrides
             .selection_foreground
@@ -343,6 +349,33 @@ impl TerminalColors {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct TerminalPaletteOverrides([Option<Color>; 8]);
+
+impl TerminalPaletteOverrides {
+    pub(crate) fn sparse(colors: [Option<Color>; 8]) -> Option<Self> {
+        colors.iter().any(Option::is_some).then_some(Self(colors))
+    }
+
+    pub(crate) fn complete(colors: [Color; 8]) -> Self {
+        Self(colors.map(Some))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, index: usize) -> Option<Color> {
+        self.0.get(index).copied().flatten()
+    }
+
+    fn apply(&self, target: &mut [Color; 8]) {
+        for (target, authored) in target.iter_mut().zip(self.0) {
+            if let Some(color) = authored {
+                *target = color;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TerminalColorOverrides {
@@ -363,19 +396,19 @@ pub(crate) struct TerminalColorOverrides {
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) normal: Option<[Color; 8]>,
+    pub(crate) normal: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) bright: Option<[Color; 8]>,
+    pub(crate) bright: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) dim: Option<[Color; 8]>,
+    pub(crate) dim: Option<TerminalPaletteOverrides>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
@@ -512,9 +545,9 @@ impl TerminalColorOverrides {
         Self {
             foreground: Some(colors.foreground),
             background: Some(colors.background),
-            normal: Some(colors.normal),
-            bright: Some(colors.bright),
-            dim: Some(colors.dim),
+            normal: Some(TerminalPaletteOverrides::complete(colors.normal)),
+            bright: Some(TerminalPaletteOverrides::complete(colors.bright)),
+            dim: Some(TerminalPaletteOverrides::complete(colors.dim)),
             bright_foreground: Some(colors.bright_foreground),
             dim_foreground: Some(colors.dim_foreground),
             cursor: Some(colors.cursor),
