@@ -1675,13 +1675,13 @@ fn render_pane_caption(
             let background = caption.terminal.read(cx).surface_background();
             let pane_id = caption.pane_id;
             let paint = appearance.colors.caption(background, caption.focused);
+            let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
                 &pane_group,
                 host,
                 crate::desktop_profile::DesktopPresentation::get(cx),
-                bounds.size.width,
-                window,
+                layout,
                 &appearance,
                 paint,
             );
@@ -1715,12 +1715,10 @@ fn render_pane_caption_content(
     pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
     presentation: &crate::desktop_profile::DesktopPresentation,
-    width: Pixels,
-    window: &Window,
+    layout: CaptionLayout,
     appearance: &super::appearance::ChromeAppearance,
     paint: crate::appearance::CaptionPaint,
 ) -> AnyElement {
-    let layout = CaptionLayout::resolve(&caption, width, window, appearance);
     let PaneCaption {
         pane_id,
         terminal: _,

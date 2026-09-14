@@ -1479,10 +1479,12 @@ mod tests {
 
     #[test]
     fn tab_control_styles_keep_state_foregrounds_in_both_window_states() {
-        let mut colors = ChromeColors::default();
-        colors.tab_active_icon = Color::rgb(0x112233);
-        colors.tab_inactive_selected_icon = Color::rgb(0x223344);
-        colors.tab_hover_icon = Color::rgb(0x334455);
+        let colors = ChromeColors {
+            tab_active_icon: Color::rgb(0x112233),
+            tab_inactive_selected_icon: Color::rgb(0x223344),
+            tab_hover_icon: Color::rgb(0x334455),
+            ..ChromeColors::default()
+        };
         for window_active in [false, true] {
             let style =
                 TabChromePresentation::resolve(window_active, &colors).control_style(true, &colors);
