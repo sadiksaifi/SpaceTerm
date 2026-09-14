@@ -3,13 +3,20 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 guard=$script_dir/cargo-artifacts.sh
+repo_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-cargo-artifacts.XXXXXX")
 trap 'rm -rf -- "$temp_root"' EXIT HUP INT TERM
 
-make_oversized_target() {
+prepare_owned_target() {
     target=$1
     mkdir -p "$target"
+    printf '%s\n' "$repo_dir" > "$target/.spaceterm-cargo-target-owner"
     printf '{}\n' > "$target/.rustc_info.json"
+}
+
+make_oversized_target() {
+    target=$1
+    prepare_owned_target "$target"
     dd if=/dev/zero of="$target/artifact" bs=1048576 count=2 >/dev/null 2>&1
 }
 
@@ -17,11 +24,10 @@ target=$temp_root/pre/target
 make_oversized_target "$target"
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
-    "test ! -e \"\$CARGO_TARGET_DIR/artifact\" && test \"\$CARGO_INCREMENTAL\" = 0"
+    "test ! -e \"\$CARGO_TARGET_DIR/artifact\" && test \"\$CARGO_INCREMENTAL\" = 0 && test -f \"\$CARGO_TARGET_DIR/.spaceterm-cargo-target-owner\""
 
 target=$temp_root/post/target
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
@@ -30,10 +36,10 @@ status=$?
 set -e
 test "$status" -eq 75
 test ! -e "$target/artifact"
+test -f "$target/.spaceterm-cargo-target-owner"
 
 target=$temp_root/failure/target
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c 'exit 37'
@@ -42,8 +48,7 @@ set -e
 test "$status" -eq 37
 
 target=$temp_root/dash/target
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     dash "$guard" run -- sh -c 'exit 23'
@@ -53,8 +58,7 @@ test "$status" -eq 23
 
 target=$temp_root/startup-signal/target
 started=$temp_root/startup-signal-started
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
     "printf '%s\\n' \\\$\\\$ > \"\$1\"; sleep 30" \
@@ -79,8 +83,7 @@ if kill -0 "$guarded_pid" 2>/dev/null; then
 fi
 
 target=$temp_root/child-signal/target
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c 'trap "exit 41" TERM; kill -TERM $$; sleep 30' &
@@ -104,8 +107,7 @@ test "$status" -eq 41
 
 target=$temp_root/live/target
 continuation=$temp_root/live-continued
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
@@ -119,8 +121,7 @@ test ! -e "$target/artifact"
 
 target=$temp_root/leader-exit/target
 continuation=$temp_root/leader-exit-continued
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 set +e
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
@@ -133,8 +134,7 @@ test ! -e "$continuation"
 test ! -e "$target/artifact"
 
 target=$temp_root/termination-before-clean/target
-mkdir -p "$target"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
 cat > "$temp_root/write-after-term.py" <<'PY'
 import os
 from pathlib import Path
@@ -166,10 +166,14 @@ test ! -e "$target/after-term"
 test ! -e "$target/artifact"
 
 target=$temp_root/cleanup-failure/target
-mkdir -p "$target" "$temp_root/bin"
-printf '{}\n' > "$target/.rustc_info.json"
+prepare_owned_target "$target"
+mkdir -p "$temp_root/bin"
 cat > "$temp_root/bin/cargo" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = metadata ]; then
+    printf '{"target_directory":"%s"}\n' "$CARGO_TARGET_DIR"
+    exit 0
+fi
 exit 55
 EOF
 chmod +x "$temp_root/bin/cargo"
@@ -201,7 +205,53 @@ set -e
 test "$status" -eq 2
 test -e "$unsafe_target/artifact"
 
-if grep -Eq 'cargo run (--features appearance-exerciser )?--locked' "$script_dir/../.mise.toml"; then
+foreign_target=$temp_root/foreign/target
+mkdir -p "$foreign_target"
+printf '%s\n' /another/repository > "$foreign_target/.spaceterm-cargo-target-owner"
+printf 'must survive\n' > "$foreign_target/unrelated-artifact"
+set +e
+CARGO_TARGET_DIR="$foreign_target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'exit 99' >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 2
+test -e "$foreign_target/unrelated-artifact"
+
+configured_target=$temp_root/configured/target
+configured_home=$temp_root/configured/cargo-home
+cargo_bin_dir=$(rustc --print sysroot)/bin
+mkdir -p "$configured_home" "$configured_target"
+configured_target=$(CDPATH='' cd -- "$configured_target" && pwd -P)
+cat > "$configured_home/config.toml" <<EOF
+[build]
+target-dir = "$configured_target"
+EOF
+# shellcheck disable=SC2016
+PATH="$cargo_bin_dir:$PATH" CARGO_HOME="$configured_home" \
+    SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c \
+    'test "$CARGO_TARGET_DIR" = "$1" && test -f "$1/.spaceterm-cargo-target-owner"' \
+    sh "$configured_target"
+
+fake_bin=$temp_root/configured-triple-bin
+fake_executable=$temp_root/configured-triple-target/aarch-vendor-os/debug/spaceterm
+artifact_path=$temp_root/configured-triple-artifact-path
+mkdir -p "$fake_bin" "$(dirname -- "$fake_executable")"
+: > "$fake_executable"
+fake_executable=$(CDPATH='' cd -- "$(dirname -- "$fake_executable")" && pwd -P)/spaceterm
+cat > "$fake_bin/cargo" <<'EOF'
+#!/bin/sh
+printf '{"reason":"compiler-artifact","target":{"name":"spaceterm"},"executable":"%s"}\n' \
+    "$FAKE_EXECUTABLE"
+EOF
+chmod +x "$fake_bin/cargo"
+PATH="$fake_bin:$PATH" FAKE_EXECUTABLE="$fake_executable" \
+    python3 "$script_dir/cargo-build-executable.py" \
+    --output "$artifact_path" --bin spaceterm -- --locked
+test "$(cat "$artifact_path")" = "$fake_executable"
+
+if grep -Eq 'cargo run (--features appearance-exerciser )?--locked|target/debug/spaceterm' \
+    "$script_dir/../.mise.toml" "$script_dir/dev-appearance-macos.sh"; then
     echo "interactive development tasks must build before launching" >&2
     exit 1
 fi

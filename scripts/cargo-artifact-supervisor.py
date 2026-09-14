@@ -19,6 +19,7 @@ POLL_INTERVAL_SECONDS = 0.05
 TERMINATE_GRACE_SECONDS = 1.0
 KILL_GRACE_SECONDS = 5.0
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+OWNER_FILE = ".spaceterm-cargo-target-owner"
 
 
 class Supervisor:
@@ -149,15 +150,61 @@ class Supervisor:
             raise SystemExit(2) from None
 
     def target_is_verified(self) -> bool:
-        return self.target_dir == self.repo_dir / "target" or (
-            self.target_dir / ".rustc_info.json"
-        ).is_file()
+        try:
+            return (self.target_dir / OWNER_FILE).read_text(encoding="utf-8") == (
+                f"{self.repo_dir}\n"
+            )
+        except OSError:
+            return False
+
+    def ensure_target_owned(self) -> bool:
+        """Claim a safe target or verify its repository-specific ownership."""
+        owner_file = self.target_dir / OWNER_FILE
+        expected = f"{self.repo_dir}\n"
+        if owner_file.exists():
+            if self.target_is_verified():
+                return True
+            print(
+                "error: Cargo target directory is owned by another repository",
+                file=sys.stderr,
+            )
+            return False
+
+        try:
+            self.target_dir.mkdir(parents=True, exist_ok=True)
+            entries = list(self.target_dir.iterdir())
+        except OSError:
+            print("error: could not prepare Cargo target directory", file=sys.stderr)
+            return False
+
+        default_target = self.repo_dir / "target"
+        if entries and self.target_dir != default_target:
+            print(
+                "error: refusing to claim a non-empty external Cargo target directory; "
+                "use an empty repository-specific directory",
+                file=sys.stderr,
+            )
+            return False
+
+        try:
+            descriptor = os.open(owner_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            return self.target_is_verified()
+        except OSError:
+            print("error: could not mark Cargo target ownership", file=sys.stderr)
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(expected)
+        return True
 
     def clean_target(self) -> int:
         if not self.target_dir.is_dir():
             return 0
         if not self.target_is_verified():
-            print("error: refusing to clean an unverified Cargo target directory", file=sys.stderr)
+            print(
+                "error: refusing to clean a Cargo target directory not owned by this repository",
+                file=sys.stderr,
+            )
             return 2
         process = self._spawn_session(
             [
@@ -173,13 +220,18 @@ class Supervisor:
         self._clear_active()
         if self.received_signal is not None:
             return 128 + self.received_signal
-        return self.shell_status(status)
+        shell_status = self.shell_status(status)
+        if shell_status == 0 and not self.ensure_target_owned():
+            return 2
+        return shell_status
 
     @staticmethod
     def shell_status(status: int) -> int:
         return 128 - status if status < 0 else status
 
     def run(self, command: list[str]) -> int:
+        if not self.ensure_target_owned():
+            return 2
         if self.target_size_kib() > self.budget_kib:
             print(
                 "Cargo target exceeds its disk budget from a previous command; cleaning it.",
@@ -192,6 +244,7 @@ class Supervisor:
             return 128 + self.received_signal
 
         child_env = os.environ.copy()
+        child_env["CARGO_TARGET_DIR"] = str(self.target_dir)
         child_env["CARGO_INCREMENTAL"] = "0"
         child_env["SPACETERM_CARGO_ARTIFACT_GUARD_ACTIVE"] = "1"
         try:

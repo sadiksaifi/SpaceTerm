@@ -4,29 +4,26 @@ set -euo pipefail
 # A distinct development identity keeps source-build inspection separate from installed apps.
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_dir="$(cd -- "$script_dir/.." && pwd -P)"
-bundle="$repo_dir/target/appearance-exerciser/SpaceTerm Appearance.app"
+artifact_path=$(mktemp "${TMPDIR:-/tmp}/spaceterm-appearance-executable.XXXXXX")
+trap 'rm -f -- "$artifact_path"' EXIT HUP INT TERM
 
 build_and_package() {
-    cargo build --manifest-path "$repo_dir/Cargo.toml" --features appearance-exerciser --locked
+    "$script_dir/cargo-artifacts.sh" run -- python3 "$script_dir/cargo-build-executable.py" \
+        --output "$artifact_path" --bin spaceterm -- \
+        --manifest-path "$repo_dir/Cargo.toml" --features appearance-exerciser --locked
+    executable=$(cat "$artifact_path")
+    bundle="$(dirname -- "$(dirname -- "$executable")")/appearance-exerciser/SpaceTerm Appearance.app"
     mkdir -p "$bundle/Contents/MacOS"
     install -m 0644 "$repo_dir/packaging/macos/AppearanceExerciser-Info.plist" "$bundle/Contents/Info.plist"
-    install -m 0755 "$repo_dir/target/debug/spaceterm" "$bundle/Contents/MacOS/SpaceTerm Appearance"
+    install -m 0755 "$executable" "$bundle/Contents/MacOS/SpaceTerm Appearance"
 }
 
-case "${1:-}" in
-    --build-only)
-        build_and_package
-        exit 0
-        ;;
-    --run-only)
-        ;;
-    '')
-        build_and_package
-        ;;
-    *)
-        echo "usage: dev-appearance-macos.sh [--build-only|--run-only]" >&2
-        exit 2
-        ;;
-esac
+if [ "$#" -ne 0 ]; then
+    echo "usage: dev-appearance-macos.sh" >&2
+    exit 2
+fi
+
+build_and_package
+rm -f -- "$artifact_path"
 
 exec env SPACETERM_APPEARANCE_EXERCISER=1 "$bundle/Contents/MacOS/SpaceTerm Appearance"

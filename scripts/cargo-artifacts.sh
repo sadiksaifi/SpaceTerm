@@ -16,7 +16,9 @@ Usage: cargo-artifacts.sh run -- COMMAND [ARG...]
 Keep the active Cargo target directory within a bounded disk budget. The default
 budget is 20 GiB. Set SPACETERM_CARGO_TARGET_BUDGET_MIB to a positive integer to
 override it. CARGO_TARGET_DIR is honored; relative paths resolve from the caller's
-working directory, as they do for Cargo.
+working directory. Cargo configuration is honored through `cargo metadata`, and
+the resolved directory is passed back to every guarded Cargo process. An external
+target must be empty when SpaceTerm first claims it for automatic cleanup.
 EOF
 }
 
@@ -31,15 +33,23 @@ resolve_target_dir() {
             /*) target_dir=$CARGO_TARGET_DIR ;;
             *) target_dir=$PWD/$CARGO_TARGET_DIR ;;
         esac
-    else
-        target_dir=$repo_dir/target
-    fi
-
-    case "$target_dir" in
+        case "$target_dir" in
         *'/../'*|*/..|*'/./'*|*/.)
             die "CARGO_TARGET_DIR must not contain . or .. path segments"
             ;;
-    esac
+        esac
+        metadata=$(cd "$repo_dir" && CARGO_TARGET_DIR="$target_dir" cargo metadata \
+            --format-version 1 --no-deps --manifest-path "$repo_dir/Cargo.toml") \
+            || die "could not resolve Cargo target directory"
+    else
+        metadata=$(cd "$repo_dir" && cargo metadata \
+            --format-version 1 --no-deps --manifest-path "$repo_dir/Cargo.toml") \
+            || die "could not resolve Cargo target directory"
+    fi
+
+    target_dir=$(printf '%s\n' "$metadata" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin)["target_directory"])') \
+        || die "Cargo metadata did not report a target directory"
 
     if [ -d "$target_dir" ]; then
         target_dir=$(CDPATH='' cd -- "$target_dir" && pwd -P)
@@ -73,13 +83,14 @@ size_kib() {
 }
 
 is_cargo_target() {
-    [ "$target_dir" = "$repo_dir/target" ] || [ -f "$target_dir/.rustc_info.json" ]
+    [ -f "$target_dir/.spaceterm-cargo-target-owner" ] \
+        && [ "$(cat "$target_dir/.spaceterm-cargo-target-owner")" = "$repo_dir" ]
 }
 
 clean_target() {
     [ -d "$target_dir" ] || return 0
     if ! is_cargo_target; then
-        echo "error: refusing to clean an unverified Cargo target directory" >&2
+        echo "error: refusing to clean a Cargo target directory not owned by this repository" >&2
         return 2
     fi
     cargo clean --manifest-path "$repo_dir/Cargo.toml" --target-dir "$target_dir"
