@@ -64,6 +64,7 @@ pub(crate) use terminal_pane::{
     PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
     TerminalPaneEvent,
 };
+pub(crate) use workspace_frame::WorkspaceFrame;
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 
 actions!(

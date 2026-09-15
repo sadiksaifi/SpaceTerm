@@ -435,14 +435,16 @@ impl PaneHost {
                     cx.notify();
                 }
                 TerminalPaneEvent::CaptionChanged => {
-                    if pane_id == host.terminal_tab.root_pane_id() {
-                        cx.emit(PaneHostEvent::PresentationChanged {
-                            tab_id: host.terminal_tab.id(),
-                        });
-                    }
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if host.pane_captions.get(&pane_id) != Some(&caption) {
                         host.pane_captions.insert(pane_id, caption);
+                        if pane_id == host.terminal_tab.root_pane_id()
+                            || pane_id == host.terminal_tab.focused_pane_id()
+                        {
+                            cx.emit(PaneHostEvent::PresentationChanged {
+                                tab_id: host.terminal_tab.id(),
+                            });
+                        }
                         cx.notify();
                     }
                 }
@@ -863,6 +865,9 @@ impl PaneHost {
             return;
         }
         self.sync_terminal_focus(cx);
+        cx.emit(PaneHostEvent::PresentationChanged {
+            tab_id: self.terminal_tab.id(),
+        });
         cx.notify();
     }
 
@@ -876,6 +881,9 @@ impl PaneHost {
             return;
         };
         self.sync_terminal_focus(cx);
+        cx.emit(PaneHostEvent::PresentationChanged {
+            tab_id: self.terminal_tab.id(),
+        });
         cx.notify();
         if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
             terminal.update(cx, |terminal, _| terminal.focus(window));
@@ -2208,8 +2216,8 @@ fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoEleme
 
 /// The Split's resize interaction, owned by the empty gap between its Panes.
 ///
-/// The handle keeps its pointer target, cursor, double-click reset, and keyboard focus, but paints
-/// no divider in any state: the gap itself is the only visible separation.
+/// The handle keeps its pointer target, cursor, double-click reset, and keyboard focus. The gap is
+/// the only visible separation until keyboard focus reveals the handle's restrained indicator.
 fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
@@ -4198,6 +4206,54 @@ mod tests {
                 "the handle should stay inside the gap, got {state:?} in {gap:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn pane_split_resize_should_reveal_its_paintless_handle_to_keyboard_focus(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("split-resize-1-keyboard-focus-indicator")
+                .is_none(),
+            "the idle Pane gap should stay paintless"
+        );
+
+        let mut indicator = None;
+        for _ in 0..32 {
+            cx.update(|window, _| window.focus_next());
+            cx.run_until_parked();
+            indicator = cx.debug_bounds("split-resize-1-keyboard-focus-indicator");
+            if indicator.is_some() {
+                break;
+            }
+        }
+        let indicator = indicator.expect("the split resize tab stop should reveal its indicator");
+        let gap = cx
+            .debug_bounds("split-gap-1")
+            .expect("the split gap was rendered");
+        assert!(
+            indicator.left() >= gap.left() && indicator.right() <= gap.right(),
+            "the keyboard focus indicator escaped the locked Pane gap"
+        );
     }
 
     #[gpui::test]

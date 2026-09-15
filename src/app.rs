@@ -246,6 +246,12 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
+    let appearance = crate::ui::appearance::chrome(cx);
+    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
+        .top_chrome_height(appearance.top_height());
+    let workspace_traffic_light_position = host
+        .window_frame
+        .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
@@ -255,7 +261,8 @@ pub(crate) fn open(
             titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
                 title: titlebar.title.clone(),
                 appears_transparent: titlebar.appears_transparent,
-                traffic_light_position: titlebar.traffic_light_position,
+                traffic_light_position: workspace_traffic_light_position
+                    .or(titlebar.traffic_light_position),
             }),
             ..WindowOptions::default()
         },
@@ -668,13 +675,7 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
-    crate::ui::settings_window::configure_window_chrome(
-        Rc::clone(&host.window_movement),
-        host.titlebar
-            .as_ref()
-            .and_then(|titlebar| titlebar.traffic_light_position),
-        cx,
-    );
+    crate::ui::settings_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     init(cx, Rc::clone(&host.adapters.application_menu));
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]

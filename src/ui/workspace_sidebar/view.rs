@@ -595,8 +595,8 @@ impl WorkspaceSidebar {
         )
         .tab_stop(true)
         .reset_on_double_click(true)
-        // The sidebar and the content stage share one continuous base surface, so the edge
-        // between them keeps its resize target and cursor without painting a separator.
+        // The sidebar and the content stage share one continuous base surface, so the edge keeps
+        // its resize target and cursor while only keyboard focus reveals an indicator.
         .paint_divider(false)
         .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)

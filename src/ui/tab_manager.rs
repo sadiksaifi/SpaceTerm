@@ -3350,6 +3350,43 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn split_tab_should_refresh_rendered_identity_for_focused_pane_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, records, cx) = tab_manager(cx);
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        report_current_directory(&records, 2, 1, "/tmp/second-pane-with-a-long-name", false);
+        cx.run_until_parked();
+        let focused_second_before_caption_change = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused second Pane's initial place should render");
+
+        report_current_directory(&records, 2, 2, "/tmp/x", false);
+        cx.run_until_parked();
+        let focused_second = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused second Pane's changed place should render");
+        assert!(
+            focused_second_before_caption_change.size.width > focused_second.size.width,
+            "the rendered Tab should replace the focused Pane's changed place: \
+             {focused_second_before_caption_change:?} {focused_second:?}"
+        );
+
+        cx.simulate_keystrokes("cmd-alt-left");
+        cx.run_until_parked();
+        let focused_first = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused first Pane's place should render");
+
+        assert!(
+            focused_first.size.width > focused_second.size.width,
+            "the rendered Tab should replace the second Pane's short place after focus changes: \
+             {focused_second:?} {focused_first:?}"
+        );
+    }
+
     /// A Tab keeps the two segments its words cannot replace: where the Session runs, and whether
     /// the Tab holds more than one Pane.
     #[gpui::test]

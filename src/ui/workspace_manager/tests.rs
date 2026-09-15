@@ -5207,6 +5207,35 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
 }
 
 #[gpui::test]
+fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    assert!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-keyboard-focus-indicator")
+            .is_none(),
+        "the idle sidebar edge should stay paintless"
+    );
+
+    let mut indicator = None;
+    for _ in 0..64 {
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        indicator = cx.debug_bounds("workspace-sidebar-resize-handle-keyboard-focus-indicator");
+        if indicator.is_some() {
+            break;
+        }
+    }
+    let indicator = indicator.expect("the sidebar resize tab stop should reveal its indicator");
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was rendered");
+    assert_eq!(indicator.size.width, px(CHROME_DIVIDER_SIZE));
+    assert!(
+        indicator.top() >= root.top() && indicator.bottom() <= root.bottom(),
+        "the keyboard focus indicator escaped the Workspace frame"
+    );
+}
+
+#[gpui::test]
 fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
 

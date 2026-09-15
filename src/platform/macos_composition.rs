@@ -7,7 +7,7 @@ use crate::desktop_profile::{
     DesktopProfileError, DesktopWording,
 };
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
-use gpui::{TitlebarOptions, point, px};
+use gpui::TitlebarOptions;
 use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
@@ -236,11 +236,11 @@ fn compose(
         },
         services: Rc::new(super::macos_services::NativeServicesRegistration),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
-        window_frame: super::macos_window_frame::workspace_window_frame_geometry(),
+        window_frame: super::macos_window_frame::window_frame_geometry(),
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(15.5), px(14.0))),
+            traffic_light_position: None,
         }),
     })
     .map(|host| {
