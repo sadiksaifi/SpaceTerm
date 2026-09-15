@@ -84,9 +84,10 @@ const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 /// full-height strip into a row of shapes resting inside the title bar, and it keeps the chip clear
 /// of the bar's lower edge where the title bar meets the floating content stage.
 ///
-/// Inside the title bar that inset leaves a chip as tall as a Settings navigation row. The radius
-/// comes from the Workspace frame's one radius family, so a Tab, a selected sidebar row, and a
-/// floating Pane read as the same shape at three sizes rather than as cousins.
+/// The strip carries the Workspace frame's top space in its own height, so a chip grows with it and
+/// keeps the same air above and below. The radius comes from the frame's one radius family, so a
+/// Tab, a selected sidebar row, and a floating Pane read as the same shape at three sizes rather
+/// than as cousins.
 const TAB_CHIP_INSET_X: f32 = 3.0;
 const TAB_CHIP_INSET_Y: f32 = 4.0;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
@@ -1316,11 +1317,11 @@ impl TabManager {
         let background = presentation.background;
         let create_icon_size = appearance.spacing(14.0);
         // The strip begins where the floating content stage begins, and a Tab's paint is inset
-        // inside its own item, so the strip gives back exactly that inset. The first Tab's chip
-        // then starts on the same vertical as the Pane beneath it, in either sidebar state.
+        // inside its own item, so the strip gives that inset back. The first Tab's chip then starts
+        // on the same vertical as the Pane beneath it, in either sidebar state.
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                .chip_alignment_padding(appearance.spacing(TAB_CHIP_INSET_X));
+                .tab_strip_leading_padding(appearance.spacing(TAB_CHIP_INSET_X));
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
@@ -1369,7 +1370,8 @@ impl TabManager {
             .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
-                    .size(appearance.top_height())
+                    .h_full()
+                    .w(appearance.top_height())
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1425,7 +1427,10 @@ impl TabManager {
             .id("tab-bar")
             .debug_selector(|| "tab-bar".to_owned())
             .relative()
-            .h(appearance.top_height())
+            .h(
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height()),
+            )
             .min_w_0()
             .flex_1()
             .flex_shrink_0()
@@ -1477,7 +1482,7 @@ impl Render for TabManager {
             .on_action(cx.listener(Self::on_close_tab))
             .child(
                 div()
-                    .h(appearance.top_height())
+                    .h(frame.top_chrome_height(appearance.top_height()))
                     .w_full()
                     .flex_shrink_0()
                     .flex()
@@ -1503,10 +1508,15 @@ impl Render for TabManager {
                     .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
-                    // The content stage is base surface. Its inset floats the Pane Layout below the
-                    // titlebar, beside the sidebar, and clear of the window's other edges.
+                    // The content stage is base surface. The group of Panes keeps the frame's one
+                    // measurement on its left, right, and bottom in either sidebar state. It has no
+                    // top edge to paint: the top chrome above already carries that space in its own
+                    // height, so the Pane starts at the chrome's lower edge.
                     .bg(gpui_color(stage_surface))
-                    .p(frame.outer_inset())
+                    .pt(px(0.0))
+                    .pb(frame.space())
+                    .pr(frame.space())
+                    .pl(frame.stage_leading_inset())
                     .child(
                         div()
                             .debug_selector(move || {
@@ -2640,11 +2650,19 @@ mod tests {
             .debug_bounds("tab-item-2-chip")
             .expect("the Active Tab chip was not rendered");
 
+        // The bar absorbs the Workspace frame's top space, so the strip is taller than the base
+        // title-bar height and a Tab grows with it.
+        let bar_height = cx.update(|_, cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_chrome_height(appearance.top_height())
+        });
         assert_eq!(
             (active_item.size.height, bar.size.height),
-            (px(TAB_BAR_HEIGHT), px(TAB_BAR_HEIGHT)),
+            (bar_height, bar_height),
             "a Tab should keep the full height of the bar as its hit target"
         );
+        assert!(bar_height > px(TAB_BAR_HEIGHT));
         assert_eq!(
             active_chip,
             gpui::bounds(
@@ -2924,11 +2942,16 @@ mod tests {
             .debug_bounds("tab-bar")
             .expect("the Tab bar was not rendered");
 
+        let chrome_height = cx.update(|_, cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_chrome_height(appearance.top_height())
+        });
         assert_eq!(
             (spacer.origin, spacer.size, bar.origin.x),
             (
                 root.origin,
-                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
+                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), chrome_height),
                 root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
         );
@@ -3263,7 +3286,7 @@ mod tests {
             let button = cx.debug_bounds("create-tab-button").unwrap();
             let area = cx.debug_bounds("create-tab-area").unwrap();
             assert_eq!(area.left(), tab.right());
-            assert_eq!(area.size, gpui::size(tab.size.height, tab.size.height));
+            assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), tab.size.height));
             assert_eq!(button.center(), area.center());
             assert_eq!(button.center().y, tab.center().y);
             if index < 2 {
@@ -3308,7 +3331,7 @@ mod tests {
                 let bar = cx.debug_bounds("tab-bar").unwrap();
                 assert_eq!(area.left(), strip.right());
                 assert!(area.right() <= bar.right());
-                assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+                assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
                 assert_eq!(button.center(), area.center());
                 assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
                 if width == 1200.0 {
@@ -3350,7 +3373,7 @@ mod tests {
         let bar = cx.debug_bounds("tab-bar").unwrap();
         assert_eq!(area.left(), strip.right());
         assert!(area.right() <= bar.right());
-        assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+        assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
         assert_eq!(button.center(), area.center());
         let active = cx.debug_bounds("tab-item-21-active").unwrap();
         assert!(active.left() >= strip.left());

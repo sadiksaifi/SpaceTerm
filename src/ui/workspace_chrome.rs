@@ -16,7 +16,6 @@ pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 // Reserved native traffic-light region, with no additional leading gap.
 /// Space reserved for native window controls in app-owned top chrome.
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
-const CONTROL_TOP_INSET: f32 = 4.0;
 const EXPANDED_MINIMUM_ACTION_GAP: f32 = 4.0;
 const COLLAPSED_ACTION_GAP: f32 = 0.0;
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
@@ -29,11 +28,10 @@ const NAME_AND_PIN_MAXIMUM_WIDTH: f32 = 58.0;
 
 /// The air the top-left chrome keeps at its trailing edge.
 ///
-/// It is the Workspace frame's edge reserve, the same air a selected sidebar row's chip keeps to
-/// the floating content stage, so the identity area, the sidebar list, and the Tab strip all stop
-/// on one grid instead of three.
+/// It is the Workspace frame's one measurement, the same margin a selected sidebar row's chip keeps
+/// beside it, so the identity area and the list under it stop on one vertical.
 fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
-    super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).edge_reserve()
+    super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).space()
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +98,11 @@ impl WorkspaceChromeLayout {
             .child(switcher);
         div()
             .absolute()
-            .top(appearance.spacing(CONTROL_TOP_INSET))
+            // The chrome now carries the frame's top space in its own height, so its controls ride
+            // the middle of that height rather than a fixed inset from its upper edge. Tabs centre
+            // in the same strip, so identity and Tabs stay on one line.
+            .top_0()
+            .bottom_0()
             .left(px(TRAFFIC_LIGHT_CLEARANCE))
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
             // stops, so the identity area and the list under it share one trailing edge.

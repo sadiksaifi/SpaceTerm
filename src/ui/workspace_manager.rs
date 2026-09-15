@@ -2907,8 +2907,9 @@ impl WorkspaceManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
-        let chip_insets = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-            .stage_adjacent_chip_insets();
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let chip_inset = frame.sidebar_chip_inset();
+        let top_chrome_height = frame.top_chrome_height(appearance.top_height());
         let chrome_icon_size = appearance.spacing(WORKSPACE_CHROME_ICON_SIZE);
         let placeholder_color = gpui_color(appearance.colors.text_placeholder);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -2990,9 +2991,7 @@ impl WorkspaceManager {
         ))
         // The chooser's panel spans exactly the width a selected Workspace row's chip spans, so the
         // list it opens lines up with the list it came from.
-        .panel_width(
-            self.sidebar.read(cx).layout().width - chip_insets.leading - chip_insets.trailing,
-        )
+        .panel_width(self.sidebar.read(cx).layout().width - chip_inset - chip_inset)
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
@@ -3083,7 +3082,7 @@ impl WorkspaceManager {
             .top_0()
             .left_0()
             .w(layout.width)
-            .h(appearance.top_height())
+            .h(top_chrome_height)
             .bg(gpui_color(if window.is_window_active() {
                 appearance.colors.title_bar_background
             } else {
@@ -3231,11 +3230,17 @@ impl Render for WorkspaceManager {
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
             })
-            .child(self.sidebar.read(cx).render_resize_handle(
-                self.sidebar.downgrade(),
-                chrome.width,
-                super::appearance::chrome(cx).top_height(),
-            ))
+            .child(
+                self.sidebar.read(cx).render_resize_handle(
+                    self.sidebar.downgrade(),
+                    chrome.width,
+                    super::workspace_frame::WorkspaceFrame::for_appearance(
+                        super::appearance::chrome(cx),
+                        cx,
+                    )
+                    .top_chrome_height(super::appearance::chrome(cx).top_height()),
+                ),
+            )
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))

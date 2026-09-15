@@ -1,6 +1,6 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::ui::workspace_frame::{ChipInsets, WorkspaceFrame};
+use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
@@ -25,21 +25,29 @@ use spaceterm_ui::{
 use super::*;
 use crate::domain::{PaneId, TabId};
 
-/// The chip insets a sidebar row takes from the resolved Workspace frame.
-fn chip_insets(cx: &mut VisualTestContext) -> ChipInsets {
+/// The resolved Workspace frame for the installed Chrome appearance.
+fn workspace_frame(cx: &mut VisualTestContext) -> WorkspaceFrame {
+    cx.update(|_, cx| WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx))
+}
+
+/// The one measurement every visible gap in the Workspace uses.
+fn frame_space(cx: &mut VisualTestContext) -> Pixels {
+    workspace_frame(cx).space()
+}
+
+/// The height of the top chrome, which carries the frame's top space in its own height.
+fn top_chrome_height(cx: &mut VisualTestContext) -> Pixels {
     cx.update(|_, cx| {
-        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx)
-            .stage_adjacent_chip_insets()
+        let appearance = crate::ui::appearance::chrome(cx);
+        WorkspaceFrame::for_appearance(appearance, cx).top_chrome_height(appearance.top_height())
     })
 }
 
-/// The air between a row's content and the trailing edge of the row.
-fn row_trailing_padding(cx: &mut VisualTestContext) -> Pixels {
+/// The air between a row's content and either edge of the row.
+fn row_padding(cx: &mut VisualTestContext) -> Pixels {
     cx.update(|_, cx| {
         let appearance = crate::ui::appearance::chrome(cx);
-        WorkspaceFrame::for_appearance(appearance, cx)
-            .stage_adjacent_chip_insets()
-            .trailing
+        WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
             + appearance.spacing(crate::ui::workspace_sidebar::SIDEBAR_ROW_CHIP_PADDING)
     })
 }
@@ -282,7 +290,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
     // Canvas children removed this frame can leave historical GPUI debug bounds behind.
     // The name occupying all available width verifies the machine and its gap are gone.
-    assert_eq!(name.right(), row.right() - row_trailing_padding(cx));
+    assert_eq!(name.right(), row.right() - row_padding(cx));
     let counts = cx.debug_bounds("workspace-counts-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
     assert!(counts.right() <= row.right());
@@ -5102,6 +5110,7 @@ fn drag_to(selector: &'static str, destination_x: Pixels, cx: &mut VisualTestCon
 #[gpui::test]
 fn sidebar_should_share_one_resize_edge_across_top_chrome_and_body(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
+    let chrome_height = top_chrome_height(cx);
 
     let root = cx
         .debug_bounds("workspace-manager")
@@ -5136,9 +5145,9 @@ fn sidebar_should_share_one_resize_edge_across_top_chrome_and_body(cx: &mut Test
             content.origin.x,
         ),
         (
-            gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
+            gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), chrome_height),
             px(0.0),
-            px(TOP_CHROME_HEIGHT),
+            chrome_height,
             px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             px(0.0),
             px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -5165,7 +5174,7 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
     assert_eq!(hitbox.size.width, px(8.0));
     assert_eq!(
         spacious_hitbox.size,
-        gpui::size(px(16.0), px(TOP_CHROME_HEIGHT))
+        gpui::size(px(16.0), top_chrome_height(cx))
     );
     let workspace_drag_target = cx
         .debug_bounds("workspace-top-chrome-drag-region-hitbox")
@@ -5225,16 +5234,16 @@ fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext
     );
 }
 
+/// Every visible gap around the Pane stage is the frame's one measurement.
+///
+/// The group of Panes keeps that measurement on its left, right, and bottom in either sidebar
+/// state. The stage has no top gap: the top chrome above it already carries that space in its own
+/// height, so the Pane starts at the chrome's lower edge.
 #[gpui::test]
-fn content_stage_should_inset_the_active_pane_on_every_side(cx: &mut TestAppContext) {
+fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    let frame = cx.update(|_, cx| {
-        crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
-            crate::ui::appearance::chrome(cx),
-            cx,
-        )
-    });
-    let inset = frame.outer_inset();
+    let space = frame_space(cx);
+    let chrome_height = top_chrome_height(cx);
 
     for sidebar_visible in [true, false] {
         cx.update(|window, cx| {
@@ -5272,27 +5281,38 @@ fn content_stage_should_inset_the_active_pane_on_every_side(cx: &mut TestAppCont
             ),
             (
                 content_left,
-                root.origin.y + px(TOP_CHROME_HEIGHT),
-                inset,
-                inset,
-                inset,
-                inset,
+                root.origin.y + chrome_height,
+                space,
+                px(0.0),
+                space,
+                space,
             ),
             "sidebar visible: {sidebar_visible}"
         );
+        // A sidebar chip's trailing margin and the stage's leading perimeter are two adjacent
+        // spaces, each the frame's one measurement, rather than one shared between them.
+        if sidebar_visible {
+            let chip = cx
+                .debug_bounds("workspace-row-selection-1")
+                .expect("the Active Workspace chip was rendered");
+            assert_eq!(
+                (content.left() - chip.right(), pane.left() - content.left()),
+                (space, space)
+            );
+        }
     }
 }
 
-/// The Tab strip and the floating stage share one leading vertical.
+/// The Tab strip carries the floating stage's leading edge.
 ///
-/// A Tab's paint is inset inside its own item, so the strip gives that inset back as padding: the
-/// first Tab's chip then starts exactly where the Pane beneath it starts.
+/// A Tab's paint is inset inside its own item, so the strip gives that inset back and its first
+/// chip starts one space in. Beside a sidebar that lands on the Pane's own leading vertical;
+/// without one the traffic lights own the window's leading edge, so the chip keeps the same rhythm
+/// from the strip's start instead.
 #[gpui::test]
 fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    let inset = cx.update(|_, cx| {
-        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).outer_inset()
-    });
+    let space = frame_space(cx);
 
     for sidebar_visible in [true, false] {
         cx.update(|window, cx| {
@@ -5310,10 +5330,11 @@ fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppC
         let chip = cx
             .debug_bounds("tab-item-1-chip")
             .expect("the Active Tab chip was rendered");
+        // The strip carries the stage's leading perimeter in either sidebar state.
         assert_eq!(
             chip.left() - strip.left(),
-            inset,
-            "the first Tab should start one stage inset into its strip \
+            space,
+            "the first Tab should start on the stage's leading edge \
              (sidebar visible: {sidebar_visible})"
         );
 
@@ -5849,29 +5870,29 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         .debug_bounds("workspace-row-selection-3")
         .expect("the Active Workspace selection was not rendered");
 
-    let insets = chip_insets(cx);
+    let space = frame_space(cx);
     assert_eq!(
         selection,
         gpui::bounds(
             point(
-                third_row.origin.x + insets.leading,
+                third_row.origin.x + space,
                 third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
             gpui::size(
-                third_row.size.width - insets.leading - insets.trailing,
+                third_row.size.width - space - space,
                 third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
         ),
         "the selected Workspace material should float inside its row"
     );
-    // The chip keeps the same visible air on both sides: the window edge on one, and the floating
-    // content stage, whose own inset completes the trailing margin, on the other.
-    let stage_inset = cx.update(|_, cx| {
-        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).outer_inset()
-    });
+    // The chip's two margins are literally the frame's one measurement, not a pair of numbers that
+    // add up to the same distance.
     assert_eq!(
-        selection.left() - third_row.left(),
-        third_row.right() - selection.right() + stage_inset,
+        (
+            selection.left() - third_row.left(),
+            third_row.right() - selection.right(),
+        ),
+        (space, space),
         "the selected Workspace chip should rest on equal air"
     );
     for row in 1..=3 {
@@ -5903,7 +5924,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
     assert_eq!(toggle.left(), chrome.left() + px(78.0));
     assert!(toggle.right() < chooser.left());
     let tabs = cx.debug_bounds("tab-bar").unwrap();
-    assert_eq!(tabs.left() - chooser.right(), px(2.0));
+    assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
 
     click("workspace-switcher", cx);
 
@@ -5991,11 +6012,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the New Workspace ComboBox panel should render");
-    let insets = chip_insets(cx);
-    assert_eq!(
-        panel.size.width,
-        sidebar.size.width - insets.leading - insets.trailing
-    );
+    let space = frame_space(cx);
+    assert_eq!(panel.size.width, sidebar.size.width - space - space);
     let chooser = cx
         .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
@@ -6339,10 +6357,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let trailing_inset = chooser.right() - label.right();
     assert!(trailing_inset >= px(11.0) && trailing_inset < px(12.0));
     assert_eq!(label.left() - switcher_icon.right(), px(8.0));
-    let edge_reserve = cx.update(|_, cx| {
-        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).edge_reserve()
-    });
-    assert_eq!(tabs.left() - chooser.right(), edge_reserve);
+    assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
 
     for position in [
         switcher_icon.center(),

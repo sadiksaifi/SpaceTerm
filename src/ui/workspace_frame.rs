@@ -1,9 +1,18 @@
-//! Geometry of the floating Workspace frame: the base-surface inset around the Pane Layout, the
-//! gap between Split Panes, and the corner radius of each floating Pane surface.
+//! Geometry of the floating Workspace frame: the one negative-space measurement the composition
+//! breathes with, the corner radius family its surfaces share, and the top chrome height that
+//! absorbs the frame's top edge.
+//!
+//! Every visible gap in the Workspace is that one measurement: the Pane stage's perimeter, the
+//! space between Split Panes at any nesting depth, and the margin on both sides of a sidebar item's
+//! chip. They are literally equal rather than sums that happen to agree.
+//!
+//! The frame has no top edge to paint. The space that would sit between the titlebar and the Pane
+//! belongs to the top chrome's height instead, so the Tab strip breathes with the same measurement
+//! and the Pane starts at the chrome's lower edge.
 //!
 //! These are layout metrics, not color roles. Every consumer reads one resolved [`WorkspaceFrame`]
-//! so the inset, gap, and radius cannot drift apart across WorkspaceManager, TabManager, and
-//! PaneHost.
+//! so the space, the radii, and the chrome height cannot drift apart across WorkspaceManager,
+//! TabManager, WorkspaceSidebar, and PaneHost.
 
 use gpui::{App, Pixels, px};
 
@@ -19,21 +28,13 @@ pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
     colors.panel_background
 }
 
-/// The Compact-density base-surface inset between the content stage edges and a Pane.
+/// The Compact-density measurement of every visible gap in the Workspace.
 ///
 /// It is the selection chip's radius, so the frame's negative space and the smallest shape in the
 /// Chrome hierarchy are one measurement rather than two that happen to agree.
-const OUTER_INSET: f32 = super::selection_chip::CHIP_RADIUS;
-/// The Compact-density empty base surface between two Split Panes. It matches the inset so a
-/// Split reads with the same rhythm as the frame around it.
-const PANE_GAP: f32 = OUTER_INSET;
+const SPACE: f32 = super::selection_chip::CHIP_RADIUS;
 /// The smallest Pane radius that still reads as a rounded surface at every density.
 const MINIMUM_PANE_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
-/// The Compact-density air a navigation chip keeps to the edge of the surface it rests on.
-///
-/// It is the hairline gap the keyboard focus ring needs outside a chip, so a ring never has to
-/// paint outside the strip that owns it.
-const EDGE_RESERVE: f32 = 2.0;
 
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
@@ -41,21 +42,9 @@ const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
 /// Resolved whole-point geometry of the floating Workspace frame for one density.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WorkspaceFrame {
-    outer_inset: Pixels,
-    pane_gap: Pixels,
+    space: Pixels,
     pane_radius: Pixels,
     chip_radius: Pixels,
-    edge_reserve: Pixels,
-}
-
-/// Where a navigation strip's selection chip sits inside the row that owns it.
-///
-/// A sidebar row rests against the window edge on one side and against the floating content stage
-/// on the other, so its chip needs different insets to keep the same air on both sides.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ChipInsets {
-    pub(crate) leading: Pixels,
-    pub(crate) trailing: Pixels,
 }
 
 impl WorkspaceFrame {
@@ -69,24 +58,21 @@ impl WorkspaceFrame {
         } else {
             1.0
         };
-        let outer_inset = (OUTER_INSET * scale).round();
-        let pane_gap = (PANE_GAP * scale).round();
+        let space = (SPACE * scale).round();
         // One radius family: the chip is the smallest shape, and a Pane is the window's own corner
-        // carried inward by the frame inset, so both grow from the same two facts.
+        // carried inward by the frame's space, so both grow from the same two facts.
         let chip_radius = (super::selection_chip::CHIP_RADIUS * scale).round();
         let window_radius = match window.outer_corner_radius() {
             Some(radius) if radius.is_finite() && radius >= 0.0 => radius,
             Some(_) | None => FALLBACK_WINDOW_RADIUS,
         };
-        let pane_radius = (window_radius - outer_inset)
+        let pane_radius = (window_radius - space)
             .round()
             .max(chip_radius.min(MINIMUM_PANE_RADIUS));
         Self {
-            outer_inset: px(outer_inset),
-            pane_gap: px(pane_gap),
+            space: px(space),
             pane_radius: px(pane_radius),
             chip_radius: px(chip_radius),
-            edge_reserve: px((EDGE_RESERVE * scale).round()),
         }
     }
 
@@ -102,14 +88,37 @@ impl WorkspaceFrame {
         Self::resolve(appearance.spacing_scale, window)
     }
 
-    /// Base surface between the content stage edges and a Pane on all four sides.
-    pub(crate) const fn outer_inset(self) -> Pixels {
-        self.outer_inset
+    /// The one visible gap in the Workspace: stage perimeter, Split gap, and sidebar chip margin.
+    pub(crate) const fn space(self) -> Pixels {
+        self.space
     }
 
     /// Base surface between two Split Panes; it also owns the Split's resize hit target.
     pub(crate) const fn pane_gap(self) -> Pixels {
-        self.pane_gap
+        self.space
+    }
+
+    /// The margin a sidebar item's chip keeps on both of its sides.
+    ///
+    /// It is the frame's own measurement on each side, independent of whatever sits beyond the
+    /// sidebar: the chip's trailing margin and the Pane stage's leading perimeter are two adjacent
+    /// spaces, not one shared between them.
+    pub(crate) const fn sidebar_chip_inset(self) -> Pixels {
+        self.space
+    }
+
+    /// The Pane stage's leading perimeter, which the group of Panes keeps in either sidebar state.
+    pub(crate) const fn stage_leading_inset(self) -> Pixels {
+        self.space
+    }
+
+    /// The height of the top chrome, which absorbs the frame's top space.
+    ///
+    /// Nothing is painted between the titlebar and the Pane: the Tab strip simply grows by the
+    /// frame's measurement, so its chips keep the same air above and below that every other gap
+    /// in the Workspace has.
+    pub(crate) fn top_chrome_height(self, base_height: Pixels) -> Pixels {
+        base_height + self.space
     }
 
     /// Corner radius of every floating Pane surface.
@@ -122,29 +131,12 @@ impl WorkspaceFrame {
         self.chip_radius
     }
 
-    /// The air a navigation chip keeps to the edge of the strip that owns it.
-    pub(crate) const fn edge_reserve(self) -> Pixels {
-        self.edge_reserve
-    }
-
-    /// Chip insets for a strip that meets the window edge on its leading side and the floating
-    /// content stage on its trailing side, so both visible margins come out equal.
+    /// The leading padding a Tab strip takes so its first chip lands on the Pane's leading edge.
     ///
-    /// The trailing margin is completed by the stage's own inset, which is why the trailing inset
-    /// is the smaller of the two.
-    pub(crate) fn stage_adjacent_chip_insets(self) -> ChipInsets {
-        ChipInsets {
-            leading: self.outer_inset + self.edge_reserve,
-            trailing: self.edge_reserve,
-        }
-    }
-
-    /// The leading padding a strip needs so its first chip lines up with the content stage.
-    ///
-    /// The strip starts where the stage starts, but a chip is inset inside its own item, so the
-    /// strip gives back exactly the difference.
-    pub(crate) fn chip_alignment_padding(self, chip_inset: Pixels) -> Pixels {
-        (self.outer_inset - chip_inset).max(px(0.0))
+    /// The strip starts where the stage starts, and a Tab's paint is inset inside its own item, so
+    /// the strip gives back exactly the difference between the stage's perimeter and that inset.
+    pub(crate) fn tab_strip_leading_padding(self, chip_inset: Pixels) -> Pixels {
+        (self.stage_leading_inset() - chip_inset).max(px(0.0))
     }
 }
 
@@ -170,11 +162,11 @@ mod tests {
             for window in [window(Some(STANDARD_WINDOW_RADIUS)), window(None)] {
                 let frame = frame(density, window);
                 for metric in [
-                    frame.outer_inset(),
+                    frame.space(),
                     frame.pane_gap(),
+                    frame.sidebar_chip_inset(),
                     frame.pane_radius(),
                     frame.chip_radius(),
-                    frame.edge_reserve(),
                 ] {
                     let value = f32::from(metric);
                     assert_eq!(value, value.round(), "{density:?} {window:?} {frame:?}");
@@ -189,8 +181,42 @@ mod tests {
         let window = window(Some(STANDARD_WINDOW_RADIUS));
         let compact = frame(ChromeDensity::Compact, window);
         let comfortable = frame(ChromeDensity::Comfortable, window);
-        assert!(comfortable.outer_inset() >= compact.outer_inset());
-        assert!(comfortable.pane_gap() >= compact.pane_gap());
+        assert!(comfortable.space() > compact.space());
+        assert_eq!((compact.space(), comfortable.space()), (px(6.0), px(8.0)));
+    }
+
+    /// Every visible gap in the Workspace is the same measurement, not a sum that agrees.
+    #[test]
+    fn every_visible_gap_should_be_one_measurement() {
+        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+            let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
+            let space = frame.space();
+            assert_eq!(
+                (
+                    frame.pane_gap(),
+                    frame.sidebar_chip_inset(),
+                    frame.stage_leading_inset(),
+                    frame.top_chrome_height(px(36.0)) - px(36.0),
+                ),
+                (space, space, space, space),
+                "{density:?} gaps should be one measurement"
+            );
+        }
+    }
+
+    /// The Tab strip lands its first chip on the Pane's leading edge in either sidebar state.
+    #[test]
+    fn tab_strip_padding_should_land_the_first_chip_on_the_stage_edge() {
+        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+            let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
+            let chip_inset = px(3.0);
+            assert_eq!(
+                frame.tab_strip_leading_padding(chip_inset) + chip_inset,
+                frame.stage_leading_inset(),
+                "{density:?} the first chip should start one space into the strip"
+            );
+            assert_eq!(frame.tab_strip_leading_padding(px(40.0)), px(0.0));
+        }
     }
 
     /// Pane corners and selection chips are one family: every radius grows from the chip baseline
@@ -201,7 +227,7 @@ mod tests {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
             let frame = frame(density, window);
             assert_eq!(
-                frame.pane_radius() + frame.outer_inset(),
+                frame.pane_radius() + frame.space(),
                 px(STANDARD_WINDOW_RADIUS),
                 "{density:?} Pane corners should stay concentric with the window corner"
             );
@@ -209,34 +235,8 @@ mod tests {
                 frame.chip_radius() <= frame.pane_radius(),
                 "{density:?} a chip is the smallest shape in the family, got {frame:?}"
             );
-            assert_eq!(frame.outer_inset(), frame.chip_radius());
+            assert_eq!(frame.space(), frame.chip_radius());
         }
-    }
-
-    /// A sidebar row rests against the window edge on one side and the floating stage on the other.
-    /// Its chip keeps the same visible air on both, once the stage's own inset is counted.
-    #[test]
-    fn stage_adjacent_chips_should_keep_equal_visible_margins() {
-        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
-            let insets = frame.stage_adjacent_chip_insets();
-            assert_eq!(
-                insets.leading,
-                insets.trailing + frame.outer_inset(),
-                "{density:?} leading air should equal trailing air plus the stage inset"
-            );
-            assert!(insets.trailing >= frame.edge_reserve());
-        }
-    }
-
-    #[test]
-    fn chip_alignment_padding_should_land_a_first_chip_on_the_stage_edge() {
-        let frame = frame(ChromeDensity::Compact, window(Some(STANDARD_WINDOW_RADIUS)));
-        assert_eq!(
-            frame.chip_alignment_padding(px(2.0)) + px(2.0),
-            frame.outer_inset()
-        );
-        assert_eq!(frame.chip_alignment_padding(px(40.0)), px(0.0));
     }
 
     #[test]
