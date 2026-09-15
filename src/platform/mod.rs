@@ -8,6 +8,7 @@ pub(crate) mod control_socket;
 mod macos_appearance;
 #[cfg(target_os = "macos")]
 mod macos_selected_file;
+pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod window_frame;
@@ -75,6 +76,11 @@ pub(crate) mod macos_keyboard;
 mod macos_locale;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_locale;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_microphone_access;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_microphone_access;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_notification;

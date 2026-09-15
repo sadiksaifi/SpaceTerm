@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
+readonly ENTITLEMENTS_SOURCE="$REPO_ROOT/packaging/macos/Entitlements.plist"
 
 PROFILE="${1:-}"
 case "$PROFILE" in
@@ -77,7 +78,8 @@ readonly STAGED_BUNDLE
 mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS"
 install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
 install -m 0755 "$EXECUTABLE" "$STAGED_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
-codesign --force --sign - --timestamp=none "$STAGED_BUNDLE" >/dev/null
+codesign --force --sign - --options runtime --entitlements "$ENTITLEMENTS_SOURCE" \
+    --timestamp=none "$STAGED_BUNDLE" >/dev/null
 
 BUNDLE="$BUNDLE_PARENT/$APP_NAME.app"
 readonly BUNDLE

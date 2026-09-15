@@ -133,6 +133,7 @@ verify_app_bundle() {
     local executable_name icon_file icon_name executable icon_path asset_catalog package_type
     local bundle_identifier
     local bundle_name display_name marketing_version build_number minimum_macos_version
+    local microphone_usage_description
     local extracted_iconset="$TEMP_ROOT/$label.iconset"
     local asset_info="$TEMP_ROOT/$label.assets.json"
     local executable_architectures executable_description signature_details
@@ -140,6 +141,7 @@ verify_app_bundle() {
     local terminfo="$app/Contents/Resources/terminfo"
     local third_party_notices="$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
     local terminfo_description
+    local entitlements="$TEMP_ROOT/$label.entitlements.plist"
 
     [[ -d "$app" ]] || die "$label app bundle is missing: $app"
     [[ -f "$plist" ]] || die "$label Info.plist is missing: $plist"
@@ -155,6 +157,7 @@ verify_app_bundle() {
     marketing_version="$(plist_value "$plist" CFBundleShortVersionString)"
     build_number="$(plist_value "$plist" CFBundleVersion)"
     minimum_macos_version="$(plist_value "$plist" LSMinimumSystemVersion)"
+    microphone_usage_description="$(plist_value "$plist" NSMicrophoneUsageDescription)"
     [[ "$executable_name" == "$APP_NAME" ]] \
         || die "$label CFBundleExecutable must be $APP_NAME, got: $executable_name"
     [[ "$icon_file" == "$APP_NAME" ]] \
@@ -171,6 +174,9 @@ verify_app_bundle() {
         || die "$label CFBundleDisplayName must be $APP_NAME, got: $display_name"
     [[ "$minimum_macos_version" == "$MINIMUM_MACOS_VERSION" ]] \
         || die "$label LSMinimumSystemVersion must be $MINIMUM_MACOS_VERSION, got: $minimum_macos_version"
+    [[ "$microphone_usage_description" == \
+        "SpaceTerm lets terminal applications you run use your microphone for voice input." ]] \
+        || die "$label NSMicrophoneUsageDescription is missing or unexpected"
     [[ "$marketing_version" =~ ^[0-9]+([.][0-9]+){2}$ ]] \
         || die "$label CFBundleShortVersionString is invalid: $marketing_version"
     [[ "$build_number" =~ ^[0-9]+([.][0-9]+){0,2}$ ]] \
@@ -259,6 +265,10 @@ verify_app_bundle() {
         || die "$label app signature metadata could not be read: $app"
     grep -Fq "Signature=adhoc" <<<"$signature_details" \
         || die "$label app is not ad-hoc signed: $app"
+    codesign --display --entitlements :- "$app" >"$entitlements" 2>/dev/null \
+        || die "$label app entitlements could not be read: $app"
+    [[ "$(plist_value "$entitlements" com.apple.security.device.audio-input)" == "true" ]] \
+        || die "$label app is missing the audio input entitlement"
     verify_askpass_helper_mode "$executable" "$label"
 }
 

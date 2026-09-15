@@ -57,7 +57,7 @@ fn open_settings_with_drag(
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
-        SettingsWindow::new_with_window_drag(window_drag, window, cx)
+        SettingsWindow::new_with_capabilities(window_drag, None, window, cx)
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -81,6 +81,7 @@ fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
         SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
         SettingsSectionId::Terminal => "settings-navigation-settings-section-terminal",
         SettingsSectionId::ColorSchemes => "settings-navigation-settings-section-color-schemes",
+        SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
     };
     click(selector, cx);
 }
