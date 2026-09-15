@@ -5234,11 +5234,12 @@ fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext
     );
 }
 
-/// Every visible gap around the Pane stage is the frame's one measurement.
+/// Every visible gap around the Pane stage measures one frame space from surface to surface.
 ///
-/// The group of Panes keeps that measurement on its left, right, and bottom in either sidebar
-/// state. The stage has no top gap: the top chrome above it already carries that space in its own
-/// height, so the Pane starts at the chrome's lower edge.
+/// The distances are taken between painted bounds, not between layout properties: beside a sidebar
+/// the gap is painted once, by the sidebar chip's own margin, and the stage adds nothing that would
+/// double it. The stage has no top gap at all, because the chrome above already carries that space
+/// in its own height.
 #[gpui::test]
 fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -5270,14 +5271,23 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
             root.origin.x
         };
 
+        // The Pane's leading neighbour is the sidebar chip when the sidebar is shown and the window
+        // edge when it is hidden. Either way exactly one space is painted between them.
+        let leading_neighbour = if sidebar_visible {
+            cx.debug_bounds("workspace-row-selection-1")
+                .expect("the Active Workspace chip was rendered")
+                .right()
+        } else {
+            root.left()
+        };
         assert_eq!(
             (
                 content.origin.x,
                 content.origin.y,
-                pane.left() - content.left(),
+                pane.left() - leading_neighbour,
                 pane.top() - content.top(),
-                content.right() - pane.right(),
-                content.bottom() - pane.bottom(),
+                root.right() - pane.right(),
+                root.bottom() - pane.bottom(),
             ),
             (
                 content_left,
@@ -5289,28 +5299,15 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
             ),
             "sidebar visible: {sidebar_visible}"
         );
-        // A sidebar chip's trailing margin and the stage's leading perimeter are two adjacent
-        // spaces, each the frame's one measurement, rather than one shared between them.
-        if sidebar_visible {
-            let chip = cx
-                .debug_bounds("workspace-row-selection-1")
-                .expect("the Active Workspace chip was rendered");
-            assert_eq!(
-                (content.left() - chip.right(), pane.left() - content.left()),
-                (space, space)
-            );
-        }
     }
 }
 
-/// The Tab strip carries the floating stage's leading edge.
+/// The first Tab keeps one visible space from the Workspace identity beside it.
 ///
-/// A Tab's paint is inset inside its own item, so the strip gives that inset back and its first
-/// chip starts one space in. Beside a sidebar that lands on the Pane's own leading vertical;
-/// without one the traffic lights own the window's leading edge, so the chip keeps the same rhythm
-/// from the strip's start instead.
+/// A chip is inset inside its item, so the strip pulls that inset back: the identity's own trailing
+/// margin is then the whole gap, and the first Tab's paint lands on the Pane's leading vertical.
 #[gpui::test]
-fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppContext) {
+fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let space = frame_space(cx);
 
@@ -5324,17 +5321,16 @@ fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppC
         });
         cx.run_until_parked();
 
-        let strip = cx
-            .debug_bounds("tab-items")
-            .expect("the Tab strip was rendered");
+        let switcher = cx
+            .debug_bounds("workspace-switcher")
+            .expect("the Workspace chooser was rendered");
         let chip = cx
             .debug_bounds("tab-item-1-chip")
             .expect("the Active Tab chip was rendered");
-        // The strip carries the stage's leading perimeter in either sidebar state.
         assert_eq!(
-            chip.left() - strip.left(),
+            chip.left() - switcher.right(),
             space,
-            "the first Tab should start on the stage's leading edge \
+            "the identity and the first Tab should leave one visible space \
              (sidebar visible: {sidebar_visible})"
         );
 
@@ -5348,9 +5344,6 @@ fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppC
                 "the first Tab and the Pane beneath it should share one leading vertical"
             );
             // The identity area above the sidebar stops where a selected row's chip stops.
-            let switcher = cx
-                .debug_bounds("workspace-switcher")
-                .expect("the Workspace chooser was rendered");
             let row_chip = cx
                 .debug_bounds("workspace-row-selection-1")
                 .expect("the Active Workspace chip was rendered");
@@ -5885,15 +5878,21 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         ),
         "the selected Workspace material should float inside its row"
     );
-    // The chip's two margins are literally the frame's one measurement, not a pair of numbers that
-    // add up to the same distance.
+    // The chip's two margins are the frame's one measurement, and each is measured to the surface
+    // actually beside it: the window edge on one side, the floating Pane on the other.
+    let pane = cx
+        .debug_bounds("pane-surface-1")
+        .expect("the floating Pane surface was rendered");
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was rendered");
     assert_eq!(
         (
-            selection.left() - third_row.left(),
-            third_row.right() - selection.right(),
+            selection.left() - root.left(),
+            pane.left() - selection.right(),
         ),
         (space, space),
-        "the selected Workspace chip should rest on equal air"
+        "the selected Workspace chip should rest on equal visible air"
     );
     for row in 1..=3 {
         let selector: &'static str = format!("workspace-row-divider-{row}").leak();

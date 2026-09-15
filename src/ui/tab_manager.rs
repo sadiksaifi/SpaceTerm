@@ -77,19 +77,28 @@ const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
-/// The inset, radius, and focus gap of the chip carrying one Tab's material.
+/// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
 ///
 /// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
-/// paint moves inward. The vertical inset is the larger one, because that is the air that turns a
-/// full-height strip into a row of shapes resting inside the title bar, and it keeps the chip clear
-/// of the bar's lower edge where the title bar meets the floating content stage.
+/// paint moves inward. The insets are what the eye actually measures:
 ///
-/// The strip carries the Workspace frame's top space in its own height, so a chip grows with it and
-/// keeps the same air above and below. The radius comes from the frame's one radius family, so a
-/// Tab, a selected sidebar row, and a floating Pane read as the same shape at three sizes rather
-/// than as cousins.
-const TAB_CHIP_INSET_X: f32 = 3.0;
-const TAB_CHIP_INSET_Y: f32 = 4.0;
+/// - vertically the chip faces the window's top edge and, below the strip, the Pane's own surface,
+///   so it carries a whole frame space on each side;
+/// - horizontally it faces another chip, so each side carries half and the visible gap between two
+///   Tabs is one frame space again.
+///
+/// The radius comes from the frame's one radius family, so a Tab, a selected sidebar row, and a
+/// floating Pane read as the same shape at three sizes rather than as cousins.
+fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
+    let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+    ChipShape {
+        inset_leading: frame.half_space(),
+        inset_trailing: frame.half_space(),
+        inset_y: frame.space(),
+        radius: frame.chip_radius(),
+    }
+}
+
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -189,16 +198,7 @@ impl TabChromePresentation {
         appearance: &super::appearance::ChromeAppearance,
         cx: &App,
     ) -> SelectionChip {
-        SelectionChip::new(
-            ChipShape::symmetric(
-                appearance.spacing(TAB_CHIP_INSET_X),
-                appearance.spacing(TAB_CHIP_INSET_Y),
-                // One radius family with the sidebar's selected row and the floating Panes.
-                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                    .chip_radius(),
-            ),
-            self.tab_chip_paint(active),
-        )
+        SelectionChip::new(tab_chip_shape(appearance, cx), self.tab_chip_paint(active))
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
@@ -1316,18 +1316,19 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
         let create_icon_size = appearance.spacing(14.0);
-        // The strip begins where the floating content stage begins, and a Tab's paint is inset
-        // inside its own item, so the strip gives that inset back. The first Tab's chip then starts
-        // on the same vertical as the Pane beneath it, in either sidebar state.
+        // A chip is inset inside its item, which would add to the gap the Workspace identity before
+        // the strip already leaves. The strip pulls that inset back, so the visible distance from
+        // the identity to the first Tab is one frame space and the first Tab's paint lines up with
+        // the Pane beneath it.
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                .tab_strip_leading_padding(appearance.spacing(TAB_CHIP_INSET_X));
+                .chip_strip_leading_offset();
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
-            .pl(leading_alignment)
+            .ml(leading_alignment)
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -1508,15 +1509,17 @@ impl Render for TabManager {
                     .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
-                    // The content stage is base surface. The group of Panes keeps the frame's one
-                    // measurement on its left, right, and bottom in either sidebar state. It has no
-                    // top edge to paint: the top chrome above already carries that space in its own
-                    // height, so the Pane starts at the chrome's lower edge.
+                    // The content stage is base surface, and every gap it paints is measured to the
+                    // next painted surface rather than counted in layout properties. It has no top
+                    // edge: the chrome above already carries that space in its own height. Beside a
+                    // sidebar it has no leading edge either, because the sidebar chip's own trailing
+                    // margin is already that gap and two insets of one continuous surface would read
+                    // as a gap of twice the size.
                     .bg(gpui_color(stage_surface))
                     .pt(px(0.0))
                     .pb(frame.space())
                     .pr(frame.space())
-                    .pl(frame.stage_leading_inset())
+                    .pl(frame.stage_leading_inset(self.sidebar_visible))
                     .child(
                         div()
                             .debug_selector(move || {
@@ -2663,24 +2666,37 @@ mod tests {
             "a Tab should keep the full height of the bar as its hit target"
         );
         assert!(bar_height > px(TAB_BAR_HEIGHT));
+        let (space, half_space) = cx.update(|_, cx| {
+            let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
+                crate::ui::appearance::chrome(cx),
+                cx,
+            );
+            (frame.space(), frame.half_space())
+        });
         assert_eq!(
             active_chip,
             gpui::bounds(
                 gpui::point(
-                    active_item.origin.x + px(TAB_CHIP_INSET_X),
-                    active_item.origin.y + px(TAB_CHIP_INSET_Y),
+                    active_item.origin.x + half_space,
+                    active_item.origin.y + space,
                 ),
                 gpui::size(
-                    active_item.size.width - px(TAB_CHIP_INSET_X * 2.0),
-                    active_item.size.height - px(TAB_CHIP_INSET_Y * 2.0),
+                    active_item.size.width - half_space - half_space,
+                    active_item.size.height - space - space,
                 ),
             ),
             "the Active Tab material should float inside its item"
         );
+        // The visible distance between two Tabs, and between a Tab and the strip's own edges, is
+        // the frame's one space.
         assert_eq!(
-            active_chip.left() - inactive_chip.right(),
-            px(TAB_CHIP_INSET_X * 2.0),
-            "neighbouring Tabs should leave the bar visible between them"
+            (
+                active_chip.left() - inactive_chip.right(),
+                active_chip.top() - bar.top(),
+                bar.bottom() - active_chip.bottom(),
+            ),
+            (space, space, space),
+            "every gap around a Tab should be one visible space"
         );
         assert!(
             active_chip.bottom() < bar.bottom(),

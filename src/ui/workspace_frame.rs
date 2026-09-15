@@ -43,6 +43,7 @@ const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WorkspaceFrame {
     space: Pixels,
+    half_space: Pixels,
     pane_radius: Pixels,
     chip_radius: Pixels,
 }
@@ -71,6 +72,7 @@ impl WorkspaceFrame {
             .max(chip_radius.min(MINIMUM_PANE_RADIUS));
         Self {
             space: px(space),
+            half_space: px((space / 2.0).round()),
             pane_radius: px(pane_radius),
             chip_radius: px(chip_radius),
         }
@@ -89,8 +91,20 @@ impl WorkspaceFrame {
     }
 
     /// The one visible gap in the Workspace: stage perimeter, Split gap, and sidebar chip margin.
+    ///
+    /// It is a distance between painted surfaces, not a layout property. Two insets of this size
+    /// may never meet, because the base surface is continuous and adjacent insets would read as one
+    /// gap of twice the size.
     pub(crate) const fn space(self) -> Pixels {
         self.space
+    }
+
+    /// What each of two neighbouring chips contributes to the gap between them.
+    ///
+    /// Chips in one strip are inset inside their own items, so both sides of a boundary contribute
+    /// and the visible gap is [`WorkspaceFrame::space`] again.
+    pub(crate) const fn half_space(self) -> Pixels {
+        self.half_space
     }
 
     /// Base surface between two Split Panes; it also owns the Split's resize hit target.
@@ -100,16 +114,21 @@ impl WorkspaceFrame {
 
     /// The margin a sidebar item's chip keeps on both of its sides.
     ///
-    /// It is the frame's own measurement on each side, independent of whatever sits beyond the
-    /// sidebar: the chip's trailing margin and the Pane stage's leading perimeter are two adjacent
-    /// spaces, not one shared between them.
+    /// A row's chip faces the window edge on one side and the Pane beside the sidebar on the other.
+    /// Both neighbours are painted surfaces rather than chips, so the chip carries the whole gap on
+    /// each side and the stage adds nothing where they meet.
     pub(crate) const fn sidebar_chip_inset(self) -> Pixels {
         self.space
     }
 
-    /// The Pane stage's leading perimeter, which the group of Panes keeps in either sidebar state.
-    pub(crate) const fn stage_leading_inset(self) -> Pixels {
-        self.space
+    /// The Pane stage's leading perimeter.
+    ///
+    /// With a sidebar present the visible gap is already painted by the sidebar chip's own trailing
+    /// margin, so the stage adds nothing: two insets of the same base surface would otherwise merge
+    /// into one gap of twice the size. Without a sidebar the stage carries the window-edge
+    /// perimeter itself.
+    pub(crate) fn stage_leading_inset(self, sidebar_visible: bool) -> Pixels {
+        if sidebar_visible { px(0.0) } else { self.space }
     }
 
     /// The height of the top chrome, which absorbs the frame's top space.
@@ -131,12 +150,14 @@ impl WorkspaceFrame {
         self.chip_radius
     }
 
-    /// The leading padding a Tab strip takes so its first chip lands on the Pane's leading edge.
+    /// The offset a chip strip takes so its first chip paints on the strip's own leading edge.
     ///
-    /// The strip starts where the stage starts, and a Tab's paint is inset inside its own item, so
-    /// the strip gives back exactly the difference between the stage's perimeter and that inset.
-    pub(crate) fn tab_strip_leading_padding(self, chip_inset: Pixels) -> Pixels {
-        (self.stage_leading_inset() - chip_inset).max(px(0.0))
+    /// A chip is inset inside its item, which would add to the gap the control before the strip
+    /// already leaves. The strip pulls that inset back instead, so the visible distance from the
+    /// preceding control to the first chip is one [`WorkspaceFrame::space`], and the first Tab's
+    /// paint lines up with the Pane beneath it.
+    pub(crate) fn chip_strip_leading_offset(self) -> Pixels {
+        px(0.0) - self.half_space
     }
 }
 
@@ -163,6 +184,7 @@ mod tests {
                 let frame = frame(density, window);
                 for metric in [
                     frame.space(),
+                    frame.half_space(),
                     frame.pane_gap(),
                     frame.sidebar_chip_inset(),
                     frame.pane_radius(),
@@ -195,27 +217,39 @@ mod tests {
                 (
                     frame.pane_gap(),
                     frame.sidebar_chip_inset(),
-                    frame.stage_leading_inset(),
+                    frame.stage_leading_inset(false),
                     frame.top_chrome_height(px(36.0)) - px(36.0),
+                    frame.half_space() * 2.0,
                 ),
-                (space, space, space, space),
+                (space, space, space, space, space),
                 "{density:?} gaps should be one measurement"
+            );
+            assert_eq!(
+                frame.stage_leading_inset(true),
+                px(0.0),
+                "{density:?} the sidebar chip's own margin is the whole gap beside the Pane"
+            );
+            assert_eq!(
+                frame.chip_strip_leading_offset(),
+                px(0.0) - frame.half_space(),
+                "{density:?} a strip pulls its first chip's inset back"
             );
         }
     }
 
-    /// The Tab strip lands its first chip on the Pane's leading edge in either sidebar state.
+    /// Two neighbouring chips each contribute half of one visible gap.
     #[test]
-    fn tab_strip_padding_should_land_the_first_chip_on_the_stage_edge() {
+    fn paired_chips_should_sum_to_one_visible_gap() {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
             let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
-            let chip_inset = px(3.0);
+            assert_eq!(frame.half_space() + frame.half_space(), frame.space());
+            // A chip's paint starts on its strip's leading edge, so the control before the strip
+            // supplies the whole gap by itself.
             assert_eq!(
-                frame.tab_strip_leading_padding(chip_inset) + chip_inset,
-                frame.stage_leading_inset(),
-                "{density:?} the first chip should start one space into the strip"
+                frame.chip_strip_leading_offset() + frame.half_space(),
+                px(0.0),
+                "{density:?} a first chip should paint on the strip edge"
             );
-            assert_eq!(frame.tab_strip_leading_padding(px(40.0)), px(0.0));
         }
     }
 
