@@ -27,15 +27,19 @@ impl AppearanceGeneration {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SystemAppearance(Option<Appearance>);
+pub(crate) struct SystemAppearance(Option<Appearance>, bool);
 
 impl SystemAppearance {
     #[cfg(test)]
     pub(crate) const fn available(appearance: Appearance) -> Self {
-        Self(Some(appearance))
+        Self(Some(appearance), false)
     }
     pub(crate) const fn unavailable() -> Self {
-        Self(None)
+        Self(None, false)
+    }
+    pub(crate) const fn with_transparency(mut self, supported: bool) -> Self {
+        self.1 = supported;
+        self
     }
     pub(crate) const fn effective(self) -> Appearance {
         match self.0 {
@@ -47,7 +51,7 @@ impl SystemAppearance {
 
 impl From<Option<Appearance>> for SystemAppearance {
     fn from(value: Option<Appearance>) -> Self {
-        Self(value)
+        Self(value, false)
     }
 }
 
@@ -214,8 +218,7 @@ impl AppearanceChangeSet {
         Self {
             chrome_colors: previous.chrome.colors != next.chrome.colors,
             native_appearance: previous.chrome.appearance != next.chrome.appearance,
-            window_composition: previous.chrome.composition.effective
-                != next.chrome.composition.effective,
+            window_composition: previous.chrome.composition != next.chrome.composition,
             chrome_typography: previous.chrome.typography != next.chrome.typography,
             chrome_metrics: previous.chrome.typography != next.chrome.typography
                 || previous.chrome.density != next.chrome.density,
@@ -245,6 +248,8 @@ impl SchemeCatalog {
         if preferences.mode == super::AppearanceMode::Auto && system.0.is_none() {
             diagnostics.push(AppearanceDiagnostic::SystemAppearanceUnavailable);
         }
+        let composition =
+            super::ResolvedWindowComposition::resolve(&preferences.background, system.1);
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
         let requested_chrome = preferences.chrome.schemes.get(appearance);
@@ -285,11 +290,7 @@ impl SchemeCatalog {
                 colors: chrome_colors,
                 provenance: compiled_chrome.provenance,
                 readability: compiled_chrome.readability,
-                composition: super::ResolvedWindowComposition::foundation(
-                    self.chrome(&effective_chrome)
-                        .and_then(|scheme| scheme.window_background)
-                        .unwrap_or_default(),
-                ),
+                composition,
                 typography: chrome_typography,
                 density: preferences.chrome.density,
             }),

@@ -78,6 +78,8 @@ impl SettingsSectionId {
 pub(super) enum SettingsRowId {
     /// The shared light, dark, or automatic choice.
     AppearanceMode,
+    Transparency,
+    BackgroundBlur,
     ChromeDensity,
     ChromeScheme,
     ChromeLightScheme,
@@ -116,6 +118,8 @@ impl SettingsRowId {
     pub(super) fn reset_target(self, appearance: Appearance) -> Option<ResetTarget> {
         Some(match self {
             Self::AppearanceMode => ResetTarget::AppearanceMode,
+            Self::Transparency => ResetTarget::Transparency,
+            Self::BackgroundBlur => ResetTarget::BackgroundBlur,
             Self::ChromeDensity => ResetTarget::ChromeDensity,
             Self::ChromeScheme => ResetTarget::ChromeScheme(appearance),
             Self::ChromeLightScheme => ResetTarget::ChromeScheme(Appearance::Light),
@@ -180,6 +184,22 @@ pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
 }
 
 pub(super) const ROWS: &[SettingsRowDescriptor] = &[
+    SettingsRowDescriptor {
+        id: SettingsRowId::Transparency,
+        section: SettingsSectionId::Appearance,
+        group: "Background",
+        label: "Transparency",
+        keywords: &["opacity", "transparent", "opaque", "window", "terminal"],
+        selector: "settings-row-transparency",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::BackgroundBlur,
+        section: SettingsSectionId::Appearance,
+        group: "Background",
+        label: "Blur",
+        keywords: &["blurred", "background", "window", "glass"],
+        selector: "settings-row-background-blur",
+    },
     SettingsRowDescriptor {
         id: SettingsRowId::AppearanceMode,
         section: SettingsSectionId::Appearance,
@@ -403,8 +423,10 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 23] = [
+    const EVERY_ROW: [SettingsRowId; 25] = [
         SettingsRowId::AppearanceMode,
+        SettingsRowId::Transparency,
+        SettingsRowId::BackgroundBlur,
         SettingsRowId::ChromeDensity,
         SettingsRowId::ChromeScheme,
         SettingsRowId::ChromeLightScheme,

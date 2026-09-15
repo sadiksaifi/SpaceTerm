@@ -193,3 +193,12 @@ Source identity and attribution, separate from the installed identifier and disp
 
 **Window Background Appearance**:
 Opaque, transparent or blurred native presentation, independent of Light/Dark and color alpha.
+
+**Transparency**:
+The application-scoped amount of desktop visible through Workspace backgrounds, from zero
+(opaque) to one (maximum transparency). Terminal text and explicit cell colors retain their own appearance.
+
+**Surface Material**:
+The translucency and neutral shading of a background fill. The window backing admits the desktop,
+while Panes and controls retain enough tint to remain distinct at maximum transparency. Floating
+surfaces over content stay denser.

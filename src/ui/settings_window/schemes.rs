@@ -95,7 +95,10 @@ impl SettingsWindow {
                 .p(appearance.spacing(10.0))
                 // The notice spans the column the cards under it span, so the page has one edge.
                 .rounded(appearance.spacing(CARD_RADIUS))
-                .bg(gpui_color(appearance.colors.warning_background))
+                .bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Surface,
+                    appearance.colors.warning_background,
+                )))
                 .border_1()
                 .border_color(gpui_color(appearance.colors.warning_border))
                 // The same glyph the window's own banner carries, at the same size: they are the

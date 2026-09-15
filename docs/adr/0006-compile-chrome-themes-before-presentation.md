@@ -31,14 +31,38 @@ Custom theme roles otherwise retain explicitly authored colors; completion is a 
 unrequested rewrite of author decisions.
 
 Window background appearance is distinct from Light/Dark and from each straight RGBA color.
-The foundation retains requested opaque/transparent/blurred intent with an effective opaque
-presentation. Public transparency requires separate native and rendered acceptance. Window owners
-apply native effects once per window. Opaque foundation rendering backs the root with its own RGB, composes panels/elevated surfaces
-on that root and fields on the canonical panel. The prepared field paints that complete backing
-regardless of host, matching compiler contrast. Authored RGBA remains separate. A root paints its
-backing once; panels and fields paint their own surfaces once; floating and critical surfaces retain deliberate backing. Transparency must not
-fade text or change terminal protocol colors. Alpha replacement, opacity multiplication and
-source-over are distinct operations.
+Application Settings own transparency and blur independently of scheme authorship. Native and
+accessibility capabilities determine the effective presentation without discarding those Settings.
+Window owners apply native effects once per window, and SpaceTerm owns the blurred backdrop itself
+rather than accepting a framework effect that rewrites a native material's private layers. Depth
+comes from one neutral ladder in both appearances: the base is the darkest (Dark) or most shaded
+(Light) rung, and chips, controls and floating surfaces rest lighter or brighter on it. One
+Setting controls transmission through a continuous window tint. Resting Chrome surfaces use minimal-alpha
+color overlays against the opaque scheme reference. One neutral elevation ladder is compressed
+into the overlay each appearance may spend, so near-white Light surfaces neither recreate opaque
+panels nor collapse onto a shared ceiling. Floating surfaces over content use a denser curve;
+zero keeps the opaque presentation, while one clears the window tint and retains color on resting
+and floating surfaces. The separate blur Setting controls the native material.
+The compiler derives material fills from the opaque presentation,
+which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
+elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
+thin elevation tints alone transmit too much desktop variation behind muted ANSI colors.
+Readability takes precedence over keeping a Pane lighter than its surroundings on bright backdrops.
+Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency. GPUI cannot blur
+content inside the window, so floating surfaces tint rather than blur what they cover.
+
+The window root owns the continuous window tint. Containers and resting controls paint only their color
+difference from that reference, and nested list rows paint only their own fill. Explicit Terminal cell
+backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
+colors retain their own semantics.
+
+GPUI's rectangular descendant clipping requires terminal content to end above the Pane's bottom
+corner arcs. A small bottom inset preserves those rounded edges without an opaque overpaint.
+The empty corner fillets and Split gaps each own one Chrome fill.
+Authored RGBA remains separate. Alpha replacement, opacity multiplication and source-over are
+distinct operations. GPUI 0.2.2 is locally patched because its macOS main and path-sprite
+pipelines add destination alpha while blending RGB with source-over. Correct destination-alpha
+attenuation is required for layered translucent surfaces; theme colors cannot compensate for it.
 
 Exports distinguish authored definitions from current effective portable copies. Effective exports
 include user overrides and fresh install identities, including copies of built-ins. Zed remains an

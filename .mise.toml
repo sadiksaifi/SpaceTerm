@@ -70,8 +70,8 @@ description = "Check every feature of the locally maintained Ghostty wrappers"
 run = "./scripts/cargo-artifacts.sh run -- cargo check --package libghostty-vt --all-features --locked"
 
 [tasks."deps:lock"]
-description = "Refresh the local Ghostty dependency entries without upgrading unrelated packages"
-run = "cargo update --package libghostty-vt-sys --offline"
+description = "Refresh local patched dependency entries without upgrading unrelated packages"
+run = "cargo update --package libghostty-vt-sys --package gpui --offline"
 
 [tasks."deps:fmt"]
 description = "Format the locally maintained Ghostty integration"
@@ -370,3 +370,7 @@ run = [
   "codesign --display --verbose=2 dist/SpaceTerm.app",
   "ls -lh dist/SpaceTerm.dmg dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
 ]
+
+[tasks."deps:metal:macos"]
+description = "Install Xcode's Metal compiler component for native GPUI builds"
+run = "xcodebuild -downloadComponent MetalToolchain"

@@ -3,7 +3,13 @@ use spaceterm_ui::{CommandPaletteMetrics, CommandPalettePaint, CommandPaletteThe
 
 use crate::appearance::{ChromeColors, Color};
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> CommandPaletteTheme {
+    themed(colors, colors)
+}
+
+/// Paints `colors`, resolving row content against the opaque `reference`.
+pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> CommandPaletteTheme {
     CommandPaletteTheme::new(
         CommandPalettePaint::new(
             gpui_color(colors.elevated_surface_background),
@@ -15,7 +21,9 @@ pub(super) fn theme(colors: &ChromeColors) -> CommandPaletteTheme {
             gpui_color(colors.ghost_element_selected_foreground),
             gpui_color(colors.text_accent),
         )
-        .rows(super::control_theme_catalog::overlay_list_rows(colors))
+        .rows(super::control_theme_catalog::overlay_list_rows(
+            reference, colors,
+        ))
         .icons(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .separator(gpui_color(colors.border_variant))
         .hover_background(gpui_color(colors.ghost_element_hover))

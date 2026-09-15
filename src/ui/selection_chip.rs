@@ -63,6 +63,23 @@ pub(crate) struct ChipPaint {
     pub(crate) hover_rim: Option<Color>,
 }
 
+impl ChipPaint {
+    /// Ties a chip to a translucent window without giving up what it describes.
+    ///
+    /// Fills add the resting surface overlay over the shared tint. Selection comes from the
+    /// authored color difference; rims retain their quiet neutral edge.
+    pub(crate) fn raised(self, appearance: &crate::ui::appearance::ChromeAppearance) -> Self {
+        let material = |color: Option<Color>| {
+            color.map(|color| appearance.surface(crate::appearance::SurfaceRole::Surface, color))
+        };
+        Self {
+            fill: material(self.fill),
+            hover_fill: material(self.hover_fill),
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SelectionChip {
     shape: ChipShape,

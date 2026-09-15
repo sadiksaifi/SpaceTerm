@@ -233,6 +233,10 @@ impl<T> TerminalTab<T> {
         self.minimum_pane_size
     }
 
+    pub(crate) fn set_minimum_pane_size(&mut self, size: PaneSize) {
+        self.minimum_pane_size = size;
+    }
+
     pub(crate) fn pane_count(&self) -> usize {
         self.terminals.len()
     }

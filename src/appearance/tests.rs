@@ -2,6 +2,313 @@ use std::collections::BTreeSet;
 
 use super::*;
 
+#[test]
+fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors() {
+    let catalog = SchemeCatalog::default();
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        let mut preferences = AppearancePreferences {
+            mode,
+            ..Default::default()
+        };
+        let opaque = resolve(&preferences);
+        for transparency in [0.0, 0.15, 0.35, 1.0] {
+            preferences.background.transparency = transparency;
+            let resolved = catalog
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable().with_transparency(true),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            assert_eq!(resolved.chrome.colors, opaque.chrome.colors);
+            assert_eq!(resolved.terminal.colors, opaque.terminal.colors);
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+            let pane = prepared.pane_surface(opaque.terminal.colors.background);
+            let controls = &prepared.control_colors;
+            assert_eq!(controls.text, prepared.colors.text);
+            assert_eq!(controls.border, prepared.colors.border);
+            assert_eq!(prepared.pane_rim(), prepared.colors.row_selected_border);
+            if transparency == 0.0 {
+                assert_eq!(pane, opaque.terminal.colors.background);
+                assert_eq!(sheet.a, 255);
+                assert_eq!(controls.row_selected_background.a, 255);
+                assert_eq!(
+                    resolved.chrome.composition.effective,
+                    WindowBackgroundAppearance::Opaque
+                );
+            } else {
+                assert_eq!(
+                    resolved.chrome.composition.effective,
+                    WindowBackgroundAppearance::Blurred
+                );
+                assert!(
+                    controls.elevated_surface_background.a > sheet.a,
+                    "{mode:?} at {transparency}: a floating surface stays denser than the sheet"
+                );
+                if transparency == 1.0 {
+                    // The sheet clears while Panes and controls keep enough tint to retain shape.
+                    assert_eq!(sheet.a, 0);
+                    assert!(pane.a > 0 && pane.a < 192);
+                    assert!(controls.row_selected_background.a > 0);
+                    assert!(controls.elevated_surface_background.a >= 96);
+                } else {
+                    // Two resting layers must retain a substantial share of the sheet's backdrop transmission.
+                    // Previously, each added a full tint and almost erased it.
+                    let retained = (1.0 - f64::from(pane.a) / 255.0)
+                        * (1.0 - f64::from(controls.row_selected_background.a) / 255.0);
+                    let repeated_full_tints = f64::from(transparency).powi(2);
+                    assert!(
+                        retained > repeated_full_tints * 3.0,
+                        "{mode:?}: resting layers retain {retained}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
+    let preferences = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    };
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable().with_transparency(true),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    for backdrop in [Color::rgb(0xb0b0b0), Color::rgb(0xf0f0f0)] {
+        let sheet = prepared
+            .surface(SurfaceRole::Sheet, prepared.colors.background)
+            .source_over(backdrop);
+        for target in [
+            resolved.terminal.colors.background,
+            prepared.colors.elevated_surface_background,
+            prepared.colors.row_selected_background,
+            prepared.colors.selection_background,
+        ] {
+            let overlay = prepared.surface(SurfaceRole::Surface, target);
+            let raised = overlay.source_over(sheet);
+            assert!(raised.r > sheet.r && raised.g > sheet.g && raised.b > sheet.b);
+            assert!(
+                [
+                    raised.r.saturating_sub(sheet.r),
+                    raised.g.saturating_sub(sheet.g),
+                    raised.b.saturating_sub(sheet.b)
+                ]
+                .into_iter()
+                .all(|delta| delta >= 5),
+                "Light elevation should remain visible: {raised:?} over {sheet:?}"
+            );
+            assert!(
+                overlay.a < 128,
+                "a resting surface must continue to transmit most of its backing"
+            );
+        }
+    }
+}
+
+#[test]
+fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() {
+    let catalog = SchemeCatalog::default();
+    for transparency in [0.15, 0.35, 0.7, 1.0] {
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Dark,
+            ..Default::default()
+        };
+        preferences.background.transparency = transparency;
+        let resolved = catalog
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable().with_transparency(true),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let terminal = &resolved.terminal.colors;
+        let pane = prepared.pane_surface(terminal.background);
+        let lift_only = prepared.surface(
+            SurfaceRole::Surface,
+            terminal.background.mix(
+                prepared.colors.elevated_surface_background,
+                f64::from(prepared.materials.elevation(prepared.colors.background)),
+            ),
+        );
+        let render = |fill: Color, desktop: Color| {
+            fill.source_over(
+                prepared
+                    .surface(SurfaceRole::Sheet, prepared.colors.background)
+                    .source_over(desktop),
+            )
+        };
+        for desktop in [0x808080, 0x906060, 0x608090].map(Color::rgb) {
+            let protected = render(pane, desktop);
+            let unprotected = render(lift_only, desktop);
+            for text in [terminal.foreground, terminal.normal[2], terminal.normal[4]] {
+                assert!(
+                    text.contrast_ratio(protected) > text.contrast_ratio(unprotected),
+                    "Dark at {transparency}: backing must improve text contrast"
+                );
+            }
+        }
+        let dark = render(pane, Color::rgb(0x303030));
+        let bright = render(pane, Color::rgb(0x909090));
+        let previous_dark = render(lift_only, Color::rgb(0x303030));
+        let previous_bright = render(lift_only, Color::rgb(0x909090));
+        for (new, previous) in [
+            (bright.r - dark.r, previous_bright.r - previous_dark.r),
+            (bright.g - dark.g, previous_bright.g - previous_dark.g),
+            (bright.b - dark.b, previous_bright.b - previous_dark.b),
+        ] {
+            assert!(new > 0, "the Pane should still admit the desktop");
+            assert!(
+                f32::from(new) <= f32::from(previous) * 0.6 + 1.0,
+                "the desktop should influence text backing substantially less"
+            );
+        }
+    }
+}
+
+#[test]
+fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    };
+    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
+        preferences.background.transparency = transparency;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable().with_transparency(true),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let background = resolved.terminal.colors.background;
+        let expected = prepared.surface(
+            SurfaceRole::Surface,
+            background.mix(
+                prepared.colors.elevated_surface_background,
+                f64::from(prepared.materials.elevation(prepared.colors.background)),
+            ),
+        );
+        assert_eq!(prepared.pane_surface(background), expected);
+    }
+}
+
+/// The elevation ladder is what tells a Pane from a selected chip from a hovered row once the
+/// fills are translucent, so it has to survive the whole Stepper range rather than collapsing
+/// onto one wash part of the way up it.
+#[test]
+fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let reference = builtin_chrome_base(appearance).opaque_presentation();
+        for transparency in [0.05, 0.15, 0.35, 0.7, 1.0] {
+            let mut preferences = AppearancePreferences::default();
+            preferences.background.transparency = transparency;
+            let materials =
+                ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+            let paint = reference.material_presentation(materials);
+            // The rungs a Workspace rests on, in the order both appearances author them: the
+            // shell, a hovered element, and the persistent selection.
+            let ladder = [
+                paint.panel_background,
+                paint.element_hover,
+                paint.row_selected_background,
+            ];
+            let alphas = ladder.map(|rung| rung.a);
+            assert!(
+                alphas.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{appearance:?} at {transparency}: ladder out of order {alphas:?}"
+            );
+            assert!(
+                alphas[2] > alphas[0] && alphas[1] > 0,
+                "{appearance:?} at {transparency}: ladder collapsed {alphas:?}"
+            );
+            // A Pane rests above the hovered rung in both appearances and never disappears.
+            let pane = materials.paint(
+                SurfaceRole::Surface,
+                reference.background,
+                reference.elevated_surface_background,
+            );
+            assert!(
+                pane.a > alphas[1],
+                "{appearance:?} at {transparency}: a Pane sank into the ladder"
+            );
+        }
+    }
+}
+
+/// Light is the appearance the material can flatten, because every one of its surfaces is a
+/// near-white asking for almost all the ink. Its hierarchy is checked as rendered, over a desktop.
+#[test]
+fn light_surfaces_separate_over_the_desktop_at_every_setting() {
+    let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
+    let desktop = Color::rgb(0x808080);
+    for (transparency, minimum) in [(0.15, 12_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = transparency;
+        let materials = ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+        let sheet = materials
+            .paint(
+                SurfaceRole::Sheet,
+                reference.background,
+                reference.background,
+            )
+            .source_over(desktop);
+        let rendered = |role, target| {
+            materials
+                .paint(role, reference.background, target)
+                .source_over(sheet)
+        };
+        let shell = rendered(SurfaceRole::Base, reference.panel_background);
+        let selected = rendered(SurfaceRole::Surface, reference.row_selected_background);
+        let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
+        for (name, above, below) in [
+            ("Pane over the sheet", pane, sheet),
+            ("selected chip over the shell", selected, shell),
+            ("shell over the sheet", shell, sheet),
+        ] {
+            let step = above.g.saturating_sub(below.g);
+            assert!(
+                step >= minimum.min(3),
+                "{name} at {transparency}: {step} levels of separation"
+            );
+        }
+        assert!(
+            pane.g.saturating_sub(sheet.g) >= minimum,
+            "a Pane at {transparency} must stay clearly above the sheet: {pane:?} over {sheet:?}"
+        );
+    }
+}
+
+#[test]
+fn transparency_rejects_invalid_numbers_and_defaults_for_documents_without_background_settings() {
+    let mut preferences = AppearancePreferences::default();
+    for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+        preferences.background.transparency = invalid;
+        assert!(preferences.validate().is_err());
+    }
+    let mut document = serde_json::to_value(AppearanceDocument::default()).unwrap();
+    document["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("background");
+    let parsed = parse_settings(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(parsed.preferences.background.transparency, 0.35);
+    assert!(parsed.preferences.background.blur);
+}
+
 fn resolve(preferences: &AppearancePreferences) -> ResolvedAppearance {
     SchemeCatalog::default()
         .resolve(

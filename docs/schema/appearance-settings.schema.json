@@ -206,6 +206,14 @@
         "mode": {
           "$ref": "#/$defs/appearanceMode"
         },
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "transparency": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
+            "blur": { "type": "boolean", "default": true }
+          }
+        },
         "chrome": {
           "type": "object",
           "additionalProperties": false,

@@ -5,6 +5,7 @@ use gpui::{AnyElement, App, Pixels, Rgba, Window, div, px};
 use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon, IconName};
 
 use super::appearance::{ChromeAppearance, chrome};
+use super::selection_chip::{CHIP_RADIUS, ChipPaint, ChipShape, SelectionChip};
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -142,6 +143,16 @@ impl WorkspaceChromeIdentity {
         let status_hovered = status.map(|status| gpui_color(status.paint.hovered));
         let status_selector = status.map(|status| status.selector);
         let status_group = "workspace-chrome-status";
+        let surface = SelectionChip::new(
+            ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(CHIP_RADIUS)),
+            ChipPaint {
+                fill: Some(appearance.colors.row_selected_background),
+                rim: Some(appearance.colors.row_selected_border),
+                hover_fill: Some(appearance.colors.row_selected_hover_background),
+                hover_rim: Some(appearance.colors.row_selected_hover_border),
+            }
+            .raised(appearance),
+        );
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
@@ -177,13 +188,16 @@ impl WorkspaceChromeIdentity {
                     .child(self.name),
             );
         div()
+            .relative()
             .flex()
             .items_center()
             .w_full()
+            .h_full()
             .min_w_0()
             .px(appearance.spacing(SWITCHER_HORIZONTAL_PADDING))
             .gap(appearance.spacing(SWITCHER_IDENTITY_GAP))
             .group(status_group)
+            .child(surface.render("workspace-switcher-chip".to_owned(), status_group))
             .child(
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
@@ -233,11 +247,11 @@ impl WorkspaceChromeIdentity {
                 proposed,
                 appearance
                     .colors
-                    .ghost_element_background
+                    .row_selected_background
                     .source_over(appearance.colors.title_bar_background),
                 appearance
                     .colors
-                    .ghost_element_hover
+                    .row_selected_hover_background
                     .source_over(appearance.colors.title_bar_background),
                 4.5,
             ),
@@ -306,11 +320,11 @@ mod tests {
             };
             let normal_background = appearance
                 .colors
-                .ghost_element_background
+                .row_selected_background
                 .source_over(appearance.colors.title_bar_background);
             let hovered_background = appearance
                 .colors
-                .ghost_element_hover
+                .row_selected_hover_background
                 .source_over(appearance.colors.title_bar_background);
             for (availability, remote_connection_phase) in [
                 (

@@ -19,6 +19,20 @@ const SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSInteger = 4;
 pub(crate) struct MacosAppearancePlatform;
 
 impl AppearancePlatform for MacosAppearancePlatform {
+    fn supports_transparency(&self) -> bool {
+        // SAFETY: display accessibility preferences are queried on the AppKit thread.
+        unsafe {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let reduce: objc::runtime::BOOL =
+                msg_send![workspace, accessibilityDisplayShouldReduceTransparency];
+            let contrast: objc::runtime::BOOL =
+                msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
+            reduce == objc::runtime::NO && contrast == objc::runtime::NO
+        }
+    }
+    fn apply_window_backdrop(&self, window: &gpui::Window, blurred: bool) {
+        super::macos_window_backdrop::apply(window, blurred);
+    }
     fn system_appearance(&self) -> Option<Appearance> {
         // SAFETY: the preference is read on the AppKit thread. It is the system preference,
         // independent of NSApplication's effective appearance, which this Adapter may force.
@@ -103,12 +117,28 @@ unsafe fn observe_distributed(
         ];
     }
 
+    // Accessibility changes use the workspace's local notification center. Both observations
+    // share the same coalescing wakeup and are removed with the application owner.
+    let workspace: id = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
+    let accessibility_center: id = unsafe { msg_send![workspace, notificationCenter] };
+    let accessibility_center: id = unsafe { msg_send![accessibility_center, retain] };
+    let accessibility_name = unsafe {
+        NSString::alloc(nil).init_str("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification")
+    };
+    unsafe {
+        let _: () = msg_send![accessibility_center,
+            addObserver: observer selector: sel!(appearanceChanged:) name: accessibility_name object: nil
+        ];
+        let _: () = msg_send![accessibility_name, release];
+    }
+
     Some(SystemAppearanceObservation {
         changed,
         subscription: Box::new(MacosAppearanceSubscription {
             center,
             observer,
             name,
+            accessibility_center,
         }),
     })
 }
@@ -174,6 +204,7 @@ struct MacosAppearanceSubscription {
     center: id,
     observer: id,
     name: id,
+    accessibility_center: id,
 }
 
 impl SystemAppearanceSubscription for MacosAppearanceSubscription {}
@@ -183,6 +214,8 @@ impl Drop for MacosAppearanceSubscription {
         // SAFETY: NSDistributedNotificationCenter does not retain selector observers. Remove the
         // observer while every registration argument is still alive, then release owned objects.
         unsafe {
+            let _: () = msg_send![self.accessibility_center, removeObserver: self.observer];
+            let _: () = msg_send![self.accessibility_center, release];
             let _: () = msg_send![self.center,
                 removeObserver: self.observer name: self.name object: nil
             ];

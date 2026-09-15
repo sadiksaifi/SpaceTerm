@@ -221,16 +221,36 @@ impl Default for TerminalPreferences {
     }
 }
 
+/// Window surface presentation, independent of authored Chrome and Terminal colors.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct BackgroundPreferences {
+    pub(crate) transparency: f32,
+    pub(crate) blur: bool,
+}
+
+impl Default for BackgroundPreferences {
+    fn default() -> Self {
+        Self {
+            transparency: 0.35,
+            blur: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppearancePreferences {
     pub(crate) mode: AppearanceMode,
+    #[serde(default)]
+    pub(crate) background: BackgroundPreferences,
     pub(crate) chrome: ChromePreferences,
     pub(crate) terminal: TerminalPreferences,
 }
 
 impl AppearancePreferences {
     pub(crate) fn validate(&self) -> Result<(), PreferenceError> {
+        finite_range(self.background.transparency, 0.0, 1.0)?;
         self.chrome.typography.validate()?;
         self.terminal.typography.validate()?;
         if self.chrome.overrides.len() > 128 || self.terminal.overrides.len() > 128 {
@@ -255,6 +275,10 @@ impl AppearancePreferences {
         let defaults = Self::default();
         match target {
             ResetTarget::AppearanceMode => self.mode = defaults.mode,
+            ResetTarget::Transparency => {
+                self.background.transparency = defaults.background.transparency
+            }
+            ResetTarget::BackgroundBlur => self.background.blur = defaults.background.blur,
             ResetTarget::ChromeScheme(appearance) => {
                 *self.chrome.schemes.get_mut(appearance) =
                     defaults.chrome.schemes.get(appearance).clone();
@@ -342,6 +366,8 @@ impl AppearancePreferences {
 )]
 pub(crate) enum ResetTarget {
     AppearanceMode,
+    Transparency,
+    BackgroundBlur,
     ChromeScheme(Appearance),
     ChromeFontFamily,
     ChromeBaseSize,

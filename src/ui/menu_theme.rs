@@ -3,7 +3,13 @@ use spaceterm_ui::{MenuMetrics, MenuPaint, MenuSizes, MenuTheme};
 
 use crate::appearance::{ChromeColors, Color};
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
+    themed(colors, colors)
+}
+
+/// Paints `colors`, resolving row content against the opaque `reference`.
+pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> MenuTheme {
     let paint = MenuPaint::new(
         gpui_color(colors.elevated_surface_background),
         gpui_color(colors.border),
@@ -15,8 +21,10 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
         gpui_color(colors.error),
         gpui_color(colors.border),
     )
-    .rows(super::control_theme_catalog::overlay_list_rows(colors))
-    .destructive_rows(destructive_rows(colors))
+    .rows(super::control_theme_catalog::overlay_list_rows(
+        reference, colors,
+    ))
+    .destructive_rows(destructive_rows(reference, colors))
     .hover_background(gpui_color(colors.ghost_element_hover))
     .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(
@@ -33,15 +41,28 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
     .shadow(super::appearance::control_shadow(colors, false))
 }
 
-fn destructive_rows(colors: &ChromeColors) -> spaceterm_ui::ListRowPaints {
+fn destructive_rows(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+) -> spaceterm_ui::ListRowPaints {
+    use super::control_theme_catalog::OverlayRow;
     use spaceterm_ui::{ListRowPaint, ListRowPaints};
-    let elevated = colors.elevated_surface_background;
-    let row = |background: Color, foreground: Color, icon: Color, border: Color| {
-        let background = background.source_over(elevated);
-        let foreground = super::control_theme_catalog::readable_on(foreground, background, 4.5);
-        let icon = super::control_theme_catalog::readable_on(icon, background, 4.5);
+    let surfaces = (
+        reference.elevated_surface_background,
+        colors.elevated_surface_background,
+    );
+    let row = |pick: fn(&ChromeColors) -> (Color, Color)| {
+        let (fill, border) = pick(reference);
+        let row = OverlayRow::resolve(
+            (fill, surfaces.0),
+            (pick(colors).0, surfaces.1),
+            [reference.error; 4],
+            border,
+        );
+        let [foreground, _, icon, _] = row.content;
+        let fill = row.fill;
         ListRowPaint::new(
-            gpui_color(background),
+            gpui_color(fill),
             gpui_color(foreground),
             gpui_color(foreground),
             gpui_color(icon),
@@ -50,32 +71,21 @@ fn destructive_rows(colors: &ChromeColors) -> spaceterm_ui::ListRowPaints {
         )
     };
     ListRowPaints::new(
-        row(elevated, colors.error, colors.error, colors.row_border),
-        row(
-            colors.row_hover_background,
-            colors.error,
-            colors.error,
-            colors.row_hover_border,
-        ),
-        row(
-            colors.row_selected_background,
-            colors.error,
-            colors.error,
-            colors.row_selected_border,
-        ),
-        row(
-            colors.row_selected_hover_background,
-            colors.error,
-            colors.error,
-            colors.row_selected_hover_border,
-        ),
+        row(|c| (c.elevated_surface_background, c.row_border)),
+        row(|c| (c.row_hover_background, c.row_hover_border)),
+        row(|c| (c.row_selected_background, c.row_selected_border)),
+        row(|c| (c.row_selected_hover_background, c.row_selected_hover_border)),
         ListRowPaint::new(
-            gpui_color(elevated),
-            gpui_color(colors.text_disabled),
-            gpui_color(colors.text_disabled),
-            gpui_color(colors.icon_disabled),
-            gpui_color(colors.text_disabled),
-            gpui_color(colors.row_border),
+            gpui_color(if surfaces.0 == surfaces.1 {
+                surfaces.1
+            } else {
+                Color::rgba(0)
+            }),
+            gpui_color(reference.text_disabled),
+            gpui_color(reference.text_disabled),
+            gpui_color(reference.icon_disabled),
+            gpui_color(reference.text_disabled),
+            gpui_color(reference.row_border),
         ),
     )
 }
@@ -128,7 +138,7 @@ mod tests {
     fn destructive_menu_rows_use_neutral_overlay_surfaces_and_semantic_content() {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
-            let rows = destructive_rows(&colors);
+            let rows = destructive_rows(&colors, &colors);
 
             assert_eq!(
                 rows.resolve(true, false, false),

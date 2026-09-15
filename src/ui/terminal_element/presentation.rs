@@ -107,7 +107,10 @@ impl TerminalGridPresentation {
         configuration: TerminalGridConfiguration,
         cx: &mut App,
     ) -> impl IntoElement + use<> {
-        let eligible = configuration.terminal_input_focused
+        // The cursor cache restores a row with an opaque fill. Translucent surfaces repaint
+        // the grid so blinking never compounds alpha or leaves the previous cursor behind.
+        let eligible = crate::ui::appearance::chrome(cx).materials.is_opaque()
+            && configuration.terminal_input_focused
             && screen.cursor.visible
             && screen.cursor.blinking
             && screen.cursor.position.is_some()

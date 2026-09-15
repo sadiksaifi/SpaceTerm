@@ -5,7 +5,8 @@ use std::sync::Arc;
 use gpui::{App, Font, FontWeight, Global, Pixels, TextRun, Window, font, px, rgba};
 
 use crate::appearance::{
-    ChromeColors, ChromeDensity, ResolvedChromeAppearance, ResolvedFontDescriptor,
+    ChromeColors, ChromeDensity, Color, ResolvedChromeAppearance, ResolvedFontDescriptor,
+    SurfaceMaterials, SurfaceRole,
 };
 
 pub(crate) fn prepared_font(descriptor: &ResolvedFontDescriptor) -> Font {
@@ -66,7 +67,11 @@ impl TerminalFonts {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChromeAppearance {
+    /// Opaque presentation: the contrast reference and the input to Workspace surface owners.
     pub(crate) colors: ChromeColors,
+    /// The same colors with the window's material applied to background fills, for controls.
+    pub(crate) control_colors: ChromeColors,
+    pub(crate) materials: SurfaceMaterials,
     pub(crate) regular: Font,
     pub(crate) emphasis: Font,
     pub(crate) caption: Font,
@@ -80,8 +85,11 @@ impl Default for ChromeAppearance {
         let regular = font(".SystemUIFont");
         let mut emphasis = regular.clone();
         emphasis.weight = FontWeight::SEMIBOLD;
+        let colors = ChromeColors::default().opaque_presentation();
         Self {
-            colors: ChromeColors::default().opaque_presentation(),
+            control_colors: colors.clone(),
+            colors,
+            materials: SurfaceMaterials::OPAQUE,
             caption: regular.clone(),
             regular,
             heading: emphasis.clone(),
@@ -93,6 +101,40 @@ impl Default for ChromeAppearance {
 }
 
 impl ChromeAppearance {
+    /// Applies the window's material for one surface role to an authored background color.
+    ///
+    /// Only the owner of a painted background calls this, once. Authored translucency is scaled
+    /// rather than replaced, so a theme that authored a translucent surface keeps its intent.
+    pub(crate) fn surface(&self, role: SurfaceRole, color: Color) -> Color {
+        self.materials.paint(role, self.colors.background, color)
+    }
+
+    /// The backdrop a Pane paints beneath its Terminal.
+    ///
+    /// Presentation only: protocol colors and explicit cell backgrounds keep their own values. A
+    /// translucent window lifts the default backdrop toward the scheme's elevated surface so it
+    /// separates from the base; an opaque window paints it as is. Dark also retains a backing
+    /// beneath that tint so desktop colors do not wash out Terminal text.
+    pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
+        let target = terminal_background.mix(
+            self.colors.elevated_surface_background,
+            f64::from(self.materials.elevation(self.colors.background)),
+        );
+        let lift = self.surface(SurfaceRole::Surface, target);
+        let protection = self.materials.pane_protection(self.colors.background);
+        if protection == 0.0 {
+            return lift;
+        }
+        let backing = terminal_background.multiply_opacity((protection * 255.0).round() as u8);
+        lift.source_over(backing)
+    }
+
+    /// The hairline around every Pane: the same neutral edge a selected Workspace row or Active Tab
+    /// chip carries, at every transparency.
+    pub(crate) fn pane_rim(&self) -> Color {
+        self.colors.row_selected_border
+    }
+
     pub(crate) fn shadow(&self) -> Vec<gpui::BoxShadow> {
         vec![gpui::BoxShadow {
             color: rgba(self.colors.shadow.rgba_hex()).into(),
@@ -102,11 +144,11 @@ impl ChromeAppearance {
         }]
     }
     pub(crate) fn prepare(resolved: &ResolvedChromeAppearance) -> Self {
+        let colors = resolved.colors.opaque_presentation();
         Self {
-            // Native foundation presentation has a known opaque backing. Preserve authored RGBA
-            // in the published appearance, and share the compiler's canonical surface hierarchy
-            // with every app consumer and the injected reusable-control catalog.
-            colors: resolved.colors.opaque_presentation(),
+            control_colors: colors.material_presentation(resolved.composition.materials),
+            colors,
+            materials: resolved.composition.materials,
             regular: prepared_font(&resolved.typography.body),
             emphasis: prepared_font(&resolved.typography.navigation),
             caption: prepared_font(&resolved.typography.caption),

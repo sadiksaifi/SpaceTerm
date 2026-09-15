@@ -1,9 +1,26 @@
 use super::*;
 use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode, SchemeId};
+use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
 use gpui::TestAppContext;
+
+fn shell(resolved: &ResolvedAppearance) -> u8 {
+    resolved
+        .chrome
+        .composition
+        .materials
+        .alpha(SurfaceRole::Base)
+}
+
+fn floating(resolved: &ResolvedAppearance) -> u8 {
+    resolved
+        .chrome
+        .composition
+        .materials
+        .alpha(SurfaceRole::Floating)
+}
 
 #[derive(Default)]
 struct PreviewStorage(Option<Vec<u8>>);
@@ -32,6 +49,113 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
         crate::ui::initialize_controls(cx).unwrap();
     });
     (settings, platform)
+}
+
+/// A blurred Workspace asks the framework only for a transparent window: SpaceTerm installs the
+/// native backdrop itself, and takes it away again when the composition resolves opaque.
+#[gpui::test]
+fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect(
+    cx: &mut TestAppContext,
+) {
+    let (_settings, platform) = start(cx);
+    platform.set_transparency_supported(true);
+    cx.run_until_parked();
+    let test_window = cx.add_window(|_, _| gpui::EmptyView);
+    let mut owner = WindowAppearanceOwner::default();
+    test_window
+        .update(cx, |_, window, cx| {
+            owner.apply(window, cx);
+            assert_eq!(
+                window_background(cx),
+                gpui::WindowBackgroundAppearance::Transparent
+            );
+        })
+        .unwrap();
+    assert_eq!(platform.backdrops.borrow().as_slice(), &[true]);
+
+    platform.set_transparency_supported(false);
+    cx.run_until_parked();
+    test_window
+        .update(cx, |_, window, cx| {
+            owner.apply(window, cx);
+            assert_eq!(
+                window_background(cx),
+                gpui::WindowBackgroundAppearance::Opaque
+            );
+        })
+        .unwrap();
+    assert_eq!(platform.backdrops.borrow().as_slice(), &[true, false]);
+
+    // Re-applying an unchanged composition costs no native work.
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
+        .unwrap();
+    assert_eq!(platform.backdrops.borrow().len(), 2);
+}
+
+#[gpui::test]
+fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_protocol_changes(
+    cx: &mut TestAppContext,
+) {
+    let (settings, platform) = start(cx);
+    platform.set_transparency_supported(true);
+    cx.run_until_parked();
+    let before = cx.update(|cx| current(cx));
+    assert!(shell(&before) > 0 && shell(&before) < 255);
+    assert!(floating(&before) > shell(&before));
+    assert_eq!(
+        before.chrome.composition.effective,
+        crate::appearance::WindowBackgroundAppearance::Blurred
+    );
+    let token = settings.begin_preview(0).unwrap();
+    let mut document = AppearanceDocument::default();
+    document.preferences.background.transparency = 0.5;
+    document.preferences.background.blur = false;
+    settings.update_preview(&token, document).unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let after = current(cx);
+        assert!(shell(&after) > 0 && shell(&after) < shell(&before));
+        assert!(floating(&after) < floating(&before));
+        // Floating surfaces covering content stay denser than the base between the endpoints.
+        assert!(floating(&after) > shell(&after));
+        assert_eq!(
+            after.chrome.composition.effective,
+            crate::appearance::WindowBackgroundAppearance::Transparent
+        );
+        let chrome = crate::ui::appearance::chrome(cx);
+        assert_eq!(
+            chrome
+                .surface(SurfaceRole::Sheet, chrome.colors.background)
+                .a,
+            after.chrome.composition.materials.alpha(SurfaceRole::Sheet)
+        );
+        assert!(
+            chrome
+                .surface(SurfaceRole::Sheet, chrome.colors.background)
+                .a
+                < shell(&after)
+        );
+        assert_eq!(chrome.colors.text.a, 255);
+        assert_eq!(after.terminal, before.terminal);
+        assert!(!AppearanceChangeSet::between(&before, &after).terminal_protocol_colors);
+    });
+    let preview_shell = cx.update(|cx| shell(&current(cx)));
+    platform.set_transparency_supported(false);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert!(current(cx).chrome.composition.materials.is_opaque());
+        assert_eq!(
+            window_background(cx),
+            gpui::WindowBackgroundAppearance::Opaque
+        );
+    });
+    platform.set_transparency_supported(true);
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(shell(&current(cx)), preview_shell));
+    drop(token);
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(shell(&current(cx)), shell(&before)));
 }
 
 #[gpui::test]

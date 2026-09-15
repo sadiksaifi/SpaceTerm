@@ -3001,7 +3001,11 @@ impl WorkspaceManager {
         .when(!sidebar_visible, |chooser| {
             let (identity, tooltip) = self.workspace_chrome_identity();
             chooser
-                .custom_trigger(identity.render(gpui_color(appearance.colors.icon), appearance))
+                .custom_trigger(identity.render(
+                    gpui_color(appearance.colors.row_selected_foreground),
+                    appearance,
+                ))
+                .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
@@ -3083,11 +3087,14 @@ impl WorkspaceManager {
             .left_0()
             .w(layout.width)
             .h(top_chrome_height)
-            .bg(gpui_color(if window.is_window_active() {
-                appearance.colors.title_bar_background
-            } else {
-                appearance.colors.title_bar_inactive_background
-            }))
+            .bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                if window.is_window_active() {
+                    appearance.colors.title_bar_background
+                } else {
+                    appearance.colors.title_bar_inactive_background
+                },
+            )))
             .child(drag_region)
             .into_any_element()
     }
@@ -3176,6 +3183,10 @@ impl Render for WorkspaceManager {
         });
         let content = div()
             .id("workspace-manager")
+            .bg(gpui_color(super::appearance::chrome(cx).surface(
+                crate::appearance::SurfaceRole::Sheet,
+                super::appearance::chrome(cx).colors.background,
+            )))
             .debug_selector(|| "workspace-manager".to_owned())
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
@@ -3184,7 +3195,6 @@ impl Render for WorkspaceManager {
             .min_h_0()
             .overflow_hidden()
             .font(super::appearance::chrome(cx).regular.clone())
-            .bg(gpui_color(super::appearance::chrome(cx).colors.background))
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))
