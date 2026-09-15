@@ -83,7 +83,7 @@ run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
 [tasks.dev]
 description = "Run SpaceTerm from source"
-run = [{ task = "dev:macos" }]
+run = "python3 scripts/run-development-app.py dev"
 
 [tasks."dev:macos"]
 description = "Run SpaceTerm Dev from a source-built macOS application bundle"
@@ -91,7 +91,7 @@ run = "exec bash scripts/run-development-app-macos.sh dev"
 
 [tasks."dev:appearance"]
 description = "Run the appearance exerciser with isolated retained settings"
-run = [{ task = "dev:appearance:macos" }]
+run = "python3 scripts/run-development-app.py appearance"
 
 [tasks.check]
 description = "Check every target and feature"
@@ -161,7 +161,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
 '''
 
 [tasks."lint:diff"]
