@@ -358,32 +358,141 @@ fn builtin_list_hover_and_selection_match_without_aliasing_the_roles() {
 }
 
 #[test]
-fn dark_defaults_match_the_consumed_vague_pro_values() {
-    let terminal = TerminalColors::default();
-    assert_eq!(
-        terminal.foreground,
-        crate::theme::ACTIVE_THEME.terminal_foreground
+fn defaults_select_spaceterm_owned_schemes_in_both_appearances() {
+    let catalog = SchemeCatalog::default();
+    for (mode, suffix) in [
+        (AppearanceMode::Light, "light"),
+        (AppearanceMode::Dark, "dark"),
+    ] {
+        let preferences = AppearancePreferences {
+            mode,
+            ..Default::default()
+        };
+        let resolved = resolve(&preferences);
+        assert_eq!(
+            resolved.chrome.effective_scheme.as_str(),
+            format!("builtin.spaceterm.chrome.{suffix}")
+        );
+        assert_eq!(
+            resolved.terminal.effective_scheme.as_str(),
+            format!("builtin.spaceterm.terminal.{suffix}")
+        );
+        let chrome = catalog.chrome(&resolved.chrome.effective_scheme).unwrap();
+        let terminal = catalog
+            .terminal(&resolved.terminal.effective_scheme)
+            .unwrap();
+        assert_eq!(chrome.name, terminal.name);
+        assert_eq!(
+            chrome.metadata.author.as_deref(),
+            Some("SpaceTerm contributors")
+        );
+        assert_eq!(
+            terminal.metadata.author.as_deref(),
+            Some("SpaceTerm contributors")
+        );
+    }
+}
+
+#[test]
+fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency() {
+    let catalog = SchemeCatalog::default();
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        let mut preferences = AppearancePreferences {
+            mode,
+            ..Default::default()
+        };
+        for step in 0..=100 {
+            preferences.background.transparency = step as f32 / 100.0;
+            let resolved = catalog
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable().with_transparency(true),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let colors = &prepared.control_colors;
+            let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+            let pane = prepared.pane_surface(resolved.terminal.colors.background);
+            for (name, color) in [
+                ("sheet", sheet),
+                ("pane", pane),
+                ("pane rim", prepared.pane_rim()),
+                ("panel", colors.panel_background),
+                ("popup", colors.elevated_surface_background),
+                ("title bar", colors.title_bar_background),
+                ("active tab", colors.tab_active_background),
+                ("selected row", colors.row_selected_background),
+                ("hovered row", colors.row_hover_background),
+                ("selected row hover", colors.row_selected_hover_background),
+                ("selected control", colors.selection_background),
+                ("selected control hover", colors.selection_hover_background),
+                ("control", colors.element_background),
+                ("control hover", colors.element_hover),
+                ("input", colors.input_background),
+                ("disabled input", colors.input_disabled_background),
+                ("preview", colors.preview_background),
+                ("badge", colors.badge_background),
+                ("border", colors.border),
+                ("shadow", colors.shadow),
+                ("scrim", colors.modal_scrim),
+            ] {
+                assert_eq!(color.r, color.g, "{mode:?} at {step}: {name}");
+                assert_eq!(color.g, color.b, "{mode:?} at {step}: {name}");
+            }
+            // Neutral desktop light can change brightness, but must not acquire a scheme hue.
+            for desktop in [0x000000, 0x808080, 0xffffff].map(Color::rgb) {
+                let rendered = pane.source_over(sheet.source_over(desktop));
+                assert_eq!(rendered.r, rendered.g);
+                assert_eq!(rendered.g, rendered.b);
+            }
+        }
+    }
+}
+
+#[test]
+fn retired_builtin_selections_retain_overrides_without_missing_scheme_diagnostics() {
+    let mut document = AppearanceDocument::default();
+    document.preferences.mode = AppearanceMode::Dark;
+    let chrome = SchemeId::builtin("builtin.vague-pro.chrome.dark");
+    let terminal = SchemeId::builtin("builtin.vague-pro.terminal.dark");
+    document.preferences.chrome.schemes.dark = chrome.clone();
+    document.preferences.terminal.schemes.dark = terminal.clone();
+    document.preferences.chrome.overrides.insert(
+        chrome.clone(),
+        ChromeColorOverrides {
+            text: Some(Color::rgb(0xabcdef)),
+            ..Default::default()
+        },
     );
-    assert_eq!(
-        terminal.background,
-        crate::theme::ACTIVE_THEME.terminal_background
+    document.preferences.terminal.overrides.insert(
+        terminal.clone(),
+        TerminalColorOverrides {
+            foreground: Some(Color::rgb(0xfedcba)),
+            ..Default::default()
+        },
     );
-    assert_eq!(
-        terminal.normal,
-        crate::theme::ACTIVE_THEME.terminal_normal()
+    let loaded = parse_settings(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let resolved = resolve(&loaded.preferences);
+    assert_eq!(resolved.chrome.colors.text, Color::rgb(0xabcdef));
+    assert_eq!(resolved.terminal.colors.foreground, Color::rgb(0xfedcba));
+    assert!(!loaded.preferences.chrome.overrides.contains_key(&chrome));
+    assert!(
+        !loaded
+            .preferences
+            .terminal
+            .overrides
+            .contains_key(&terminal)
     );
+    assert!(!resolved.diagnostics.iter().any(|diagnostic| matches!(
+        diagnostic,
+        AppearanceDiagnostic::ChromeSchemeUnavailable { .. }
+            | AppearanceDiagnostic::TerminalSchemeUnavailable { .. }
+    )));
     assert_eq!(
-        terminal.bright,
-        crate::theme::ACTIVE_THEME.terminal_bright()
-    );
-    assert_eq!(terminal.dim, crate::theme::ACTIVE_THEME.terminal_dim());
-    assert_eq!(
-        terminal.bright_foreground,
-        crate::theme::ACTIVE_THEME.terminal_bright_foreground
-    );
-    assert_eq!(
-        terminal.dim_foreground,
-        crate::theme::ACTIVE_THEME.terminal_dim_foreground
+        parse_settings(&serde_json::to_vec(&loaded).unwrap()).unwrap(),
+        loaded
     );
 }
 
@@ -619,7 +728,7 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
 #[test]
 fn a_known_wrong_kind_or_classification_is_rejected() {
     let mut preferences = AppearancePreferences::default();
-    preferences.chrome.schemes.dark = SchemeId::builtin("builtin.vague-pro.terminal.dark");
+    preferences.chrome.schemes.dark = SchemeId::builtin("builtin.spaceterm.terminal.dark");
     assert!(matches!(
         SchemeCatalog::default().resolve(
             AppearanceGeneration::INITIAL,
@@ -631,7 +740,7 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
     ));
 
     preferences.mode = AppearanceMode::Light;
-    preferences.chrome.schemes.light = SchemeId::builtin("builtin.vague-pro.chrome.dark");
+    preferences.chrome.schemes.light = SchemeId::builtin("builtin.spaceterm.chrome.dark");
     assert!(matches!(
         SchemeCatalog::default().resolve(
             AppearanceGeneration::INITIAL,
@@ -644,7 +753,7 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
 
     let mut document = AppearanceDocument::default();
     document.preferences.chrome.overrides.insert(
-        SchemeId::builtin("builtin.vague-pro.terminal.dark"),
+        SchemeId::builtin("builtin.spaceterm.terminal.dark"),
         ChromeColorOverrides::default(),
     );
     assert!(matches!(
@@ -654,7 +763,7 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
 
     let mut document = AppearanceDocument::default();
     document.preferences.terminal.overrides.insert(
-        SchemeId::builtin("builtin.vague-pro.chrome.dark"),
+        SchemeId::builtin("builtin.spaceterm.chrome.dark"),
         TerminalColorOverrides::default(),
     );
     assert!(matches!(
@@ -985,7 +1094,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
     assert!(ResetTarget::terminal_color_override(terminal_id, "not_a_role").is_none());
 
     let mut sparse = AppearanceDocument::default();
-    let chrome_id = SchemeId::builtin("builtin.vague-pro.chrome.dark");
+    let chrome_id = SchemeId::builtin("builtin.spaceterm.chrome.dark");
     sparse.preferences.chrome.overrides.insert(
         chrome_id.clone(),
         ChromeColorOverrides {
@@ -998,7 +1107,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
         .unwrap();
     assert!(!sparse.preferences.chrome.overrides.contains_key(&chrome_id));
 
-    let terminal_id = SchemeId::builtin("builtin.vague-pro.terminal.dark");
+    let terminal_id = SchemeId::builtin("builtin.spaceterm.terminal.dark");
     sparse.preferences.terminal.overrides.insert(
         terminal_id.clone(),
         TerminalColorOverrides {
@@ -1104,7 +1213,7 @@ fn catalog_batch_install_is_atomic_and_revision_checked() {
 
 #[test]
 fn zed_import_uses_explicit_candidate_and_deterministic_kind_ids() {
-    let bytes = include_bytes!("../../third_party/vague-pro-zed/themes/vague-pro.json");
+    let bytes = include_bytes!("fixtures/vague-pro/theme.json");
     let candidates = list_zed_candidates(bytes).unwrap();
     assert_eq!(candidates.len(), 1);
     let first = import_zed(
@@ -1190,7 +1299,7 @@ fn native_examples_and_complete_export_follow_the_runtime_contract() {
         &[
             (
                 SchemeKind::Chrome,
-                SchemeId::builtin("builtin.vague-pro.chrome.dark"),
+                SchemeId::builtin("builtin.spaceterm.chrome.dark"),
             ),
             (
                 SchemeKind::Terminal,

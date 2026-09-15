@@ -4,11 +4,11 @@ use super::scheme::{
 };
 use super::{Appearance, ChromeColors, Color, SchemeId, SchemeKind, TerminalColors};
 
-pub(crate) fn vague_chrome_id() -> SchemeId {
-    SchemeId::builtin("builtin.vague-pro.chrome.dark")
+pub(crate) fn dark_chrome_id() -> SchemeId {
+    SchemeId::builtin("builtin.spaceterm.chrome.dark")
 }
-pub(crate) fn vague_terminal_id() -> SchemeId {
-    SchemeId::builtin("builtin.vague-pro.terminal.dark")
+pub(crate) fn dark_terminal_id() -> SchemeId {
+    SchemeId::builtin("builtin.spaceterm.terminal.dark")
 }
 pub(crate) fn light_chrome_id() -> SchemeId {
     SchemeId::builtin("builtin.spaceterm.chrome.light")
@@ -19,51 +19,40 @@ pub(crate) fn light_terminal_id() -> SchemeId {
 
 pub(crate) fn fallback_id(kind: SchemeKind, appearance: Appearance) -> SchemeId {
     match (kind, appearance) {
-        (SchemeKind::Chrome, Appearance::Dark) => vague_chrome_id(),
-        (SchemeKind::Terminal, Appearance::Dark) => vague_terminal_id(),
+        (SchemeKind::Chrome, Appearance::Dark) => dark_chrome_id(),
+        (SchemeKind::Terminal, Appearance::Dark) => dark_terminal_id(),
         (SchemeKind::Chrome, Appearance::Light) => light_chrome_id(),
         (SchemeKind::Terminal, Appearance::Light) => light_terminal_id(),
     }
 }
 
 pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
-    let vague_metadata = SchemeMetadata {
-        origin: None,
-        author: Some(String::from("Vague Theme contributors")),
-        license: Some(String::from("MIT")),
-        description: Some(String::from(
-            "Terminal colors extracted from the pinned Vague Pro source",
-        )),
-    };
-    let spaceterm_chrome_metadata = SchemeMetadata {
+    let chrome_metadata = SchemeMetadata {
         origin: None,
         author: Some(String::from("SpaceTerm contributors")),
         license: Some(String::from("MIT")),
         description: Some(String::from("SpaceTerm-owned Chrome appearance")),
     };
-    let spaceterm_terminal_metadata = SchemeMetadata {
+    let terminal_metadata = SchemeMetadata {
         origin: None,
         author: Some(String::from("SpaceTerm contributors")),
         license: Some(String::from("MIT")),
         description: Some(String::from("SpaceTerm-owned Terminal appearance")),
     };
     vec![
-        // The Chrome palette is SpaceTerm's own identity, so it carries SpaceTerm attribution even
-        // though the retained scheme id keeps existing settings resolving. Only the paired Terminal
-        // scheme still consumes the pinned Vague Pro source.
         CustomScheme::Chrome(Box::new(ChromeScheme {
             window_background: None,
-            id: vague_chrome_id(),
+            id: dark_chrome_id(),
             name: String::from("SpaceTerm Dark"),
             appearance: Appearance::Dark,
-            metadata: spaceterm_chrome_metadata.clone(),
+            metadata: chrome_metadata.clone(),
             colors: chrome_definition(Appearance::Dark),
         })),
         CustomScheme::Terminal(Box::new(TerminalScheme {
-            id: vague_terminal_id(),
-            name: String::from("Vague Pro Dark"),
+            id: dark_terminal_id(),
+            name: String::from("SpaceTerm Dark"),
             appearance: Appearance::Dark,
-            metadata: vague_metadata,
+            metadata: terminal_metadata.clone(),
             colors: TerminalColorOverrides::default(),
         })),
         CustomScheme::Chrome(Box::new(ChromeScheme {
@@ -71,14 +60,14 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
             id: light_chrome_id(),
             name: String::from("SpaceTerm Light"),
             appearance: Appearance::Light,
-            metadata: spaceterm_chrome_metadata,
+            metadata: chrome_metadata,
             colors: chrome_definition(Appearance::Light),
         })),
         CustomScheme::Terminal(Box::new(TerminalScheme {
             id: light_terminal_id(),
             name: String::from("SpaceTerm Light"),
             appearance: Appearance::Light,
-            metadata: spaceterm_terminal_metadata,
+            metadata: terminal_metadata,
             colors: TerminalColorOverrides::default(),
         })),
     ]
@@ -87,31 +76,31 @@ pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
 #[cfg(test)]
 pub(crate) fn chrome_base(appearance: Appearance) -> ChromeColors {
     match appearance {
-        Appearance::Dark => vague_dark_chrome(),
+        Appearance::Dark => spaceterm_dark_chrome(),
         Appearance::Light => spaceterm_light_chrome(),
     }
 }
 
 pub(crate) fn terminal_base(appearance: Appearance) -> TerminalColors {
     match appearance {
-        Appearance::Dark => vague_dark_terminal(),
+        Appearance::Dark => spaceterm_dark_terminal(),
         Appearance::Light => spaceterm_light_terminal(),
     }
 }
 
 impl Default for ChromeColors {
     fn default() -> Self {
-        vague_dark_chrome()
+        spaceterm_dark_chrome()
     }
 }
 
 impl Default for TerminalColors {
     fn default() -> Self {
-        vague_dark_terminal()
+        spaceterm_dark_terminal()
     }
 }
 
-fn vague_dark_chrome() -> ChromeColors {
+fn spaceterm_dark_chrome() -> ChromeColors {
     super::compiler::compile_chrome(
         Appearance::Dark,
         &chrome_definition(Appearance::Dark),
@@ -129,123 +118,126 @@ fn spaceterm_light_chrome() -> ChromeColors {
     .colors
 }
 
-/// The authored SpaceTerm Chrome identity: one cool-neutral surface ladder per appearance plus a
+/// The authored SpaceTerm Chrome identity: one achromatic surface ladder per appearance plus a
 /// small set of restrained semantic accents.
 ///
 /// Light and dark are a paired tonal system rather than an inversion. Each appearance authors the
 /// same ladder (root, chrome shell, raised surface, field, hover, pressed, persistent selection)
-/// as small luminance steps over a near-achromatic cool gray, so adjacent structural surfaces
-/// separate by weight instead of by hue. Persistent selection is a neutral step on that ladder: it
-/// must never read as a call to action, so it stays out of the accent family entirely. Blue is
-/// reserved for emphasis, links, focus, and small active indicators; red stays destructive; the
-/// remaining status hues are desaturated enough to sit beside the neutrals.
+/// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
+/// alone. Every resting surface, separator, text gray, and shadow is authored with equal channels:
+/// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
+/// only to what it communicates. Persistent selection is a neutral step on that ladder: it must
+/// never read as a call to action, so it stays out of the accent family entirely. Blue is reserved
+/// for emphasis, links, focus, and small active indicators; red stays destructive; the remaining
+/// status hues are desaturated enough to sit beside the neutrals.
 ///
 /// Separators are authored low-contrast because a Chrome that outlines every region reads as a grid
 /// of boxes. Roles that communicate state, namely focus, invalid, and the active indicator, stay
 /// obvious, and raised surfaces earn their separation from `shadow` plus a slightly stronger
 /// `border` rather than from a heavier hairline everywhere.
 ///
-/// Roles absent here keep deriving from these seeds. What is authored beyond the ladder is the set
-/// the compiler would otherwise hold to a readability floor against its own fill: control
-/// outlines, switch indicators, and the labels on filled actions. Those floors protect a glyph, and
-/// applying them to a ring or a knob collapses a quiet palette into pure black and white.
+/// Roles absent here keep deriving from these seeds, and every derived resting role mixes only
+/// these grays, so it stays achromatic too. What is authored beyond the ladder is the set the
+/// compiler would otherwise hold to a readability floor against its own fill: control outlines,
+/// switch indicators, and the labels on filled actions. Those floors protect a glyph, and applying
+/// them to a ring or a knob collapses a quiet palette into pure black and white.
 pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides {
     let palette = match appearance {
         Appearance::Dark => ChromePalette {
-            root: 0x141517,
-            shell: 0x161719,
-            shell_inactive: 0x151618,
-            raised: 0x1e2024,
-            field: 0x1a1c1f,
-            hover: 0x1c1d21,
-            pressed: 0x222428,
-            selected: 0x2c2e33,
-            selected_inactive: 0x1b1c20,
-            row_selected: 0x25272b,
-            row_selected_rim: 0x303338,
-            row_selected_text: 0xf1f2f5,
-            row_selected_secondary: 0xb9bdc5,
-            text: 0xe3e4e8,
-            text_secondary: 0xa9adb5,
-            text_muted: 0x969aa2,
-            text_placeholder: 0x979ba3,
-            text_disabled: 0x5e6167,
-            separator: 0x25272b,
-            separator_quiet: 0x1c1e22,
-            separator_disabled: 0x202226,
-            field_outline: 0x2c2f34,
-            control_outline: 0x2e3136,
-            control_outline_strong: 0x3b3e45,
-            tab_separator: 0x33363c,
-            mark_outline: 0x727781,
-            mark_outline_strong: 0x848a95,
-            mark_track: 0x1e2024,
-            mark_indicator: 0xa8acb4,
-            mark_indicator_strong: 0xc2c6cd,
-            scrollbar_thumb: 0x82868e,
-            accent: 0x78ade9,
-            accent_hover: 0x98c1f0,
-            accent_pressed: 0xb8d6f5,
-            emphasis: 0x2c65c0,
-            emphasis_hover: 0x3572d0,
-            emphasis_pressed: 0x24549f,
+            root: 0x151515,
+            shell: 0x171717,
+            shell_inactive: 0x161616,
+            raised: 0x202020,
+            field: 0x1c1c1c,
+            hover: 0x1d1d1d,
+            pressed: 0x242424,
+            selected: 0x2e2e2e,
+            selected_inactive: 0x1c1c1c,
+            row_selected: 0x272727,
+            row_selected_rim: 0x333333,
+            row_selected_text: 0xf2f2f2,
+            row_selected_secondary: 0xbcbcbc,
+            text: 0xe4e4e4,
+            text_secondary: 0xacacac,
+            text_muted: 0x999999,
+            text_placeholder: 0x9a9a9a,
+            text_disabled: 0x606060,
+            separator: 0x272727,
+            separator_quiet: 0x1e1e1e,
+            separator_disabled: 0x222222,
+            field_outline: 0x2f2f2f,
+            control_outline: 0x313131,
+            control_outline_strong: 0x3e3e3e,
+            tab_separator: 0x363636,
+            mark_outline: 0x767676,
+            mark_outline_strong: 0x898989,
+            mark_track: 0x202020,
+            mark_indicator: 0xababab,
+            mark_indicator_strong: 0xc5c5c5,
+            scrollbar_thumb: 0x858585,
+            accent: 0x5ea8ff,
+            accent_hover: 0x80baff,
+            accent_pressed: 0xa6cfff,
+            emphasis: 0x1f66d1,
+            emphasis_hover: 0x2a72de,
+            emphasis_pressed: 0x1a56b0,
             destructive: 0xbb3b38,
             destructive_hover: 0xc8443f,
             destructive_pressed: 0x9e2f2d,
             on_emphasis: 0xffffff,
-            info: 0x78ace8,
-            success: 0x69b183,
+            info: 0x5ea8ff,
+            success: 0x66b77e,
             warning: 0xe0a75c,
             error: 0xe3707a,
             shadow: 0x00000080,
         },
         Appearance::Light => ChromePalette {
-            root: 0xdcdee3,
-            shell: 0xe3e5e9,
-            shell_inactive: 0xe7e9ed,
+            root: 0xdedede,
+            shell: 0xe5e5e5,
+            shell_inactive: 0xe9e9e9,
             raised: 0xffffff,
-            field: 0xfbfcfd,
-            hover: 0xeceef2,
-            pressed: 0xe4e6ea,
-            selected: 0xf6f8fb,
-            selected_inactive: 0xeef0f4,
-            row_selected: 0xf6f8fb,
-            row_selected_rim: 0xd3d6dc,
-            row_selected_text: 0x15171a,
-            row_selected_secondary: 0x4d5158,
-            text: 0x1d1f23,
-            text_secondary: 0x555960,
-            text_muted: 0x6b6f77,
-            text_placeholder: 0x6e727a,
-            text_disabled: 0xa2a6ad,
-            separator: 0xe0e2e6,
-            separator_quiet: 0xe7e9ed,
-            separator_disabled: 0xe4e6ea,
-            field_outline: 0xd3d6dc,
-            control_outline: 0xd0d3d9,
-            control_outline_strong: 0xbdc0c8,
-            tab_separator: 0xbcbfc6,
-            mark_outline: 0x838890,
-            mark_outline_strong: 0x686e78,
-            mark_track: 0xeceef1,
-            mark_indicator: 0x565a62,
-            mark_indicator_strong: 0x44484f,
-            scrollbar_thumb: 0x7d8189,
-            accent: 0x14559f,
-            accent_hover: 0x0f4885,
-            accent_pressed: 0x0c3a6c,
-            emphasis: 0x1a63bb,
-            emphasis_hover: 0x15539e,
-            emphasis_pressed: 0x114582,
+            field: 0xfcfcfc,
+            hover: 0xeeeeee,
+            pressed: 0xe6e6e6,
+            selected: 0xf8f8f8,
+            selected_inactive: 0xf0f0f0,
+            row_selected: 0xf8f8f8,
+            row_selected_rim: 0xd6d6d6,
+            row_selected_text: 0x161616,
+            row_selected_secondary: 0x505050,
+            text: 0x1e1e1e,
+            text_secondary: 0x585858,
+            text_muted: 0x6e6e6e,
+            text_placeholder: 0x717171,
+            text_disabled: 0xa5a5a5,
+            separator: 0xe2e2e2,
+            separator_quiet: 0xe9e9e9,
+            separator_disabled: 0xe6e6e6,
+            field_outline: 0xd6d6d6,
+            control_outline: 0xd3d3d3,
+            control_outline_strong: 0xc0c0c0,
+            tab_separator: 0xbfbfbf,
+            mark_outline: 0x878787,
+            mark_outline_strong: 0x6d6d6d,
+            mark_track: 0xeeeeee,
+            mark_indicator: 0x595959,
+            mark_indicator_strong: 0x474747,
+            scrollbar_thumb: 0x808080,
+            accent: 0x1259b0,
+            accent_hover: 0x0e4c98,
+            accent_pressed: 0x0b3f7e,
+            emphasis: 0x1a66c8,
+            emphasis_hover: 0x1558ad,
+            emphasis_pressed: 0x114a92,
             destructive: 0xc23b34,
             destructive_hover: 0xa93028,
             destructive_pressed: 0x8d2621,
             on_emphasis: 0xffffff,
-            info: 0x1c6bc7,
+            info: 0x1a66c8,
             success: 0x22713f,
             warning: 0x8a5b12,
             error: 0xb8352f,
-            shadow: 0x0f172a26,
+            shadow: 0x00000024,
         },
     };
     palette.into_definition()
@@ -455,64 +447,72 @@ impl ChromePalette {
     }
 }
 
-fn vague_dark_terminal() -> TerminalColors {
+/// The authored SpaceTerm Terminal palettes, paired with the Chrome ladder of the same appearance.
+///
+/// The default background, foreground, and grays share Chrome's achromatic family, so a Pane reads
+/// as part of the window rather than as a tinted inset. ANSI hues stay distinct and are tuned to
+/// read over their own background and over the translucent Pane backdrop at every transparency;
+/// dim colors keep their hue at a lower weight instead of fading toward gray. Selection answers a
+/// reader's action and takes a restrained accent blue; find matches keep the familiar yellow and
+/// orange so they never compete with selection.
+fn spaceterm_dark_terminal() -> TerminalColors {
     TerminalColors {
-        foreground: Color::rgb(0xcdcdcd),
-        background: Color::rgb(0x141415),
+        foreground: Color::rgb(0xd8d8d8),
+        background: Color::rgb(0x141414),
         normal: [
-            0x252530, 0xd8647e, 0x7fa563, 0xf3be7c, 0x6e94b2, 0xbb9dbd, 0xaeaed1, 0xcdcdcd,
+            0x2e2e2e, 0xe5696b, 0x83c07e, 0xe6b85c, 0x5fa3f0, 0xc387d9, 0x5fc0c8, 0xc8c8c8,
         ]
         .map(Color::rgb),
         bright: [
-            0x606079, 0xe08398, 0x99b782, 0xf5cb96, 0x8ba9c1, 0xc9b1ca, 0xbebeda, 0xd7d7d7,
+            0x6e6e6e, 0xf28a8b, 0x9fd39a, 0xf0cb80, 0x84b9f6, 0xd5a4e6, 0x82d3d9, 0xf0f0f0,
         ]
         .map(Color::rgb),
         dim: [
-            0x18181f, 0x8e4253, 0x536c41, 0xa07d51, 0x486175, 0x7b677c, 0x727289, 0x878787,
+            0x1f1f1f, 0xa24c4e, 0x5e895a, 0xa38443, 0x4a78ae, 0x8c64a0, 0x468a90, 0x8a8a8a,
         ]
         .map(Color::rgb),
-        bright_foreground: Color::rgb(0xd7d7d7),
-        dim_foreground: Color::rgb(0x878787),
-        cursor: Color::rgb(0xcdcdcd),
+        bright_foreground: Color::rgb(0xf0f0f0),
+        dim_foreground: Color::rgb(0x8a8a8a),
+        cursor: Color::rgb(0xd8d8d8),
         cursor_text: None,
-        selection_background: Color::rgba(0x333738aa),
+        selection_background: Color::rgba(0x34485eaa),
         selection_foreground: None,
-        find_match_background: Color::rgba(0x6e94b266),
+        find_match_background: Color::rgba(0xe6b85c4d),
         find_match_foreground: None,
-        find_active_match_background: Color::rgba(0xe8b58966),
+        find_active_match_background: Color::rgba(0xf0913a80),
         find_active_match_foreground: None,
-        hyperlink: Color::rgb(0x7e98e8),
-        visual_bell: Color::rgba(0xf3be7c80),
+        hyperlink: Color::rgb(0x5ea8ff),
+        visual_bell: Color::rgba(0xe6b85c80),
     }
 }
 
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
-        foreground: Color::rgb(0x242426),
-        background: Color::rgb(0xfbfbfc),
+        foreground: Color::rgb(0x242424),
+        background: Color::rgb(0xfbfbfb),
         normal: [
-            0x343438, 0xa62f43, 0x28733d, 0x8a5300, 0x315f91, 0x78508e, 0x19717a, 0x686a70,
+            0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
         ]
         .map(Color::rgb),
         bright: [
-            0x777981, 0xc54258, 0x399451, 0xa96a09, 0x477cb4, 0x9868b1, 0x268f99, 0x242426,
+            0x767676, 0xcc4450, 0x3a9450, 0xa86c0a, 0x3f7cc8, 0xa566bb, 0x258f98, 0x242424,
         ]
         .map(Color::rgb),
         dim: [
-            0x9a9ca3, 0x71303c, 0x315f3c, 0x654b24, 0x38536f, 0x584263, 0x315d62, 0x5f6065,
+            0x9c9c9c, 0x7a3038, 0x33603c, 0x664a22, 0x34547f, 0x5f4468, 0x2f5d62, 0x606060,
         ]
         .map(Color::rgb),
-        bright_foreground: Color::rgb(0x111113),
-        dim_foreground: Color::rgb(0x66686e),
-        cursor: Color::rgb(0x315f91),
+        bright_foreground: Color::rgb(0x111111),
+        dim_foreground: Color::rgb(0x686868),
+        cursor: Color::rgb(0x3a3a3a),
         cursor_text: None,
-        selection_background: Color::rgba(0x9fc4ea88),
+        selection_background: Color::rgba(0xa9cdf588),
         selection_foreground: None,
         find_match_background: Color::rgba(0xf0c66c88),
         find_match_foreground: None,
         find_active_match_background: Color::rgba(0xe3964388),
         find_active_match_foreground: None,
-        hyperlink: Color::rgb(0x315f91),
+        hyperlink: Color::rgb(0x1259b0),
         visual_bell: Color::rgba(0xd28a2380),
     }
 }
@@ -548,8 +548,73 @@ mod tests {
         (high - low) / 255.0
     }
 
-    /// A near-achromatic surface: cool enough to feel deliberate, never enough to read as a hue.
-    const NEUTRAL_TINT: f64 = 0.06;
+    /// An achromatic resting role, allowing only the rounding a mix of two grays can introduce.
+    const NEUTRAL_TINT: f64 = 2.0 / 255.0;
+
+    /// Every resting role of a built-in appearance is gray; hue is kept for what it communicates.
+    ///
+    /// A cast in surfaces, text grays, separators, or shadow tints the whole window, and it is
+    /// most visible over a translucent backdrop where nothing else carries color. The Terminal's
+    /// default backdrop and text belong to the same family, so a Pane never reads as a tinted inset.
+    #[test]
+    fn resting_roles_should_stay_achromatic_in_both_appearances() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = chrome_base(appearance).opaque_presentation();
+            let terminal = terminal_base(appearance);
+
+            for (role, color) in [
+                ("root", colors.background),
+                ("shell", colors.panel_background),
+                ("title bar", colors.title_bar_background),
+                ("inactive title bar", colors.title_bar_inactive_background),
+                ("raised", colors.elevated_surface_background),
+                ("field", colors.input_background),
+                ("hover", colors.element_hover),
+                ("pressed", colors.element_active),
+                ("ghost hover", colors.ghost_element_hover),
+                ("row hover", colors.row_hover_background),
+                ("tab hover", colors.tab_hover_background),
+                ("selected chip", colors.row_selected_background),
+                ("selected chip hover", colors.row_selected_hover_background),
+                ("tab", colors.tab_active_background),
+                ("active tab hover", colors.tab_active_hover_background),
+                ("toggle track", colors.toggle_off_background),
+                ("text", colors.text),
+                ("secondary text", colors.text_secondary),
+                ("muted text", colors.text_muted),
+                ("placeholder", colors.text_placeholder),
+                ("disabled text", colors.text_disabled),
+                ("icon", colors.icon),
+                ("muted icon", colors.icon_muted),
+                ("row text", colors.row_foreground),
+                ("row secondary", colors.row_secondary),
+                ("chip secondary", colors.row_selected_secondary),
+                ("border", colors.border),
+                ("quiet border", colors.border_variant),
+                ("field outline", colors.input_border),
+                ("control outline", colors.outline_border),
+                ("chip rim", colors.row_selected_border),
+                ("inactive tab rim", colors.tab_inactive_selected_border),
+                ("tab separator", colors.tab_separator),
+                ("resize handle", colors.resize_idle),
+                ("scrollbar", colors.scrollbar_thumb_background),
+                ("shadow", colors.shadow),
+                ("modal scrim", colors.modal_scrim),
+                ("terminal background", terminal.background),
+                ("terminal foreground", terminal.foreground),
+                ("terminal cursor", terminal.cursor),
+            ] {
+                assert!(
+                    tint(color) <= NEUTRAL_TINT,
+                    "{appearance:?} {role} carries a hue cast: {color:?}"
+                );
+            }
+            assert!(
+                tint(colors.text_accent) > 0.3,
+                "{appearance:?} keeps its accent recognisably colored"
+            );
+        }
+    }
 
     /// Every built-in chrome interaction fill stays in the neutral surface family.
     ///

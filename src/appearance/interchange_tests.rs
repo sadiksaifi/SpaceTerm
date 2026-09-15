@@ -338,7 +338,7 @@ fn zed_null_missing_unknown_and_invalid_inputs_have_bounded_behavior() {
 
 #[test]
 fn pinned_upstream_roles_cross_the_production_importer_and_compiler() {
-    let bytes = include_bytes!("../../third_party/vague-pro-zed/themes/vague-pro.json");
+    let bytes = include_bytes!("fixtures/vague-pro/theme.json");
     let candidates = list_zed_candidates(bytes).unwrap();
     let candidate = candidates
         .iter()
@@ -406,20 +406,24 @@ fn pinned_upstream_roles_cross_the_production_importer_and_compiler() {
     let CustomScheme::Terminal(terminal) = &imported[1] else {
         panic!()
     };
-    let expected = TerminalColors::default();
-    for index in 0..8 {
-        assert_eq!(
-            terminal.colors.normal.as_ref().unwrap().get(index),
-            Some(expected.normal[index])
-        );
-        assert_eq!(
-            terminal.colors.bright.as_ref().unwrap().get(index),
-            Some(expected.bright[index])
-        );
-        assert_eq!(
-            terminal.colors.dim.as_ref().unwrap().get(index),
-            Some(expected.dim[index])
-        );
+    for (prefix, palette) in [
+        ("terminal.ansi.", terminal.colors.normal.as_ref().unwrap()),
+        (
+            "terminal.ansi.bright_",
+            terminal.colors.bright.as_ref().unwrap(),
+        ),
+        ("terminal.ansi.dim_", terminal.colors.dim.as_ref().unwrap()),
+    ] {
+        for (index, name) in [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("{prefix}{name}");
+            let expected = Color::parse(style[&key].as_str().unwrap()).unwrap();
+            assert_eq!(palette.get(index), Some(expected));
+        }
     }
 }
 

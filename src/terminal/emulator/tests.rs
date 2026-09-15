@@ -2,10 +2,10 @@
 use std::fs;
 
 use super::*;
+use crate::appearance::TerminalColors;
 use crate::terminal::TerminalAccessibilityModel;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use crate::terminal::metadata::{DirectoryProvenance, ProgressMetadata};
-use crate::theme::ACTIVE_THEME;
 
 fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
     TerminalGeometry::from_grid(
@@ -967,11 +967,11 @@ fn snapshots_preserve_inverse_and_terminal_reverse_semantics() {
     assert_eq!(snapshot.background, snapshot.colors.foreground);
     assert_eq!(
         snapshot.colors.palette[1],
-        ACTIVE_THEME.terminal_normal()[1]
+        TerminalColors::default().normal[1]
     );
     assert_eq!(
         snapshot.colors.palette[9],
-        ACTIVE_THEME.terminal_bright()[1]
+        TerminalColors::default().bright[1]
     );
 }
 

@@ -238,7 +238,7 @@ impl Gallery {
                 SchemeId::new(if appearance == Appearance::Light {
                     "builtin.spaceterm.chrome.light"
                 } else {
-                    "builtin.vague-pro.chrome.dark"
+                    "builtin.spaceterm.chrome.dark"
                 })
                 .unwrap()
             };

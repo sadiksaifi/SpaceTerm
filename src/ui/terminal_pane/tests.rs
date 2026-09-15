@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use super::*;
+use crate::appearance::TerminalColors;
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -4311,7 +4312,7 @@ fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppConte
         let run = TextRun {
             len: text.len(),
             font: crate::ui::terminal_element::terminal_cell_font(&"Menlo".into(), false, false),
-            color: gpui_color(ACTIVE_THEME.terminal_foreground).into(),
+            color: gpui_color(TerminalColors::default().foreground).into(),
             background_color: None,
             underline: None,
             strikethrough: None,

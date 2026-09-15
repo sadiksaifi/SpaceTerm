@@ -128,10 +128,42 @@ pub(crate) struct ColorSchemeDocument {
 
 pub(crate) fn parse_settings(bytes: &[u8]) -> Result<AppearanceDocument, AppearanceDocumentError> {
     preflight(bytes).map_err(AppearanceDocumentError::from_preflight)?;
-    let document: AppearanceDocument =
+    let mut document: AppearanceDocument =
         serde_json::from_slice(bytes).map_err(|_| AppearanceDocumentError::InvalidJson)?;
+    replace_retired_builtin_ids(&mut document.preferences);
     document.validate()?;
     Ok(document)
+}
+
+/// Move retained built-in selections and their overrides together when the owned scheme is renamed.
+fn replace_retired_builtin_ids(preferences: &mut AppearancePreferences) {
+    fn replace<T>(
+        slots: &mut SchemeSlots,
+        overrides: &mut std::collections::BTreeMap<SchemeId, T>,
+        old: &'static str,
+        new: SchemeId,
+    ) {
+        for slot in [&mut slots.light, &mut slots.dark] {
+            if slot.as_str() == old {
+                *slot = new.clone();
+            }
+        }
+        if let Some(value) = overrides.remove(&SchemeId::builtin(old)) {
+            overrides.entry(new).or_insert(value);
+        }
+    }
+    replace(
+        &mut preferences.chrome.schemes,
+        &mut preferences.chrome.overrides,
+        "builtin.vague-pro.chrome.dark",
+        super::builtin::dark_chrome_id(),
+    );
+    replace(
+        &mut preferences.terminal.schemes,
+        &mut preferences.terminal.overrides,
+        "builtin.vague-pro.terminal.dark",
+        super::builtin::dark_terminal_id(),
+    );
 }
 
 pub(crate) fn export_settings(

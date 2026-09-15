@@ -146,7 +146,7 @@ fn catalog_requires_replacement_intent_to_exactly_match_incoming_collisions() {
 fn catalog_never_replaces_a_reserved_builtin() {
     let mut catalog = SchemeCatalog::default();
     let before = catalog.schemes();
-    let reserved = chrome_scheme("builtin.vague-pro.chrome.dark", "Overwrite");
+    let reserved = chrome_scheme("builtin.spaceterm.chrome.dark", "Overwrite");
     let replace = BTreeSet::from([reserved.id().clone()]);
 
     assert_eq!(
@@ -205,7 +205,7 @@ fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
 
 #[test]
 fn deterministic_zed_reimport_collides_until_explicitly_replaced() {
-    let bytes = include_bytes!("../../third_party/vague-pro-zed/themes/vague-pro.json");
+    let bytes = include_bytes!("fixtures/vague-pro/theme.json");
     let imported = import_zed(bytes, 0, &[ZedImportKind::Chrome, ZedImportKind::Terminal]).unwrap();
     let mut catalog = SchemeCatalog::default();
     catalog
