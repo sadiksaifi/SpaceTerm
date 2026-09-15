@@ -98,6 +98,186 @@ fn effective_exports_install_fresh_and_reproduce_builtin_paints_and_overrides() 
 }
 
 #[test]
+fn retired_override_collisions_merge_by_field_with_current_ids_winning() {
+    let palette = |entries: &[(usize, Color)]| {
+        let mut colors = [None; 8];
+        for &(index, color) in entries {
+            colors[index] = Some(color);
+        }
+        super::scheme::TerminalPaletteOverrides::sparse(colors).unwrap()
+    };
+
+    let mut document = AppearanceDocument::default();
+    let retired_chrome = SchemeId::builtin("builtin.vague-pro.chrome.dark");
+    let current_chrome = super::builtin::dark_chrome_id();
+    document.preferences.chrome.overrides.insert(
+        retired_chrome.clone(),
+        ChromeColorOverrides {
+            background: Some(Color::rgb(0x101112)),
+            text: Some(Color::rgb(0x202122)),
+            ..Default::default()
+        },
+    );
+    document.preferences.chrome.overrides.insert(
+        current_chrome.clone(),
+        ChromeColorOverrides {
+            text: Some(Color::rgb(0x303132)),
+            border: Some(Color::rgb(0x404142)),
+            ..Default::default()
+        },
+    );
+
+    let retired_terminal = SchemeId::builtin("builtin.vague-pro.terminal.dark");
+    let current_terminal = super::builtin::dark_terminal_id();
+    document.preferences.terminal.overrides.insert(
+        retired_terminal.clone(),
+        TerminalColorOverrides {
+            foreground: Some(Color::rgb(0x505152)),
+            normal: Some(palette(&[
+                (0, Color::rgb(0x000001)),
+                (1, Color::rgb(0x010101)),
+            ])),
+            bright: Some(palette(&[
+                (2, Color::rgb(0x020202)),
+                (3, Color::rgb(0x030303)),
+            ])),
+            dim: Some(palette(&[
+                (4, Color::rgb(0x040404)),
+                (5, Color::rgb(0x050505)),
+            ])),
+            cursor: Some(Color::rgb(0x606162)),
+            cursor_text: OptionalColorOverride::None,
+            selection_foreground: OptionalColorOverride::Color(Color::rgb(0x707172)),
+            ..Default::default()
+        },
+    );
+    document.preferences.terminal.overrides.insert(
+        current_terminal.clone(),
+        TerminalColorOverrides {
+            background: Some(Color::rgb(0x808182)),
+            normal: Some(palette(&[
+                (1, Color::rgb(0x111111)),
+                (6, Color::rgb(0x161616)),
+            ])),
+            bright: Some(palette(&[
+                (3, Color::rgb(0x131313)),
+                (7, Color::rgb(0x171717)),
+            ])),
+            dim: Some(palette(&[
+                (0, Color::rgb(0x101010)),
+                (5, Color::rgb(0x151515)),
+            ])),
+            cursor: Some(Color::rgb(0x909192)),
+            selection_foreground: OptionalColorOverride::None,
+            ..Default::default()
+        },
+    );
+
+    let loaded = parse_settings(&serde_json::to_vec(&document).unwrap()).unwrap();
+
+    assert!(
+        !loaded
+            .preferences
+            .chrome
+            .overrides
+            .contains_key(&retired_chrome)
+    );
+    let chrome = &loaded.preferences.chrome.overrides[&current_chrome];
+    assert_eq!(chrome.background, Some(Color::rgb(0x101112)));
+    assert_eq!(chrome.text, Some(Color::rgb(0x303132)));
+    assert_eq!(chrome.border, Some(Color::rgb(0x404142)));
+
+    assert!(
+        !loaded
+            .preferences
+            .terminal
+            .overrides
+            .contains_key(&retired_terminal)
+    );
+    let terminal = &loaded.preferences.terminal.overrides[&current_terminal];
+    assert_eq!(terminal.foreground, Some(Color::rgb(0x505152)));
+    assert_eq!(terminal.background, Some(Color::rgb(0x808182)));
+    assert_eq!(terminal.cursor, Some(Color::rgb(0x909192)));
+    assert_eq!(terminal.cursor_text, OptionalColorOverride::None);
+    assert_eq!(terminal.selection_foreground, OptionalColorOverride::None);
+    let normal = terminal.normal.as_ref().unwrap();
+    assert_eq!(normal.get(0), Some(Color::rgb(0x000001)));
+    assert_eq!(normal.get(1), Some(Color::rgb(0x111111)));
+    assert_eq!(normal.get(6), Some(Color::rgb(0x161616)));
+    let bright = terminal.bright.as_ref().unwrap();
+    assert_eq!(bright.get(2), Some(Color::rgb(0x020202)));
+    assert_eq!(bright.get(3), Some(Color::rgb(0x131313)));
+    assert_eq!(bright.get(7), Some(Color::rgb(0x171717)));
+    let dim = terminal.dim.as_ref().unwrap();
+    assert_eq!(dim.get(0), Some(Color::rgb(0x101010)));
+    assert_eq!(dim.get(4), Some(Color::rgb(0x040404)));
+    assert_eq!(dim.get(5), Some(Color::rgb(0x151515)));
+}
+
+#[test]
+fn resolved_exports_keep_authored_backdrop_metadata_outside_application_preferences() {
+    let catalog = SchemeCatalog::default();
+    let mut preferences = AppearancePreferences::default();
+    preferences.background.blur = true;
+    let resolved = catalog
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.chrome.composition.requested,
+        WindowBackgroundAppearance::Blurred
+    );
+    let encoded = super::document::export_resolved_schemes(&catalog, &resolved).unwrap();
+    let parsed = parse_color_document(encoded.as_bytes()).unwrap();
+    let CustomScheme::Chrome(exported) = &parsed.schemes[0] else {
+        panic!("resolved export must put Chrome first")
+    };
+    assert_eq!(exported.window_background, None);
+
+    let authored = parse_color_document(
+        br##"{"schema_version":1,"schemes":[{"kind":"chrome","window_background":"blurred","id":"custom.authored-backdrop","name":"Authored Backdrop","appearance":"dark","description":"Source intent","colors":{}}]}"##,
+    )
+    .unwrap();
+    let authored_id = authored.schemes[0].id().clone();
+    let authored_catalog = SchemeCatalog::from_custom_schemes(&authored.schemes).unwrap();
+    let mut preferences = AppearancePreferences::default();
+    preferences.background.blur = false;
+    preferences
+        .chrome
+        .schemes
+        .set(Appearance::Dark, authored_id);
+    let resolved = authored_catalog
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.chrome.composition.requested,
+        WindowBackgroundAppearance::Transparent
+    );
+    let encoded = super::document::export_resolved_schemes(&authored_catalog, &resolved).unwrap();
+    let parsed = parse_color_document(encoded.as_bytes()).unwrap();
+    let CustomScheme::Chrome(exported) = &parsed.schemes[0] else {
+        panic!("resolved export must put Chrome first")
+    };
+    assert_eq!(
+        exported.window_background,
+        Some(WindowBackgroundAppearance::Blurred)
+    );
+    assert_eq!(
+        exported.metadata.description.as_deref(),
+        Some("Source intent")
+    );
+}
+
+#[test]
 fn definition_exports_preserve_sparse_authored_intent_and_install_builtin_copies() {
     let catalog = SchemeCatalog::default();
     let id = super::builtin::fallback_id(SchemeKind::Chrome, Appearance::Dark);
