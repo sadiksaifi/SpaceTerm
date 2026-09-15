@@ -87,7 +87,7 @@ The terminal engine is pinned in the `third_party/ghostty` submodule and built f
 SpaceTerm maintains its Rust integration as local workspace dependencies. See
 [the Ghostty integration guide](docs/ghostty-integration.md) for source, binding, and patch updates.
 
-The default theme is built from the pinned `third_party/vague-pro-zed` submodule.
-`mise run setup:macos` initializes it for new and existing checkouts. The build embeds the theme, so
-the installed application needs no checkout or network access. UI colors follow Zed semantic roles; terminal
-font sizing remains independent of UI sizing.
+SpaceTerm authors paired Light and Dark color schemes for the interface and terminal. Neutral
+surfaces share one material hierarchy across opaque and translucent appearance. Interface and
+terminal schemes remain independently selectable, including imported schemes; their font sizes
+are independent too.

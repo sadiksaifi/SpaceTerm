@@ -315,7 +315,7 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         settings.remove_custom_scheme_preview(
             &token,
             before.catalog_revision,
-            &SchemeId::builtin("builtin.vague-pro.chrome.dark"),
+            &SchemeId::builtin("builtin.spaceterm.chrome.dark"),
         ),
         Err(SettingsError::Catalog(CatalogError::ReservedId))
     );

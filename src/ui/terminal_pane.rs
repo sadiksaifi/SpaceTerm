@@ -66,8 +66,6 @@ use crate::terminal::{
     UnhandledKeyDiagnostic, WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 #[cfg(test)]
-use crate::theme::VAGUE_PRO as ACTIVE_THEME;
-#[cfg(test)]
 use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{

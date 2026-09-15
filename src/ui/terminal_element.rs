@@ -20,8 +20,6 @@ use crate::terminal::{
     RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
     TerminalUnderlineSnapshot,
 };
-#[cfg(test)]
-use crate::theme::ACTIVE_THEME;
 
 use super::appearance::TerminalFonts;
 use super::terminal_graphics::{
@@ -3080,27 +3078,27 @@ mod tests {
     #[test]
     fn theme_intensity_roles_preserve_application_supplied_colors() {
         let mut colors = colors();
-        colors.foreground = ACTIVE_THEME.terminal_foreground;
+        colors.foreground = TerminalColors::default().foreground;
         let mut palette = *colors.palette;
-        palette[..8].copy_from_slice(&ACTIVE_THEME.terminal_normal());
-        palette[8..16].copy_from_slice(&ACTIVE_THEME.terminal_bright());
+        palette[..8].copy_from_slice(&TerminalColors::default().normal);
+        palette[8..16].copy_from_slice(&TerminalColors::default().bright);
         colors.palette = Arc::new(palette);
         let mut subject = cell("x");
         subject.bold = true;
         assert_eq!(
             effective_colors(&subject, &colors).0,
-            ACTIVE_THEME.terminal_bright_foreground
+            TerminalColors::default().bright_foreground
         );
         subject.faint = true;
         assert_eq!(
             effective_colors(&subject, &colors).0,
-            ACTIVE_THEME.terminal_dim_foreground
+            TerminalColors::default().dim_foreground
         );
         for index in 0..16 {
             subject.foreground_source = TerminalColor::Palette(index);
             assert_eq!(
                 effective_colors(&subject, &colors).0,
-                ACTIVE_THEME.terminal_dim()[usize::from(index % 8)]
+                TerminalColors::default().dim[usize::from(index % 8)]
             );
         }
         let custom = Color::rgb(0x123456);
@@ -3329,7 +3327,7 @@ mod tests {
                 [BackgroundSpan {
                     start: 0,
                     len: 1,
-                    color: ACTIVE_THEME.players[0].selection,
+                    color: TerminalColors::default().selection_background,
                 }]
                 .as_slice(),
             )
@@ -3460,7 +3458,7 @@ mod tests {
 
     #[test]
     fn matching_cell_backgrounds_coalesce() {
-        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let accent = TerminalColors::default().normal[1];
         let mut first = cell("a");
         first.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let mut second = cell("b");
@@ -3622,7 +3620,7 @@ mod tests {
 
     #[test]
     fn invisible_cells_keep_backgrounds_without_preparing_foreground_text() {
-        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let accent = TerminalColors::default().normal[1];
         let mut invisible = cell("secret");
         invisible.invisible = true;
         invisible.background_source = crate::terminal::TerminalColor::Rgb(accent);
@@ -3643,7 +3641,7 @@ mod tests {
 
     #[test]
     fn prepared_decorations_preserve_kind_color_layer_and_cell_span() {
-        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let accent = TerminalColors::default().normal[1];
         let mut decorated = cell("界");
         decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Double;
         decorated.underline_source = crate::terminal::TerminalColor::Rgb(accent);
@@ -3887,7 +3885,7 @@ mod tests {
             vec![BackgroundSpan {
                 start: 0,
                 len: 2,
-                color: ACTIVE_THEME.players[0].selection,
+                color: TerminalColors::default().selection_background,
             }]
         );
     }

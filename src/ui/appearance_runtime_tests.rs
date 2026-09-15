@@ -194,7 +194,7 @@ fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
         assert_eq!(resolved.chrome.requested_scheme.as_str(), "custom.missing");
         assert_eq!(
             resolved.chrome.effective_scheme.as_str(),
-            "builtin.vague-pro.chrome.dark"
+            "builtin.spaceterm.chrome.dark"
         );
         assert!(!resolved.diagnostics.is_empty());
     });

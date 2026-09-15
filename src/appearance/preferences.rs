@@ -188,7 +188,7 @@ impl Default for ChromePreferences {
         Self {
             schemes: SchemeSlots {
                 light: builtin::fallback_id(SchemeKind::Chrome, Appearance::Light),
-                dark: builtin::vague_chrome_id(),
+                dark: builtin::dark_chrome_id(),
             },
             typography: ChromeTypographyPreferences::default(),
             density: ChromeDensity::Compact,
@@ -212,7 +212,7 @@ impl Default for TerminalPreferences {
         Self {
             schemes: SchemeSlots {
                 light: builtin::fallback_id(SchemeKind::Terminal, Appearance::Light),
-                dark: builtin::vague_terminal_id(),
+                dark: builtin::dark_terminal_id(),
             },
             typography: TerminalTypographyPreferences::default(),
             rendering: TerminalRenderingPreferences::default(),
