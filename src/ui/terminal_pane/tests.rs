@@ -3864,6 +3864,61 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
     assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
 }
 
+#[test]
+fn escape_pair_within_window_requests_fullscreen_exit() {
+    let start = Instant::now();
+    let mut sequence = FullscreenEscapeSequence::default();
+
+    assert!(!sequence.escape_pressed(start));
+    assert!(sequence.escape_pressed(
+        start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW - Duration::from_millis(100)
+    ));
+}
+
+#[test]
+fn slow_escape_pair_does_not_request_fullscreen_exit() {
+    let start = Instant::now();
+    let mut sequence = FullscreenEscapeSequence::default();
+
+    assert!(!sequence.escape_pressed(start));
+    assert!(!sequence.escape_pressed(
+        start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW + Duration::from_millis(1)
+    ));
+}
+
+#[test]
+fn completed_and_reset_escape_sequences_start_over() {
+    let start = Instant::now();
+    let mut sequence = FullscreenEscapeSequence::default();
+
+    assert!(!sequence.escape_pressed(start));
+    assert!(sequence.escape_pressed(start + Duration::from_millis(100)));
+    assert!(!sequence.escape_pressed(start + Duration::from_millis(200)));
+
+    sequence.reset();
+    assert!(!sequence.escape_pressed(start + Duration::from_millis(300)));
+}
+
+#[gpui::test]
+fn windowed_double_escape_still_reaches_the_session(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let key_count_before = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    let key_count_after = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+    assert_eq!(key_count_after, key_count_before + 2);
+}
+
 #[gpui::test]
 fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
