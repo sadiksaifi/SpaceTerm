@@ -3001,7 +3001,11 @@ impl WorkspaceManager {
         .when(!sidebar_visible, |chooser| {
             let (identity, tooltip) = self.workspace_chrome_identity();
             chooser
-                .custom_trigger(identity.render(gpui_color(appearance.colors.icon), appearance))
+                .custom_trigger(identity.render(
+                    gpui_color(appearance.colors.row_selected_foreground),
+                    appearance,
+                ))
+                .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })

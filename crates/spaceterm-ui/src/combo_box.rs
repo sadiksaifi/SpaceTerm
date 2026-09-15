@@ -763,6 +763,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
+    custom_trigger_content_height: Option<Pixels>,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
     on_accept: Option<AcceptanceHandler<I>>,
@@ -797,6 +798,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
+            custom_trigger_content_height: None,
             tooltip: None,
             debug_selector: None,
             on_accept: None,
@@ -917,6 +919,12 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Supply any desired padding inside the content; no label or chevron is added.
     pub fn custom_trigger(mut self, content: impl IntoElement) -> Self {
         self.trigger = ComboBoxTrigger::Custom(content.into_any_element());
+        self
+    }
+
+    /// Sets the custom content's height, excluding the trigger's focus border.
+    pub fn custom_trigger_content_height(mut self, height: Pixels) -> Self {
+        self.custom_trigger_content_height = Some(height.max(px(0.0)));
         self
     }
 
@@ -1862,7 +1870,11 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             })
             .when(custom_trigger, |trigger| {
                 trigger
-                    .h(metrics.icon_trigger_size)
+                    .h(self
+                        .custom_trigger_content_height
+                        .map_or(metrics.icon_trigger_size, |height| {
+                            height + metrics.border_width * 2.0
+                        }))
                     .min_w_0()
                     .when(fill_parent, |trigger| trigger.w_full())
             })

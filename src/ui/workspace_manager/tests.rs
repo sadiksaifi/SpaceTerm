@@ -5381,6 +5381,31 @@ fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut Tes
     }
 }
 
+/// Visible workspace and Tab surfaces align across density and text-size changes.
+#[gpui::test]
+fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    click("toggle-sidebar-button", cx);
+
+    for (text_scale, spacing_scale) in [(1.0, 1.0), (1.0, 1.25), (24.0 / 13.0, 1.25)] {
+        cx.update(|window, cx| {
+            let appearance = crate::ui::appearance::ChromeAppearance {
+                text_scale,
+                spacing_scale,
+                ..crate::ui::appearance::ChromeAppearance::default()
+            };
+            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let workspace = cx.debug_bounds("workspace-switcher-chip").unwrap();
+        let tab = cx.debug_bounds("tab-item-1-chip").unwrap();
+        assert_eq!(workspace.size.height, tab.size.height);
+        assert_eq!(workspace.top(), tab.top());
+        assert_eq!(workspace.bottom(), tab.bottom());
+    }
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
