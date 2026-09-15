@@ -24,8 +24,6 @@
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>SpaceTerm lets terminal applications you run use your microphone for voice input.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
