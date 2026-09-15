@@ -9,6 +9,7 @@ mod catalog;
 mod controls;
 mod editor;
 mod import;
+mod microphone;
 mod schemes;
 
 #[cfg(test)]
@@ -16,6 +17,9 @@ mod test_support;
 
 #[cfg(test)]
 mod control_tests;
+
+#[cfg(test)]
+mod microphone_tests;
 
 #[cfg(test)]
 #[path = "settings_window/tests.rs"]
@@ -41,6 +45,7 @@ use crate::appearance::{
     Appearance, AppearanceDocument, AppearanceMode, ChromeDensity, ChromeFontFamily, Color,
     FontClass, ResetTarget, SchemeId, SchemeKind, TerminalFontFamily,
 };
+use crate::platform::microphone_access::MicrophoneAccess;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
@@ -55,6 +60,7 @@ use controls::{
     gpui_color, reset_button, section_heading, text,
 };
 use editor::{SaveStatus, SettingsEditor};
+use microphone::MicrophoneAccessRow;
 
 actions!(
     spaceterm,
@@ -132,20 +138,26 @@ fn navigation_chip_paint(
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
 impl Global for OpenSettingsWindow {}
 
-/// Host-owned capabilities needed by the Settings window's app-drawn titlebar.
+/// Host-owned capabilities needed by the Settings window's app-drawn titlebar and Privacy section.
 ///
 /// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
-/// Settings portable and gives each opened window one independent pointer-interaction owner.
+/// Settings portable and gives each opened window one independent pointer-interaction owner. A
+/// host without microphone authorization composes none, and the Privacy section says so.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
+    microphone_access: Option<Rc<dyn MicrophoneAccess>>,
 }
 impl Global for SettingsWindowComposition {}
 
 pub(crate) fn configure_window_chrome(
     window_movement: Rc<dyn WindowMovementFactory>,
+    microphone_access: Option<Rc<dyn MicrophoneAccess>>,
     cx: &mut App,
 ) {
-    cx.set_global(SettingsWindowComposition { window_movement });
+    cx.set_global(SettingsWindowComposition {
+        window_movement,
+        microphone_access,
+    });
 }
 
 /// Opens Settings, or activates it when it is already open.
@@ -171,6 +183,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         return;
     };
     let window_drag = composition.window_movement.create();
+    let microphone_access = composition.microphone_access.clone();
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
         .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
@@ -200,7 +213,12 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         },
         |window, cx| {
             let settings = cx.new(|cx| {
-                SettingsWindow::new_with_window_drag(Rc::clone(&window_drag), window, cx)
+                SettingsWindow::new_with_capabilities(
+                    Rc::clone(&window_drag),
+                    microphone_access.clone(),
+                    window,
+                    cx,
+                )
             });
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
@@ -276,20 +294,23 @@ pub(crate) struct SettingsWindow {
     /// Keyboard traversal enables the ring; pointer selection withdraws keyboard focus and the ring.
     navigation_focus_visible: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+    microphone_access: MicrophoneAccessRow,
 }
 
 impl SettingsWindow {
     #[cfg(test)]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::new_with_window_drag(
+        Self::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            None,
             window,
             cx,
         )
     }
 
-    fn new_with_window_drag(
+    fn new_with_capabilities(
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        microphone_access: Option<Rc<dyn MicrophoneAccess>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -385,6 +406,14 @@ impl SettingsWindow {
             },
         )
         .detach();
+        // Authorization can change in the system's settings while this window is in the background,
+        // most often right after the Denied recovery sent the person there.
+        cx.observe_window_activation(window, |settings, window, cx| {
+            if window.is_window_active() {
+                settings.refresh_microphone_access(cx);
+            }
+        })
+        .detach();
         cx.on_app_quit(|settings, cx| {
             if !settings.editor.flush_for_shutdown(cx) {
                 eprintln!("SpaceTerm Settings could not be saved during shutdown");
@@ -407,6 +436,7 @@ impl SettingsWindow {
             navigation_focus,
             navigation_focus_visible: true,
             operating_system_window_drag_platform,
+            microphone_access: MicrophoneAccessRow::new(microphone_access),
         }
     }
 
@@ -943,6 +973,7 @@ impl SettingsWindow {
                                     SettingsSectionId::Interface => IconName::AppWindow,
                                     SettingsSectionId::Terminal => IconName::Terminal,
                                     SettingsSectionId::ColorSchemes => IconName::Palette,
+                                    SettingsSectionId::Privacy => IconName::Shield,
                                 },
                                 appearance.text_size(13.0),
                             )),
@@ -1224,7 +1255,7 @@ impl SettingsWindow {
             .layout(row_layout(row))
             .reset(self.row_reset(row, cx))
             .highlighted(highlighted);
-        if let Some(description) = row_description(row) {
+        if let Some(description) = self.row_description(row) {
             rendered = rendered.description(description);
         }
         rendered.render(appearance, window, cx).into_any_element()
@@ -1294,6 +1325,7 @@ impl SettingsWindow {
                 self.render_installed_schemes(SchemeKind::Terminal, appearance, cx)
             }
             SettingsRowId::SchemeInterchange => self.render_scheme_interchange(appearance, cx),
+            SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
         }
     }
 
@@ -2203,14 +2235,23 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     }
 }
 
-/// One line of guidance for the rows that warrant it.
-fn row_description(row: SettingsRowId) -> Option<&'static str> {
-    match row {
-        SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
-        SettingsRowId::Transparency => Some("0 is opaque. 1 is maximum transparency."),
-        SettingsRowId::BackgroundBlur => Some("Soften the desktop behind transparent backgrounds."),
-        SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
-        _ => None,
+impl SettingsWindow {
+    /// One line of guidance for the rows that warrant it.
+    ///
+    /// Microphone access explains its current status, so the guidance follows the system.
+    fn row_description(&self, row: SettingsRowId) -> Option<&'static str> {
+        match row {
+            SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
+            SettingsRowId::Transparency => Some("0 is opaque. 1 is maximum transparency."),
+            SettingsRowId::BackgroundBlur => {
+                Some("Soften the desktop behind transparent backgrounds.")
+            }
+            SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
+            SettingsRowId::MicrophoneAccess => {
+                Some(self.microphone_access.presentation().explanation)
+            }
+            _ => None,
+        }
     }
 }
 

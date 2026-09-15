@@ -198,6 +198,16 @@ fn compose(
                     "Open System Settings",
                 ),
             )),
+            microphone_access: if cfg!(any(
+                feature = "development-app",
+                feature = "appearance-exerciser"
+            )) {
+                None
+            } else {
+                Some(Rc::new(
+                    super::macos_microphone_access::MacosMicrophoneAccess::new(),
+                ))
+            },
             remote_workspace,
         },
         services: Rc::new(super::macos_services::NativeServicesRegistration),

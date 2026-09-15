@@ -17,15 +17,18 @@ pub(super) enum SettingsSectionId {
     Terminal,
     /// The scheme library both surfaces draw from.
     ColorSchemes,
+    /// System permissions that tools running in SpaceTerm rely on.
+    Privacy,
 }
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 4] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::Appearance,
         Self::Interface,
         Self::Terminal,
         Self::ColorSchemes,
+        Self::Privacy,
     ];
 
     pub(super) const fn title(self) -> &'static str {
@@ -34,6 +37,7 @@ impl SettingsSectionId {
             Self::Interface => "Interface",
             Self::Terminal => "Terminal",
             Self::ColorSchemes => "Color Schemes",
+            Self::Privacy => "Privacy",
         }
     }
 
@@ -44,6 +48,7 @@ impl SettingsSectionId {
             Self::Interface => "Interface",
             Self::Terminal => "Terminal",
             Self::ColorSchemes => "Color Schemes",
+            Self::Privacy => "Privacy",
         }
     }
 
@@ -60,6 +65,9 @@ impl SettingsSectionId {
                 "Every scheme installed for the interface and the terminal. Built-in schemes are \
                  always available; imported schemes can be removed."
             }
+            Self::Privacy => {
+                "System permissions that voice and other tools running in SpaceTerm rely on."
+            }
         }
     }
 
@@ -69,6 +77,7 @@ impl SettingsSectionId {
             Self::Interface => "settings-section-interface",
             Self::Terminal => "settings-section-terminal",
             Self::ColorSchemes => "settings-section-color-schemes",
+            Self::Privacy => "settings-section-privacy",
         }
     }
 }
@@ -102,6 +111,8 @@ pub(super) enum SettingsRowId {
     InterfaceSchemes,
     TerminalSchemes,
     SchemeInterchange,
+    /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
+    MicrophoneAccess,
 }
 
 impl SettingsRowId {
@@ -139,7 +150,10 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::InterfaceSchemes | Self::TerminalSchemes | Self::SchemeInterchange => {
+            Self::InterfaceSchemes
+            | Self::TerminalSchemes
+            | Self::SchemeInterchange
+            | Self::MicrophoneAccess => {
                 return None;
             }
         })
@@ -414,6 +428,24 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         keywords: &["zed", "import", "export", "file", "package", "share"],
         selector: "settings-row-scheme-interchange",
     },
+    SettingsRowDescriptor {
+        id: SettingsRowId::MicrophoneAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Microphone access",
+        keywords: &[
+            "voice",
+            "audio",
+            "dictation",
+            "speech",
+            "record",
+            "permission",
+            "authorization",
+            "allow",
+            "denied",
+        ],
+        selector: "settings-row-microphone-access",
+    },
 ];
 
 #[cfg(test)]
@@ -423,7 +455,7 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 25] = [
+    const EVERY_ROW: [SettingsRowId; 26] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::BackgroundBlur,
@@ -449,6 +481,7 @@ mod tests {
         SettingsRowId::InterfaceSchemes,
         SettingsRowId::TerminalSchemes,
         SettingsRowId::SchemeInterchange,
+        SettingsRowId::MicrophoneAccess,
     ];
 
     #[test]
@@ -563,6 +596,26 @@ mod tests {
         assert!(matching_rows("fallback").contains(&SettingsRowId::TerminalSchemes));
     }
 
+    /// A person whose voice tool cannot hear them searches for what they were doing, not for the
+    /// name of the permission.
+    #[test]
+    fn a_voice_query_reaches_microphone_access() {
+        for query in [
+            "microphone",
+            "Mic",
+            "voice",
+            "dictation",
+            "privacy",
+            "permissions",
+        ] {
+            assert_eq!(
+                matching_rows(query),
+                vec![SettingsRowId::MicrophoneAccess],
+                "{query:?} should reach only microphone access"
+            );
+        }
+    }
+
     #[test]
     fn a_section_query_matches_that_sections_rows() {
         let matches = matching_rows("terminal");
@@ -593,6 +646,7 @@ mod tests {
                 SettingsRowId::InterfaceSchemes
                     | SettingsRowId::TerminalSchemes
                     | SettingsRowId::SchemeInterchange
+                    | SettingsRowId::MicrophoneAccess
             );
             assert_eq!(
                 row.id.reset_target(Appearance::Light).is_some(),

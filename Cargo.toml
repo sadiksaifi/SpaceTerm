@@ -22,6 +22,7 @@ resources = [
 minimum-system-version = "11.0"
 signing-identity = "-"
 info-plist-path = "target/package-macos/Info.plist"
+entitlements = "packaging/macos/Entitlements.plist"
 
 [package.metadata.packager.dmg]
 window-size = { width = 600, height = 400 }

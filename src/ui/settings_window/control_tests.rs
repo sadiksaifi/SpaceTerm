@@ -126,7 +126,7 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::ColorSchemes
+        SettingsSectionId::Privacy
     );
 
     cx.simulate_keystrokes("home");

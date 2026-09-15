@@ -531,6 +531,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
     pub(crate) permission_recovery:
         Option<Rc<dyn crate::platform::permission_recovery::PermissionRecoveryOpener>>,
+    pub(crate) microphone_access:
+        Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
     pub(crate) remote_workspace:
         Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
 }
@@ -675,7 +677,11 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
-    crate::ui::settings_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    crate::ui::settings_window::configure_window_chrome(
+        Rc::clone(&host.window_movement),
+        host.adapters.microphone_access.clone(),
+        cx,
+    );
     init(cx, Rc::clone(&host.adapters.application_menu));
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
@@ -764,6 +770,7 @@ mod runtime_tests {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 permission_recovery: None,
+                microphone_access: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
             services,

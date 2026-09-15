@@ -281,10 +281,15 @@ impl SettingsRow {
         let label_width = appearance.measure(self.label, text::BODY, window).ceil();
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
+        let description_selector = format!("{selector}-description");
         // One rule for the whole form: the label starts at the content's left edge, the control
         // ends at its right edge, and nothing is centered.
         let caption = |description: SharedString| {
             div()
+                .debug_selector({
+                    let description_selector = description_selector.clone();
+                    move || description_selector.clone()
+                })
                 .text_size(appearance.text_size(text::SMALL))
                 .text_color(gpui_color(secondary))
                 .whitespace_normal()
@@ -312,12 +317,16 @@ impl SettingsRow {
                 .flex_1()
                 .flex_basis(label_basis)
                 .gap(appearance.spacing(2.0))
+                // The line keeps an automatic minimum width. Taffy sizes this column under a
+                // min-content constraint even when its own minimum is zero, and a zero minimum here
+                // would lay the label out one glyph per line. Taffy's cache can then hand that
+                // height back once wrapped guidance fills the column, stretching the row far below
+                // its content.
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_start()
-                        .min_w_0()
                         .gap(appearance.spacing(RESET_GAP))
                         .child(
                             div()
