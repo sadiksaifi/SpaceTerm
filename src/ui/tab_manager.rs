@@ -13,7 +13,7 @@ use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
     PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError,
-    TERMINAL_KEY_CONTEXT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    TERMINAL_KEY_CONTEXT, TabIdentity, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -59,7 +59,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, SharedString, Task, Window, div, px, rgba,
+    ScrollHandle, Task, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, CustomIconName, Icon, IconButton, IconName,
@@ -69,9 +69,9 @@ use spaceterm_ui::{
 
 #[cfg(test)]
 const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
-const TAB_ITEM_WIDTH: f32 = 132.0;
-const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
-const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
+const TAB_ITEM_WIDTH: f32 = 198.0;
+const TAB_ITEM_MINIMUM_WIDTH: f32 = 177.0;
+const TAB_ITEM_MAXIMUM_WIDTH: f32 = 240.0;
 /// The title starts as far inside the chip as a Settings navigation label does inside its own, and
 /// Close keeps the same air to the chip's right edge as it keeps above and below.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
@@ -99,6 +99,16 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
     }
 }
 
+/// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
+const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
+const TAB_ORIGIN_GAP: f32 = 6.0;
+/// The air before the Pane count and before the close control.
+const TAB_TRAILING_GAP: f32 = 4.0;
+/// How much of a Tab's identity the place may claim before the activity beside it gets a share.
+///
+/// The place is the segment that identifies the Session, so it survives a narrowing Tab; the
+/// activity is what it is doing right now, which the eye can recover from the Pane Caption.
+const TAB_PLACE_MAXIMUM_SHARE: f32 = 0.62;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -1165,7 +1175,7 @@ impl TabManager {
     fn render_tab_item(
         &self,
         tab_id: TabId,
-        title: SharedString,
+        identity: TabIdentity,
         active: bool,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
@@ -1252,18 +1262,10 @@ impl TabManager {
                 });
                 cx.stop_propagation();
             })
+            .child(render_tab_identity(tab_id, identity, appearance))
             .child(
                 div()
-                    .id(("tab-title", tab_id.get()))
-                    .debug_selector(move || format!("tab-title-{}", tab_id.get()))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(title),
-            )
-            .child(
-                div()
-                    .ml(appearance.spacing(4.0))
+                    .ml(appearance.spacing(TAB_TRAILING_GAP))
                     .flex_shrink_0()
                     .when(!active, |button| {
                         button
@@ -1346,7 +1348,7 @@ impl TabManager {
             items = items.child(
                 self.render_tab_item(
                     tab_id,
-                    pane_host.read(cx).tab_title(),
+                    pane_host.read(cx).tab_identity(),
                     active,
                     presentation,
                     manager.clone(),
@@ -1579,6 +1581,118 @@ fn render_tab_separator(
         .into_any_element()
 }
 
+/// One Tab's identity: its origin glyph, what it presents in words, and its Pane count.
+///
+/// The glyph and the count are the two segments a Tab never gives up. Only the words in between
+/// narrow, and they narrow in order of how little they identify the Tab.
+fn render_tab_identity(
+    tab_id: TabId,
+    identity: TabIdentity,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let origin_location = if identity.remote { "remote" } else { "local" };
+    let separator = |appearance: &super::appearance::ChromeAppearance| {
+        div()
+            .flex_shrink_0()
+            .mx(appearance.spacing(4.0))
+            .child("·")
+            .into_any_element()
+    };
+    let mut words = div()
+        .id(("tab-identity", tab_id.get()))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .overflow_hidden();
+    // The account leads the Tab. Local Sessions show their user; Remote Sessions include the host
+    // as `user@host` so the same position answers both who and where.
+    if !identity.account.is_empty() {
+        words = words
+            .child(
+                div()
+                    .debug_selector(move || format!("tab-account-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                    .truncate()
+                    .child(identity.account.clone()),
+            )
+            .when(!identity.place.is_empty(), |words| {
+                words.child(separator(appearance))
+            });
+    }
+    if !identity.place.is_empty() {
+        words = words.child(
+            div()
+                .debug_selector(move || format!("tab-place-{}", tab_id.get()))
+                .flex_shrink_0()
+                .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                .truncate()
+                .child(identity.place.clone()),
+        );
+    }
+    if !identity.activity.is_empty() {
+        let leads = identity.place.is_empty() && identity.account.is_empty();
+        words = words
+            .when(!leads, |words| words.child(separator(appearance)))
+            .child(
+                div()
+                    .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(identity.activity.clone()),
+            );
+    }
+
+    div()
+        .id(("tab-title", tab_id.get()))
+        .debug_selector(move || format!("tab-title-{}", tab_id.get()))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        // Attention belongs to the Tab rather than to any one segment of its name, so it leads the
+        // row and survives every narrowing, exactly as the origin glyph does.
+        .when(identity.attention, |item| {
+            item.child(
+                div()
+                    .debug_selector(move || format!("tab-attention-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .mr(appearance.spacing(TAB_TRAILING_GAP))
+                    .child("•"),
+            )
+        })
+        .child(
+            div()
+                .debug_selector(move || format!("tab-origin-{}-{origin_location}", tab_id.get()))
+                .flex_shrink_0()
+                .mr(appearance.spacing(TAB_ORIGIN_GAP))
+                .flex()
+                .items_center()
+                .child(Icon::inherited(
+                    IconName::Terminal,
+                    appearance.spacing(TAB_ORIGIN_ICON_SIZE),
+                )),
+        )
+        .child(words)
+        .when_some(identity.pane_badge(), |item, badge| {
+            item.child(
+                div()
+                    .debug_selector(move || format!("tab-pane-count-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .ml(appearance.spacing(TAB_TRAILING_GAP))
+                    // The count is a fact about the Tab rather than part of its name, so it reads
+                    // one step back from the title without taking a color of its own.
+                    .opacity(0.7)
+                    .child(badge),
+            )
+        })
+        .into_any_element()
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -1597,7 +1711,8 @@ mod tests {
 
     use gpui::{
         DivInspectorState, Hsla, Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent,
-        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
+        ScrollDelta, ScrollWheelEvent, SharedString, TestAppContext, TouchPhase, VisualTestContext,
+        point,
     };
 
     use super::*;
@@ -3195,7 +3310,7 @@ mod tests {
         let title = manager.read_with(cx, |manager, cx| {
             manager.tabs.active_tab().read(cx).tab_title()
         });
-        assert_eq!(title.as_ref(), "Claude Code");
+        assert_eq!(title.as_ref(), "Terminal · Claude Code");
     }
 
     #[gpui::test]
@@ -3228,8 +3343,111 @@ mod tests {
 
         assert_eq!(
             (split_title.as_ref(), restored_title.as_ref()),
-            ("Terminal · 2 Panes", "Claude Code")
+            (
+                "spaceterm-tab-manager-test · Terminal · 2P",
+                "Terminal · Claude Code"
+            )
         );
+    }
+
+    /// A Tab keeps the two segments its words cannot replace: where the Session runs, and whether
+    /// the Tab holds more than one Pane.
+    #[gpui::test]
+    fn tab_should_lead_with_an_origin_glyph_and_trail_its_pane_count(cx: &mut TestAppContext) {
+        let (_manager, records, cx) = tab_manager(cx);
+        let sender = records
+            .event_sender(1)
+            .expect("the initial Tab session must have started");
+        sender
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "Claude Code",
+            )))
+            .unwrap();
+        cx.run_until_parked();
+
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a single-Pane Tab should lead with its origin glyph");
+        let words = cx
+            .debug_bounds("tab-place-1")
+            .expect("the Tab should present what its Session identifies as");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the close control was not rendered");
+        assert!(
+            cx.debug_bounds("tab-pane-count-1").is_none(),
+            "a single-Pane Tab should carry no count"
+        );
+        assert!(origin.right() <= words.left() && words.right() <= close.left());
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a multi-Pane Tab should keep its origin glyph");
+        let count = cx
+            .debug_bounds("tab-pane-count-1")
+            .expect("a multi-Pane Tab should carry a terse count");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the close control was not rendered");
+        // The glyph leads, the count trails the words, and the close control stays reachable after
+        // both, so neither the glyph nor the count competes with the Tab's name for room.
+        assert!(origin.right() <= count.left() && count.right() <= close.left());
+        assert!(origin.size.width > px(0.0) && count.size.width > px(0.0));
+    }
+
+    /// A narrow Tab gives up its words before it gives up its glyph, its count, or its close
+    /// control, so every Tab stays identifiable and closable at the narrowest width.
+    #[gpui::test]
+    fn narrow_tabs_should_keep_glyph_count_and_close_reachable(cx: &mut TestAppContext) {
+        let (_manager, records, cx) = tab_manager(cx);
+        let sender = records
+            .event_sender(1)
+            .expect("the initial Tab session must have started");
+        sender
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "a terminal title long enough to need truncating in a narrow Tab",
+            )))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        for _ in 0..6 {
+            click("create-tab-button", cx);
+        }
+        cx.run_until_parked();
+
+        let item = cx
+            .debug_bounds("tab-item-1-inactive")
+            .expect("the first Tab was not rendered");
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a narrowed Tab should keep its origin glyph");
+        let count = cx
+            .debug_bounds("tab-pane-count-1")
+            .expect("a narrowed Tab should keep its Pane count");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("a narrowed Tab should keep its close control");
+        let minimum =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ITEM_MINIMUM_WIDTH));
+
+        assert!(
+            item.size.width >= minimum,
+            "got {item:?} against {minimum:?}"
+        );
+        for segment in [origin, count, close] {
+            assert!(
+                segment.left() >= item.left() && segment.right() <= item.right(),
+                "{segment:?} should stay inside its Tab {item:?}"
+            );
+        }
     }
 
     #[gpui::test]

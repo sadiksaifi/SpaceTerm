@@ -539,24 +539,33 @@ impl PaneHost {
         self.session_factory.set_pinned_directory(directory);
     }
 
-    pub(crate) fn tab_title(&self) -> gpui::SharedString {
-        let attention = self.pane_attention.values().copied().sum::<u32>();
-        let pane_count = self.terminal_tab.pane_count();
+    /// What this Tab presents about the Terminal Session it is focused on.
+    ///
+    /// The Tab reads the Focused Pane's own caption facts rather than a second title pipeline, so a
+    /// Tab and the Pane Caption under it always describe the same Terminal Session.
+    pub(crate) fn tab_identity(&self) -> TabIdentity {
+        let caption = self
+            .pane_captions
+            .get(&self.terminal_tab.focused_pane_id())
+            .cloned()
+            .unwrap_or_default();
         let title = self
             .pane_titles
             .get(&self.terminal_tab.focused_pane_id())
             .cloned()
             .unwrap_or_else(|| "Terminal".into());
-        let title = if pane_count > 1 {
-            format!("{title} · {pane_count} Panes").into()
-        } else {
-            title
-        };
-        if attention > 0 {
-            format!("• {title}").into()
-        } else {
-            title
-        }
+        TabIdentity::resolve(
+            caption,
+            title,
+            self.terminal_tab.pane_count(),
+            self.pane_attention.values().copied().sum::<u32>() > 0,
+        )
+    }
+
+    /// The Tab's identity as one line, for callers that can only carry text.
+    #[cfg(test)]
+    pub(crate) fn tab_title(&self) -> gpui::SharedString {
+        self.tab_identity().one_line()
     }
 
     #[cfg(test)]
@@ -1640,6 +1649,103 @@ impl Render for PaneHost {
     }
 }
 
+/// What one Tab presents about the Terminal Session its Focused Pane runs.
+///
+/// The Tab is a compact restatement of that Pane's own caption, in the caption's own order: where
+/// the Session runs, where it is, and what it is doing. Every segment is a fact the Pane already
+/// resolved and sanitized for presentation; a Tab never composes a path or a machine name of its
+/// own, and leaves a segment empty rather than inventing one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TabIdentity {
+    /// Local or Remote, as the Terminal Session classified itself. It selects the leading glyph.
+    pub(crate) remote: bool,
+    /// The local user, or the account and machine a Remote Session runs on.
+    pub(crate) account: gpui::SharedString,
+    /// The directory leaf that places the Session, such as `~` or the project it sits in.
+    pub(crate) place: gpui::SharedString,
+    /// What the Session is doing: its Terminal title or its running command.
+    pub(crate) activity: gpui::SharedString,
+    /// How many Panes the Tab owns. One Pane shows no count.
+    pub(crate) pane_count: usize,
+    /// Whether any Pane in the Tab is asking for attention.
+    pub(crate) attention: bool,
+}
+
+impl TabIdentity {
+    fn resolve(
+        caption: PaneCaptionText,
+        title: gpui::SharedString,
+        pane_count: usize,
+        attention: bool,
+    ) -> Self {
+        let account = if caption.origin.remote {
+            match (
+                caption.origin.user.is_empty(),
+                caption.origin.host.is_empty(),
+            ) {
+                (_, true) => gpui::SharedString::default(),
+                (true, false) => caption.origin.host.clone(),
+                (false, false) => format!("{}@{}", caption.origin.user, caption.origin.host).into(),
+            }
+        } else {
+            caption.origin.user.clone()
+        };
+        // `name` is the directory leaf when the Pane has a directory, and the Pane's own label when
+        // it has none. Keeping both segments from saying the same word leaves room for the one that
+        // still adds something.
+        let place = caption.name;
+        let activity = if caption.label.is_empty() {
+            title
+        } else {
+            caption.label
+        };
+        let activity = if activity == place {
+            gpui::SharedString::default()
+        } else {
+            activity
+        };
+        Self {
+            remote: caption.origin.remote,
+            account,
+            place,
+            activity,
+            pane_count,
+            attention,
+        }
+    }
+
+    /// The terse trailing count a multi-Pane Tab carries, such as `2P`.
+    pub(crate) fn pane_badge(&self) -> Option<gpui::SharedString> {
+        (self.pane_count > 1).then(|| format!("{}P", self.pane_count).into())
+    }
+
+    /// The identity as one line, in the order the Tab paints it.
+    #[cfg(test)]
+    pub(crate) fn one_line(&self) -> gpui::SharedString {
+        let mut line = String::new();
+        for segment in [&self.account, &self.place, &self.activity] {
+            if segment.is_empty() {
+                continue;
+            }
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(segment);
+        }
+        if line.is_empty() {
+            line.push_str("Terminal");
+        }
+        if let Some(badge) = self.pane_badge() {
+            line.push_str(" · ");
+            line.push_str(&badge);
+        }
+        if self.attention {
+            line.insert_str(0, "• ");
+        }
+        line.into()
+    }
+}
+
 /// One Pane caption split into the segments the header renders and drops independently.
 ///
 /// `origin` is the account and machine the Terminal runs on, `directory` the leading path up to
@@ -2646,7 +2752,10 @@ mod tests {
             host.pane_attention.insert(PaneId::new(1), 2);
         });
 
-        assert_eq!(host.read_with(cx, |host, _| host.tab_title()), "• Terminal");
+        assert_eq!(
+            host.read_with(cx, |host, _| host.tab_title()),
+            "• spaceterm-test-workspace · Terminal"
+        );
         assert_eq!(
             host.read_with(cx, |host, _| host.pane_attention.clone()),
             BTreeMap::from([(PaneId::new(1), 2)])
@@ -2655,6 +2764,127 @@ mod tests {
 
     fn test_home_directory() -> PathBuf {
         PathBuf::from("/tmp/spaceterm-test-workspace")
+    }
+
+    fn caption_text(origin: PaneOrigin, directory: &str, label: &str) -> PaneCaptionText {
+        PaneCaptionText::from_facts(super::super::terminal_pane::PaneCaptionFacts {
+            origin,
+            directory: directory.to_owned().into(),
+            label: label.to_owned().into(),
+            running: false,
+        })
+    }
+
+    fn local_origin() -> PaneOrigin {
+        PaneOrigin {
+            user: "tester".into(),
+            host: "workstation".into(),
+            remote: false,
+        }
+    }
+
+    fn remote_origin() -> PaneOrigin {
+        PaneOrigin {
+            user: "tester".into(),
+            host: "build-box".into(),
+            remote: true,
+        }
+    }
+
+    /// A Tab restates its Focused Pane's own facts, in the caption's order, without composing any
+    /// of its own: a Local Tab keeps the user while dropping the machine, and a Remote Tab joins
+    /// both as `user@host`.
+    #[test]
+    fn tab_identity_should_present_the_focused_pane_facts_in_caption_order() {
+        let local = TabIdentity::resolve(
+            caption_text(local_origin(), "~/Projects/api", "vim"),
+            "vim".into(),
+            1,
+            false,
+        );
+        assert_eq!(
+            (
+                local.remote,
+                local.account.as_ref(),
+                local.place.as_ref(),
+                local.activity.as_ref(),
+                local.pane_badge(),
+            ),
+            (false, "tester", "api", "vim", None)
+        );
+        assert_eq!(local.one_line().as_ref(), "tester · api · vim");
+
+        let remote = TabIdentity::resolve(
+            caption_text(remote_origin(), "~/services", "cargo test"),
+            "cargo test".into(),
+            2,
+            false,
+        );
+        assert_eq!(
+            (
+                remote.remote,
+                remote.account.as_ref(),
+                remote.place.as_ref(),
+                remote.activity.as_ref(),
+                remote.pane_badge().map(|badge| badge.to_string()),
+            ),
+            (
+                true,
+                "tester@build-box",
+                "services",
+                "cargo test",
+                Some("2P".to_owned())
+            )
+        );
+        assert_eq!(
+            remote.one_line().as_ref(),
+            "tester@build-box · services · cargo test · 2P"
+        );
+    }
+
+    /// The Tab never says the same word twice, never invents a segment it was not given, and keeps
+    /// attention and the Pane count as facts about the Tab rather than parts of its name.
+    #[test]
+    fn tab_identity_should_drop_empty_and_repeated_segments() {
+        // A Pane with no directory carries its label as the thing that identifies it, so the Tab
+        // presents it once rather than as both place and activity.
+        let untitled = TabIdentity::resolve(
+            caption_text(local_origin(), "", "zsh"),
+            "zsh".into(),
+            1,
+            false,
+        );
+        assert_eq!(
+            (untitled.place.as_ref(), untitled.activity.as_ref()),
+            ("zsh", "")
+        );
+        assert_eq!(untitled.one_line().as_ref(), "tester · zsh");
+
+        // A Remote destination that names no account leaves the account to the machine alone.
+        let anonymous = TabIdentity::resolve(
+            caption_text(
+                PaneOrigin {
+                    user: gpui::SharedString::default(),
+                    host: "build-box".into(),
+                    remote: true,
+                },
+                "~",
+                "",
+            ),
+            "Terminal".into(),
+            3,
+            true,
+        );
+        assert_eq!(anonymous.account.as_ref(), "build-box");
+        assert_eq!(
+            anonymous.one_line().as_ref(),
+            "• build-box · ~ · Terminal · 3P"
+        );
+
+        // Nothing resolved at all still names the Tab rather than leaving it blank.
+        let empty = TabIdentity::default();
+        assert_eq!(empty.one_line().as_ref(), "Terminal");
+        assert_eq!(empty.pane_badge(), None);
     }
 
     fn focused_panes_after_shortcuts<const N: usize>(

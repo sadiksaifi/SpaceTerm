@@ -48,6 +48,7 @@ pub(crate) use native_remote_workspace_flow_backend::{
 };
 pub(crate) use pane_host::{
     PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
+    TabIdentity,
 };
 pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
