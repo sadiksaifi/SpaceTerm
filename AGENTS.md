@@ -1,6 +1,6 @@
 # SpaceTerm
 
-SpaceTerm is a native desktop terminal multiplexer.
+SpaceTerm is a native desktop terminal multiplexer, production-grade application, although right now it's in highly active development, so no need to care about backward compatibility at all. Shortcuts become burdens. Hacks compound into debt. Patterns set here will be copied. Corners cut here will be cut again. Fight entropy; leave Ledger better than you found it.
 
 ## Domain and decisions
 
