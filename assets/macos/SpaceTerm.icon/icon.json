@@ -1,19 +1,9 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "display-p3:0.12402,0.12341,0.12378,1.00000",
-      "display-p3:0.19604,0.46387,0.96777,1.00000"
-    ],
-    "orientation" : {
-      "start" : {
-        "x" : 0.5,
-        "y" : 0
-      },
-      "stop" : {
-        "x" : 0.5,
-        "y" : 0.7
-      }
-    }
+      "display-p3:0.31689,0.38330,0.81055,1.00000",
+      "display-p3:0.06396,0.12537,0.37939,1.00000"
+    ]
   },
   "groups" : [
     {
@@ -22,15 +12,17 @@
           "blend-mode" : "normal",
           "fill-specializations" : [
             {
-              "value" : {
-                "solid" : "display-p3:0.99631,0.99631,0.99631,1.00000"
-              }
+              "value" : "system-light"
             },
             {
               "appearance" : "dark",
               "value" : {
                 "solid" : "display-p3:0.96311,0.96311,0.96311,1.00000"
               }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "automatic"
             }
           ],
           "glass" : true,
