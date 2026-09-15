@@ -69,9 +69,9 @@ use spaceterm_ui::{
 
 #[cfg(test)]
 const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
-const TAB_ITEM_WIDTH: f32 = 198.0;
-const TAB_ITEM_MINIMUM_WIDTH: f32 = 177.0;
-const TAB_ITEM_MAXIMUM_WIDTH: f32 = 240.0;
+const TAB_ITEM_WIDTH: f32 = 178.2;
+const TAB_ITEM_MINIMUM_WIDTH: f32 = 159.3;
+const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 /// The title starts as far inside the chip as a Settings navigation label does inside its own, and
 /// Close keeps the same air to the chip's right edge as it keeps above and below.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
