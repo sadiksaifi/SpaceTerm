@@ -116,17 +116,11 @@ impl ChromeAppearance {
     /// separates from the base; an opaque window paints it as is. Dark also retains a backing
     /// beneath that tint so desktop colors do not wash out Terminal text.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
-        let target = terminal_background.mix(
+        self.materials.pane_surface(
+            self.colors.background,
             self.colors.elevated_surface_background,
-            f64::from(self.materials.elevation(self.colors.background)),
-        );
-        let lift = self.surface(SurfaceRole::Surface, target);
-        let protection = self.materials.pane_protection(self.colors.background);
-        if protection == 0.0 {
-            return lift;
-        }
-        let backing = terminal_background.multiply_opacity((protection * 255.0).round() as u8);
-        lift.source_over(backing)
+            terminal_background,
+        )
     }
 
     /// The hairline around every Pane: the same neutral edge a selected Workspace row or Active Tab

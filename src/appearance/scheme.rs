@@ -364,6 +364,14 @@ impl TerminalPaletteOverrides {
         Self(colors.map(Some))
     }
 
+    pub(super) fn retain_missing_from(&mut self, retired: Self) {
+        for (current, retired) in self.0.iter_mut().zip(retired.0) {
+            if current.is_none() {
+                *current = retired;
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn get(&self, index: usize) -> Option<Color> {
         self.0.get(index).copied().flatten()
@@ -588,6 +596,7 @@ pub(crate) struct SchemeSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChromeScheme {
+    /// Authored source metadata; application `BackgroundPreferences` govern native window effects.
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",

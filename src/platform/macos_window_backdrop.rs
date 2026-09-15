@@ -65,6 +65,13 @@ pub(crate) fn apply(window: &gpui::Window, blurred: bool) {
         if content_view == nil {
             return;
         }
+        apply_to_content_view(content_view, blurred);
+    }
+}
+
+/// SAFETY: called on the AppKit thread with a live content view.
+unsafe fn apply_to_content_view(content_view: id, blurred: bool) {
+    unsafe {
         let identifier = NSString::alloc(nil).init_str(BACKDROP_IDENTIFIER);
         let installed = installed_backdrop(content_view, identifier);
         if !blurred {
@@ -125,5 +132,132 @@ unsafe fn install(content_view: id, identifier: id) {
         ];
         // The content view now holds the only retain this view needs for its whole lifetime.
         let _: () = msg_send![backdrop, release];
+    }
+}
+
+#[cfg(all(test, feature = "macos-native-tests"))]
+mod tests {
+    use super::*;
+    use cocoa::base::YES;
+    use cocoa::foundation::{NSPoint, NSSize};
+
+    /// Owns the content view's initial retain. Its subviews are retained only by AppKit.
+    struct ContentView(id);
+
+    impl ContentView {
+        unsafe fn new(size: NSSize) -> Self {
+            unsafe {
+                let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
+                let content = NSView::initWithFrame_(NSView::alloc(nil), frame);
+                assert_ne!(content, nil);
+                Self(content)
+            }
+        }
+
+        unsafe fn add_renderer(&self) -> id {
+            unsafe {
+                let renderer = NSView::initWithFrame_(NSView::alloc(nil), NSView::bounds(self.0));
+                assert_ne!(renderer, nil);
+                self.0.addSubview_(renderer);
+                let _: () = msg_send![renderer, release];
+                renderer
+            }
+        }
+
+        unsafe fn backdrop(&self) -> id {
+            unsafe {
+                let identifier = NSString::alloc(nil).init_str(BACKDROP_IDENTIFIER);
+                let backdrop = installed_backdrop(self.0, identifier);
+                let _: () = msg_send![identifier, release];
+                backdrop
+            }
+        }
+
+        unsafe fn subview_count(&self) -> usize {
+            unsafe {
+                let subviews: id = msg_send![self.0, subviews];
+                msg_send![subviews, count]
+            }
+        }
+    }
+
+    impl Drop for ContentView {
+        fn drop(&mut self) {
+            // SAFETY: this fixture owns the content view's initial retain and is dropped on the
+            // AppKit thread after every borrowed subview pointer has gone out of use.
+            unsafe {
+                let _: () = msg_send![self.0, release];
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn backdrop_installation_is_ordered_idempotent_and_reversible(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            // SAFETY: GPUI runs this closure on the AppKit thread. The fixture retains the content
+            // view, while AppKit retains attached subviews for exactly their attached lifetime.
+            unsafe {
+                let content = ContentView::new(NSSize::new(320.0, 180.0));
+                let renderer = content.add_renderer();
+
+                apply_to_content_view(content.0, true);
+                apply_to_content_view(content.0, true);
+
+                let backdrop = content.backdrop();
+                assert_ne!(backdrop, nil);
+                assert_eq!(content.subview_count(), 2);
+                let subviews: id = msg_send![content.0, subviews];
+                let first: id = msg_send![subviews, objectAtIndex: 0usize];
+                let second: id = msg_send![subviews, objectAtIndex: 1usize];
+                assert_eq!(first, backdrop, "the backdrop must stay below the renderer");
+                assert_eq!(second, renderer);
+
+                apply_to_content_view(content.0, false);
+                assert_eq!(content.subview_count(), 1);
+                assert_eq!(content.backdrop(), nil);
+
+                apply_to_content_view(content.0, false);
+                assert_eq!(content.subview_count(), 1);
+
+                apply_to_content_view(content.0, true);
+                assert_ne!(content.backdrop(), nil);
+                assert_eq!(content.subview_count(), 2);
+                apply_to_content_view(content.0, false);
+                assert_eq!(content.subview_count(), 1);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn backdrop_tracks_content_bounds_through_appkit_autoresizing(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            // SAFETY: GPUI runs this closure on the AppKit thread and the fixture owns the live
+            // content view for the duration of every AppKit message.
+            unsafe {
+                let content = ContentView::new(NSSize::new(300.0, 160.0));
+                content.add_renderer();
+                apply_to_content_view(content.0, true);
+                let backdrop = content.backdrop();
+                assert_ne!(backdrop, nil);
+
+                let mask: u64 = msg_send![backdrop, autoresizingMask];
+                assert_eq!(
+                    mask & (NSViewWidthSizable | NSViewHeightSizable),
+                    NSViewWidthSizable | NSViewHeightSizable
+                );
+                let autoresizes_subviews: BOOL = msg_send![content.0, autoresizesSubviews];
+                assert_eq!(autoresizes_subviews, YES);
+
+                content.0.setFrameSize(NSSize::new(640.0, 360.0));
+                let content_bounds = NSView::bounds(content.0);
+                let backdrop_frame = NSView::frame(backdrop);
+                assert_eq!(backdrop_frame.origin.x, content_bounds.origin.x);
+                assert_eq!(backdrop_frame.origin.y, content_bounds.origin.y);
+                assert_eq!(backdrop_frame.size.width, content_bounds.size.width);
+                assert_eq!(backdrop_frame.size.height, content_bounds.size.height);
+
+                apply_to_content_view(content.0, false);
+            }
+        });
     }
 }

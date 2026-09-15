@@ -13,8 +13,8 @@ use super::{Appearance, AppearancePreferences, SchemeCatalog, SchemeKind, Scheme
 use super::{
     Color, SchemeId,
     scheme::{
-        CatalogError, ChromeColorOverrides, ChromeScheme, SchemeMetadata, TerminalColorOverrides,
-        TerminalScheme, validate_scheme,
+        CatalogError, ChromeColorOverrides, ChromeScheme, OptionalColorOverride, SchemeMetadata,
+        TerminalColorOverrides, TerminalScheme, validate_scheme,
     },
 };
 
@@ -135,9 +135,74 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> Result<AppearanceDocument, Appeara
     Ok(document)
 }
 
+trait RetiredOverrides {
+    fn retain_missing_from(&mut self, retired: Self);
+}
+
+impl RetiredOverrides for ChromeColorOverrides {
+    fn retain_missing_from(&mut self, retired: Self) {
+        macro_rules! retain_missing {
+            ($($field:ident),+ $(,)?) => {
+                $(if self.$field.is_none() {
+                    self.$field = retired.$field;
+                })+
+            };
+        }
+        chrome_color_fields!(retain_missing);
+    }
+}
+
+impl RetiredOverrides for TerminalColorOverrides {
+    fn retain_missing_from(&mut self, retired: Self) {
+        macro_rules! retain_palette_missing {
+            ($($field:ident),+ $(,)?) => {
+                $(match (&mut self.$field, retired.$field) {
+                    (Some(current), Some(retired)) => current.retain_missing_from(retired),
+                    (current @ None, retired) => *current = retired,
+                    (Some(_), None) => {}
+                })+
+            };
+        }
+        retain_palette_missing!(normal, bright, dim);
+
+        macro_rules! retain_missing {
+            ($($field:ident),+ $(,)?) => {
+                $(if self.$field.is_none() {
+                    self.$field = retired.$field;
+                })+
+            };
+        }
+        retain_missing!(
+            foreground,
+            background,
+            bright_foreground,
+            dim_foreground,
+            cursor,
+            selection_background,
+            find_match_background,
+            find_active_match_background,
+            hyperlink,
+            visual_bell,
+        );
+        macro_rules! retain_optional_missing {
+            ($($field:ident),+ $(,)?) => {
+                $(if matches!(&self.$field, OptionalColorOverride::Inherit) {
+                    self.$field = retired.$field;
+                })+
+            };
+        }
+        retain_optional_missing!(
+            cursor_text,
+            selection_foreground,
+            find_match_foreground,
+            find_active_match_foreground,
+        );
+    }
+}
+
 /// Move retained built-in selections and their overrides together when the owned scheme is renamed.
 fn replace_retired_builtin_ids(preferences: &mut AppearancePreferences) {
-    fn replace<T>(
+    fn replace<T: RetiredOverrides>(
         slots: &mut SchemeSlots,
         overrides: &mut std::collections::BTreeMap<SchemeId, T>,
         old: &'static str,
@@ -148,8 +213,15 @@ fn replace_retired_builtin_ids(preferences: &mut AppearancePreferences) {
                 *slot = new.clone();
             }
         }
-        if let Some(value) = overrides.remove(&SchemeId::builtin(old)) {
-            overrides.entry(new).or_insert(value);
+        if let Some(retired) = overrides.remove(&SchemeId::builtin(old)) {
+            match overrides.entry(new) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(retired);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().retain_missing_from(retired);
+                }
+            }
         }
     }
     replace(
@@ -225,7 +297,6 @@ pub(crate) fn export_resolved_schemes(
         .clone();
     chrome.id = portable_id(&chrome.id, true)?;
     chrome.colors = ChromeColorOverrides::complete(&resolved.chrome.colors);
-    chrome.window_background = Some(resolved.chrome.composition.requested);
     let mut terminal = catalog
         .terminal(&resolved.terminal.effective_scheme)
         .ok_or(ImportError::UnknownScheme)?

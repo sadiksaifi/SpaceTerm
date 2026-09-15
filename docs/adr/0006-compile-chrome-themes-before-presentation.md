@@ -43,7 +43,7 @@ into the overlay each appearance may spend, so near-white Light surfaces neither
 panels nor collapse onto a shared ceiling. Floating surfaces over content use a denser curve;
 zero keeps the opaque presentation, while one clears the window tint and retains color on resting
 and floating surfaces. The separate blur Setting controls the native material.
-The compiler derives material fills from the opaque presentation,
+Surface composition derives material fills from the opaque presentation,
 which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
 elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
 thin elevation tints alone transmit too much desktop variation behind muted ANSI colors.
