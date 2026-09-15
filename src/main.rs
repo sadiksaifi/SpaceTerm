@@ -1,5 +1,6 @@
 mod app;
 mod appearance;
+mod application_identity;
 mod close_confirmation;
 mod domain;
 mod platform;

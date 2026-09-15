@@ -6,6 +6,7 @@ use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInte
 use objc::runtime::{BOOL, NO};
 use objc::{class, msg_send, sel, sel_impl};
 
+use crate::application_identity::ApplicationIdentity;
 use crate::terminal::attention_notification::{
     AuthorizationCompletion, NotificationAdapter, NotificationAuthorization, NotificationSettings,
     SettingsCompletion, notification_body,
@@ -51,7 +52,15 @@ fn authorization_from_raw(raw: NSInteger) -> NotificationAuthorization {
     }
 }
 
-pub(crate) struct UserNotificationAdapter;
+pub(crate) struct UserNotificationAdapter {
+    identity: ApplicationIdentity,
+}
+
+impl UserNotificationAdapter {
+    pub(crate) const fn new(identity: ApplicationIdentity) -> Self {
+        Self { identity }
+    }
+}
 
 impl NotificationAdapter for UserNotificationAdapter {
     fn settings(&self, completion: SettingsCompletion) {
@@ -128,7 +137,9 @@ impl NotificationAdapter for UserNotificationAdapter {
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
             let content: id = msg_send![class!(UNMutableNotificationContent), new];
-            let title = NSString::alloc(nil).init_str("SpaceTerm").autorelease();
+            let title = NSString::alloc(nil)
+                .init_str(self.identity.display_name())
+                .autorelease();
             let body = NSString::alloc(nil)
                 .init_str(&notification_body(aggregate_count))
                 .autorelease();
