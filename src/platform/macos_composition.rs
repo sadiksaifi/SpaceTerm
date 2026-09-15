@@ -236,6 +236,7 @@ fn compose(
         },
         services: Rc::new(super::macos_services::NativeServicesRegistration),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
+        window_frame: super::macos_window_frame::workspace_window_frame_geometry(),
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,

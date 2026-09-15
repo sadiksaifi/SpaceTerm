@@ -327,6 +327,7 @@ pub struct ResizeHandle {
     tab_stop: bool,
     reset_on_double_click: bool,
     target: ResizeHandleTarget,
+    paint_divider: bool,
     keyboard_step: f32,
     modified_keyboard_step: f32,
     debug_selector: Option<String>,
@@ -360,6 +361,7 @@ impl ResizeHandle {
             tab_stop: false,
             reset_on_double_click: false,
             target: ResizeHandleTarget::Regular,
+            paint_divider: true,
             keyboard_step: DEFAULT_KEYBOARD_STEP,
             modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             debug_selector: None,
@@ -408,6 +410,16 @@ impl ResizeHandle {
             }
             target => target,
         };
+        self
+    }
+
+    /// Controls whether the divider paints in any state.
+    ///
+    /// A handle placed over empty space, such as a gap between floating surfaces, keeps its layout
+    /// thickness, pointer target, cursor, focus, and keyboard interaction, but paints no resting,
+    /// hovered, active, focused, or disabled divider.
+    pub fn paint_divider(mut self, paint: bool) -> Self {
+        self.paint_divider = paint;
         self
     }
 
@@ -665,7 +677,7 @@ impl RenderOnce for ResizeHandle {
             .id("resize-handle-divider")
             .debug_selector(move || divider_debug)
             .flex_shrink_0()
-            .bg(color)
+            .when(self.paint_divider, |divider| divider.bg(color))
             .when(axis == ResizeAxis::Horizontal, |divider| {
                 divider.w(divider_thickness).h_full()
             })
@@ -1706,6 +1718,63 @@ mod tests {
             event,
             ResizeHandleEvent::ResizeRequested {
                 requested_value: 135.0,
+                ..
+            }
+        )));
+    }
+
+    struct PaintlessRoot {
+        events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
+    }
+
+    impl Render for PaintlessRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let events = Rc::clone(&self.events);
+            div().relative().size_full().child(
+                ResizeHandle::new(
+                    "paintless-resize",
+                    "Paintless resize",
+                    ResizeAxis::Horizontal,
+                    100.0,
+                )
+                .paint_divider(false)
+                .debug_selector("paintless-resize")
+                .on_event(move |event, _, _| events.borrow_mut().push(*event)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn paintless_divider_should_keep_layout_target_and_interaction(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+            events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("paintless-resize-hitbox")
+            .expect("the paintless hitbox was rendered");
+        let divider = cx
+            .debug_bounds("paintless-resize-divider")
+            .expect("the paintless divider kept its layout");
+        assert_eq!((target.size.width, divider.size.width), (px(9.0), px(1.0)));
+
+        let start = target.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(start.x + px(10.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            ResizeHandleEvent::ResizeRequested {
+                requested_value: 110.0,
                 ..
             }
         )));

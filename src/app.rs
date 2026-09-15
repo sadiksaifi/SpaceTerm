@@ -543,6 +543,7 @@ pub(crate) struct HostCompositionParts {
     pub(crate) adapters: ApplicationCapabilities,
     pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
     pub(crate) titlebar: Option<TitlebarOptions>,
 }
 pub(crate) struct HostComposition {
@@ -552,6 +553,7 @@ pub(crate) struct HostComposition {
     adapters: ApplicationCapabilities,
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    window_frame: crate::platform::window_frame::WindowFrameGeometry,
     titlebar: Option<TitlebarOptions>,
     appearance: Option<(
         Arc<dyn crate::settings::storage::SettingsStorage>,
@@ -586,6 +588,7 @@ impl HostComposition {
             adapters: parts.adapters,
             services: parts.services,
             window_movement: parts.window_movement,
+            window_frame: parts.window_frame,
             titlebar: parts.titlebar,
             appearance: None,
         })
@@ -651,6 +654,7 @@ fn start_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    cx.set_global(host.window_frame);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
@@ -761,7 +765,10 @@ mod runtime_tests {
                 permission_recovery: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
-            services, window_movement: movement, titlebar: None,
+            services,
+            window_movement: movement,
+            window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
+            titlebar: None,
         }
     }
     #[test]

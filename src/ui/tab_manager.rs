@@ -69,7 +69,6 @@ use spaceterm_ui::{
 
 #[cfg(test)]
 const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
-const TAB_BAR_DIVIDER_SIZE: f32 = 1.0;
 const TAB_ITEM_WIDTH: f32 = 132.0;
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
@@ -82,14 +81,14 @@ const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 ///
 /// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
 /// paint moves inward. The vertical inset is the larger one, because that is the air that turns a
-/// full-height strip into a row of shapes resting inside the title bar, and it leaves the seam
-/// under the bar free for the one divider that still describes real structure.
+/// full-height strip into a row of shapes resting inside the title bar, and it keeps the chip clear
+/// of the bar's lower edge where the title bar meets the floating content stage.
 ///
-/// Inside the title bar that inset leaves a chip as tall as a Settings navigation row, and the
-/// radius is the one both sidebars select with, so a Tab is the same shape rather than a cousin.
+/// Inside the title bar that inset leaves a chip as tall as a Settings navigation row. The radius
+/// comes from the Workspace frame's one radius family, so a Tab, a selected sidebar row, and a
+/// floating Pane read as the same shape at three sizes rather than as cousins.
 const TAB_CHIP_INSET_X: f32 = 3.0;
 const TAB_CHIP_INSET_Y: f32 = 4.0;
-const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -97,8 +96,7 @@ const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 /// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
 /// keeps its proportion to a Tab that grows with density.
 const TAB_SEPARATOR_LENGTH: f32 = 18.0;
-/// The mark's thickness: one logical point at every density, the same hairline as the chip rim and
-/// the Tab bar divider.
+/// The mark's thickness: one logical point at every density, the same hairline as the chip rim.
 ///
 /// Density lengthens the mark but never thickens it. A whole point covers at least one whole device
 /// pixel at every supported display scale, so the mark stays thin on a 1x display without ever
@@ -124,7 +122,6 @@ struct TabChromePresentation {
     hover_background: Color,
     hover_foreground: Color,
     hover_icon: Color,
-    divider: Color,
     tab_separator: Color,
 }
 
@@ -148,7 +145,6 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         } else {
@@ -171,7 +167,6 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         }
@@ -191,13 +186,16 @@ impl TabChromePresentation {
         &self,
         active: bool,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> SelectionChip {
         SelectionChip::new(
-            ChipShape {
-                inset_x: appearance.spacing(TAB_CHIP_INSET_X),
-                inset_y: appearance.spacing(TAB_CHIP_INSET_Y),
-                radius: appearance.spacing(TAB_CHIP_RADIUS),
-            },
+            ChipShape::symmetric(
+                appearance.spacing(TAB_CHIP_INSET_X),
+                appearance.spacing(TAB_CHIP_INSET_Y),
+                // One radius family with the sidebar's selected row and the floating Panes.
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .chip_radius(),
+            ),
             self.tab_chip_paint(active),
         )
     }
@@ -1159,6 +1157,10 @@ impl TabManager {
         self.activate_tab_at(8, window, cx);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one Tab render step needs its identity, presentation, owner, appearance, and host geometry"
+    )]
     fn render_tab_item(
         &self,
         tab_id: TabId,
@@ -1167,13 +1169,14 @@ impl TabManager {
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
         let hover_manager = manager.clone();
         let close_manager = manager;
-        let chip = presentation.tab_chip(active, appearance);
+        let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
         let control_style =
@@ -1312,11 +1315,18 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
         let create_icon_size = appearance.spacing(14.0);
+        // The strip begins where the floating content stage begins, and a Tab's paint is inset
+        // inside its own item, so the strip gives back exactly that inset. The first Tab's chip
+        // then starts on the same vertical as the Pane beneath it, in either sidebar state.
+        let leading_alignment =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .chip_alignment_padding(appearance.spacing(TAB_CHIP_INSET_X));
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
+            .pl(leading_alignment)
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -1339,6 +1349,7 @@ impl TabManager {
                     presentation,
                     manager.clone(),
                     appearance,
+                    cx,
                 )
                 .children(leading_separator),
             );
@@ -1354,17 +1365,6 @@ impl TabManager {
             .flex_row()
             .items_center()
             .bg(gpui_color(background))
-            .child(
-                div()
-                    .id("tab-bar-divider")
-                    .debug_selector(|| "tab-bar-divider".to_owned())
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(presentation.divider)),
-            )
             .child(items)
             .child(
                 div()
@@ -1448,6 +1448,8 @@ impl Render for TabManager {
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
         let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
 
         div()
             .id("tab-manager")
@@ -1498,8 +1500,24 @@ impl Render for TabManager {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
+                    // The content stage is base surface. Its inset floats the Pane Layout below the
+                    // titlebar, beside the sidebar, and clear of the window's other edges.
+                    .bg(gpui_color(stage_surface))
+                    .p(frame.outer_inset())
+                    .child(
+                        div()
+                            .debug_selector(move || {
+                                format!(
+                                    "tab-manager-stage-surface-{:08x}",
+                                    stage_surface.rgba_hex()
+                                )
+                            })
+                            .absolute()
+                            .inset_0(),
+                    )
                     .child(active_tab),
             )
     }
@@ -1603,7 +1621,6 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         );
@@ -1633,7 +1650,6 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         );
@@ -1798,11 +1814,6 @@ mod tests {
                             .contrast_ratio(bar),
                     "{appearance:?} window_active={window_active}: separator should stay quieter \
                      than an inactive Tab title"
-                );
-                assert!(
-                    contrast > presentation.divider.source_over(bar).contrast_ratio(bar),
-                    "{appearance:?} window_active={window_active}: a short separator should read \
-                     stronger than the full-length Tab bar divider"
                 );
             }
         }
@@ -2608,20 +2619,17 @@ mod tests {
     /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
     ///
     /// The chip is what carries that reading, and it only works while it keeps air on every side:
-    /// against its own item, against the chip beside it, and against the one seam still drawn under
-    /// the bar. The item itself keeps the full height of the bar, because the inset is paint and
-    /// must never shrink what a pointer can hit.
+    /// against its own item, against the chip beside it, and against the bar's lower edge, which
+    /// meets the base surface without a seam. The item itself keeps the full height of the bar,
+    /// because the inset is paint and must never shrink what a pointer can hit.
     #[gpui::test]
-    fn every_tab_should_float_as_an_inset_chip_over_one_structural_seam(cx: &mut TestAppContext) {
+    fn every_tab_should_float_as_an_inset_chip_without_a_bar_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
         let bar = cx
             .debug_bounds("tab-bar")
             .expect("the Tab bar was not rendered");
-        let divider = cx
-            .debug_bounds("tab-bar-divider")
-            .expect("the Tab bar divider was not rendered");
         let active_item = cx
             .debug_bounds("tab-item-2-active")
             .expect("the Active Tab item was not rendered");
@@ -2657,16 +2665,11 @@ mod tests {
             "neighbouring Tabs should leave the bar visible between them"
         );
         assert!(
-            active_chip.bottom() < divider.origin.y,
-            "the Active Tab should clear the seam under the bar, got {active_chip:?} against \
-             {divider:?}"
-        );
-        assert_eq!(
-            (divider.size.height, divider.size.width),
-            (px(TAB_BAR_DIVIDER_SIZE), bar.size.width),
-            "the one seam under the bar should run its whole width"
+            active_chip.bottom() < bar.bottom(),
+            "the Active Tab should clear the bar's lower edge, got {active_chip:?} against {bar:?}"
         );
         for stale in [
+            "tab-bar-divider",
             "tab-item-1-divider",
             "tab-item-1-bottom-divider",
             "tab-item-2-underline",

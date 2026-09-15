@@ -1,6 +1,7 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::ui::workspace_sidebar::{SIDEBAR_ROW_SELECTION_INSET_X, SIDEBAR_ROW_SELECTION_INSET_Y};
+use crate::ui::workspace_frame::{ChipInsets, WorkspaceFrame};
+use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
@@ -23,6 +24,25 @@ use spaceterm_ui::{
 
 use super::*;
 use crate::domain::{PaneId, TabId};
+
+/// The chip insets a sidebar row takes from the resolved Workspace frame.
+fn chip_insets(cx: &mut VisualTestContext) -> ChipInsets {
+    cx.update(|_, cx| {
+        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx)
+            .stage_adjacent_chip_insets()
+    })
+}
+
+/// The air between a row's content and the trailing edge of the row.
+fn row_trailing_padding(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        WorkspaceFrame::for_appearance(appearance, cx)
+            .stage_adjacent_chip_insets()
+            .trailing
+            + appearance.spacing(crate::ui::workspace_sidebar::SIDEBAR_ROW_CHIP_PADDING)
+    })
+}
 
 #[gpui::test]
 fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
@@ -262,10 +282,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
     // Canvas children removed this frame can leave historical GPUI debug bounds behind.
     // The name occupying all available width verifies the machine and its gap are gone.
-    assert_eq!(
-        name.right(),
-        row.right() - px(SIDEBAR_ROW_HORIZONTAL_PADDING)
-    );
+    assert_eq!(name.right(), row.right() - row_trailing_padding(cx));
     let counts = cx.debug_bounds("workspace-counts-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
     assert!(counts.right() <= row.right());
@@ -5083,7 +5100,7 @@ fn drag_to(selector: &'static str, destination_x: Pixels, cx: &mut VisualTestCon
 }
 
 #[gpui::test]
-fn sidebar_should_render_one_divider_across_top_chrome_and_body(cx: &mut TestAppContext) {
+fn sidebar_should_share_one_resize_edge_across_top_chrome_and_body(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
 
     let root = cx
@@ -5178,6 +5195,185 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
         .size;
 
     assert_eq!((top_geometry, body_geometry), (expected, expected));
+}
+
+#[gpui::test]
+fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+
+    for selector in [
+        "workspace-top-chrome-bottom-divider",
+        "tab-bar-divider",
+        "workspace-sidebar-footer-divider",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector} should no longer be rendered"
+        );
+    }
+    // The sidebar edge keeps its resize layout and target, while the sidebar and the content stage
+    // paint one continuous base surface instead of a separator.
+    let base = cx.update(|_, cx| crate::ui::appearance::chrome(cx).colors.panel_background);
+    let stage: &'static str = format!("tab-manager-stage-surface-{:08x}", base.rgba_hex()).leak();
+    assert!(
+        cx.debug_bounds(stage).is_some(),
+        "the content stage should paint the sidebar's base surface"
+    );
+    assert!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn content_stage_should_inset_the_active_pane_on_every_side(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let frame = cx.update(|_, cx| {
+        crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
+            crate::ui::appearance::chrome(cx),
+            cx,
+        )
+    });
+    let inset = frame.outer_inset();
+
+    for sidebar_visible in [true, false] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                if manager.sidebar.read(cx).layout().visible != sidebar_visible {
+                    manager.toggle_sidebar(window, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was rendered");
+        let content = cx
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was rendered");
+        let pane = cx
+            .debug_bounds("pane-surface-1")
+            .expect("the floating Pane surface was rendered");
+        let content_left = if sidebar_visible {
+            root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH)
+        } else {
+            root.origin.x
+        };
+
+        assert_eq!(
+            (
+                content.origin.x,
+                content.origin.y,
+                pane.left() - content.left(),
+                pane.top() - content.top(),
+                content.right() - pane.right(),
+                content.bottom() - pane.bottom(),
+            ),
+            (
+                content_left,
+                root.origin.y + px(TOP_CHROME_HEIGHT),
+                inset,
+                inset,
+                inset,
+                inset,
+            ),
+            "sidebar visible: {sidebar_visible}"
+        );
+    }
+}
+
+/// The Tab strip and the floating stage share one leading vertical.
+///
+/// A Tab's paint is inset inside its own item, so the strip gives that inset back as padding: the
+/// first Tab's chip then starts exactly where the Pane beneath it starts.
+#[gpui::test]
+fn first_tab_chip_should_align_with_the_floating_content_stage(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let inset = cx.update(|_, cx| {
+        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).outer_inset()
+    });
+
+    for sidebar_visible in [true, false] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                if manager.sidebar.read(cx).layout().visible != sidebar_visible {
+                    manager.toggle_sidebar(window, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        let strip = cx
+            .debug_bounds("tab-items")
+            .expect("the Tab strip was rendered");
+        let chip = cx
+            .debug_bounds("tab-item-1-chip")
+            .expect("the Active Tab chip was rendered");
+        assert_eq!(
+            chip.left() - strip.left(),
+            inset,
+            "the first Tab should start one stage inset into its strip \
+             (sidebar visible: {sidebar_visible})"
+        );
+
+        if sidebar_visible {
+            let pane = cx
+                .debug_bounds("pane-surface-1")
+                .expect("the floating Pane surface was rendered");
+            assert_eq!(
+                chip.left(),
+                pane.left(),
+                "the first Tab and the Pane beneath it should share one leading vertical"
+            );
+            // The identity area above the sidebar stops where a selected row's chip stops.
+            let switcher = cx
+                .debug_bounds("workspace-switcher")
+                .expect("the Workspace chooser was rendered");
+            let row_chip = cx
+                .debug_bounds("workspace-row-selection-1")
+                .expect("the Active Workspace chip was rendered");
+            assert_eq!(switcher.right(), row_chip.right());
+        }
+    }
+}
+
+/// The Workspace identity keeps its glyph in both sidebar states.
+#[gpui::test]
+fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let expanded_strip = cx
+        .debug_bounds("tab-items")
+        .expect("the Tab strip was rendered");
+    assert!(cx.debug_bounds("workspace-switcher-icon").is_some());
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx));
+    });
+    cx.run_until_parked();
+
+    let icon = cx
+        .debug_bounds("workspace-switcher-icon")
+        .expect("the collapsed Workspace chip should keep the Workspace glyph");
+    let identity = cx
+        .debug_bounds("workspace-switcher-identity-icon")
+        .expect("the collapsed Workspace glyph should paint its own resolved tint");
+    let label = cx
+        .debug_bounds("workspace-chip-label")
+        .expect("the collapsed Workspace name was rendered");
+    let strip = cx
+        .debug_bounds("tab-items")
+        .expect("the Tab strip was rendered");
+    assert!(icon.size.width > px(0.0) && identity.size.width > px(0.0));
+    assert!(
+        identity.right() <= label.left(),
+        "the glyph should lead the Workspace name, got {identity:?} and {label:?}"
+    );
+    assert_eq!(
+        strip.size.height, expanded_strip.size.height,
+        "collapsing the sidebar should not move the Tab row"
+    );
+    assert_eq!(strip.top(), expanded_strip.top());
 }
 
 #[gpui::test]
@@ -5635,7 +5831,7 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 }
 
 #[gpui::test]
-fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mut TestAppContext) {
+fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n cmd-n");
     cx.run_until_parked();
@@ -5653,32 +5849,38 @@ fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mu
         .debug_bounds("workspace-row-selection-3")
         .expect("the Active Workspace selection was not rendered");
 
+    let insets = chip_insets(cx);
     assert_eq!(
         selection,
         gpui::bounds(
             point(
-                third_row.origin.x + px(SIDEBAR_ROW_SELECTION_INSET_X),
+                third_row.origin.x + insets.leading,
                 third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
             gpui::size(
-                third_row.size.width - px(SIDEBAR_ROW_SELECTION_INSET_X * 2.0),
+                third_row.size.width - insets.leading - insets.trailing,
                 third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
         ),
         "the selected Workspace material should float inside its row"
     );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-1").is_some(),
-        "unrelated Workspace rows should retain their divider"
+    // The chip keeps the same visible air on both sides: the window edge on one, and the floating
+    // content stage, whose own inset completes the trailing margin, on the other.
+    let stage_inset = cx.update(|_, cx| {
+        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).outer_inset()
+    });
+    assert_eq!(
+        selection.left() - third_row.left(),
+        third_row.right() - selection.right() + stage_inset,
+        "the selected Workspace chip should rest on equal air"
     );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-2").is_none(),
-        "the divider before the selected Workspace should leave the material open"
-    );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-3").is_none(),
-        "the selected Workspace should not draw a divider through its material"
-    );
+    for row in 1..=3 {
+        let selector: &'static str = format!("workspace-row-divider-{row}").leak();
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "Workspace row {row} should rest on the base surface without a separator"
+        );
+    }
     assert_eq!(
         (first_row.size, second_row.size),
         (third_row.size, third_row.size)
@@ -5789,9 +5991,10 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the New Workspace ComboBox panel should render");
+    let insets = chip_insets(cx);
     assert_eq!(
         panel.size.width,
-        sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
+        sidebar.size.width - insets.leading - insets.trailing
     );
     let chooser = cx
         .debug_bounds("workspace-switcher")
@@ -5937,6 +6140,14 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
     let divider = cx
         .debug_bounds("workspace-sidebar-resize-handle-divider")
         .expect("the collapsed sidebar divider was not rendered");
+    let collapsed_width = cx.update(|window, cx| {
+        WorkspaceChromeLayout::collapsed_width(
+            "A Workspace Name That Must Be Truncated",
+            false,
+            window,
+            cx,
+        )
+    });
     assert_eq!(
         (
             chrome.size.width,
@@ -5945,10 +6156,10 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             divider.center().x,
         ),
         (
-            px(212.0),
-            px(212.0),
-            root.origin.x + px(212.0),
-            root.origin.x + px(212.0),
+            collapsed_width,
+            collapsed_width,
+            root.origin.x + collapsed_width,
+            root.origin.x + collapsed_width,
         )
     );
 }
@@ -6128,7 +6339,10 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let trailing_inset = chooser.right() - label.right();
     assert!(trailing_inset >= px(11.0) && trailing_inset < px(12.0));
     assert_eq!(label.left() - switcher_icon.right(), px(8.0));
-    assert_eq!(tabs.left() - chooser.right(), px(4.0));
+    let edge_reserve = cx.update(|_, cx| {
+        WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx).edge_reserve()
+    });
+    assert_eq!(tabs.left() - chooser.right(), edge_reserve);
 
     for position in [
         switcher_icon.center(),

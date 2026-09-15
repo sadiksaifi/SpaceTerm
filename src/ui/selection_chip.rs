@@ -27,12 +27,27 @@ pub(crate) const CHIP_RADIUS: f32 = 6.0;
 /// Where a chip sits inside the item that owns it.
 ///
 /// The item keeps its own bounds, so hit target, hover region, and keyboard target are unchanged
-/// by the inset: only the paint moves inward.
+/// by the inset: only the paint moves inward. The two horizontal insets are separate because a
+/// strip can meet a window edge on one side and a floating surface on the other, where equal
+/// insets would read as unequal air.
 #[derive(Clone, Copy)]
 pub(crate) struct ChipShape {
-    pub(crate) inset_x: Pixels,
+    pub(crate) inset_leading: Pixels,
+    pub(crate) inset_trailing: Pixels,
     pub(crate) inset_y: Pixels,
     pub(crate) radius: Pixels,
+}
+
+impl ChipShape {
+    /// A chip with the same air on both sides, for a strip whose neighbours match.
+    pub(crate) const fn symmetric(inset_x: Pixels, inset_y: Pixels, radius: Pixels) -> Self {
+        Self {
+            inset_leading: inset_x,
+            inset_trailing: inset_x,
+            inset_y,
+            radius,
+        }
+    }
 }
 
 /// What a chip paints at rest and under the pointer.
@@ -59,14 +74,14 @@ impl SelectionChip {
         Self { shape, paint }
     }
 
-    fn body(inset_x: Pixels, inset_y: Pixels, radius: Pixels) -> gpui::Div {
+    fn body(shape: ChipShape) -> gpui::Div {
         div()
             .absolute()
-            .top(inset_y)
-            .bottom(inset_y)
-            .left(inset_x)
-            .right(inset_x)
-            .rounded(radius)
+            .top(shape.inset_y)
+            .bottom(shape.inset_y)
+            .left(shape.inset_leading)
+            .right(shape.inset_trailing)
+            .rounded(shape.radius)
     }
 
     /// The chip itself, painted under the item's own content.
@@ -76,7 +91,7 @@ impl SelectionChip {
     pub(crate) fn render(self, selector: String, group: &str) -> AnyElement {
         let hover_fill = self.paint.hover_fill;
         let hover_rim = self.paint.hover_rim;
-        Self::body(self.shape.inset_x, self.shape.inset_y, self.shape.radius)
+        Self::body(self.shape)
             .debug_selector(move || selector.clone())
             .when_some(self.paint.fill, |chip, fill| {
                 chip.bg(rgba(fill.rgba_hex()))
@@ -109,11 +124,12 @@ impl SelectionChip {
     /// shape the keyboard is pointing at. The gap is the hairline of surface left visible between
     /// the two, so the ring reads as something around the chip rather than as a thicker chip.
     pub(crate) fn ring(self, gap: Pixels, color: Color, selector: &'static str) -> AnyElement {
-        Self::body(
-            self.shape.inset_x - gap,
-            self.shape.inset_y - gap,
-            self.shape.radius + gap,
-        )
+        Self::body(ChipShape {
+            inset_leading: self.shape.inset_leading - gap,
+            inset_trailing: self.shape.inset_trailing - gap,
+            inset_y: self.shape.inset_y - gap,
+            radius: self.shape.radius + gap,
+        })
         .border(px(CHIP_HAIRLINE))
         .border_color(rgba(color.rgba_hex()))
         .debug_selector(move || selector.to_owned())

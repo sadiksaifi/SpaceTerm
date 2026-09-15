@@ -55,7 +55,16 @@ use spaceterm_ui::{
     Tooltip,
 };
 
-const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
+/// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
+///
+/// Rendering, minimum sizing, Split creation, resizing, and restored-leaf sizing all read this one
+/// resolved frame gap, so a nested Split keeps the same rhythm as its parent.
+fn pane_gap(cx: &App) -> f32 {
+    f32::from(
+        super::workspace_frame::WorkspaceFrame::for_appearance(super::appearance::chrome(cx), cx)
+            .pane_gap(),
+    )
+}
 /// The Pane Caption's outer height, including its symmetric vertical padding.
 const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
@@ -885,7 +894,7 @@ impl PaneHost {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
-        let Some(target_size) = self.split_target_size(target_pane_id) else {
+        let Some(target_size) = self.split_target_size(target_pane_id, pane_gap(cx)) else {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
@@ -948,7 +957,8 @@ impl PaneHost {
                             return;
                         }
                     };
-                    let Some(current_size) = host.split_target_size(target_pane_id) else {
+                    let Some(current_size) = host.split_target_size(target_pane_id, pane_gap(cx))
+                    else {
                         return;
                     };
                     if current_size != target_size {
@@ -984,15 +994,18 @@ impl PaneHost {
         );
     }
 
-    fn split_target_size(&self, pane_id: PaneId) -> Option<PaneSize> {
+    fn split_target_size(&self, pane_id: PaneId, gap: f32) -> Option<PaneSize> {
         match self.terminal_tab.zoom_state() {
             ZoomState::Restored => self
                 .pane_bounds
                 .get(&pane_id)
                 .and_then(|bounds| pane_size(*bounds).ok()),
-            ZoomState::Zoomed(_) => {
-                restored_leaf_size(self.terminal_tab.root(), pane_id, self.pane_layout_size?)
-            }
+            ZoomState::Zoomed(_) => restored_leaf_size(
+                self.terminal_tab.root(),
+                pane_id,
+                self.pane_layout_size?,
+                gap,
+            ),
         }
     }
 
@@ -1007,22 +1020,19 @@ impl PaneHost {
     ) {
         let session_factory = self.session_factory.clone();
         let pane_construction = self.pane_construction.clone();
-        let result = self.terminal_tab.split_pane(
-            target_pane_id,
-            axis,
-            target_size,
-            DIVIDER_SIZE,
-            |new_pane_id| {
-                Self::create_terminal(
-                    new_pane_id,
-                    session_factory,
-                    prepared_launch,
-                    pane_construction,
-                    window,
-                    cx,
-                )
-            },
-        );
+        let gap = pane_gap(cx);
+        let result =
+            self.terminal_tab
+                .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
+                    Self::create_terminal(
+                        new_pane_id,
+                        session_factory,
+                        prepared_launch,
+                        pane_construction,
+                        window,
+                        cx,
+                    )
+                });
 
         match result {
             Ok(pane_id) => {
@@ -1142,18 +1152,18 @@ impl PaneHost {
         let Some(bounds) = self.split_bounds.get(&split_id).copied() else {
             return;
         };
-        let Some(requested_ratio) = split_ratio_for_offset(axis, bounds, requested_offset) else {
+        let gap = pane_gap(cx);
+        let Some(requested_ratio) = split_ratio_for_offset(axis, bounds, requested_offset, gap)
+        else {
             return;
         };
         let Ok(available_size) = pane_size(bounds) else {
             return;
         };
-        match self.terminal_tab.resize_split(
-            split_id,
-            available_size,
-            DIVIDER_SIZE,
-            requested_ratio,
-        ) {
+        match self
+            .terminal_tab
+            .resize_split(split_id, available_size, gap, requested_ratio)
+        {
             Ok(_) => cx.notify(),
             Err(error) => eprintln!("failed to resize split: {error}"),
         }
@@ -1166,9 +1176,10 @@ impl PaneHost {
         let Ok(available_size) = pane_size(bounds) else {
             return;
         };
+        let gap = pane_gap(cx);
         match self
             .terminal_tab
-            .resize_split(split_id, available_size, DIVIDER_SIZE, 0.5)
+            .resize_split(split_id, available_size, gap, 0.5)
         {
             Ok(_) => cx.notify(),
             Err(error) => eprintln!("failed to reset split: {error}"),
@@ -1369,16 +1380,17 @@ impl PaneHost {
         tree: PaneTreeRef<'_>,
         host: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, appearance),
+            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, appearance, cx),
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host, appearance),
+            } => self.render_split(split_id, axis, ratio, (first, second), host, appearance, cx),
         }
     }
 
@@ -1387,6 +1399,7 @@ impl PaneHost {
         pane_id: PaneId,
         host: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
@@ -1406,6 +1419,9 @@ impl PaneHost {
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let measure_host = host.clone();
         let focus_host = host.clone();
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        // The Pane interior stays Terminal-owned; only the surface shape comes from the frame.
+        let surface = terminal.read(cx).surface_background();
 
         div()
             .on_children_prepainted(move |children, _, cx| {
@@ -1420,6 +1436,7 @@ impl PaneHost {
                 });
             })
             .id(("pane", pane_id.get()))
+            .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
             .group(pane_group.clone())
             .relative()
             .size_full()
@@ -1427,10 +1444,12 @@ impl PaneHost {
             .min_h_0()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
             })
-            .bg(gpui_color(appearance.colors.background))
+            .rounded(frame.pane_radius())
+            .bg(gpui_color(surface))
             .child(render_pane_caption(
                 PaneCaption {
                     pane_id,
@@ -1453,9 +1472,14 @@ impl PaneHost {
                     .overflow_hidden()
                     .child(terminal),
             )
+            .child(render_pane_corner_mask(pane_id, frame, appearance))
             .into_any_element()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one recursive render step over the Split node, its host, and the frame inputs"
+    )]
     fn render_split(
         &self,
         split_id: SplitId,
@@ -1464,10 +1488,11 @@ impl PaneHost {
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone(), appearance);
-        let second = self.render_tree(second, host.clone(), appearance);
+        let first = self.render_tree(first, host.clone(), appearance, cx);
+        let second = self.render_tree(second, host.clone(), appearance, cx);
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1492,40 +1517,56 @@ impl PaneHost {
             SplitAxis::Vertical => split.flex_col(),
         };
 
+        let gap = pane_gap(cx);
         let current_offset = self
             .split_bounds
             .get(&split_id)
-            .and_then(|bounds| split_content_extent(axis, *bounds))
+            .and_then(|bounds| split_content_extent(axis, *bounds, gap))
             .map_or(0.0, |extent| extent * ratio);
 
-        // Paint the resize target after both panes, but before sibling popovers. A deferred
-        // divider would paint through command palettes, whose own menus are deferred overlays.
-        let divider = div()
+        // The gap is empty base surface: the host paints no fill and the spacer paints nothing.
+        // The resize target is centred over the gap and painted after both Panes, but before
+        // sibling popovers; a deferred target would paint through command palettes, whose own
+        // menus are deferred overlays.
+        let resize_target = div()
+            .id(("split-gap", split_id.get()))
+            .debug_selector(move || format!("split-gap-{}", split_id.get()))
             .absolute()
-            .child(render_divider(split_id, axis, current_offset, host));
-        let (spacer, divider) = match axis {
+            .flex()
+            .justify_center()
+            .child(render_split_resize_handle(
+                split_id,
+                axis,
+                current_offset,
+                host,
+            ));
+        let (spacer, resize_target) = match axis {
             SplitAxis::Horizontal => (
-                div().w(px(DIVIDER_SIZE)).h_full().flex_shrink_0(),
-                divider
+                div().w(px(gap)).h_full().flex_shrink_0(),
+                resize_target
+                    .flex_row()
                     .top_0()
                     .bottom_0()
+                    .w(px(gap))
                     .left(relative(ratio))
-                    .ml(px(-ratio * DIVIDER_SIZE)),
+                    .ml(px(-ratio * gap)),
             ),
             SplitAxis::Vertical => (
-                div().h(px(DIVIDER_SIZE)).w_full().flex_shrink_0(),
-                divider
+                div().h(px(gap)).w_full().flex_shrink_0(),
+                resize_target
+                    .flex_col()
                     .left_0()
                     .right_0()
+                    .h(px(gap))
                     .top(relative(ratio))
-                    .mt(px(-ratio * DIVIDER_SIZE)),
+                    .mt(px(-ratio * gap)),
             ),
         };
         split
             .child(split_child(first, axis, ratio))
             .child(spacer)
             .child(split_child(second, axis, 1.0 - ratio))
-            .child(divider)
+            .child(resize_target)
             .into_any_element()
     }
 }
@@ -1551,7 +1592,7 @@ impl Render for PaneHost {
         let zoom_state = self.terminal_tab.zoom_state();
         let minimum_size = match zoom_state {
             ZoomState::Zoomed(_) => self.terminal_tab.minimum_pane_size(),
-            ZoomState::Restored => match self.terminal_tab.minimum_size(DIVIDER_SIZE) {
+            ZoomState::Restored => match self.terminal_tab.minimum_size(pane_gap(cx)) {
                 Ok(size) => size,
                 Err(error) => {
                     eprintln!("failed to calculate minimum Pane layout size: {error}");
@@ -1561,9 +1602,9 @@ impl Render for PaneHost {
         };
         let content = match zoom_state {
             ZoomState::Restored => {
-                self.render_tree(self.terminal_tab.root(), host.clone(), &appearance)
+                self.render_tree(self.terminal_tab.root(), host.clone(), &appearance, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, &appearance),
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, &appearance, cx),
         };
 
         div()
@@ -1586,7 +1627,7 @@ impl Render for PaneHost {
             .min_h(px(minimum_size.height()))
             .overflow_hidden()
             .font(appearance.regular.clone())
-            .bg(gpui_color(appearance.colors.background))
+            // No host fill: the base surface beneath shows around each floating Pane.
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
             .on_action(cx.listener(Self::on_focus_pane_left))
@@ -1683,6 +1724,9 @@ fn render_pane_caption(
                 ..caption
             };
             let background = caption.terminal.read(cx).surface_background();
+            let pane_radius =
+                super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
+                    .pane_radius();
             let pane_id = caption.pane_id;
             let paint = appearance.colors.caption(background, caption.focused);
             let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
@@ -1705,6 +1749,14 @@ fn render_pane_caption(
                     )
                 })
                 .size_full()
+                // The caption keeps the full height of its strip as a hit target, and its contents
+                // ride the middle of that strip whatever the Pane's own height turns out to be.
+                .flex()
+                .items_center()
+                // The caption is the top of the floating Pane, so its surface carries the Pane's
+                // own top corners rather than painting a square edge over them.
+                .rounded_tl(pane_radius)
+                .rounded_tr(pane_radius)
                 .bg(gpui_color(background))
                 .child(content)
                 .into_any_element();
@@ -1849,7 +1901,9 @@ fn render_pane_caption_content(
                 if focused { "focused" } else { "unfocused" }
             )
         })
-        .h(appearance.caption_height())
+        // The row fills the caption strip rather than restating its height, so the contents centre
+        // on the strip's own middle and the whole strip stays one hit target.
+        .h_full()
         .w_full()
         .flex_shrink_0()
         .flex()
@@ -1996,6 +2050,42 @@ fn render_pane_origin(
         .into_any_element()
 }
 
+/// Rounds a floating Pane's painted content to the frame's corner radius.
+///
+/// GPUI content masks are rectangular, so a rounded Pane cannot clip its caption and terminal
+/// paint to its corners. This ring of base surface sits over the Pane's edges instead: its inner
+/// edge is the Pane's rounded outline and its outer part lies beyond the Pane, where the Pane's
+/// own clipping removes it. Only the corner fillets remain visible, painted in the surface already
+/// beneath the Pane, so the Pane gains no border and no hit target.
+fn render_pane_corner_mask(
+    pane_id: PaneId,
+    frame: super::workspace_frame::WorkspaceFrame,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let radius = frame.pane_radius();
+    // Any width reaching past the corner fillet works; the radius itself always does.
+    let width = radius;
+    let base = super::workspace_frame::base_surface(&appearance.colors);
+    div()
+        .debug_selector(move || {
+            format!(
+                "pane-corner-mask-{}-{}-{:08x}",
+                pane_id.get(),
+                f32::from(radius),
+                base.rgba_hex()
+            )
+        })
+        .absolute()
+        .top(-width)
+        .left(-width)
+        .right(-width)
+        .bottom(-width)
+        .border(width)
+        .border_color(gpui_color(base))
+        .rounded(radius + width)
+        .into_any_element()
+}
+
 fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoElement {
     let child = div()
         .flex_basis(DefiniteLength::Fraction(ratio))
@@ -2010,14 +2100,18 @@ fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoEleme
     }
 }
 
-fn render_divider(
+/// The Split's resize interaction, owned by the empty gap between its Panes.
+///
+/// The handle keeps its pointer target, cursor, double-click reset, and keyboard focus, but paints
+/// no divider in any state: the gap itself is the only visible separation.
+fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
     current_offset: f32,
     host: gpui::WeakEntity<PaneHost>,
 ) -> AnyElement {
     ResizeHandle::new(
-        ("split-divider", split_id.get()),
+        ("split-resize", split_id.get()),
         "Resize Pane split",
         match axis {
             SplitAxis::Horizontal => ResizeAxis::Horizontal,
@@ -2027,7 +2121,8 @@ fn render_divider(
     )
     .tab_stop(true)
     .reset_on_double_click(true)
-    .debug_selector(format!("split-divider-{}", split_id.get()))
+    .paint_divider(false)
+    .debug_selector(format!("split-resize-{}", split_id.get()))
     .on_event(move |event, window, cx| {
         let event = *event;
         let _ = host.update(cx, |host, cx| {
@@ -2042,6 +2137,7 @@ fn restored_leaf_size(
     tree: PaneTreeRef<'_>,
     target: PaneId,
     available: PaneSize,
+    gap: f32,
 ) -> Option<PaneSize> {
     match tree.node() {
         PaneNodeRef::Leaf { pane_id } => (pane_id == target).then_some(available),
@@ -2054,19 +2150,17 @@ fn restored_leaf_size(
         } => {
             let child_size = |fraction| {
                 match axis {
-                    SplitAxis::Horizontal => PaneSize::new(
-                        (available.width() - DIVIDER_SIZE) * fraction,
-                        available.height(),
-                    ),
-                    SplitAxis::Vertical => PaneSize::new(
-                        available.width(),
-                        (available.height() - DIVIDER_SIZE) * fraction,
-                    ),
+                    SplitAxis::Horizontal => {
+                        PaneSize::new((available.width() - gap) * fraction, available.height())
+                    }
+                    SplitAxis::Vertical => {
+                        PaneSize::new(available.width(), (available.height() - gap) * fraction)
+                    }
                 }
                 .ok()
             };
-            restored_leaf_size(first, target, child_size(ratio)?)
-                .or_else(|| restored_leaf_size(second, target, child_size(1.0 - ratio)?))
+            restored_leaf_size(first, target, child_size(ratio)?, gap)
+                .or_else(|| restored_leaf_size(second, target, child_size(1.0 - ratio)?, gap))
         }
     }
 }
@@ -2075,11 +2169,12 @@ fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSize
     PaneSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height))
 }
 
-fn split_content_extent(axis: SplitAxis, bounds: Bounds<Pixels>) -> Option<f32> {
+/// The extent a Split shares between its two children once its gap is reserved.
+fn split_content_extent(axis: SplitAxis, bounds: Bounds<Pixels>, gap: f32) -> Option<f32> {
     let extent = match axis {
         SplitAxis::Horizontal => f32::from(bounds.size.width),
         SplitAxis::Vertical => f32::from(bounds.size.height),
-    } - DIVIDER_SIZE;
+    } - gap;
     (extent > 0.0).then_some(extent)
 }
 
@@ -2087,8 +2182,9 @@ fn split_ratio_for_offset(
     axis: SplitAxis,
     bounds: Bounds<Pixels>,
     requested_offset: f32,
+    gap: f32,
 ) -> Option<f32> {
-    let content_extent = split_content_extent(axis, bounds)?;
+    let content_extent = split_content_extent(axis, bounds, gap)?;
     requested_offset
         .is_finite()
         .then_some(requested_offset / content_extent)
@@ -2941,13 +3037,27 @@ mod tests {
             });
             cx.run_until_parked();
             let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+            let pane = cx.debug_bounds("pane-surface-1").unwrap();
             let controls = cx.debug_bounds("pane-split-right-1").unwrap();
+            let name = cx.debug_bounds("pane-caption-name-1").unwrap();
             let top = controls.origin.y - caption.origin.y;
             let bottom = caption.bottom_right().y - controls.bottom_right().y;
             // GPUI rounds layout edges to device pixels.
             assert!((caption.size.height - expected_height).abs() <= px(0.5));
             assert!((top - bottom).abs() <= px(0.5), "top and bottom must match");
             assert!(top >= padding && bottom >= padding);
+            // The caption row is the strip: it starts at the Pane's own top edge and its contents
+            // ride the strip's middle rather than a box of their own.
+            assert_eq!(caption.top(), pane.top());
+            assert_eq!(caption.left(), pane.left());
+            assert_eq!(caption.size.width, pane.size.width);
+            for content in [controls, name] {
+                assert!(
+                    (content.center().y - caption.center().y).abs() <= px(0.5),
+                    "caption content should centre on the strip at {spacing_scale}, got \
+                     {content:?} in {caption:?}"
+                );
+            }
         }
     }
 
@@ -3009,6 +3119,60 @@ mod tests {
 
         cx.run_until_parked();
         assert!(cx.debug_bounds("pane-caption-1-focused").is_some());
+    }
+
+    #[gpui::test]
+    fn single_pane_should_float_as_one_rounded_surface_holding_its_caption(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+
+        let root = gpui::Bounds::new(
+            point(px(0.0), px(0.0)),
+            cx.update(|window, _| window.viewport_size()),
+        );
+        let surface = cx
+            .debug_bounds("pane-surface-1")
+            .expect("the floating Pane surface was rendered");
+        let caption = cx
+            .debug_bounds("pane-caption-1-focused")
+            .expect("the Pane Caption was rendered");
+        assert_eq!(surface, root, "a single Pane should fill its host");
+        assert!(
+            surface.contains(&caption.origin) && caption.right() <= surface.right(),
+            "the Pane Caption should sit inside the Pane surface"
+        );
+        assert_eq!(caption.top(), surface.top());
+
+        let (frame, base, measured) = cx.update(|_, cx| {
+            let appearance = super::super::appearance::chrome(cx);
+            (
+                super::super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx),
+                super::super::workspace_frame::base_surface(&appearance.colors),
+                host.read(cx).pane_bounds.get(&PaneId::new(1)).copied(),
+            )
+        });
+        assert_eq!(
+            measured,
+            Some(surface),
+            "Pane geometry should still measure exactly the caption and terminal region"
+        );
+        let mask: &'static str = format!(
+            "pane-corner-mask-1-{}-{:08x}",
+            f32::from(frame.pane_radius()),
+            base.rgba_hex()
+        )
+        .leak();
+        assert!(
+            cx.debug_bounds(mask).is_some(),
+            "the Pane corners should be masked at the frame radius with the base surface"
+        );
     }
 
     #[gpui::test]
@@ -3723,7 +3887,7 @@ mod tests {
         });
         cx.run_until_parked();
         let handle = cx
-            .debug_bounds("split-divider-1-hitbox")
+            .debug_bounds("split-resize-1-hitbox")
             .expect("the shared split ResizeHandle was rendered");
         let start = handle.center();
         let destination = point(start.x + px(60.0), start.y + px(40.0));
@@ -3753,7 +3917,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_split_resize_states_should_preserve_hairline_thickness(cx: &mut TestAppContext) {
+    fn pane_split_resize_states_should_keep_the_handle_inside_its_gap(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
@@ -3773,36 +3937,37 @@ mod tests {
         });
         cx.run_until_parked();
         let hitbox = cx
-            .debug_bounds("split-divider-1-hitbox")
+            .debug_bounds("split-resize-1-hitbox")
             .expect("the split ResizeHandle was not rendered");
+        let gap = cx
+            .debug_bounds("split-gap-1")
+            .expect("the split gap was not rendered");
         let target_width = hitbox.size.width;
         let center = hitbox.center();
-        let resting = cx
-            .debug_bounds("split-divider-1-divider")
-            .expect("the split divider was not rendered")
-            .size
-            .width;
+        // The handle paints nothing; its unpainted layout mark stays centred inside the gap in
+        // every interaction state instead of growing into a capsule.
+        let mark = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("split-resize-1-divider")
+                .expect("the split handle layout was not rendered")
+        };
+        let resting = mark(cx);
 
         cx.simulate_mouse_move(center, None, Modifiers::none());
         cx.run_until_parked();
-        let hovered = cx
-            .debug_bounds("split-divider-1-divider")
-            .expect("the hovered split divider was not rendered")
-            .size
-            .width;
+        let hovered = mark(cx);
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
-        let active = cx
-            .debug_bounds("split-divider-1-divider")
-            .expect("the active split divider was not rendered")
-            .size
-            .width;
+        let active = mark(cx);
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
 
-        assert_eq!(
-            (target_width, resting, hovered, active),
-            (px(8.0), px(1.0), px(1.0), px(1.0))
-        );
+        assert_eq!(target_width, px(8.0));
+        for state in [resting, hovered, active] {
+            assert_eq!(state.size.width, resting.size.width);
+            assert!(
+                state.left() >= gap.left() && state.right() <= gap.right(),
+                "the handle should stay inside the gap, got {state:?} in {gap:?}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -3828,7 +3993,7 @@ mod tests {
         });
         cx.run_until_parked();
         let handle = cx
-            .debug_bounds("split-divider-1-hitbox")
+            .debug_bounds("split-resize-1-hitbox")
             .expect("the integrated split ResizeHandle was rendered");
         let edges = [
             point(handle.left() + px(0.5), handle.center().y),
@@ -3856,22 +4021,301 @@ mod tests {
 
     #[test]
     fn split_ratio_should_follow_horizontal_requested_offset() {
-        let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(401.0), px(200.0)));
+        let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(406.0), px(200.0)));
 
         assert_eq!(
-            split_ratio_for_offset(SplitAxis::Horizontal, split_bounds, 100.0),
+            split_ratio_for_offset(SplitAxis::Horizontal, split_bounds, 100.0, 6.0),
             Some(0.25)
         );
     }
 
     #[test]
     fn split_ratio_should_follow_vertical_requested_offset() {
-        let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(400.0), px(201.0)));
+        let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(400.0), px(208.0)));
 
         assert_eq!(
-            split_ratio_for_offset(SplitAxis::Vertical, split_bounds, 50.0),
+            split_ratio_for_offset(SplitAxis::Vertical, split_bounds, 50.0, 8.0),
             Some(0.25)
         );
+    }
+
+    #[test]
+    fn split_content_extent_should_reserve_the_gap_and_reject_empty_splits() {
+        let split_bounds = bounds(point(px(0.0), px(0.0)), size(px(6.0), px(100.0)));
+
+        assert_eq!(
+            split_content_extent(SplitAxis::Vertical, split_bounds, 6.0),
+            Some(94.0)
+        );
+        assert_eq!(
+            split_content_extent(SplitAxis::Horizontal, split_bounds, 6.0),
+            None
+        );
+    }
+
+    fn split_gap_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (host, cx)
+    }
+
+    fn install_spacing_scale(spacing_scale: f32, cx: &mut VisualTestContext) -> f32 {
+        let appearance = super::super::appearance::ChromeAppearance {
+            spacing_scale,
+            ..Default::default()
+        };
+        let gap = cx.update(|_, cx| {
+            f32::from(
+                super::super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
+                    .pane_gap(),
+            )
+        });
+        cx.update(|window, cx| {
+            cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+                appearance,
+            )));
+            window.refresh();
+        });
+        cx.run_until_parked();
+        gap
+    }
+
+    fn split_ratio(host: &Entity<PaneHost>, cx: &mut VisualTestContext) -> f32 {
+        host.read_with(cx, |host, _| match host.terminal_tab.root().node() {
+            PaneNodeRef::Split { ratio, .. } => ratio,
+            PaneNodeRef::Leaf { .. } => f32::NAN,
+        })
+    }
+
+    /// Nested Splits keep the frame's gap rhythm at both densities, and each gap is empty base
+    /// surface owned by an unpainted resize target centred over it.
+    #[gpui::test]
+    fn split_gaps_should_follow_the_frame_rhythm_in_nested_splits_at_both_densities(
+        cx: &mut TestAppContext,
+    ) {
+        let (host, cx) = split_gap_host(cx);
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 3);
+
+        let mut gaps = Vec::new();
+        for spacing_scale in [1.0, 1.25] {
+            let gap = install_spacing_scale(spacing_scale, cx);
+            gaps.push(gap);
+            let first = cx.debug_bounds("pane-surface-1").expect("Pane 1 surface");
+            let second = cx.debug_bounds("pane-surface-2").expect("Pane 2 surface");
+            let third = cx.debug_bounds("pane-surface-3").expect("Pane 3 surface");
+            // GPUI rounds each laid-out edge to device pixels independently.
+            let close = |actual: Pixels, expected: f32| (f32::from(actual) - expected).abs() <= 1.0;
+            assert!(
+                close(second.left() - first.right(), gap),
+                "horizontal gap at {spacing_scale}: {first:?} {second:?}"
+            );
+            assert!(
+                close(third.top() - second.bottom(), gap),
+                "nested vertical gap at {spacing_scale}: {second:?} {third:?}"
+            );
+
+            for (split, handle_axis_extent) in [("1", gap), ("2", gap)] {
+                let gap_bounds = cx
+                    .debug_bounds(leaked(format!("split-gap-{split}")))
+                    .expect("the Split gap target was rendered");
+                let hitbox = cx
+                    .debug_bounds(leaked(format!("split-resize-{split}-hitbox")))
+                    .expect("the Split resize hitbox was rendered");
+                let (gap_extent, gap_center, hit_center) = if split == "1" {
+                    (
+                        gap_bounds.size.width,
+                        gap_bounds.center().x,
+                        hitbox.center().x,
+                    )
+                } else {
+                    (
+                        gap_bounds.size.height,
+                        gap_bounds.center().y,
+                        hitbox.center().y,
+                    )
+                };
+                assert!(close(gap_extent, handle_axis_extent), "Split {split} gap");
+                assert!(
+                    (gap_center - hit_center).abs() <= px(0.5),
+                    "Split {split} resize target should be centred over its gap"
+                );
+            }
+
+            // Every Pane wears the same rounded treatment, in a Split exactly as when alone.
+            let (radius, base) = cx.update(|_, cx| {
+                let appearance = super::super::appearance::chrome(cx);
+                (
+                    super::super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                        .pane_radius(),
+                    super::super::workspace_frame::base_surface(&appearance.colors),
+                )
+            });
+            for pane in 1..=3 {
+                let mask = leaked(format!(
+                    "pane-corner-mask-{pane}-{}-{:08x}",
+                    f32::from(radius),
+                    base.rgba_hex()
+                ));
+                assert!(
+                    cx.debug_bounds(mask).is_some(),
+                    "Pane {pane} should carry the frame's corner treatment at {spacing_scale}"
+                );
+            }
+
+            let (minimum, expected) = host.read_with(cx, |host, _| {
+                let leaf = host.terminal_tab.minimum_pane_size();
+                (
+                    host.terminal_tab.minimum_size(gap).unwrap(),
+                    (leaf.width() * 2.0 + gap, leaf.height() * 2.0 + gap),
+                )
+            });
+            assert_eq!(
+                (minimum.width(), minimum.height()),
+                expected,
+                "minimum Pane Layout size should reserve one gap per Split axis"
+            );
+        }
+        assert_eq!(gaps, [6.0, 8.0]);
+    }
+
+    #[gpui::test]
+    fn unpainted_split_gap_should_resize_and_reset_without_terminal_input(cx: &mut TestAppContext) {
+        let (host, cx) = split_gap_host(cx);
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let hitbox = cx
+            .debug_bounds("split-resize-1-hitbox")
+            .expect("the Split resize hitbox was rendered");
+        let gap = cx
+            .debug_bounds("split-gap-1")
+            .expect("the Split gap was rendered");
+        assert!(
+            hitbox.size.width >= gap.size.width,
+            "the resize target should cover the whole gap"
+        );
+
+        let start = hitbox.center();
+        let destination = point(start.x + px(40.0), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            split_ratio(&host, cx) > 0.5,
+            "dragging the gap should resize"
+        );
+
+        let center = cx
+            .debug_bounds("split-resize-1-hitbox")
+            .expect("the moved Split resize hitbox was rendered")
+            .center();
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: center,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: center,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            split_ratio(&host, cx),
+            0.5,
+            "double-clicking the gap resets"
+        );
+        let focused =
+            cx.update(|window, cx| host.read(cx).focused_terminal_has_input_focus(window, cx));
+        assert!(
+            focused,
+            "a pointer interaction should return input to the terminal"
+        );
+    }
+
+    #[gpui::test]
+    fn zoomed_split_should_size_new_splits_from_the_gapped_restored_grid(cx: &mut TestAppContext) {
+        let (host, cx) = split_gap_host(cx);
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let restored = cx.debug_bounds("pane-surface-2").expect("Pane 2 surface");
+        cx.update(|window, cx| host.update(cx, |host, cx| host.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+
+        assert_eq!(
+            host.read_with(cx, |host, _| host.terminal_tab.zoom_state()),
+            ZoomState::Zoomed(PaneId::new(2)),
+            "the focused Pane should be zoomed before its rendered geometry is inspected"
+        );
+
+        let zoomed = cx
+            .debug_bounds("pane-surface-2")
+            .expect("zoomed Pane surface");
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert_eq!(zoomed.size, viewport, "the Zoomed Pane fills its host");
+        let (radius, base) = cx.update(|_, cx| {
+            let appearance = super::super::appearance::chrome(cx);
+            (
+                super::super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .pane_radius(),
+                super::super::workspace_frame::base_surface(&appearance.colors),
+            )
+        });
+        assert!(
+            cx.debug_bounds(leaked(format!(
+                "pane-corner-mask-2-{}-{:08x}",
+                f32::from(radius),
+                base.rgba_hex()
+            )))
+            .is_some(),
+            "a Zoomed Pane keeps the same rounded treatment as a Split Pane"
+        );
+
+        let target = cx.update(|_, cx| {
+            let gap = pane_gap(cx);
+            host.read(cx).split_target_size(PaneId::new(2), gap)
+        });
+        let target = target.expect("a Zoomed Pane keeps its restored allocation");
+        assert!(
+            (target.width() - f32::from(restored.size.width)).abs() <= 1.0
+                && (target.height() - f32::from(restored.size.height)).abs() <= 1.0,
+            "restored allocation {target:?} should match the gapped layout {restored:?}"
+        );
+    }
+
+    fn leaked(selector: String) -> &'static str {
+        selector.leak()
     }
     fn report_current_directory(
         records: &TestTerminalSessionRecords,

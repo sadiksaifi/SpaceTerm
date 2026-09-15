@@ -18,9 +18,7 @@ pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
 const CONTROL_TOP_INSET: f32 = 4.0;
 const EXPANDED_MINIMUM_ACTION_GAP: f32 = 4.0;
-const EXPANDED_TRAILING_GAP: f32 = 2.0;
 const COLLAPSED_ACTION_GAP: f32 = 0.0;
-const COLLAPSED_TRAILING_GAP: f32 = 4.0;
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_SIZE: f32 = 12.0;
@@ -28,6 +26,15 @@ const PIN_NAME_GAP: f32 = 5.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
 // Name and optional pin share this budget. Outer spacing never consumes label room.
 const NAME_AND_PIN_MAXIMUM_WIDTH: f32 = 58.0;
+
+/// The air the top-left chrome keeps at its trailing edge.
+///
+/// It is the Workspace frame's edge reserve, the same air a selected sidebar row's chip keeps to
+/// the floating content stage, so the identity area, the sidebar list, and the Tab strip all stop
+/// on one grid instead of three.
+fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
+    super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).edge_reserve()
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceChromeLayout {
@@ -67,7 +74,8 @@ impl WorkspaceChromeLayout {
             + appearance.spacing(ICON_SIZE + SWITCHER_IDENTITY_GAP)
             + identity_width;
         (px(TRAFFIC_LIGHT_CLEARANCE)
-            + appearance.spacing(COLLAPSED_ACTION_GAP + COLLAPSED_TRAILING_GAP)
+            + appearance.spacing(COLLAPSED_ACTION_GAP)
+            + trailing_reserve(appearance, cx)
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
                 .custom_trigger_width(content_width))
@@ -94,11 +102,9 @@ impl WorkspaceChromeLayout {
             .absolute()
             .top(appearance.spacing(CONTROL_TOP_INSET))
             .left(px(TRAFFIC_LIGHT_CLEARANCE))
-            .right(appearance.spacing(if self.sidebar_visible {
-                EXPANDED_TRAILING_GAP
-            } else {
-                COLLAPSED_TRAILING_GAP
-            }))
+            // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
+            // stops, so the identity area and the list under it share one trailing edge.
+            .right(trailing_reserve(appearance, cx))
             .flex()
             .items_center()
             .gap(appearance.spacing(if self.sidebar_visible {
@@ -180,22 +186,13 @@ impl WorkspaceChromeIdentity {
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
                     .flex_shrink_0()
-                    .child(
-                        div()
-                            .debug_selector(move || {
-                                status_selector
-                                    .unwrap_or("workspace-switcher-identity-icon")
-                                    .to_owned()
-                            })
-                            .text_color(status_normal.unwrap_or(switcher_color))
-                            .group_hover(status_group, move |style| {
-                                style.text_color(status_hovered.unwrap_or(switcher_color))
-                            })
-                            .child(Icon::custom_inherited(
-                                CustomIconName::RectangleStack,
-                                appearance.spacing(ICON_SIZE),
-                            )),
-                    ),
+                    .child(render_identity_icon(
+                        status_selector.unwrap_or("workspace-switcher-identity-icon"),
+                        status_group,
+                        status_normal.unwrap_or(switcher_color),
+                        status_hovered.unwrap_or(switcher_color),
+                        appearance.spacing(ICON_SIZE),
+                    )),
             )
             .child(chip)
             .into_any_element()
@@ -244,6 +241,40 @@ impl WorkspaceChromeIdentity {
             ),
         })
     }
+}
+
+/// The Workspace identity glyph, which the collapsed chip and the expanded chooser both present.
+///
+/// A bundled vector paints from its own resolved tint rather than from an inherited text color, so
+/// the resting and hovered paints are drawn as two stacked glyphs and the hover swaps which one is
+/// visible. Both are the one icon: the chip keeps the same identity in either sidebar state.
+fn render_identity_icon(
+    selector: &'static str,
+    group: &'static str,
+    normal: Rgba,
+    hovered: Rgba,
+    size: Pixels,
+) -> AnyElement {
+    let glyph = |tint: Rgba| Icon::custom(CustomIconName::RectangleStack, size, tint);
+    div()
+        .debug_selector(move || selector.to_owned())
+        .relative()
+        .flex()
+        .flex_none()
+        .size(size)
+        .child(glyph(normal))
+        .when(hovered != normal, |icon| {
+            icon.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .opacity(0.0)
+                    .group_hover(group, |style| style.opacity(1.0))
+                    .child(glyph(hovered)),
+            )
+        })
+        .into_any_element()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

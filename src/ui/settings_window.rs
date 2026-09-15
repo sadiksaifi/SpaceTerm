@@ -95,11 +95,7 @@ fn navigation_chip(
     appearance: &ChromeAppearance,
 ) -> SelectionChip {
     SelectionChip::new(
-        ChipShape {
-            inset_x: px(0.0),
-            inset_y: px(0.0),
-            radius: appearance.spacing(NAVIGATION_CHIP_RADIUS),
-        },
+        ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
         navigation_chip_paint(selected, available, &appearance.colors),
     )
 }

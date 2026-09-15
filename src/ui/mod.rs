@@ -36,6 +36,7 @@ mod text_input_theme;
 mod toggle_theme;
 mod tooltip_theme;
 mod workspace_chrome;
+mod workspace_frame;
 mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
@@ -141,6 +142,9 @@ fn init_with_text_direction(
     cx: &mut App,
     direction: spaceterm_ui::TextDirection,
 ) -> gpui::Result<()> {
+    cx.set_global(crate::platform::window_frame::WindowFrameGeometry::new(
+        Some(16.0),
+    ));
     initialize_controls(cx)?;
     crate::desktop_profile::testing_profile(direction).install(cx);
     Ok(())
