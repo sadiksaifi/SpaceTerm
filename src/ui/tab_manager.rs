@@ -208,7 +208,10 @@ impl TabChromePresentation {
         appearance: &super::appearance::ChromeAppearance,
         cx: &App,
     ) -> SelectionChip {
-        SelectionChip::new(tab_chip_shape(appearance, cx), self.tab_chip_paint(active))
+        SelectionChip::new(
+            tab_chip_shape(appearance, cx),
+            self.tab_chip_paint(active).raised(appearance),
+        )
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
@@ -221,7 +224,8 @@ impl TabChromePresentation {
             }
         } else {
             ChipPaint {
-                fill: Some(self.inactive_tab_background),
+                fill: (self.inactive_tab_background != self.background)
+                    .then_some(self.inactive_tab_background),
                 rim: None,
                 hover_fill: Some(self.hover_background),
                 hover_rim: None,
@@ -1368,7 +1372,6 @@ impl TabManager {
             .flex()
             .flex_row()
             .items_center()
-            .bg(gpui_color(background))
             .child(items)
             .child(
                 div()
@@ -1437,7 +1440,9 @@ impl TabManager {
             .min_w_0()
             .flex_1()
             .flex_shrink_0()
-            .bg(gpui_color(background))
+            .bg(gpui_color(
+                appearance.surface(crate::appearance::SurfaceRole::Base, background),
+            ))
             .child(drag_region)
             .into_any_element()
     }
@@ -1471,7 +1476,6 @@ impl Render for TabManager {
             .flex_col()
             .overflow_hidden()
             .font(appearance.regular.clone())
-            .bg(gpui_color(appearance.colors.background))
             .on_action(cx.listener(Self::on_create_tab))
             .on_action(cx.listener(Self::on_activate_tab_1))
             .on_action(cx.listener(Self::on_activate_tab_2))
@@ -1496,8 +1500,7 @@ impl Render for TabManager {
                             .debug_selector(|| "tab-manager-top-spacer".to_owned())
                             .w(self.top_chrome_width)
                             .h_full()
-                            .flex_shrink_0()
-                            .bg(gpui_color(presentation.background)),
+                            .flex_shrink_0(),
                     )
                     .child(tab_bar),
             )
@@ -1517,11 +1520,12 @@ impl Render for TabManager {
                     // sidebar it has no leading edge either, because the sidebar chip's own trailing
                     // margin is already that gap and two insets of one continuous surface would read
                     // as a gap of twice the size.
-                    .bg(gpui_color(stage_surface))
-                    .pt(px(0.0))
-                    .pb(frame.space())
-                    .pr(frame.space())
-                    .pl(frame.stage_leading_inset(self.sidebar_visible))
+                    .border_color(gpui_color(
+                        appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface),
+                    ))
+                    .border_b(frame.space())
+                    .border_r(frame.space())
+                    .border_l(frame.stage_leading_inset(self.sidebar_visible))
                     .child(
                         div()
                             .debug_selector(move || {

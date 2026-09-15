@@ -96,7 +96,7 @@ fn navigation_chip(
 ) -> SelectionChip {
     SelectionChip::new(
         ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
-        navigation_chip_paint(selected, available, &appearance.colors),
+        navigation_chip_paint(selected, available, &appearance.colors).raised(appearance),
     )
 }
 
@@ -116,7 +116,10 @@ fn navigation_chip_paint(
         }
     } else {
         ChipPaint {
-            fill: Some(colors.row_background),
+            // A resting row the same color as the sidebar paints nothing, so the base is not
+            // composited twice beneath a translucent window.
+            fill: (colors.row_background != colors.panel_background)
+                .then_some(colors.row_background),
             rim: None,
             // A section the query emptied cannot be chosen, so nothing lights under the pointer.
             hover_fill: available.then_some(colors.row_hover_background),
@@ -624,7 +627,10 @@ impl Render for SettingsWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui_color(appearance.colors.background))
+            .bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Sheet,
+                appearance.colors.background,
+            )))
             .text_color(gpui_color(appearance.colors.text))
             .text_size(appearance.text_size(text::BODY))
             .font(appearance.regular.clone())
@@ -957,7 +963,7 @@ impl SettingsWindow {
             .flex_none()
             .w(appearance.text_size(SIDEBAR_WIDTH))
             .h_full()
-            .bg(gpui_color(appearance.colors.panel_background))
+            .bg(gpui_color(appearance.control_colors.panel_background))
             .child(self.render_sidebar_titlebar(appearance, cx))
             .child(
                 div()
@@ -1074,6 +1080,10 @@ impl SettingsWindow {
             .flex_1()
             .min_w_0()
             .h_full()
+            .bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                appearance.colors.background,
+            )))
             .child(self.render_detail_heading(appearance, cx))
             .children(self.render_banner(appearance, cx))
             .child(
@@ -1228,6 +1238,8 @@ impl SettingsWindow {
     ) -> AnyElement {
         match row {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
+            SettingsRowId::Transparency => self.render_transparency(appearance, cx),
+            SettingsRowId::BackgroundBlur => self.render_background_blur(cx),
             SettingsRowId::ChromeScheme => {
                 self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
             }
@@ -1577,6 +1589,52 @@ impl SettingsWindow {
         .into_any_element()
     }
 
+    fn render_transparency(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let value = self.editor.document().preferences.background.transparency;
+        let owner = cx.weak_entity();
+        Stepper::new(
+            "settings-transparency",
+            "background transparency",
+            format!("{value:.2}"),
+        )
+        .bounds(value > 0.0, value < 1.0)
+        .enabled(self.editor.editable())
+        .on_step(move |delta, _, cx| {
+            let _ = owner.update(cx, |settings, cx| {
+                settings.edit(
+                    move |draft| {
+                        let value = &mut draft.preferences.background.transparency;
+                        *value = (((*value * 20.0).round() + delta as f32) / 20.0).clamp(0.0, 1.0);
+                    },
+                    cx,
+                );
+            });
+        })
+        .render(appearance, cx)
+        .into_any_element()
+    }
+
+    fn render_background_blur(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let value = self.editor.document().preferences.background.blur;
+        let owner = cx.weak_entity();
+        Switch::new("settings-background-blur", "Blur background", value)
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
+            .disabled(!self.editor.editable())
+            .debug_selector("settings-background-blur")
+            .on_change(move |change, _, cx| {
+                let blur = change.requested();
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.edit(move |draft| draft.preferences.background.blur = blur, cx);
+                });
+            })
+            .into_any_element()
+    }
+
     fn render_chrome_size(
         &mut self,
         appearance: &ChromeAppearance,
@@ -1840,11 +1898,14 @@ impl SettingsWindow {
                 .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
                 .rounded(appearance.spacing(CARD_RADIUS))
-                .bg(gpui_color(if critical {
-                    appearance.colors.warning_background
-                } else {
-                    appearance.colors.error_background
-                }))
+                .bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Surface,
+                    if critical {
+                        appearance.colors.warning_background
+                    } else {
+                        appearance.colors.error_background
+                    },
+                )))
                 .text_color(gpui_color(if critical {
                     appearance.colors.warning
                 } else {
@@ -1923,7 +1984,7 @@ impl SettingsWindow {
                     .h_full()
                     .w(appearance.text_size(SIDEBAR_WIDTH))
                     .px(appearance.spacing(SIDEBAR_INSET))
-                    .bg(gpui_color(appearance.colors.panel_background))
+                    .bg(gpui_color(appearance.control_colors.panel_background))
                     .child(
                         action_button(
                             "settings-reset-all",
@@ -1944,6 +2005,10 @@ impl SettingsWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .bg(gpui_color(appearance.surface(
+                        crate::appearance::SurfaceRole::Base,
+                        appearance.colors.background,
+                    )))
                     .items_center()
                     .justify_end()
                     .px(appearance.spacing(CONTENT_GUTTER))
@@ -2142,6 +2207,8 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 fn row_description(row: SettingsRowId) -> Option<&'static str> {
     match row {
         SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
+        SettingsRowId::Transparency => Some("0 is opaque. 1 is maximum transparency."),
+        SettingsRowId::BackgroundBlur => Some("Soften the desktop behind transparent backgrounds."),
         SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
         _ => None,
     }

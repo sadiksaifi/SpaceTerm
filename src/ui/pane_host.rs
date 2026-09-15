@@ -66,6 +66,7 @@ fn pane_gap(cx: &App) -> f32 {
     )
 }
 /// The Pane Caption's outer height, including its symmetric vertical padding.
+#[cfg(test)]
 const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
@@ -98,7 +99,6 @@ const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CONTROL_LEADING_GAP
     + PANE_CONTROL_SIZE * 2.0
     + PANE_CONTROL_GAP;
-const MINIMUM_PANE_HEIGHT: f32 = PANE_CAPTION_HEIGHT + 4.0;
 
 #[derive(Clone, Copy)]
 enum PaneCaptionAction {
@@ -368,7 +368,13 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let minimum_pane_size = match PaneSize::new(MINIMUM_PANE_WIDTH, MINIMUM_PANE_HEIGHT) {
+        let appearance = super::appearance::chrome(cx);
+        let radius =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).pane_radius();
+        let minimum_pane_size = match PaneSize::new(
+            MINIMUM_PANE_WIDTH,
+            f32::from(appearance.caption_height() + radius) + 4.0,
+        ) {
             Ok(size) => size,
             Err(error) => {
                 unreachable!("fixed minimum Pane dimensions must be valid: {error}")
@@ -1419,9 +1425,14 @@ impl PaneHost {
         cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
+            // A Pane without its Terminal still occupies a Pane's place, so it keeps a Pane's
+            // material rather than punching an opaque block through a translucent window.
             return div()
                 .size_full()
-                .bg(gpui_color(appearance.colors.background))
+                .bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Surface,
+                    appearance.colors.background,
+                )))
                 .into_any_element();
         };
         let focused = self.terminal_tab.focused_pane_id() == pane_id;
@@ -1438,15 +1449,17 @@ impl PaneHost {
         let focus_host = host.clone();
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         // The Pane interior stays Terminal-owned; only the surface shape comes from the frame.
-        let surface = terminal.read(cx).surface_background();
+        let surface_terminal = terminal.clone();
+        let surface_appearance = appearance.clone();
+        let radius = frame.pane_radius();
 
         div()
             .on_children_prepainted(move |children, _, cx| {
-                let Some(first) = children.first() else {
+                let Some(first) = children.get(1) else {
                     return;
                 };
                 let bounds = children
-                    .get(1)
+                    .get(2)
                     .map_or(*first, |terminal| first.union(terminal));
                 let _ = measure_host.update(cx, |host, _| {
                     host.pane_bounds.insert(pane_id, bounds);
@@ -1466,7 +1479,22 @@ impl PaneHost {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
             })
             .rounded(frame.pane_radius())
-            .bg(gpui_color(surface))
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, cx| {
+                        // The terminal chooses its accepted presentation during prepaint. Read its
+                        // surface at paint time so recovery and OSC changes share this frame's
+                        // presentation. Its color overlay rests on the shared window tint.
+                        let color = surface_appearance
+                            .pane_surface(surface_terminal.read(cx).surface_background());
+                        window
+                            .paint_quad(gpui::fill(bounds, gpui_color(color)).corner_radii(radius));
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(render_pane_caption(
                 PaneCaption {
                     pane_id,
@@ -1487,9 +1515,21 @@ impl PaneHost {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
+                    // GPUI clips descendants to rectangles. Keep every terminal paint above the
+                    // bottom corner arcs, including graphics, status overlays and the scrollbar.
+                    .pb(radius)
                     .child(terminal),
             )
-            .child(render_pane_corner_mask(pane_id, frame, appearance))
+            .child(render_pane_corner_surface(pane_id, frame, appearance))
+            // The hairline paints last so the caption, Terminal and corner mask never cover it.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(gpui_color(appearance.pane_rim())),
+            )
             .into_any_element()
     }
 
@@ -1541,7 +1581,7 @@ impl PaneHost {
             .and_then(|bounds| split_content_extent(axis, *bounds, gap))
             .map_or(0.0, |extent| extent * ratio);
 
-        // The gap is empty base surface: the host paints no fill and the spacer paints nothing.
+        // The spacer owns the gap's base surface; no root or stage fill lies beneath the Panes.
         // The resize target is centred over the gap and painted after both Panes, but before
         // sibling popovers; a deferred target would paint through command palettes, whose own
         // menus are deferred overlays.
@@ -1581,7 +1621,10 @@ impl PaneHost {
         };
         split
             .child(split_child(first, axis, ratio))
-            .child(spacer)
+            .child(spacer.bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                super::workspace_frame::base_surface(&appearance.colors),
+            ))))
             .child(split_child(second, axis, 1.0 - ratio))
             .child(resize_target)
             .into_any_element()
@@ -1604,6 +1647,14 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = super::appearance::chrome(cx).clone();
+        let radius =
+            super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
+        if let Ok(minimum) = PaneSize::new(
+            MINIMUM_PANE_WIDTH,
+            f32::from(appearance.caption_height() + radius) + 4.0,
+        ) {
+            self.terminal_tab.set_minimum_pane_size(minimum);
+        }
         self.sync_terminal_focus(cx);
         let host = cx.entity().downgrade();
         let zoom_state = self.terminal_tab.zoom_state();
@@ -1644,7 +1695,7 @@ impl Render for PaneHost {
             .min_h(px(minimum_size.height()))
             .overflow_hidden()
             .font(appearance.regular.clone())
-            // No host fill: the base surface beneath shows around each floating Pane.
+            // Leaves, corner fillets and Split spacers each own their single surface fill.
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
             .on_action(cx.listener(Self::on_focus_pane_left))
@@ -1842,7 +1893,21 @@ fn render_pane_caption(
                 super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
                     .pane_radius();
             let pane_id = caption.pane_id;
-            let paint = appearance.colors.caption(background, caption.focused);
+            let mut paint = appearance.colors.caption(background, caption.focused);
+            // Caption buttons already sit on the Pane. Add only their state color difference;
+            // repeating the Terminal background here would leave opaque squares on the glass.
+            for control in [
+                &mut paint.control,
+                &mut paint.control_hover,
+                &mut paint.control_pressed,
+                &mut paint.control_disabled,
+            ] {
+                control.background = appearance.materials.paint(
+                    crate::appearance::SurfaceRole::Surface,
+                    background,
+                    control.background,
+                );
+            }
             let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
@@ -1871,7 +1936,6 @@ fn render_pane_caption(
                 // own top corners rather than painting a square edge over them.
                 .rounded_tl(pane_radius)
                 .rounded_tr(pane_radius)
-                .bg(gpui_color(background))
                 .child(content)
                 .into_any_element();
             content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
@@ -2164,14 +2228,10 @@ fn render_pane_origin(
         .into_any_element()
 }
 
-/// Rounds a floating Pane's painted content to the frame's corner radius.
-///
-/// GPUI content masks are rectangular, so a rounded Pane cannot clip its caption and terminal
-/// paint to its corners. This ring of base surface sits over the Pane's edges instead: its inner
-/// edge is the Pane's rounded outline and its outer part lies beyond the Pane, where the Pane's
-/// own clipping removes it. Only the corner fillets remain visible, painted in the surface already
-/// beneath the Pane, so the Pane gains no border and no hit target.
-fn render_pane_corner_mask(
+/// Fills the empty corner fillets with Chrome, adjoining the rounded Terminal surface.
+/// Descendants stay inside the rounded surface through layout insets. Nothing is painted beneath
+/// these fillets: this is their single backing fill, not a mask over terminal content.
+fn render_pane_corner_surface(
     pane_id: PaneId,
     frame: super::workspace_frame::WorkspaceFrame,
     appearance: &super::appearance::ChromeAppearance,
@@ -2179,7 +2239,10 @@ fn render_pane_corner_mask(
     let radius = frame.pane_radius();
     // Any width reaching past the corner fillet works; the radius itself always does.
     let width = radius;
-    let base = super::workspace_frame::base_surface(&appearance.colors);
+    let base = appearance.surface(
+        crate::appearance::SurfaceRole::Base,
+        super::workspace_frame::base_surface(&appearance.colors),
+    );
     div()
         .debug_selector(move || {
             format!(

@@ -186,7 +186,11 @@ impl SettingsGroup {
                     // A revealed row fills to the card's own edges, so the card clips it back to
                     // its corners instead of letting a square fill escape a rounded shape.
                     .overflow_hidden()
-                    .bg(gpui_color(appearance.colors.background))
+                    // A card is a surface resting on the page's base, lighter or brighter than it.
+                    .bg(gpui_color(appearance.surface(
+                        crate::appearance::SurfaceRole::Surface,
+                        appearance.colors.elevated_surface_background,
+                    )))
                     .children(self.rows),
             )
     }
@@ -372,7 +376,10 @@ impl SettingsRow {
             .py(appearance.spacing(8.0))
             .rounded(px(6.0))
             .when(self.highlighted, |row| {
-                row.bg(gpui_color(appearance.colors.row_selected_background))
+                row.bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Surface,
+                    appearance.colors.row_selected_background,
+                )))
             })
             .children(label_above)
             .child(primary)
@@ -624,7 +631,10 @@ pub(super) fn badge(
         .h(appearance.text_size(16.0))
         .px(appearance.spacing(6.0))
         .rounded(px(4.0))
-        .bg(gpui_color(appearance.colors.badge_background))
+        .bg(gpui_color(appearance.surface(
+            crate::appearance::SurfaceRole::Surface,
+            appearance.colors.badge_background,
+        )))
         .text_size(appearance.text_size(text::BADGE))
         .text_color(gpui_color(appearance.colors.badge_foreground))
         .child(label.into())

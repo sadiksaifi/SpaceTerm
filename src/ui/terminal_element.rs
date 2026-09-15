@@ -1576,7 +1576,7 @@ impl Element for TerminalGridElement {
             ),
         );
         let mut candidate = TerminalPaintBatch {
-            surface: Some(fill(bounds, gpui_color(self.background))),
+            surface: None,
             grid_bounds,
             rows: prepared_rows,
             graphics: self.graphics.paint_plan(
@@ -2551,7 +2551,13 @@ fn prepare_row_cached(
         let cursor = cursor_column == Some(column);
         let placeholder = is_kitty_placeholder(cell);
         let (_, background) = effective_colors(cell, colors);
-        if background != colors.effective_background() {
+        // Source identity matters even when a program's explicit RGB matches the default tint.
+        // Reverse video turns foreground colors into cell backgrounds, which remain opaque.
+        if cell.inverse
+            || (!colors.reversed && cell.background_source != TerminalColor::Default)
+            || (colors.reversed && cell.foreground_source != TerminalColor::Default)
+            || background != colors.effective_background()
+        {
             if let Some(previous) = backgrounds.last_mut()
                 && previous.color == background
                 && previous.start + previous.len == column
@@ -3469,6 +3475,23 @@ mod tests {
                 start: 0,
                 len: 2,
                 color: accent,
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_background_matching_default_still_paints_over_transparency() {
+        let colors = colors();
+        let mut explicit = cell("a");
+        explicit.background_source = TerminalColor::Rgb(colors.background);
+        let row = Arc::<[CellSnapshot]>::from([cell(" "), explicit]);
+        let input = prepare_row(&row, &colors, &"Menlo".into(), None);
+        assert_eq!(
+            input.backgrounds,
+            vec![BackgroundSpan {
+                start: 1,
+                len: 1,
+                color: colors.background
             }]
         );
     }

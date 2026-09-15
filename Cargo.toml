@@ -37,6 +37,7 @@ members = [
 ]
 default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
 resolver = "2"
+exclude = ["third_party/gpui"]
 
 [features]
 default = []
@@ -102,3 +103,6 @@ debug = false
 [profile.test.build-override]
 debug = false
 incremental = false
+
+[patch.crates-io]
+gpui = { path = "third_party/gpui" }

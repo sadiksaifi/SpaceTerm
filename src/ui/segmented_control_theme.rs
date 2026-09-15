@@ -78,7 +78,9 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
         gpui_color(colors.border),
         gpui_color(colors.border_focused),
     )
-    .selected_shadow(super::appearance::control_shadow(colors, false))
+    // A resting segment uses its fill and hairline for selection. A drop shadow remains visible
+    // through translucent fills and makes the selected segment look recessed.
+    .selected_shadow(spaceterm_ui::ControlShadow::none())
 }
 
 fn values(unselected: SegmentedPaint, selected: SegmentedPaint) -> SegmentedValuePaints {

@@ -152,17 +152,17 @@ fn spaceterm_light_chrome() -> ChromeColors {
 pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides {
     let palette = match appearance {
         Appearance::Dark => ChromePalette {
-            root: 0x18191c,
-            shell: 0x1f2126,
-            shell_inactive: 0x1b1d21,
-            raised: 0x2a2c31,
-            field: 0x232529,
-            hover: 0x26282d,
-            pressed: 0x2e3036,
-            selected: 0x393c43,
-            selected_inactive: 0x2c2e34,
-            row_selected: 0x3d4046,
-            row_selected_rim: 0x4f535b,
+            root: 0x141517,
+            shell: 0x161719,
+            shell_inactive: 0x151618,
+            raised: 0x1e2024,
+            field: 0x1a1c1f,
+            hover: 0x1c1d21,
+            pressed: 0x222428,
+            selected: 0x2c2e33,
+            selected_inactive: 0x1b1c20,
+            row_selected: 0x25272b,
+            row_selected_rim: 0x303338,
             row_selected_text: 0xf1f2f5,
             row_selected_secondary: 0xb9bdc5,
             text: 0xe3e4e8,
@@ -170,13 +170,13 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             text_muted: 0x969aa2,
             text_placeholder: 0x979ba3,
             text_disabled: 0x5e6167,
-            separator: 0x2b2d33,
-            separator_quiet: 0x25272c,
-            separator_disabled: 0x272930,
-            field_outline: 0x3b3e45,
-            control_outline: 0x3b3e45,
-            control_outline_strong: 0x4c5058,
-            tab_separator: 0x3b3e45,
+            separator: 0x25272b,
+            separator_quiet: 0x1c1e22,
+            separator_disabled: 0x202226,
+            field_outline: 0x2c2f34,
+            control_outline: 0x2e3136,
+            control_outline_strong: 0x3b3e45,
+            tab_separator: 0x33363c,
             mark_outline: 0x727781,
             mark_outline_strong: 0x848a95,
             mark_track: 0x1e2024,
@@ -200,17 +200,17 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shadow: 0x00000080,
         },
         Appearance::Light => ChromePalette {
-            root: 0xfbfbfc,
-            shell: 0xeff0f3,
-            shell_inactive: 0xf4f5f7,
+            root: 0xdcdee3,
+            shell: 0xe3e5e9,
+            shell_inactive: 0xe7e9ed,
             raised: 0xffffff,
-            field: 0xffffff,
-            hover: 0xe7e9ed,
-            pressed: 0xd8dbe2,
-            selected: 0xd0d4dc,
-            selected_inactive: 0xe4e6ea,
-            row_selected: 0xd6d9df,
-            row_selected_rim: 0xc2c6cf,
+            field: 0xfbfcfd,
+            hover: 0xeceef2,
+            pressed: 0xe4e6ea,
+            selected: 0xf6f8fb,
+            selected_inactive: 0xeef0f4,
+            row_selected: 0xf6f8fb,
+            row_selected_rim: 0xd3d6dc,
             row_selected_text: 0x15171a,
             row_selected_secondary: 0x4d5158,
             text: 0x1d1f23,
@@ -218,19 +218,19 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             text_muted: 0x6b6f77,
             text_placeholder: 0x6e727a,
             text_disabled: 0xa2a6ad,
-            separator: 0xe2e4e8,
-            separator_quiet: 0xeaebee,
-            separator_disabled: 0xe7e8ec,
-            field_outline: 0xced1d8,
-            control_outline: 0xc8cbd3,
-            control_outline_strong: 0xb3b7c0,
-            tab_separator: 0xc8cbd3,
+            separator: 0xe0e2e6,
+            separator_quiet: 0xe7e9ed,
+            separator_disabled: 0xe4e6ea,
+            field_outline: 0xd3d6dc,
+            control_outline: 0xd0d3d9,
+            control_outline_strong: 0xbdc0c8,
+            tab_separator: 0xbcbfc6,
             mark_outline: 0x838890,
             mark_outline_strong: 0x686e78,
             mark_track: 0xeceef1,
             mark_indicator: 0x565a62,
             mark_indicator_strong: 0x44484f,
-            scrollbar_thumb: 0x81858d,
+            scrollbar_thumb: 0x7d8189,
             accent: 0x14559f,
             accent_hover: 0x0f4885,
             accent_pressed: 0x0c3a6c,
@@ -741,10 +741,9 @@ mod tests {
 
     /// Each appearance separates its structural surfaces by weight rather than by hue.
     ///
-    /// Root, chrome shell, raised surface, hover, and selection are read as depth, which only works
-    /// when every rung moves in one direction and none of them introduces a color of its own. Light
-    /// and dark run the same ladder in opposite directions, so the pair stays one design rather
-    /// than two.
+    /// Root, chrome shell, hover and a selected chip are read as depth: the base is the darkest or
+    /// most shaded rung and everything resting on it is lighter, in both appearances, so floating
+    /// surfaces lift off the base without any color of their own.
     #[test]
     fn the_surface_ladder_should_climb_in_one_direction_in_both_appearances() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -753,7 +752,7 @@ mod tests {
                 ("root", colors.background),
                 ("shell", colors.panel_background),
                 ("hover", colors.element_hover),
-                ("selection", colors.selection_background),
+                ("selected chip", colors.row_selected_background),
             ];
 
             for (role, surface) in ladder {
@@ -767,10 +766,6 @@ mod tests {
                     unreachable!()
                 };
                 let climb = weight(*to) - weight(*from);
-                let climb = match appearance {
-                    Appearance::Dark => climb,
-                    Appearance::Light => -climb,
-                };
                 assert!(
                     climb > 0.0,
                     "{appearance:?} should raise {upper} above {lower}"
@@ -785,8 +780,9 @@ mod tests {
                 colors
                     .elevated_surface_background
                     .contrast_ratio(colors.panel_background)
-                    > 1.0,
-                "{appearance:?} should separate a floating surface from the chrome shell"
+                    > 1.0
+                    && weight(colors.elevated_surface_background) > weight(colors.panel_background),
+                "{appearance:?} should lift a floating surface above the chrome shell"
             );
         }
     }

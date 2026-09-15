@@ -93,7 +93,8 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         .resolve(
             generation,
             &candidate.preferences,
-            SystemAppearance::from(runtime.platform.system_appearance()),
+            SystemAppearance::from(runtime.platform.system_appearance())
+                .with_transparency(runtime.platform.supports_transparency()),
             &runtime.fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;
@@ -111,7 +112,10 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         return Ok(());
     }
     let chrome_changed = changes.is_none_or(|changes| {
-        changes.chrome_colors || changes.chrome_typography || changes.chrome_metrics
+        changes.chrome_colors
+            || changes.chrome_typography
+            || changes.chrome_metrics
+            || changes.window_composition
     });
     if chrome_changed {
         let prepared = ChromeAppearance::prepare(&resolved.chrome);
@@ -230,10 +234,17 @@ pub(crate) struct WindowAppearanceOwner {
 impl WindowAppearanceOwner {
     pub(crate) fn apply(&mut self, window: &mut gpui::Window, cx: &App) {
         let effective = current(cx).chrome.composition.effective;
-        if self.effective != Some(effective) {
-            window.set_background_appearance(native_background(effective));
-            self.effective = Some(effective);
+        if self.effective == Some(effective) {
+            return;
         }
+        window.set_background_appearance(native_background(effective));
+        if let Some(runtime) = cx.try_global::<AppearanceRuntime>() {
+            runtime.platform.apply_window_backdrop(
+                window,
+                effective == crate::appearance::WindowBackgroundAppearance::Blurred,
+            );
+        }
+        self.effective = Some(effective);
     }
 }
 
@@ -241,6 +252,12 @@ pub(crate) fn window_background(cx: &App) -> gpui::WindowBackgroundAppearance {
     native_background(current(cx).chrome.composition.effective)
 }
 
+/// A blurred window asks the framework for a transparent one.
+///
+/// SpaceTerm owns the blurred backdrop itself through `AppearancePlatform`, because GPUI's own
+/// blurred background rewrites the native material's private layers and leaves the desktop
+/// showing through unblurred. Asking for transparency is exactly the part of the framework's
+/// behavior SpaceTerm still wants: a non-opaque window whose renderer composites straight alpha.
 fn native_background(
     appearance: crate::appearance::WindowBackgroundAppearance,
 ) -> gpui::WindowBackgroundAppearance {
@@ -248,11 +265,9 @@ fn native_background(
         crate::appearance::WindowBackgroundAppearance::Opaque => {
             gpui::WindowBackgroundAppearance::Opaque
         }
-        crate::appearance::WindowBackgroundAppearance::Transparent => {
+        crate::appearance::WindowBackgroundAppearance::Transparent
+        | crate::appearance::WindowBackgroundAppearance::Blurred => {
             gpui::WindowBackgroundAppearance::Transparent
-        }
-        crate::appearance::WindowBackgroundAppearance::Blurred => {
-            gpui::WindowBackgroundAppearance::Blurred
         }
     }
 }

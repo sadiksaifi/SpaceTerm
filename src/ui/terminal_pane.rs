@@ -3197,7 +3197,11 @@ impl TerminalPane {
                 .rounded(px(7.0))
                 .border_1()
                 .border_color(gpui_color(appearance.colors.border))
-                .bg(gpui_color(appearance.colors.elevated_surface_background))
+                // Covers terminal content, so it takes the dense floating material.
+                .bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Floating,
+                    appearance.colors.elevated_surface_background,
+                )))
                 .shadow(appearance.shadow())
                 .block_mouse_except_scroll()
                 .key_context(TERMINAL_FIND_KEY_CONTEXT)
@@ -3539,10 +3543,7 @@ impl Render for TerminalPane {
         );
         if !self.render_lifecycle.can_present() {
             self.evict_presentation_resources(cx);
-            return div()
-                .size_full()
-                .bg(gpui_color(self.screen.background))
-                .into_any_element();
+            return div().size_full().into_any_element();
         }
         let recovery_holds_presentation = self.pending_recovery.is_some_and(|pending| {
             matches!(
@@ -3610,7 +3611,6 @@ impl Render for TerminalPane {
         };
         let projected_display_screen =
             ScreenSnapshot::projected_for_renderer(&display_screen, &self.appearance.terminal);
-        let background = gpui_color(projected_display_screen.background);
         if self.surface_background != projected_display_screen.background {
             self.surface_background = projected_display_screen.background;
             cx.emit(TerminalPaneEvent::SurfaceBackgroundChanged);
@@ -3789,7 +3789,6 @@ impl Render for TerminalPane {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(background)
             .px(px(HORIZONTAL_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
@@ -3853,7 +3852,11 @@ impl Render for TerminalPane {
                             .rounded(px(4.0))
                             .border_1()
                             .border_color(gpui_color(appearance.colors.border))
-                            .bg(gpui_color(appearance.colors.preview_background))
+                            // Covers terminal content, so it takes the dense floating material.
+                            .bg(gpui_color(appearance.surface(
+                                crate::appearance::SurfaceRole::Floating,
+                                appearance.colors.preview_background,
+                            )))
                             .text_color(gpui_color(appearance.colors.preview_foreground))
                             .text_size(appearance.text_size(13.0))
                             .overflow_hidden()
@@ -3883,7 +3886,11 @@ impl Render for TerminalPane {
                             .rounded(px(6.0))
                             .border_1()
                             .border_color(gpui_color(status_color))
-                            .bg(gpui_color(appearance.colors.elevated_surface_background))
+                            // Covers terminal content, so it takes the dense floating material.
+                            .bg(gpui_color(appearance.surface(
+                                crate::appearance::SurfaceRole::Floating,
+                                appearance.colors.elevated_surface_background,
+                            )))
                             .text_color(gpui_color(appearance.colors.text))
                             .text_size(appearance.text_size(13.0))
                             .flex()
@@ -3980,7 +3987,11 @@ fn render_paste_confirmation(
         .rounded(px(8.0))
         .border_1()
         .border_color(gpui_color(appearance.colors.warning_border))
-        .bg(gpui_color(appearance.colors.elevated_surface_background))
+        // Covers terminal content, so it takes the dense floating material.
+        .bg(gpui_color(appearance.surface(
+            crate::appearance::SurfaceRole::Floating,
+            appearance.colors.elevated_surface_background,
+        )))
         .text_color(gpui_color(appearance.colors.text))
         .text_size(appearance.text_size(13.0))
         .occlude()

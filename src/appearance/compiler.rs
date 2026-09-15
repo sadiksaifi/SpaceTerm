@@ -977,29 +977,9 @@ pub(crate) struct CaptionPaint {
     pub(crate) control_disabled: SemanticPaint,
 }
 
-impl ChromeColors {
-    /// Canonical surface backing for the opaque foundation. Definitions retain authored RGBA;
-    /// rendering and derived foregrounds use the same known root/panel/field hierarchy.
-    pub(crate) fn opaque_presentation(&self) -> Self {
-        let mut paint = self.clone();
-        let root = self.background.with_alpha(255);
-        paint.background = root;
-        paint.panel_background = self.panel_background.source_over(root);
-        paint.elevated_surface_background = self.elevated_surface_background.source_over(root);
-        paint.input_background = self.input_background.source_over(paint.panel_background);
-        paint.input_disabled_background = self
-            .input_disabled_background
-            .source_over(paint.panel_background);
-        if self.ghost_element_background.a != 0 {
-            paint.ghost_element_background = self.ghost_element_background.source_over(root);
-        }
-        if self.ghost_element_disabled.a != 0 {
-            paint.ghost_element_disabled = self.ghost_element_disabled.source_over(root);
-        }
-        macro_rules! on_root { ($($role:ident),+ $(,)?) => { $(paint.$role = self.$role.source_over(root);)+ }; }
-        on_root!(
-            title_bar_background,
-            title_bar_inactive_background,
+macro_rules! resting_fill_roles {
+    ($apply:ident) => {
+        $apply!(
             tab_active_background,
             tab_inactive_background,
             tab_inactive_selected_background,
@@ -1042,8 +1022,58 @@ impl ChromeColors {
             info_background,
             success_background,
             warning_background,
-            error_background
+            error_background,
+        )
+    };
+}
+
+impl ChromeColors {
+    /// Canonical surface backing for the opaque foundation. Definitions retain authored RGBA;
+    /// rendering and derived foregrounds use the same known root/panel/field hierarchy.
+    pub(crate) fn opaque_presentation(&self) -> Self {
+        let mut paint = self.clone();
+        let root = self.background.with_alpha(255);
+        paint.background = root;
+        paint.panel_background = self.panel_background.source_over(root);
+        paint.elevated_surface_background = self.elevated_surface_background.source_over(root);
+        paint.input_background = self.input_background.source_over(paint.panel_background);
+        paint.input_disabled_background = self
+            .input_disabled_background
+            .source_over(paint.panel_background);
+        if self.ghost_element_background.a != 0 {
+            paint.ghost_element_background = self.ghost_element_background.source_over(root);
+        }
+        if self.ghost_element_disabled.a != 0 {
+            paint.ghost_element_disabled = self.ghost_element_disabled.source_over(root);
+        }
+        macro_rules! on_root { ($($role:ident),+ $(,)?) => { $(paint.$role = self.$role.source_over(root);)+ }; }
+        on_root!(title_bar_background, title_bar_inactive_background);
+        resting_fill_roles!(on_root);
+        paint
+    }
+
+    /// Presentation fills for a translucent window, from an opaque presentation. Only background
+    /// fills change; text, icons, borders and marks stay opaque, and contrast decisions keep using
+    /// the opaque presentation this is derived from.
+    pub(crate) fn material_presentation(&self, materials: super::SurfaceMaterials) -> Self {
+        use super::SurfaceRole;
+        let mut paint = self.clone();
+        let surface = |role, color| materials.paint(role, self.background, color);
+        paint.background = surface(SurfaceRole::Base, self.background);
+        paint.panel_background = surface(SurfaceRole::Base, self.panel_background);
+        paint.title_bar_background = surface(SurfaceRole::Base, self.title_bar_background);
+        paint.title_bar_inactive_background =
+            surface(SurfaceRole::Base, self.title_bar_inactive_background);
+        paint.elevated_surface_background =
+            surface(SurfaceRole::Floating, self.elevated_surface_background);
+        macro_rules! resting { ($($role:ident),+ $(,)?) => { $(paint.$role = surface(SurfaceRole::Surface, self.$role);)+ }; }
+        resting!(
+            input_background,
+            input_disabled_background,
+            ghost_element_background,
+            ghost_element_disabled
         );
+        resting_fill_roles!(resting);
         paint
     }
 

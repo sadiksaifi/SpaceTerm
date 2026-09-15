@@ -26,6 +26,7 @@ fn row_chip(
             hover_rim: Some(colors.row_hover_border),
         }
     };
+    let paint = paint.raised(appearance);
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     SelectionChip::new(
         ChipShape::symmetric(
@@ -205,7 +206,16 @@ impl WorkspaceSidebar {
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
             .group(row_group.clone())
-            .bg(gpui_color(appearance.colors.row_background))
+            .when(
+                appearance.colors.row_background
+                    != crate::ui::workspace_frame::base_surface(&appearance.colors),
+                |row| {
+                    row.bg(gpui_color(appearance.surface(
+                        crate::appearance::SurfaceRole::Base,
+                        appearance.colors.row_background,
+                    )))
+                },
+            )
             .child(chip.render(
                 format!("workspace-row-selection-{}", workspace_id.get()),
                 &row_group,
@@ -446,8 +456,9 @@ impl WorkspaceSidebar {
                 }
             })
             .font(appearance.regular.clone())
-            .bg(gpui_color(crate::ui::workspace_frame::base_surface(
-                &appearance.colors,
+            .bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                crate::ui::workspace_frame::base_surface(&appearance.colors),
             )))
             .occlude()
             .child(rows)

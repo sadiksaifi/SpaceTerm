@@ -870,7 +870,9 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     ///
     /// A ghost trigger belongs in chrome, where it reads as an action. In a form it reads as a
     /// value with no edge, which puts it optically short of the bezeled controls beside it even
-    /// though the two occupy the same width. The bezel reuses the popup's own surface and border.
+    /// though the two occupy the same width. The bezel takes the popup's border but keeps the
+    /// trigger's resting fill: the popup's surface is a covering material, and painted on a
+    /// resting surface in a translucent window it reads as a well rather than as a field.
     pub fn bezel(mut self, bezel: bool) -> Self {
         self.bezel = bezel;
         self
@@ -1890,8 +1892,6 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             })
             .bg(if open {
                 paint.trigger_hover_background
-            } else if bezel {
-                paint.background
             } else {
                 paint.trigger_background
             })

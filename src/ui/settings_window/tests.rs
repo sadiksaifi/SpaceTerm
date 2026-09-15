@@ -1000,6 +1000,48 @@ fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    assert_eq!(
+        document_of(&window, cx).preferences.background.transparency,
+        0.35
+    );
+    for _ in 0..8 {
+        click("settings-transparency-decrease", cx);
+    }
+    assert_eq!(
+        document_of(&window, cx).preferences.background.transparency,
+        0.0
+    );
+    for _ in 0..21 {
+        click("settings-transparency-increase", cx);
+    }
+    assert_eq!(
+        document_of(&window, cx).preferences.background.transparency,
+        1.0
+    );
+    click("settings-background-blur", cx);
+    settle(cx);
+    let saved = harness.storage.document().unwrap();
+    assert_eq!(saved.preferences.background.transparency, 1.0);
+    assert!(!saved.preferences.background.blur);
+    window.update(cx, |settings, cx| {
+        settings.edit(
+            |draft| {
+                draft
+                    .preferences
+                    .reset(crate::appearance::ResetTarget::Transparency)
+            },
+            cx,
+        )
+    });
+    settle(cx);
+    let saved = harness.storage.document().unwrap();
+    assert_eq!(saved.preferences.background.transparency, 0.35);
+    assert!(!saved.preferences.background.blur);
+}
+
 /// Nothing is wrong by default, and a warning that says so is noise rather than information.
 #[gpui::test]
 fn the_scheme_library_warns_only_when_something_could_not_be_resolved(cx: &mut TestAppContext) {
@@ -1076,7 +1118,7 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
         ),
         (
             "settings-section-terminal-group-font-card",
-            Some(colors.background),
+            Some(colors.elevated_surface_background),
             None,
         ),
         (

@@ -3,7 +3,13 @@ use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
 use crate::appearance::{ChromeColors, Color};
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
+    themed(colors, colors)
+}
+
+/// Paints `colors`, resolving row content against the opaque `reference`.
+pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> ComboBoxTheme {
     ComboBoxTheme::new(
         ComboBoxPaint::new(
             gpui_color(colors.elevated_surface_background),
@@ -19,7 +25,9 @@ pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
             gpui_color(colors.border_focused),
         )
         .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
-        .rows(super::control_theme_catalog::overlay_list_rows(colors))
+        .rows(super::control_theme_catalog::overlay_list_rows(
+            reference, colors,
+        ))
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
         ComboBoxMetrics::new(px(240.0), px(28.0))

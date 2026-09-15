@@ -126,6 +126,11 @@ mod macos_window_drag;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_window_drag;
 
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_window_backdrop;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_window_backdrop;
+
 #[cfg(target_os = "macos")]
 mod macos_window_frame;
 
