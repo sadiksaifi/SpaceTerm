@@ -36,6 +36,7 @@ mod text_input_theme;
 mod toggle_theme;
 mod tooltip_theme;
 mod workspace_chrome;
+mod workspace_frame;
 mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
@@ -47,6 +48,7 @@ pub(crate) use native_remote_workspace_flow_backend::{
 };
 pub(crate) use pane_host::{
     PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
+    TabIdentity,
 };
 pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
@@ -62,6 +64,7 @@ pub(crate) use terminal_pane::{
     PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
     TerminalPaneEvent,
 };
+pub(crate) use workspace_frame::WorkspaceFrame;
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 
 actions!(
@@ -141,6 +144,9 @@ fn init_with_text_direction(
     cx: &mut App,
     direction: spaceterm_ui::TextDirection,
 ) -> gpui::Result<()> {
+    cx.set_global(crate::platform::window_frame::WindowFrameGeometry::new(
+        Some(16.0),
+    ));
     initialize_controls(cx)?;
     crate::desktop_profile::testing_profile(direction).install(cx);
     Ok(())

@@ -327,6 +327,7 @@ pub struct ResizeHandle {
     tab_stop: bool,
     reset_on_double_click: bool,
     target: ResizeHandleTarget,
+    paint_divider: bool,
     keyboard_step: f32,
     modified_keyboard_step: f32,
     debug_selector: Option<String>,
@@ -360,6 +361,7 @@ impl ResizeHandle {
             tab_stop: false,
             reset_on_double_click: false,
             target: ResizeHandleTarget::Regular,
+            paint_divider: true,
             keyboard_step: DEFAULT_KEYBOARD_STEP,
             modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             debug_selector: None,
@@ -411,6 +413,17 @@ impl ResizeHandle {
         self
     }
 
+    /// Controls whether the divider paints outside keyboard focus.
+    ///
+    /// A handle placed over empty space, such as a gap between floating surfaces, keeps its layout
+    /// thickness, pointer target, cursor, focus, and keyboard interaction. Resting,
+    /// pointer-hovered, dragged, and disabled states remain paintless; keyboard focus receives a
+    /// restrained indicator so the tab stop stays visible.
+    pub fn paint_divider(mut self, paint: bool) -> Self {
+        self.paint_divider = paint;
+        self
+    }
+
     /// Configures the ordinary and Shift-modified keyboard steps.
     pub fn keyboard_steps(mut self, ordinary: f32, modified: f32) -> Self {
         if ordinary.is_finite() && ordinary > 0.0 {
@@ -458,12 +471,13 @@ impl RenderOnce for ResizeHandle {
         });
         emit_events(self.on_event.clone(), cancelled, window, cx);
 
-        let (focus_handle, hovered, active) = {
+        let (focus_handle, hovered, active, pointer_focused) = {
             let state = state.read(cx);
             (
                 state.focus_handle.clone(),
                 state.hovered,
                 state.pointer.is_some(),
+                state.pointer_focused,
             )
         };
         if !enabled && focus_handle.is_focused(window) {
@@ -485,6 +499,7 @@ impl RenderOnce for ResizeHandle {
             .unwrap_or_else(|| self.accessibility_name.to_string());
         let hitbox_selector = format!("{root_selector}-hitbox");
         let divider_selector = format!("{root_selector}-divider");
+        let focus_indicator_selector = format!("{root_selector}-keyboard-focus-indicator");
 
         let regular_thickness = theme.metrics.hitbox_thickness;
         let target_thickness = theme.metrics.pointer_target_thickness(self.target);
@@ -527,6 +542,7 @@ impl RenderOnce for ResizeHandle {
                                 return;
                             }
                             window.prevent_default();
+                            down_state.update(cx, |state, cx| state.prepare_pointer_focus(cx));
                             pointer_focus.focus(window);
                             emit_events(
                                 reset_handler.clone(),
@@ -661,17 +677,30 @@ impl RenderOnce for ResizeHandle {
                 })
         });
         let divider_debug = divider_selector;
+        let show_keyboard_focus_indicator =
+            !self.paint_divider && focused && !pointer_focused && enabled && !active;
+        let focus_indicator_debug = focus_indicator_selector;
+        let focus_indicator = show_keyboard_focus_indicator.then(|| {
+            div()
+                .id("resize-handle-keyboard-focus-indicator")
+                .debug_selector(move || focus_indicator_debug)
+                .absolute()
+                .inset_0()
+                .bg(color)
+        });
         let divider = div()
             .id("resize-handle-divider")
             .debug_selector(move || divider_debug)
+            .relative()
             .flex_shrink_0()
-            .bg(color)
+            .when(self.paint_divider, |divider| divider.bg(color))
             .when(axis == ResizeAxis::Horizontal, |divider| {
                 divider.w(divider_thickness).h_full()
             })
             .when(axis == ResizeAxis::Vertical, |divider| {
                 divider.h(divider_thickness).w_full()
-            });
+            })
+            .children(focus_indicator);
 
         let hitbox_offset =
             px(-(f32::from(target_thickness) - f32::from(theme.metrics.visible_thickness)) / 2.0);
@@ -780,6 +809,7 @@ struct ResizeHandleState {
     hovered: bool,
     hovered_targets: u8,
     pointer: Option<PointerInteraction>,
+    pointer_focused: bool,
     suppress_pointer_until_release: bool,
     next_interaction_id: u64,
     handler: Option<ResizeHandler>,
@@ -790,8 +820,11 @@ impl ResizeHandleState {
         let focus_handle = cx.focus_handle();
         cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
             .detach();
-        cx.on_blur(&focus_handle, window, |_, _, cx| cx.notify())
-            .detach();
+        cx.on_blur(&focus_handle, window, |state, _, cx| {
+            state.pointer_focused = false;
+            cx.notify();
+        })
+        .detach();
         cx.observe_window_activation(window, |state, window, cx| {
             if window.is_window_active() {
                 return;
@@ -818,6 +851,7 @@ impl ResizeHandleState {
             hovered: false,
             hovered_targets: 0,
             pointer: None,
+            pointer_focused: false,
             suppress_pointer_until_release: false,
             next_interaction_id: 1,
             handler: None,
@@ -884,6 +918,13 @@ impl ResizeHandleState {
         self.pointer.is_some() || self.suppress_pointer_until_release
     }
 
+    fn prepare_pointer_focus(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.pointer_focused {
+            self.pointer_focused = true;
+            cx.notify();
+        }
+    }
+
     fn pointer_down(
         &mut self,
         position: Point<Pixels>,
@@ -902,6 +943,7 @@ impl ResizeHandleState {
             original_value: self.current_value,
             last_requested_value: None,
         };
+        self.prepare_pointer_focus(cx);
         self.pointer = Some(interaction);
         cx.notify();
         vec![ResizeHandleEvent::InteractionStarted {
@@ -1018,6 +1060,10 @@ impl ResizeHandleState {
         let Some(direction) = self.axis.keyboard_direction(&event.keystroke.key) else {
             return Vec::new();
         };
+        if self.pointer_focused {
+            self.pointer_focused = false;
+            cx.notify();
+        }
         let step = if modifiers.shift {
             self.modified_keyboard_step
         } else {
@@ -1709,6 +1755,134 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    struct PaintlessRoot {
+        events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
+    }
+
+    impl Render for PaintlessRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let events = Rc::clone(&self.events);
+            div().relative().size_full().child(
+                ResizeHandle::new(
+                    "paintless-resize",
+                    "Paintless resize",
+                    ResizeAxis::Horizontal,
+                    100.0,
+                )
+                .tab_stop(true)
+                .paint_divider(false)
+                .debug_selector("paintless-resize")
+                .on_event(move |event, _, _| events.borrow_mut().push(*event)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn paintless_divider_should_keep_layout_target_and_interaction(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+            events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("paintless-resize-hitbox")
+            .expect("the paintless hitbox was rendered");
+        let divider = cx
+            .debug_bounds("paintless-resize-divider")
+            .expect("the paintless divider kept its layout");
+        assert_eq!((target.size.width, divider.size.width), (px(9.0), px(1.0)));
+
+        let start = target.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(start.x + px(10.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            ResizeHandleEvent::ResizeRequested {
+                requested_value: 110.0,
+                ..
+            }
+        )));
+    }
+
+    #[gpui::test]
+    fn paintless_divider_should_stay_hidden_during_pointer_states(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+            events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("paintless-resize-hitbox")
+            .expect("the paintless hitbox was rendered");
+        let center = target.center();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none()
+        );
+
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none(),
+            "pointer hover must remain paintless"
+        );
+        cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none(),
+            "pointer drag must remain paintless"
+        );
+        cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none(),
+            "pointer focus must remain paintless after release"
+        );
+    }
+
+    #[gpui::test]
+    fn paintless_divider_should_show_a_restrained_keyboard_focus_indicator(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let root_events = Rc::clone(&events);
+        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+            events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("paintless-resize-hitbox")
+            .expect("the paintless hitbox was rendered");
+
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        let indicator = cx
+            .debug_bounds("paintless-resize-keyboard-focus-indicator")
+            .expect("keyboard focus should reveal the paintless handle");
+        assert_eq!(indicator.size.width, px(2.0));
+        assert!(
+            target.contains(&indicator.center()),
+            "the focus indicator must remain inside the pointer target"
+        );
     }
 
     #[gpui::test]

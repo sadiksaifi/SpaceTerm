@@ -10,6 +10,7 @@ mod macos_appearance;
 mod macos_selected_file;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
+pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
 
 pub(crate) mod local_filesystem;
@@ -124,6 +125,9 @@ pub(crate) mod macos_system_settings;
 mod macos_window_drag;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_window_drag;
+
+#[cfg(target_os = "macos")]
+mod macos_window_frame;
 
 pub(crate) mod shell_integration;
 pub(crate) mod shell_launch;

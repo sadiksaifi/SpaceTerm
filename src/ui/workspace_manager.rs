@@ -8,8 +8,8 @@ use super::workspace_sidebar::{
     SIDEBAR_MAXIMUM_WIDTH, SIDEBAR_ROW_HEIGHT, TERMINAL_CONTENT_MINIMUM_WIDTH,
 };
 use super::workspace_sidebar::{
-    SIDEBAR_ROW_HORIZONTAL_PADDING, SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel,
-    WorkspaceSidebar, remote_connection_status,
+    SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel, WorkspaceSidebar,
+    remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 #[cfg(test)]
@@ -84,6 +84,7 @@ use spaceterm_ui::{
     window_combo_box_is_open, window_modal_is_open,
 };
 
+#[cfg(test)]
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (CustomIconName, &'static str) {
@@ -2906,6 +2907,9 @@ impl WorkspaceManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let chip_inset = frame.sidebar_chip_inset();
+        let top_chrome_height = frame.top_chrome_height(appearance.top_height());
         let chrome_icon_size = appearance.spacing(WORKSPACE_CHROME_ICON_SIZE);
         let placeholder_color = gpui_color(appearance.colors.text_placeholder);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -2985,10 +2989,9 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        .panel_width(
-            self.sidebar.read(cx).layout().width
-                - appearance.spacing(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0),
-        )
+        // The chooser's panel spans exactly the width a selected Workspace row's chip spans, so the
+        // list it opens lines up with the list it came from.
+        .panel_width(self.sidebar.read(cx).layout().width - chip_inset - chip_inset)
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
@@ -3029,43 +3032,29 @@ impl WorkspaceManager {
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         });
-        let content = div()
-            .relative()
-            .size_full()
-            .child(
-                div()
-                    .id("workspace-top-chrome-bottom-divider")
-                    .debug_selector(|| "workspace-top-chrome-bottom-divider".to_owned())
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(appearance.spacing(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(appearance.colors.border)),
-            )
-            .child(
-                layout.render_controls(
-                    IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
-                        Icon::custom(toggle_icon, chrome_icon_size, foreground).into_any_element()
-                    })
-                    .variant(ButtonVariant::Ghost)
-                    .size(TOGGLE_SIZE)
-                    .preserve_ancestor_hover()
-                    .debug_selector("toggle-sidebar-button")
-                    .tooltip(
-                        Tooltip::new("toggle-sidebar-tooltip", toggle_label)
-                            .keyboard_equivalent(presentation.shortcut(&ToggleSidebar))
-                            .debug_selector("toggle-sidebar-tooltip"),
-                    )
-                    .on_activate(move |_, window, cx| {
-                        let _ = toggle_manager.update(cx, |manager, cx| {
-                            manager.toggle_sidebar(window, cx);
-                        });
-                    }),
-                    chooser,
-                    cx,
-                ),
-            );
+        let content = div().relative().size_full().child(
+            layout.render_controls(
+                IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
+                    Icon::custom(toggle_icon, chrome_icon_size, foreground).into_any_element()
+                })
+                .variant(ButtonVariant::Ghost)
+                .size(TOGGLE_SIZE)
+                .preserve_ancestor_hover()
+                .debug_selector("toggle-sidebar-button")
+                .tooltip(
+                    Tooltip::new("toggle-sidebar-tooltip", toggle_label)
+                        .keyboard_equivalent(presentation.shortcut(&ToggleSidebar))
+                        .debug_selector("toggle-sidebar-tooltip"),
+                )
+                .on_activate(move |_, window, cx| {
+                    let _ = toggle_manager.update(cx, |manager, cx| {
+                        manager.toggle_sidebar(window, cx);
+                    });
+                }),
+                chooser,
+                cx,
+            ),
+        );
         let drag_region = WindowDragRegion::new(
             "workspace-top-chrome-drag-region",
             "Move Operating-System Window from Workspace chrome",
@@ -3093,7 +3082,7 @@ impl WorkspaceManager {
             .top_0()
             .left_0()
             .w(layout.width)
-            .h(appearance.top_height())
+            .h(top_chrome_height)
             .bg(gpui_color(if window.is_window_active() {
                 appearance.colors.title_bar_background
             } else {
@@ -3241,11 +3230,17 @@ impl Render for WorkspaceManager {
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
             })
-            .child(self.sidebar.read(cx).render_resize_handle(
-                self.sidebar.downgrade(),
-                chrome.width,
-                super::appearance::chrome(cx).top_height(),
-            ))
+            .child(
+                self.sidebar.read(cx).render_resize_handle(
+                    self.sidebar.downgrade(),
+                    chrome.width,
+                    super::workspace_frame::WorkspaceFrame::for_appearance(
+                        super::appearance::chrome(cx),
+                        cx,
+                    )
+                    .top_chrome_height(super::appearance::chrome(cx).top_height()),
+                ),
+            )
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
         let content = content.child(self.transient.picker.clone());
         ModalLayer::new(TooltipLayer::new(content))

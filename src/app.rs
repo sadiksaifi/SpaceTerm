@@ -246,6 +246,12 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
+    let appearance = crate::ui::appearance::chrome(cx);
+    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
+        .top_chrome_height(appearance.top_height());
+    let workspace_traffic_light_position = host
+        .window_frame
+        .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
@@ -255,7 +261,8 @@ pub(crate) fn open(
             titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
                 title: titlebar.title.clone(),
                 appears_transparent: titlebar.appears_transparent,
-                traffic_light_position: titlebar.traffic_light_position,
+                traffic_light_position: workspace_traffic_light_position
+                    .or(titlebar.traffic_light_position),
             }),
             ..WindowOptions::default()
         },
@@ -543,6 +550,7 @@ pub(crate) struct HostCompositionParts {
     pub(crate) adapters: ApplicationCapabilities,
     pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
     pub(crate) titlebar: Option<TitlebarOptions>,
 }
 pub(crate) struct HostComposition {
@@ -552,6 +560,7 @@ pub(crate) struct HostComposition {
     adapters: ApplicationCapabilities,
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    window_frame: crate::platform::window_frame::WindowFrameGeometry,
     titlebar: Option<TitlebarOptions>,
     appearance: Option<(
         Arc<dyn crate::settings::storage::SettingsStorage>,
@@ -586,6 +595,7 @@ impl HostComposition {
             adapters: parts.adapters,
             services: parts.services,
             window_movement: parts.window_movement,
+            window_frame: parts.window_frame,
             titlebar: parts.titlebar,
             appearance: None,
         })
@@ -651,6 +661,7 @@ fn start_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    cx.set_global(host.window_frame);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
@@ -664,13 +675,7 @@ fn start_application(
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
-    crate::ui::settings_window::configure_window_chrome(
-        Rc::clone(&host.window_movement),
-        host.titlebar
-            .as_ref()
-            .and_then(|titlebar| titlebar.traffic_light_position),
-        cx,
-    );
+    crate::ui::settings_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     init(cx, Rc::clone(&host.adapters.application_menu));
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
@@ -761,7 +766,10 @@ mod runtime_tests {
                 permission_recovery: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
-            services, window_movement: movement, titlebar: None,
+            services,
+            window_movement: movement,
+            window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
+            titlebar: None,
         }
     }
     #[test]

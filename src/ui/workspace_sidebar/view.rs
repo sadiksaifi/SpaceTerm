@@ -5,7 +5,11 @@ use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 ///
 /// The geometry and the paints are read together so the fill, the hover state, and the keyboard
 /// focus ring cannot drift apart.
-fn row_chip(selected: bool, appearance: &crate::ui::appearance::ChromeAppearance) -> SelectionChip {
+fn row_chip(
+    selected: bool,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    cx: &App,
+) -> SelectionChip {
     let colors = &appearance.colors;
     let paint = if selected {
         ChipPaint {
@@ -22,32 +26,38 @@ fn row_chip(selected: bool, appearance: &crate::ui::appearance::ChromeAppearance
             hover_rim: Some(colors.row_hover_border),
         }
     };
+    let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     SelectionChip::new(
-        ChipShape {
-            inset_x: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_X),
-            inset_y: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
-            radius: appearance.spacing(SIDEBAR_ROW_SELECTION_RADIUS),
-        },
+        ChipShape::symmetric(
+            // A row's chip keeps the frame's one measurement on both sides: to the window edge on
+            // one, and to the Pane beside the sidebar on the other.
+            frame.sidebar_chip_inset(),
+            appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
+            frame.chip_radius(),
+        ),
         paint,
     )
 }
 
-struct WorkspaceRowLayout {
-    row: WorkspaceRowViewModel,
-    divider: bool,
+/// The row padding that keeps a row's content balanced inside its chip.
+///
+/// The chip's margin is equal on both sides, so the row's padding is that margin plus the air the
+/// content keeps inside the chip.
+fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
+    crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
+        + appearance.spacing(SIDEBAR_ROW_CHIP_PADDING)
 }
 
 impl WorkspaceSidebar {
     fn render_workspace_row(
         &self,
-        layout: WorkspaceRowLayout,
+        row: WorkspaceRowViewModel,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
     ) -> AnyElement {
-        let WorkspaceRowLayout { row, divider } = layout;
         let WorkspaceRowViewModel {
             workspace_id,
             name,
@@ -67,7 +77,7 @@ impl WorkspaceSidebar {
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected roles are promoted
         // below, because that promotion is what the row's text and icons consume.
-        let chip = row_chip(active, &appearance);
+        let chip = row_chip(active, &appearance, cx);
         if active {
             appearance.colors.row_foreground = appearance.colors.row_selected_foreground;
             appearance.colors.row_secondary = appearance.colors.row_selected_secondary;
@@ -174,6 +184,7 @@ impl WorkspaceSidebar {
             "Workspace Directory"
         };
 
+        let row_padding = row_padding(&appearance, cx);
         let row_content = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
@@ -187,7 +198,7 @@ impl WorkspaceSidebar {
             .w_full()
             .h(appearance.height(SIDEBAR_ROW_HEIGHT, SIDEBAR_NAME_TEXT_SIZE))
             .flex_shrink_0()
-            .px(appearance.spacing(SIDEBAR_ROW_HORIZONTAL_PADDING))
+            .px(row_padding)
             .flex()
             .flex_row()
             .items_center()
@@ -290,24 +301,8 @@ impl WorkspaceSidebar {
                         appearance.clone(),
                     )),
             )
-            // A divider that runs up to a selected chip fences it in. Both seams that touch the
-            // selection are left open instead, so the chip keeps the air that makes it read as one
-            // resting shape rather than as a band cut out of the list.
-            .when(divider, |row| {
-                row.child(
-                    div()
-                        .id(("workspace-row-divider", workspace_id.get()))
-                        .debug_selector(move || {
-                            format!("workspace-row-divider-{}", workspace_id.get())
-                        })
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(CHROME_DIVIDER_SIZE))
-                        .bg(gpui_color(appearance.colors.border_variant)),
-                )
-            })
+            // Rows rest on the continuous base surface without separators; the hover and selection
+            // chips alone give each Workspace its shape.
             // Keyboard focus rides just outside the chip it belongs to, with a hairline of the
             // sidebar surface between the two. A ring drawn on the row's own edges would box the
             // whole strip and say nothing about which shape the keyboard is pointing at.
@@ -411,13 +406,9 @@ impl WorkspaceSidebar {
                 });
             })
             .occlude();
-        for (index, row) in self.rows.iter().enumerate() {
-            let next_selected = self.rows.get(index + 1).is_some_and(|next| next.active);
+        for row in &self.rows {
             rows = rows.child(self.render_workspace_row(
-                WorkspaceRowLayout {
-                    row: row.clone(),
-                    divider: !row.active && !next_selected,
-                },
+                row.clone(),
                 sidebar.clone(),
                 presentation,
                 window,
@@ -436,7 +427,10 @@ impl WorkspaceSidebar {
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
             .absolute()
-            .top(appearance.top_height())
+            .top(
+                crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height()),
+            )
             .bottom_0()
             .left_0()
             .w(self.layout.width)
@@ -452,7 +446,9 @@ impl WorkspaceSidebar {
                 }
             })
             .font(appearance.regular.clone())
-            .bg(gpui_color(appearance.colors.panel_background))
+            .bg(gpui_color(crate::ui::workspace_frame::base_surface(
+                &appearance.colors,
+            )))
             .occlude()
             .child(rows)
             .child(
@@ -599,6 +595,9 @@ impl WorkspaceSidebar {
         )
         .tab_stop(true)
         .reset_on_double_click(true)
+        // The sidebar and the content stage share one continuous base surface, so the edge keeps
+        // its resize target and cursor while only keyboard focus reveals an indicator.
+        .paint_divider(false)
         .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)
         .on_event(move |event, window, cx| {

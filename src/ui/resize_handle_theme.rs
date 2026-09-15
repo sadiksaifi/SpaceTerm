@@ -9,9 +9,9 @@ pub(super) fn theme(colors: &ChromeColors) -> ResizeHandleTheme {
     ResizeHandleTheme::new(
         ResizeHandlePaint::new(
             gpui_color(colors.resize_idle),
-            gpui_color(colors.resize_focused),
             gpui_color(colors.resize_hovered),
             gpui_color(colors.resize_dragged),
+            gpui_color(colors.resize_focused),
             gpui_color(colors.resize_disabled),
         ),
         ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0)),

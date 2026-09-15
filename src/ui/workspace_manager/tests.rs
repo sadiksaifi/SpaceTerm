@@ -1,6 +1,7 @@
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::ui::workspace_sidebar::{SIDEBAR_ROW_SELECTION_INSET_X, SIDEBAR_ROW_SELECTION_INSET_Y};
+use crate::ui::workspace_frame::WorkspaceFrame;
+use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
 use spaceterm_ui::MenuLifecycleEvent;
@@ -23,6 +24,33 @@ use spaceterm_ui::{
 
 use super::*;
 use crate::domain::{PaneId, TabId};
+
+/// The resolved Workspace frame for the installed Chrome appearance.
+fn workspace_frame(cx: &mut VisualTestContext) -> WorkspaceFrame {
+    cx.update(|_, cx| WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx))
+}
+
+/// The one measurement every visible gap in the Workspace uses.
+fn frame_space(cx: &mut VisualTestContext) -> Pixels {
+    workspace_frame(cx).space()
+}
+
+/// The height of the top chrome, which carries the frame's top space in its own height.
+fn top_chrome_height(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        WorkspaceFrame::for_appearance(appearance, cx).top_chrome_height(appearance.top_height())
+    })
+}
+
+/// The air between a row's content and either edge of the row.
+fn row_padding(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
+            + appearance.spacing(crate::ui::workspace_sidebar::SIDEBAR_ROW_CHIP_PADDING)
+    })
+}
 
 #[gpui::test]
 fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
@@ -262,10 +290,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
     // Canvas children removed this frame can leave historical GPUI debug bounds behind.
     // The name occupying all available width verifies the machine and its gap are gone.
-    assert_eq!(
-        name.right(),
-        row.right() - px(SIDEBAR_ROW_HORIZONTAL_PADDING)
-    );
+    assert_eq!(name.right(), row.right() - row_padding(cx));
     let counts = cx.debug_bounds("workspace-counts-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
     assert!(counts.right() <= row.right());
@@ -5083,8 +5108,9 @@ fn drag_to(selector: &'static str, destination_x: Pixels, cx: &mut VisualTestCon
 }
 
 #[gpui::test]
-fn sidebar_should_render_one_divider_across_top_chrome_and_body(cx: &mut TestAppContext) {
+fn sidebar_should_share_one_resize_edge_across_top_chrome_and_body(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
+    let chrome_height = top_chrome_height(cx);
 
     let root = cx
         .debug_bounds("workspace-manager")
@@ -5119,9 +5145,9 @@ fn sidebar_should_render_one_divider_across_top_chrome_and_body(cx: &mut TestApp
             content.origin.x,
         ),
         (
-            gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
+            gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), chrome_height),
             px(0.0),
-            px(TOP_CHROME_HEIGHT),
+            chrome_height,
             px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             px(0.0),
             px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -5148,7 +5174,7 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
     assert_eq!(hitbox.size.width, px(8.0));
     assert_eq!(
         spacious_hitbox.size,
-        gpui::size(px(16.0), px(TOP_CHROME_HEIGHT))
+        gpui::size(px(16.0), top_chrome_height(cx))
     );
     let workspace_drag_target = cx
         .debug_bounds("workspace-top-chrome-drag-region-hitbox")
@@ -5178,6 +5204,219 @@ fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(cx: &mut 
         .size;
 
     assert_eq!((top_geometry, body_geometry), (expected, expected));
+}
+
+#[gpui::test]
+fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    assert!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-keyboard-focus-indicator")
+            .is_none(),
+        "the idle sidebar edge should stay paintless"
+    );
+
+    let mut indicator = None;
+    for _ in 0..64 {
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        indicator = cx.debug_bounds("workspace-sidebar-resize-handle-keyboard-focus-indicator");
+        if indicator.is_some() {
+            break;
+        }
+    }
+    let indicator = indicator.expect("the sidebar resize tab stop should reveal its indicator");
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was rendered");
+    assert_eq!(indicator.size.width, px(CHROME_DIVIDER_SIZE));
+    assert!(
+        indicator.top() >= root.top() && indicator.bottom() <= root.bottom(),
+        "the keyboard focus indicator escaped the Workspace frame"
+    );
+}
+
+#[gpui::test]
+fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+
+    for selector in [
+        "workspace-top-chrome-bottom-divider",
+        "tab-bar-divider",
+        "workspace-sidebar-footer-divider",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector} should no longer be rendered"
+        );
+    }
+    // The sidebar edge keeps its resize layout and target, while the sidebar and the content stage
+    // paint one continuous base surface instead of a separator.
+    let base = cx.update(|_, cx| crate::ui::appearance::chrome(cx).colors.panel_background);
+    let stage: &'static str = format!("tab-manager-stage-surface-{:08x}", base.rgba_hex()).leak();
+    assert!(
+        cx.debug_bounds(stage).is_some(),
+        "the content stage should paint the sidebar's base surface"
+    );
+    assert!(
+        cx.debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .is_some()
+    );
+}
+
+/// Every visible gap around the Pane stage measures one frame space from surface to surface.
+///
+/// The distances are taken between painted bounds, not between layout properties: beside a sidebar
+/// the gap is painted once, by the sidebar chip's own margin, and the stage adds nothing that would
+/// double it. The stage has no top gap at all, because the chrome above already carries that space
+/// in its own height.
+#[gpui::test]
+fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let space = frame_space(cx);
+    let chrome_height = top_chrome_height(cx);
+
+    for sidebar_visible in [true, false] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                if manager.sidebar.read(cx).layout().visible != sidebar_visible {
+                    manager.toggle_sidebar(window, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was rendered");
+        let content = cx
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was rendered");
+        let pane = cx
+            .debug_bounds("pane-surface-1")
+            .expect("the floating Pane surface was rendered");
+        let content_left = if sidebar_visible {
+            root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH)
+        } else {
+            root.origin.x
+        };
+
+        // The Pane's leading neighbour is the sidebar chip when the sidebar is shown and the window
+        // edge when it is hidden. Either way exactly one space is painted between them.
+        let leading_neighbour = if sidebar_visible {
+            cx.debug_bounds("workspace-row-selection-1")
+                .expect("the Active Workspace chip was rendered")
+                .right()
+        } else {
+            root.left()
+        };
+        assert_eq!(
+            (
+                content.origin.x,
+                content.origin.y,
+                pane.left() - leading_neighbour,
+                pane.top() - content.top(),
+                root.right() - pane.right(),
+                root.bottom() - pane.bottom(),
+            ),
+            (
+                content_left,
+                root.origin.y + chrome_height,
+                space,
+                px(0.0),
+                space,
+                space,
+            ),
+            "sidebar visible: {sidebar_visible}"
+        );
+    }
+}
+
+/// The first Tab keeps one visible space from the Workspace identity beside it.
+///
+/// A chip is inset inside its item, so the strip pulls that inset back: the identity's own trailing
+/// margin is then the whole gap, and the first Tab's paint lands on the Pane's leading vertical.
+#[gpui::test]
+fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let space = frame_space(cx);
+
+    for sidebar_visible in [true, false] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                if manager.sidebar.read(cx).layout().visible != sidebar_visible {
+                    manager.toggle_sidebar(window, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        let switcher = cx
+            .debug_bounds("workspace-switcher")
+            .expect("the Workspace chooser was rendered");
+        let chip = cx
+            .debug_bounds("tab-item-1-chip")
+            .expect("the Active Tab chip was rendered");
+        assert_eq!(
+            chip.left() - switcher.right(),
+            space,
+            "the identity and the first Tab should leave one visible space \
+             (sidebar visible: {sidebar_visible})"
+        );
+
+        if sidebar_visible {
+            let pane = cx
+                .debug_bounds("pane-surface-1")
+                .expect("the floating Pane surface was rendered");
+            assert_eq!(
+                chip.left(),
+                pane.left(),
+                "the first Tab and the Pane beneath it should share one leading vertical"
+            );
+            // The identity area above the sidebar stops where a selected row's chip stops.
+            let row_chip = cx
+                .debug_bounds("workspace-row-selection-1")
+                .expect("the Active Workspace chip was rendered");
+            assert_eq!(switcher.right(), row_chip.right());
+        }
+    }
+}
+
+/// The Workspace identity keeps its glyph in both sidebar states.
+#[gpui::test]
+fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let expanded_strip = cx
+        .debug_bounds("tab-items")
+        .expect("the Tab strip was rendered");
+    assert!(cx.debug_bounds("workspace-switcher-icon").is_some());
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx));
+    });
+    cx.run_until_parked();
+
+    let icon = cx
+        .debug_bounds("workspace-switcher-icon")
+        .expect("the collapsed Workspace chip should keep the Workspace glyph");
+    let identity = cx
+        .debug_bounds("workspace-switcher-identity-icon")
+        .expect("the collapsed Workspace glyph should paint its own resolved tint");
+    let label = cx
+        .debug_bounds("workspace-chip-label")
+        .expect("the collapsed Workspace name was rendered");
+    let strip = cx
+        .debug_bounds("tab-items")
+        .expect("the Tab strip was rendered");
+    assert!(icon.size.width > px(0.0) && identity.size.width > px(0.0));
+    assert!(
+        identity.right() <= label.left(),
+        "the glyph should lead the Workspace name, got {identity:?} and {label:?}"
+    );
+    assert_eq!(
+        strip.size.height, expanded_strip.size.height,
+        "collapsing the sidebar should not move the Tab row"
+    );
+    assert_eq!(strip.top(), expanded_strip.top());
 }
 
 #[gpui::test]
@@ -5635,7 +5874,7 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 }
 
 #[gpui::test]
-fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mut TestAppContext) {
+fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n cmd-n");
     cx.run_until_parked();
@@ -5653,32 +5892,44 @@ fn selected_workspace_should_use_an_inset_chip_without_adjacent_dividers(cx: &mu
         .debug_bounds("workspace-row-selection-3")
         .expect("the Active Workspace selection was not rendered");
 
+    let space = frame_space(cx);
     assert_eq!(
         selection,
         gpui::bounds(
             point(
-                third_row.origin.x + px(SIDEBAR_ROW_SELECTION_INSET_X),
+                third_row.origin.x + space,
                 third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
             gpui::size(
-                third_row.size.width - px(SIDEBAR_ROW_SELECTION_INSET_X * 2.0),
+                third_row.size.width - space - space,
                 third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
         ),
         "the selected Workspace material should float inside its row"
     );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-1").is_some(),
-        "unrelated Workspace rows should retain their divider"
+    // The chip's two margins are the frame's one measurement, and each is measured to the surface
+    // actually beside it: the window edge on one side, the floating Pane on the other.
+    let pane = cx
+        .debug_bounds("pane-surface-1")
+        .expect("the floating Pane surface was rendered");
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was rendered");
+    assert_eq!(
+        (
+            selection.left() - root.left(),
+            pane.left() - selection.right(),
+        ),
+        (space, space),
+        "the selected Workspace chip should rest on equal visible air"
     );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-2").is_none(),
-        "the divider before the selected Workspace should leave the material open"
-    );
-    assert!(
-        cx.debug_bounds("workspace-row-divider-3").is_none(),
-        "the selected Workspace should not draw a divider through its material"
-    );
+    for row in 1..=3 {
+        let selector: &'static str = format!("workspace-row-divider-{row}").leak();
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "Workspace row {row} should rest on the base surface without a separator"
+        );
+    }
     assert_eq!(
         (first_row.size, second_row.size),
         (third_row.size, third_row.size)
@@ -5701,7 +5952,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
     assert_eq!(toggle.left(), chrome.left() + px(78.0));
     assert!(toggle.right() < chooser.left());
     let tabs = cx.debug_bounds("tab-bar").unwrap();
-    assert_eq!(tabs.left() - chooser.right(), px(2.0));
+    assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
 
     click("workspace-switcher", cx);
 
@@ -5789,10 +6040,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the New Workspace ComboBox panel should render");
-    assert_eq!(
-        panel.size.width,
-        sidebar.size.width - px(SIDEBAR_ROW_HORIZONTAL_PADDING * 2.0)
-    );
+    let space = frame_space(cx);
+    assert_eq!(panel.size.width, sidebar.size.width - space - space);
     let chooser = cx
         .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
@@ -5937,6 +6186,14 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
     let divider = cx
         .debug_bounds("workspace-sidebar-resize-handle-divider")
         .expect("the collapsed sidebar divider was not rendered");
+    let collapsed_width = cx.update(|window, cx| {
+        WorkspaceChromeLayout::collapsed_width(
+            "A Workspace Name That Must Be Truncated",
+            false,
+            window,
+            cx,
+        )
+    });
     assert_eq!(
         (
             chrome.size.width,
@@ -5945,10 +6202,10 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             divider.center().x,
         ),
         (
-            px(212.0),
-            px(212.0),
-            root.origin.x + px(212.0),
-            root.origin.x + px(212.0),
+            collapsed_width,
+            collapsed_width,
+            root.origin.x + collapsed_width,
+            root.origin.x + collapsed_width,
         )
     );
 }
@@ -6128,7 +6385,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let trailing_inset = chooser.right() - label.right();
     assert!(trailing_inset >= px(11.0) && trailing_inset < px(12.0));
     assert_eq!(label.left() - switcher_icon.right(), px(8.0));
-    assert_eq!(tabs.left() - chooser.right(), px(4.0));
+    assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
 
     for position in [
         switcher_icon.center(),

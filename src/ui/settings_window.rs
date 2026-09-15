@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels, Point,
+    AnyElement, AnyWindowHandle, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels,
     ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
     WindowOptions, actions, div, px, size,
 };
@@ -95,11 +95,7 @@ fn navigation_chip(
     appearance: &ChromeAppearance,
 ) -> SelectionChip {
     SelectionChip::new(
-        ChipShape {
-            inset_x: px(0.0),
-            inset_y: px(0.0),
-            radius: appearance.spacing(NAVIGATION_CHIP_RADIUS),
-        },
+        ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
         navigation_chip_paint(selected, available, &appearance.colors),
     )
 }
@@ -139,19 +135,14 @@ impl Global for OpenSettingsWindow {}
 /// Settings portable and gives each opened window one independent pointer-interaction owner.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
-    traffic_light_position: Option<Point<Pixels>>,
 }
 impl Global for SettingsWindowComposition {}
 
 pub(crate) fn configure_window_chrome(
     window_movement: Rc<dyn WindowMovementFactory>,
-    traffic_light_position: Option<Point<Pixels>>,
     cx: &mut App,
 ) {
-    cx.set_global(SettingsWindowComposition {
-        window_movement,
-        traffic_light_position,
-    });
+    cx.set_global(SettingsWindowComposition { window_movement });
 }
 
 /// Opens Settings, or activates it when it is already open.
@@ -177,7 +168,10 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         return;
     };
     let window_drag = composition.window_movement.create();
-    let traffic_light_position = composition.traffic_light_position;
+    let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
+    let traffic_light_position = cx
+        .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
+        .and_then(|geometry| geometry.settings_traffic_light_position(titlebar_height));
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
         WindowOptions {

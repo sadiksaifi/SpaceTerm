@@ -13,7 +13,7 @@ use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
     PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError,
-    TERMINAL_KEY_CONTEXT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    TERMINAL_KEY_CONTEXT, TabIdentity, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -59,7 +59,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, SharedString, Task, Window, div, px, rgba,
+    ScrollHandle, Task, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, CustomIconName, Icon, IconButton, IconName,
@@ -69,27 +69,46 @@ use spaceterm_ui::{
 
 #[cfg(test)]
 const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
-const TAB_BAR_DIVIDER_SIZE: f32 = 1.0;
-const TAB_ITEM_WIDTH: f32 = 132.0;
-const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
-const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
+const TAB_ITEM_WIDTH: f32 = 178.2;
+const TAB_ITEM_MINIMUM_WIDTH: f32 = 159.3;
+const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 /// The title starts as far inside the chip as a Settings navigation label does inside its own, and
 /// Close keeps the same air to the chip's right edge as it keeps above and below.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
-/// The inset, radius, and focus gap of the chip carrying one Tab's material.
+/// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
 ///
 /// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
-/// paint moves inward. The vertical inset is the larger one, because that is the air that turns a
-/// full-height strip into a row of shapes resting inside the title bar, and it leaves the seam
-/// under the bar free for the one divider that still describes real structure.
+/// paint moves inward. The insets are what the eye actually measures:
 ///
-/// Inside the title bar that inset leaves a chip as tall as a Settings navigation row, and the
-/// radius is the one both sidebars select with, so a Tab is the same shape rather than a cousin.
-const TAB_CHIP_INSET_X: f32 = 3.0;
-const TAB_CHIP_INSET_Y: f32 = 4.0;
-const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
+/// - vertically the chip faces the window's top edge and, below the strip, the Pane's own surface,
+///   so it carries a whole frame space on each side;
+/// - horizontally it faces another chip, so each side carries half and the visible gap between two
+///   Tabs is one frame space again.
+///
+/// The radius comes from the frame's one radius family, so a Tab, a selected sidebar row, and a
+/// floating Pane read as the same shape at three sizes rather than as cousins.
+fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
+    let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+    ChipShape {
+        inset_leading: frame.half_space(),
+        inset_trailing: frame.half_space(),
+        inset_y: frame.space(),
+        radius: frame.chip_radius(),
+    }
+}
+
+/// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
+const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
+const TAB_ORIGIN_GAP: f32 = 6.0;
+/// The air before the Pane count and before the close control.
+const TAB_TRAILING_GAP: f32 = 4.0;
+/// How much of a Tab's identity the place may claim before the activity beside it gets a share.
+///
+/// The place is the segment that identifies the Session, so it survives a narrowing Tab; the
+/// activity is what it is doing right now, which the eye can recover from the Pane Caption.
+const TAB_PLACE_MAXIMUM_SHARE: f32 = 0.62;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -97,8 +116,7 @@ const TAB_CHIP_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
 /// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
 /// keeps its proportion to a Tab that grows with density.
 const TAB_SEPARATOR_LENGTH: f32 = 18.0;
-/// The mark's thickness: one logical point at every density, the same hairline as the chip rim and
-/// the Tab bar divider.
+/// The mark's thickness: one logical point at every density, the same hairline as the chip rim.
 ///
 /// Density lengthens the mark but never thickens it. A whole point covers at least one whole device
 /// pixel at every supported display scale, so the mark stays thin on a 1x display without ever
@@ -124,7 +142,6 @@ struct TabChromePresentation {
     hover_background: Color,
     hover_foreground: Color,
     hover_icon: Color,
-    divider: Color,
     tab_separator: Color,
 }
 
@@ -148,7 +165,6 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         } else {
@@ -171,7 +187,6 @@ impl TabChromePresentation {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         }
@@ -191,15 +206,9 @@ impl TabChromePresentation {
         &self,
         active: bool,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> SelectionChip {
-        SelectionChip::new(
-            ChipShape {
-                inset_x: appearance.spacing(TAB_CHIP_INSET_X),
-                inset_y: appearance.spacing(TAB_CHIP_INSET_Y),
-                radius: appearance.spacing(TAB_CHIP_RADIUS),
-            },
-            self.tab_chip_paint(active),
-        )
+        SelectionChip::new(tab_chip_shape(appearance, cx), self.tab_chip_paint(active))
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
@@ -1159,21 +1168,26 @@ impl TabManager {
         self.activate_tab_at(8, window, cx);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one Tab render step needs its identity, presentation, owner, appearance, and host geometry"
+    )]
     fn render_tab_item(
         &self,
         tab_id: TabId,
-        title: SharedString,
+        identity: TabIdentity,
         active: bool,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
         let hover_manager = manager.clone();
         let close_manager = manager;
-        let chip = presentation.tab_chip(active, appearance);
+        let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
         let control_style =
@@ -1248,18 +1262,10 @@ impl TabManager {
                 });
                 cx.stop_propagation();
             })
+            .child(render_tab_identity(tab_id, identity, appearance))
             .child(
                 div()
-                    .id(("tab-title", tab_id.get()))
-                    .debug_selector(move || format!("tab-title-{}", tab_id.get()))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(title),
-            )
-            .child(
-                div()
-                    .ml(appearance.spacing(4.0))
+                    .ml(appearance.spacing(TAB_TRAILING_GAP))
                     .flex_shrink_0()
                     .when(!active, |button| {
                         button
@@ -1312,11 +1318,19 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
         let create_icon_size = appearance.spacing(14.0);
+        // A chip is inset inside its item, which would add to the gap the Workspace identity before
+        // the strip already leaves. The strip pulls that inset back, so the visible distance from
+        // the identity to the first Tab is one frame space and the first Tab's paint lines up with
+        // the Pane beneath it.
+        let leading_alignment =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .chip_strip_leading_offset();
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
+            .ml(leading_alignment)
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -1334,11 +1348,12 @@ impl TabManager {
             items = items.child(
                 self.render_tab_item(
                     tab_id,
-                    pane_host.read(cx).tab_title(),
+                    pane_host.read(cx).tab_identity(),
                     active,
                     presentation,
                     manager.clone(),
                     appearance,
+                    cx,
                 )
                 .children(leading_separator),
             );
@@ -1354,22 +1369,12 @@ impl TabManager {
             .flex_row()
             .items_center()
             .bg(gpui_color(background))
-            .child(
-                div()
-                    .id("tab-bar-divider")
-                    .debug_selector(|| "tab-bar-divider".to_owned())
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(TAB_BAR_DIVIDER_SIZE))
-                    .bg(gpui_color(presentation.divider)),
-            )
             .child(items)
             .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
-                    .size(appearance.top_height())
+                    .h_full()
+                    .w(appearance.top_height())
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1425,7 +1430,10 @@ impl TabManager {
             .id("tab-bar")
             .debug_selector(|| "tab-bar".to_owned())
             .relative()
-            .h(appearance.top_height())
+            .h(
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height()),
+            )
             .min_w_0()
             .flex_1()
             .flex_shrink_0()
@@ -1448,6 +1456,8 @@ impl Render for TabManager {
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
         let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
 
         div()
             .id("tab-manager")
@@ -1475,7 +1485,7 @@ impl Render for TabManager {
             .on_action(cx.listener(Self::on_close_tab))
             .child(
                 div()
-                    .h(appearance.top_height())
+                    .h(frame.top_chrome_height(appearance.top_height()))
                     .w_full()
                     .flex_shrink_0()
                     .flex()
@@ -1498,8 +1508,31 @@ impl Render for TabManager {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
+                    // The content stage is base surface, and every gap it paints is measured to the
+                    // next painted surface rather than counted in layout properties. It has no top
+                    // edge: the chrome above already carries that space in its own height. Beside a
+                    // sidebar it has no leading edge either, because the sidebar chip's own trailing
+                    // margin is already that gap and two insets of one continuous surface would read
+                    // as a gap of twice the size.
+                    .bg(gpui_color(stage_surface))
+                    .pt(px(0.0))
+                    .pb(frame.space())
+                    .pr(frame.space())
+                    .pl(frame.stage_leading_inset(self.sidebar_visible))
+                    .child(
+                        div()
+                            .debug_selector(move || {
+                                format!(
+                                    "tab-manager-stage-surface-{:08x}",
+                                    stage_surface.rgba_hex()
+                                )
+                            })
+                            .absolute()
+                            .inset_0(),
+                    )
                     .child(active_tab),
             )
     }
@@ -1548,6 +1581,118 @@ fn render_tab_separator(
         .into_any_element()
 }
 
+/// One Tab's identity: its origin glyph, what it presents in words, and its Pane count.
+///
+/// The glyph and the count are the two segments a Tab never gives up. Only the words in between
+/// narrow, and they narrow in order of how little they identify the Tab.
+fn render_tab_identity(
+    tab_id: TabId,
+    identity: TabIdentity,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let origin_location = if identity.remote { "remote" } else { "local" };
+    let separator = |appearance: &super::appearance::ChromeAppearance| {
+        div()
+            .flex_shrink_0()
+            .mx(appearance.spacing(4.0))
+            .child("·")
+            .into_any_element()
+    };
+    let mut words = div()
+        .id(("tab-identity", tab_id.get()))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .overflow_hidden();
+    // The account leads the Tab. Local Sessions show their user; Remote Sessions include the host
+    // as `user@host` so the same position answers both who and where.
+    if !identity.account.is_empty() {
+        words = words
+            .child(
+                div()
+                    .debug_selector(move || format!("tab-account-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                    .truncate()
+                    .child(identity.account.clone()),
+            )
+            .when(!identity.place.is_empty(), |words| {
+                words.child(separator(appearance))
+            });
+    }
+    if !identity.place.is_empty() {
+        words = words.child(
+            div()
+                .debug_selector(move || format!("tab-place-{}", tab_id.get()))
+                .flex_shrink_0()
+                .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                .truncate()
+                .child(identity.place.clone()),
+        );
+    }
+    if !identity.activity.is_empty() {
+        let leads = identity.place.is_empty() && identity.account.is_empty();
+        words = words
+            .when(!leads, |words| words.child(separator(appearance)))
+            .child(
+                div()
+                    .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(identity.activity.clone()),
+            );
+    }
+
+    div()
+        .id(("tab-title", tab_id.get()))
+        .debug_selector(move || format!("tab-title-{}", tab_id.get()))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        // Attention belongs to the Tab rather than to any one segment of its name, so it leads the
+        // row and survives every narrowing, exactly as the origin glyph does.
+        .when(identity.attention, |item| {
+            item.child(
+                div()
+                    .debug_selector(move || format!("tab-attention-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .mr(appearance.spacing(TAB_TRAILING_GAP))
+                    .child("•"),
+            )
+        })
+        .child(
+            div()
+                .debug_selector(move || format!("tab-origin-{}-{origin_location}", tab_id.get()))
+                .flex_shrink_0()
+                .mr(appearance.spacing(TAB_ORIGIN_GAP))
+                .flex()
+                .items_center()
+                .child(Icon::inherited(
+                    IconName::Terminal,
+                    appearance.spacing(TAB_ORIGIN_ICON_SIZE),
+                )),
+        )
+        .child(words)
+        .when_some(identity.pane_badge(), |item, badge| {
+            item.child(
+                div()
+                    .debug_selector(move || format!("tab-pane-count-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .ml(appearance.spacing(TAB_TRAILING_GAP))
+                    // The count is a fact about the Tab rather than part of its name, so it reads
+                    // one step back from the title without taking a color of its own.
+                    .opacity(0.7)
+                    .child(badge),
+            )
+        })
+        .into_any_element()
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -1566,7 +1711,8 @@ mod tests {
 
     use gpui::{
         DivInspectorState, Hsla, Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent,
-        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
+        ScrollDelta, ScrollWheelEvent, SharedString, TestAppContext, TouchPhase, VisualTestContext,
+        point,
     };
 
     use super::*;
@@ -1603,7 +1749,6 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         );
@@ -1633,7 +1778,6 @@ mod tests {
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
                 hover_icon: colors.tab_hover_icon,
-                divider: colors.border,
                 tab_separator: colors.tab_separator,
             }
         );
@@ -1798,11 +1942,6 @@ mod tests {
                             .contrast_ratio(bar),
                     "{appearance:?} window_active={window_active}: separator should stay quieter \
                      than an inactive Tab title"
-                );
-                assert!(
-                    contrast > presentation.divider.source_over(bar).contrast_ratio(bar),
-                    "{appearance:?} window_active={window_active}: a short separator should read \
-                     stronger than the full-length Tab bar divider"
                 );
             }
         }
@@ -2608,20 +2747,17 @@ mod tests {
     /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
     ///
     /// The chip is what carries that reading, and it only works while it keeps air on every side:
-    /// against its own item, against the chip beside it, and against the one seam still drawn under
-    /// the bar. The item itself keeps the full height of the bar, because the inset is paint and
-    /// must never shrink what a pointer can hit.
+    /// against its own item, against the chip beside it, and against the bar's lower edge, which
+    /// meets the base surface without a seam. The item itself keeps the full height of the bar,
+    /// because the inset is paint and must never shrink what a pointer can hit.
     #[gpui::test]
-    fn every_tab_should_float_as_an_inset_chip_over_one_structural_seam(cx: &mut TestAppContext) {
+    fn every_tab_should_float_as_an_inset_chip_without_a_bar_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
         let bar = cx
             .debug_bounds("tab-bar")
             .expect("the Tab bar was not rendered");
-        let divider = cx
-            .debug_bounds("tab-bar-divider")
-            .expect("the Tab bar divider was not rendered");
         let active_item = cx
             .debug_bounds("tab-item-2-active")
             .expect("the Active Tab item was not rendered");
@@ -2632,41 +2768,57 @@ mod tests {
             .debug_bounds("tab-item-2-chip")
             .expect("the Active Tab chip was not rendered");
 
+        // The bar absorbs the Workspace frame's top space, so the strip is taller than the base
+        // title-bar height and a Tab grows with it.
+        let bar_height = cx.update(|_, cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_chrome_height(appearance.top_height())
+        });
         assert_eq!(
             (active_item.size.height, bar.size.height),
-            (px(TAB_BAR_HEIGHT), px(TAB_BAR_HEIGHT)),
+            (bar_height, bar_height),
             "a Tab should keep the full height of the bar as its hit target"
         );
+        assert!(bar_height > px(TAB_BAR_HEIGHT));
+        let (space, half_space) = cx.update(|_, cx| {
+            let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
+                crate::ui::appearance::chrome(cx),
+                cx,
+            );
+            (frame.space(), frame.half_space())
+        });
         assert_eq!(
             active_chip,
             gpui::bounds(
                 gpui::point(
-                    active_item.origin.x + px(TAB_CHIP_INSET_X),
-                    active_item.origin.y + px(TAB_CHIP_INSET_Y),
+                    active_item.origin.x + half_space,
+                    active_item.origin.y + space,
                 ),
                 gpui::size(
-                    active_item.size.width - px(TAB_CHIP_INSET_X * 2.0),
-                    active_item.size.height - px(TAB_CHIP_INSET_Y * 2.0),
+                    active_item.size.width - half_space - half_space,
+                    active_item.size.height - space - space,
                 ),
             ),
             "the Active Tab material should float inside its item"
         );
+        // The visible distance between two Tabs, and between a Tab and the strip's own edges, is
+        // the frame's one space.
         assert_eq!(
-            active_chip.left() - inactive_chip.right(),
-            px(TAB_CHIP_INSET_X * 2.0),
-            "neighbouring Tabs should leave the bar visible between them"
+            (
+                active_chip.left() - inactive_chip.right(),
+                active_chip.top() - bar.top(),
+                bar.bottom() - active_chip.bottom(),
+            ),
+            (space, space, space),
+            "every gap around a Tab should be one visible space"
         );
         assert!(
-            active_chip.bottom() < divider.origin.y,
-            "the Active Tab should clear the seam under the bar, got {active_chip:?} against \
-             {divider:?}"
-        );
-        assert_eq!(
-            (divider.size.height, divider.size.width),
-            (px(TAB_BAR_DIVIDER_SIZE), bar.size.width),
-            "the one seam under the bar should run its whole width"
+            active_chip.bottom() < bar.bottom(),
+            "the Active Tab should clear the bar's lower edge, got {active_chip:?} against {bar:?}"
         );
         for stale in [
+            "tab-bar-divider",
             "tab-item-1-divider",
             "tab-item-1-bottom-divider",
             "tab-item-2-underline",
@@ -2921,11 +3073,16 @@ mod tests {
             .debug_bounds("tab-bar")
             .expect("the Tab bar was not rendered");
 
+        let chrome_height = cx.update(|_, cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_chrome_height(appearance.top_height())
+        });
         assert_eq!(
             (spacer.origin, spacer.size, bar.origin.x),
             (
                 root.origin,
-                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
+                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), chrome_height),
                 root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
         );
@@ -3153,7 +3310,7 @@ mod tests {
         let title = manager.read_with(cx, |manager, cx| {
             manager.tabs.active_tab().read(cx).tab_title()
         });
-        assert_eq!(title.as_ref(), "Claude Code");
+        assert_eq!(title.as_ref(), "Terminal · Claude Code");
     }
 
     #[gpui::test]
@@ -3186,8 +3343,148 @@ mod tests {
 
         assert_eq!(
             (split_title.as_ref(), restored_title.as_ref()),
-            ("Terminal · 2 Panes", "Claude Code")
+            (
+                "spaceterm-tab-manager-test · Terminal · 2P",
+                "Terminal · Claude Code"
+            )
         );
+    }
+
+    #[gpui::test]
+    fn split_tab_should_refresh_rendered_identity_for_focused_pane_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, records, cx) = tab_manager(cx);
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        report_current_directory(&records, 2, 1, "/tmp/second-pane-with-a-long-name", false);
+        cx.run_until_parked();
+        let focused_second_before_caption_change = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused second Pane's initial place should render");
+
+        report_current_directory(&records, 2, 2, "/tmp/x", false);
+        cx.run_until_parked();
+        let focused_second = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused second Pane's changed place should render");
+        assert!(
+            focused_second_before_caption_change.size.width > focused_second.size.width,
+            "the rendered Tab should replace the focused Pane's changed place: \
+             {focused_second_before_caption_change:?} {focused_second:?}"
+        );
+
+        cx.simulate_keystrokes("cmd-alt-left");
+        cx.run_until_parked();
+        let focused_first = cx
+            .debug_bounds("tab-place-1")
+            .expect("the focused first Pane's place should render");
+
+        assert!(
+            focused_first.size.width > focused_second.size.width,
+            "the rendered Tab should replace the second Pane's short place after focus changes: \
+             {focused_second:?} {focused_first:?}"
+        );
+    }
+
+    /// A Tab keeps the two segments its words cannot replace: where the Session runs, and whether
+    /// the Tab holds more than one Pane.
+    #[gpui::test]
+    fn tab_should_lead_with_an_origin_glyph_and_trail_its_pane_count(cx: &mut TestAppContext) {
+        let (_manager, records, cx) = tab_manager(cx);
+        let sender = records
+            .event_sender(1)
+            .expect("the initial Tab session must have started");
+        sender
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "Claude Code",
+            )))
+            .unwrap();
+        cx.run_until_parked();
+
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a single-Pane Tab should lead with its origin glyph");
+        let words = cx
+            .debug_bounds("tab-place-1")
+            .expect("the Tab should present what its Session identifies as");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the close control was not rendered");
+        assert!(
+            cx.debug_bounds("tab-pane-count-1").is_none(),
+            "a single-Pane Tab should carry no count"
+        );
+        assert!(origin.right() <= words.left() && words.right() <= close.left());
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a multi-Pane Tab should keep its origin glyph");
+        let count = cx
+            .debug_bounds("tab-pane-count-1")
+            .expect("a multi-Pane Tab should carry a terse count");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the close control was not rendered");
+        // The glyph leads, the count trails the words, and the close control stays reachable after
+        // both, so neither the glyph nor the count competes with the Tab's name for room.
+        assert!(origin.right() <= count.left() && count.right() <= close.left());
+        assert!(origin.size.width > px(0.0) && count.size.width > px(0.0));
+    }
+
+    /// A narrow Tab gives up its words before it gives up its glyph, its count, or its close
+    /// control, so every Tab stays identifiable and closable at the narrowest width.
+    #[gpui::test]
+    fn narrow_tabs_should_keep_glyph_count_and_close_reachable(cx: &mut TestAppContext) {
+        let (_manager, records, cx) = tab_manager(cx);
+        let sender = records
+            .event_sender(1)
+            .expect("the initial Tab session must have started");
+        sender
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "a terminal title long enough to need truncating in a narrow Tab",
+            )))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        for _ in 0..6 {
+            click("create-tab-button", cx);
+        }
+        cx.run_until_parked();
+
+        let item = cx
+            .debug_bounds("tab-item-1-inactive")
+            .expect("the first Tab was not rendered");
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("a narrowed Tab should keep its origin glyph");
+        let count = cx
+            .debug_bounds("tab-pane-count-1")
+            .expect("a narrowed Tab should keep its Pane count");
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("a narrowed Tab should keep its close control");
+        let minimum =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ITEM_MINIMUM_WIDTH));
+
+        assert!(
+            item.size.width >= minimum,
+            "got {item:?} against {minimum:?}"
+        );
+        for segment in [origin, count, close] {
+            assert!(
+                segment.left() >= item.left() && segment.right() <= item.right(),
+                "{segment:?} should stay inside its Tab {item:?}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -3260,7 +3557,7 @@ mod tests {
             let button = cx.debug_bounds("create-tab-button").unwrap();
             let area = cx.debug_bounds("create-tab-area").unwrap();
             assert_eq!(area.left(), tab.right());
-            assert_eq!(area.size, gpui::size(tab.size.height, tab.size.height));
+            assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), tab.size.height));
             assert_eq!(button.center(), area.center());
             assert_eq!(button.center().y, tab.center().y);
             if index < 2 {
@@ -3305,7 +3602,7 @@ mod tests {
                 let bar = cx.debug_bounds("tab-bar").unwrap();
                 assert_eq!(area.left(), strip.right());
                 assert!(area.right() <= bar.right());
-                assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+                assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
                 assert_eq!(button.center(), area.center());
                 assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
                 if width == 1200.0 {
@@ -3347,7 +3644,7 @@ mod tests {
         let bar = cx.debug_bounds("tab-bar").unwrap();
         assert_eq!(area.left(), strip.right());
         assert!(area.right() <= bar.right());
-        assert_eq!(area.size, gpui::size(bar.size.height, bar.size.height));
+        assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
         assert_eq!(button.center(), area.center());
         let active = cx.debug_bounds("tab-item-21-active").unwrap();
         assert!(active.left() >= strip.left());
