@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
-readonly ENTITLEMENTS_SOURCE="$REPO_ROOT/packaging/macos/Entitlements.plist"
+readonly ENTITLEMENTS_SOURCE="$REPO_ROOT/packaging/macos/Development-Entitlements.plist"
 
 PROFILE="${1:-}"
 case "$PROFILE" in
@@ -80,6 +80,23 @@ install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
 install -m 0755 "$EXECUTABLE" "$STAGED_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 codesign --force --sign - --options runtime --entitlements "$ENTITLEMENTS_SOURCE" \
     --timestamp=none "$STAGED_BUNDLE" >/dev/null
+codesign --verify --strict "$STAGED_BUNDLE" >/dev/null 2>&1 || {
+    echo "error: development bundle signature verification failed" >&2
+    exit 2
+}
+SIGNED_ENTITLEMENTS="$STAGING_ROOT/signed-entitlements.plist"
+readonly SIGNED_ENTITLEMENTS
+codesign --display --entitlements :- "$STAGED_BUNDLE" >"$SIGNED_ENTITLEMENTS" 2>/dev/null
+for entitlement in \
+    com.apple.security.device.audio-input \
+    com.apple.security.get-task-allow; do
+    [[ "$(/usr/libexec/PlistBuddy -c "Print :$entitlement" \
+        "$SIGNED_ENTITLEMENTS" 2>/dev/null)" == "true" ]] || {
+        echo "error: development bundle is missing the $entitlement entitlement" >&2
+        exit 2
+    }
+done
+rm -f -- "$SIGNED_ENTITLEMENTS"
 
 BUNDLE="$BUNDLE_PARENT/$APP_NAME.app"
 readonly BUNDLE

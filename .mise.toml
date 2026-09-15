@@ -286,7 +286,7 @@ python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(),
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
-plutil -lint packaging/macos/Entitlements.plist
+plutil -lint packaging/macos/Entitlements.plist packaging/macos/Development-Entitlements.plist
 '''
 
 [tasks."validate:macos"]
