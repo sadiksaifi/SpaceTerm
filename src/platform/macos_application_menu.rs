@@ -9,6 +9,7 @@ use crate::app::{
     OpenApplicationHelp, QuitApplication, ShowAboutApplication, ShowAllApplications,
     ZoomActiveWindow,
 };
+use crate::application_identity::ApplicationIdentity;
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
     ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
@@ -17,55 +18,27 @@ use crate::ui::{
     ToggleSidebarFocus,
 };
 
-pub(crate) struct MacosApplicationMenuAdapter;
+pub(crate) struct MacosApplicationMenuAdapter {
+    identity: ApplicationIdentity,
+}
+
+impl MacosApplicationMenuAdapter {
+    pub(crate) const fn new(identity: ApplicationIdentity) -> Self {
+        Self { identity }
+    }
+}
 
 const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MenuItemIcon {
-    menu: &'static str,
-    submenu: Option<&'static str>,
-    item: &'static str,
-    symbol: &'static str,
+struct MenuItemIcon<'a> {
+    menu: &'a str,
+    submenu: Option<&'a str>,
+    item: &'a str,
+    symbol: &'a str,
 }
 
 const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "About SpaceTerm",
-        symbol: "info.circle",
-    },
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "Settings…",
-        symbol: "gearshape",
-    },
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "Hide SpaceTerm",
-        symbol: "eye.slash",
-    },
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "Hide Others",
-        symbol: "eye.slash.fill",
-    },
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "Show All",
-        symbol: "eye",
-    },
-    MenuItemIcon {
-        menu: "SpaceTerm",
-        submenu: None,
-        item: "Quit SpaceTerm",
-        symbol: "power",
-    },
     MenuItemIcon {
         menu: "File",
         submenu: None,
@@ -286,18 +259,19 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
 
 impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
-        cx.set_menus(menus());
-        native::decorate()
+        let application_name = self.identity.display_name();
+        cx.set_menus(menus(application_name));
+        native::decorate(application_name)
     }
 
     fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
-        native::perform(command)
+        native::perform(command, self.identity.display_name())
     }
 }
 
-fn menus() -> Vec<Menu> {
+fn menus(application_name: &str) -> Vec<Menu> {
     vec![
-        application_menu(),
+        application_menu(application_name),
         file_menu(),
         edit_menu(),
         view_menu(),
@@ -306,21 +280,21 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
-fn application_menu() -> Menu {
+fn application_menu(application_name: &str) -> Menu {
     Menu {
-        name: "SpaceTerm".into(),
+        name: application_name.to_owned().into(),
         items: vec![
-            MenuItem::action("About SpaceTerm", ShowAboutApplication),
+            MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
             MenuItem::separator(),
             MenuItem::action("Settings…", crate::ui::settings_window::OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide SpaceTerm", HideApplication),
+            MenuItem::action(format!("Hide {application_name}"), HideApplication),
             MenuItem::action("Hide Others", HideOtherApplications),
             MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
-            MenuItem::action("Quit SpaceTerm", QuitApplication),
+            MenuItem::action(format!("Quit {application_name}"), QuitApplication),
         ],
     }
 }
@@ -418,6 +392,17 @@ fn help_menu() -> Menu {
     }
 }
 
+fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 6] {
+    [
+        (format!("About {application_name}"), "info.circle"),
+        ("Settings…".to_owned(), "gearshape"),
+        (format!("Hide {application_name}"), "eye.slash"),
+        ("Hide Others".to_owned(), "eye.slash.fill"),
+        ("Show All".to_owned(), "eye"),
+        (format!("Quit {application_name}"), "power"),
+    ]
+}
+
 #[cfg(not(test))]
 mod native {
     use cocoa::appkit::{NSApp, NSEventModifierFlags};
@@ -448,7 +433,7 @@ mod native {
         static ABOUT_CREDITS: id;
     }
 
-    pub(super) fn decorate() -> Result<(), ApplicationMenuError> {
+    pub(super) fn decorate(application_name: &str) -> Result<(), ApplicationMenuError> {
         if !main_thread() {
             return Err(ApplicationMenuError::OffMainThread);
         }
@@ -458,13 +443,16 @@ mod native {
         // string is used before the local autorelease pool drains.
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
-            let result = decorate_main_menu();
+            let result = decorate_main_menu(application_name);
             pool.drain();
             result
         }
     }
 
-    pub(super) fn perform(command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+    pub(super) fn perform(
+        command: ApplicationMenuCommand,
+        application_name: &str,
+    ) -> Result<(), ApplicationMenuError> {
         if !main_thread() {
             return Err(ApplicationMenuError::OffMainThread);
         }
@@ -474,7 +462,7 @@ mod native {
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
             let result = match command {
-                ApplicationMenuCommand::ShowAbout => show_about(),
+                ApplicationMenuCommand::ShowAbout => show_about(application_name),
                 ApplicationMenuCommand::ZoomActiveWindow => zoom_active_window(),
                 ApplicationMenuCommand::BringAllWindowsToFront => bring_all_windows_to_front(),
                 ApplicationMenuCommand::OpenHelp => open_help(),
@@ -484,12 +472,16 @@ mod native {
         }
     }
 
-    unsafe fn show_about() -> Result<(), ApplicationMenuError> {
+    unsafe fn show_about(application_name: &str) -> Result<(), ApplicationMenuError> {
         let application = unsafe { NSApp() };
         if application == nil {
             return Err(ApplicationMenuError::Unavailable);
         }
-        let name = unsafe { NSString::alloc(nil).init_str("SpaceTerm").autorelease() };
+        let name = unsafe {
+            NSString::alloc(nil)
+                .init_str(application_name)
+                .autorelease()
+        };
         let version = unsafe {
             NSString::alloc(nil)
                 .init_str(env!("CARGO_PKG_VERSION"))
@@ -534,7 +526,7 @@ mod native {
         Ok(())
     }
 
-    unsafe fn decorate_main_menu() -> Result<(), ApplicationMenuError> {
+    unsafe fn decorate_main_menu(application_name: &str) -> Result<(), ApplicationMenuError> {
         let application = unsafe { NSApp() };
         if application == nil {
             return Err(ApplicationMenuError::Unavailable);
@@ -544,8 +536,20 @@ mod native {
             return Err(ApplicationMenuError::Unavailable);
         }
 
+        for (item_title, symbol) in super::application_menu_item_icons(application_name) {
+            let decoration = MenuItemIcon {
+                menu: application_name,
+                submenu: None,
+                item: &item_title,
+                symbol,
+            };
+            let item = unsafe { find_menu_item(main_menu, &decoration, application_name) }
+                .ok_or(ApplicationMenuError::Unavailable)?;
+            unsafe { set_symbol_image(item, decoration.symbol) }?;
+        }
+
         for decoration in MENU_ITEM_ICONS {
-            let item = unsafe { find_menu_item(main_menu, decoration) }
+            let item = unsafe { find_menu_item(main_menu, decoration, application_name) }
                 .ok_or(ApplicationMenuError::Unavailable)?;
             unsafe { set_symbol_image(item, decoration.symbol) }?;
         }
@@ -556,7 +560,7 @@ mod native {
             item: TOGGLE_PANE_ZOOM_TITLE,
             symbol: "",
         };
-        let zoom_item = unsafe { find_menu_item(main_menu, &zoom_decoration) }
+        let zoom_item = unsafe { find_menu_item(main_menu, &zoom_decoration, application_name) }
             .ok_or(ApplicationMenuError::Unavailable)?;
         let key_equivalent = unsafe { NSString::alloc(nil).init_str("\r").autorelease() };
         let modifiers =
@@ -575,10 +579,14 @@ mod native {
         Ok(())
     }
 
-    unsafe fn find_menu_item(main_menu: id, decoration: &MenuItemIcon) -> Option<id> {
+    unsafe fn find_menu_item(
+        main_menu: id,
+        decoration: &MenuItemIcon<'_>,
+        application_name: &str,
+    ) -> Option<id> {
         let menu_title = unsafe { NSString::alloc(nil).init_str(decoration.menu).autorelease() };
         let mut top_item: id = unsafe { msg_send![main_menu, itemWithTitle: menu_title] };
-        if top_item == nil && decoration.menu == "SpaceTerm" {
+        if top_item == nil && decoration.menu == application_name {
             top_item = unsafe { msg_send![main_menu, itemAtIndex: 0_isize] };
         }
         if top_item == nil {
@@ -680,11 +688,11 @@ mod native {
 mod native {
     use super::{ApplicationMenuCommand, ApplicationMenuError};
 
-    pub(super) fn decorate() -> Result<(), ApplicationMenuError> {
+    pub(super) fn decorate(_: &str) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
 
-    pub(super) fn perform(_: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+    pub(super) fn perform(_: ApplicationMenuCommand, _: &str) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
 }
@@ -709,9 +717,11 @@ mod tests {
             .collect()
     }
 
-    fn custom_menu_item_paths() -> BTreeSet<(String, Option<String>, String)> {
+    fn custom_menu_item_paths(
+        application_name: &str,
+    ) -> BTreeSet<(String, Option<String>, String)> {
         let mut paths = BTreeSet::new();
-        for menu in menus().into_iter().map(Menu::owned) {
+        for menu in menus(application_name).into_iter().map(Menu::owned) {
             let menu_name = menu.name.to_string();
             for item in menu.items {
                 match item {
@@ -736,7 +746,7 @@ mod tests {
 
     #[test]
     fn macos_menu_bar_should_expose_the_standard_top_level_structure() {
-        let names = menus()
+        let names = menus("SpaceTerm")
             .into_iter()
             .map(|menu| menu.name.to_string())
             .collect::<Vec<_>>();
@@ -749,7 +759,7 @@ mod tests {
 
     #[test]
     fn every_custom_menu_item_should_have_a_native_icon() {
-        let decorated = MENU_ITEM_ICONS
+        let mut decorated = MENU_ITEM_ICONS
             .iter()
             .map(|decoration| {
                 (
@@ -759,14 +769,18 @@ mod tests {
                 )
             })
             .collect::<BTreeSet<_>>();
+        decorated.extend(
+            application_menu_item_icons("SpaceTerm")
+                .map(|(item, _)| ("SpaceTerm".to_owned(), None, item)),
+        );
 
-        assert_eq!(decorated, custom_menu_item_paths());
+        assert_eq!(decorated, custom_menu_item_paths("SpaceTerm"));
     }
 
     #[test]
     fn application_menu_should_include_about_and_standard_macos_commands() {
         assert_eq!(
-            labels(application_menu().owned()),
+            labels(application_menu("SpaceTerm").owned()),
             [
                 "About SpaceTerm",
                 "|",
@@ -779,6 +793,26 @@ mod tests {
                 "Show All",
                 "|",
                 "Quit SpaceTerm",
+            ]
+        );
+    }
+
+    #[test]
+    fn development_application_menu_should_use_its_visible_name() {
+        assert_eq!(
+            labels(application_menu("SpaceTerm Dev").owned()),
+            [
+                "About SpaceTerm Dev",
+                "|",
+                "Settings…",
+                "|",
+                "Services",
+                "|",
+                "Hide SpaceTerm Dev",
+                "Hide Others",
+                "Show All",
+                "|",
+                "Quit SpaceTerm Dev",
             ]
         );
     }

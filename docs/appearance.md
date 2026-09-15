@@ -146,8 +146,8 @@ facts. Native observation, retained settings storage, GPUI font preparation, and
 live outside this module. Resolved values are immutable and carry a monotonic runtime generation;
 settings documents carry a separate `u64` revision.
 
-Run `mise run dev:appearance` for the development-only harness with an isolated retained Config
-root, or `mise run dev:appearance:macos` for the separately identifiable macOS bundle. The harness
+Run `mise run dev:appearance` for the development-only harness in its separately identifiable
+macOS application bundle. `mise run dev:appearance:macos` is the explicit platform task. The harness
 uses the production settings owner and supports preview, cancel, direct save, preview save, reload,
 native and Zed import, complete export, shared system selection, independent color/font/density toggles,
 typed resets, font refresh, and requested/effective diagnostics. `cmd-alt-a` returns to the harness
@@ -156,5 +156,5 @@ masked input, or modal remains the active acceptance surface. `Reset Next Field`
 cycle the typed reset surface for manual checks. The terminal and fixture buttons activate a
 live terminal window or open Alert, Dialog,
 ProgressDialog, menu, ComboBox, plain-input, and obscured-input acceptance fixtures. The harness can
-open only when `SPACETERM_APPEARANCE_EXERCISER=1`; its startup path validation prevents access to the
-ordinary settings root.
+open only when `SPACETERM_APPEARANCE_EXERCISER=1`; its application identity gives every retained
+application directory a namespace separate from ordinary and development builds.

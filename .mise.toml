@@ -83,35 +83,15 @@ run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
 [tasks.dev]
 description = "Run SpaceTerm from source"
-run = '''
-set -eu
-artifact_path=$(mktemp "${TMPDIR:-/tmp}/spaceterm-executable.XXXXXX")
-trap 'rm -f -- "$artifact_path"' EXIT HUP INT TERM
-./scripts/cargo-artifacts.sh run -- python3 scripts/cargo-build-executable.py \
-  --output "$artifact_path" --bin spaceterm -- --locked
-executable=$(cat "$artifact_path")
-rm -f -- "$artifact_path"
-exec "$executable"
-'''
+run = [{ task = "dev:macos" }]
+
+[tasks."dev:macos"]
+description = "Run SpaceTerm Dev from a source-built macOS application bundle"
+run = "exec bash scripts/run-development-app-macos.sh dev"
 
 [tasks."dev:appearance"]
 description = "Run the appearance exerciser with isolated retained settings"
-run = '''
-set -eu
-root="${TMPDIR:-/tmp}/spaceterm-appearance-exerciser"
-artifact_path=$(mktemp "${TMPDIR:-/tmp}/spaceterm-appearance-executable.XXXXXX")
-trap 'rm -f -- "$artifact_path"' EXIT HUP INT TERM
-SPACETERM_APPEARANCE_EXERCISER=1 \
-SPACETERM_APPEARANCE_CONFIG="$root" \
-./scripts/cargo-artifacts.sh run -- python3 scripts/cargo-build-executable.py \
-  --output "$artifact_path" --bin spaceterm -- --features appearance-exerciser --locked
-executable=$(cat "$artifact_path")
-rm -f -- "$artifact_path"
-exec env \
-  SPACETERM_APPEARANCE_EXERCISER=1 \
-  SPACETERM_APPEARANCE_CONFIG="$root" \
-  "$executable"
-'''
+run = [{ task = "dev:appearance:macos" }]
 
 [tasks.check]
 description = "Check every target and feature"
@@ -119,10 +99,7 @@ run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --pac
 
 [tasks."dev:appearance:macos"]
 description = "Run the source appearance exerciser as a separate inspectable macOS app"
-run = '''
-set -eu
-exec bash scripts/dev-appearance-macos.sh
-'''
+run = "exec bash scripts/run-development-app-macos.sh appearance"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
@@ -303,10 +280,11 @@ run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-
 description = "Check macOS scripts and package metadata"
 run = '''
 set -eu
-bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/dev-appearance-macos.sh
-shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/dev-appearance-macos.sh
+bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
+shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
 python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py
 plutil -lint packaging/macos/Info.plist
+plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
 '''
 

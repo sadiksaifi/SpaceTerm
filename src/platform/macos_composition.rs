@@ -2,6 +2,7 @@
 use crate::app::{
     HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
 };
+use crate::application_identity::ApplicationIdentity;
 use crate::desktop_profile::{
     ActionShortcut, ControlKeybindingProfiles, DesktopPresentation, DesktopProfile,
     DesktopProfileError, DesktopWording,
@@ -11,25 +12,27 @@ use gpui::TitlebarOptions;
 use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
+    let identity = ApplicationIdentity::current();
     let code = match super::macos_askpass_transport::dispatch_helper_from_environment() {
         Some(code) => code,
-        None => crate::app::launch(capture_startup_dependencies(), compose),
+        None => crate::app::launch(capture_startup_dependencies(identity), |startup| {
+            compose(startup, identity)
+        }),
     };
     if code != 0 {
         std::process::exit(code);
     }
 }
 
-fn capture_startup_dependencies() -> Result<
+fn capture_startup_dependencies(
+    identity: ApplicationIdentity,
+) -> Result<
     StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
     StartupDependenciesError,
 > {
     let path_environment = super::app_directories::AppDirectoryEnvironment::capture();
-    let directories =
-        super::app_directories::AppDirectories::resolve(super::app_directories::APP_DIR_NAME)
-            .map_err(|_| StartupDependenciesError::Paths)?;
-    #[cfg(feature = "appearance-exerciser")]
-    let directories = isolate_appearance_exerciser_config(directories)?;
+    let directories = super::app_directories::AppDirectories::resolve(identity.directory_name())
+        .map_err(|_| StartupDependenciesError::Paths)?;
     let secure_filesystem: Arc<dyn super::secure_filesystem::SecureFilesystem> =
         Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem);
     let paths = super::app_paths::AppPaths::from_directories(
@@ -53,44 +56,6 @@ fn capture_startup_dependencies() -> Result<
         Arc::new(super::macos_control_socket::MacosControlSocketProbe),
         Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
     )
-}
-
-#[cfg(feature = "appearance-exerciser")]
-fn isolate_appearance_exerciser_config(
-    directories: super::app_directories::AppDirectories,
-) -> Result<super::app_directories::AppDirectories, StartupDependenciesError> {
-    use std::ffi::OsStr;
-
-    if std::env::var_os("SPACETERM_APPEARANCE_EXERCISER").as_deref() != Some(OsStr::new("1")) {
-        return Ok(directories);
-    }
-    let requested = std::env::var_os("SPACETERM_APPEARANCE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("spaceterm-appearance-exerciser"));
-    isolate_appearance_exerciser_directories(directories, requested)
-}
-
-#[cfg(feature = "appearance-exerciser")]
-fn isolate_appearance_exerciser_directories(
-    directories: super::app_directories::AppDirectories,
-    requested: PathBuf,
-) -> Result<super::app_directories::AppDirectories, StartupDependenciesError> {
-    use std::ffi::OsStr;
-    use std::path::Component;
-
-    let normal = requested.is_absolute()
-        && requested
-            .components()
-            .all(|component| !matches!(component, Component::ParentDir | Component::CurDir))
-        && requested.file_name() == Some(OsStr::new("spaceterm-appearance-exerciser"));
-    if !normal {
-        return Err(StartupDependenciesError::Paths);
-    }
-    let parent = requested.parent().ok_or(StartupDependenciesError::Paths)?;
-    let root = std::fs::canonicalize(parent)
-        .map_err(|_| StartupDependenciesError::Paths)?
-        .join("spaceterm-appearance-exerciser");
-    Ok(directories.with_config_directory(root.join(super::app_directories::APP_DIR_NAME)))
 }
 
 fn desktop_profile(
@@ -156,6 +121,7 @@ fn desktop_profile(
 
 fn compose(
     startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
     let settings_storage = startup.settings_storage();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
@@ -166,7 +132,7 @@ fn compose(
             Box::new(crate::platform::macos_attention::AppKitDockAttention::default()),
             Box::new(
                 crate::terminal::attention_notification::AttentionNotifications::new(Arc::new(
-                    crate::platform::macos_notification::UserNotificationAdapter,
+                    crate::platform::macos_notification::UserNotificationAdapter::new(identity),
                 )),
             ),
             Rc::clone(&activity),
@@ -203,7 +169,7 @@ fn compose(
         adapters: crate::app::ApplicationCapabilities {
             selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
             application_menu: Rc::new(
-                super::macos_application_menu::MacosApplicationMenuAdapter,
+                super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),
             local_filesystem,
             key_input: Rc::new(
@@ -254,36 +220,6 @@ fn compose(
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "appearance-exerciser")]
-    #[test]
-    fn appearance_exerciser_should_rebind_every_config_semantic_path() {
-        let directories = super::super::app_directories::AppDirectories::resolve_xdg(
-            super::super::app_directories::APP_DIR_NAME,
-            &super::super::app_directories::AppDirectoryEnvironment {
-                home: Some("/Users/test".into()),
-                ..Default::default()
-            },
-            Some("/temporary".into()),
-        )
-        .unwrap();
-        let temporary = std::env::temp_dir();
-        let directories = isolate_appearance_exerciser_directories(
-            directories,
-            temporary.join("spaceterm-appearance-exerciser"),
-        )
-        .unwrap();
-        let config = std::fs::canonicalize(temporary)
-            .unwrap()
-            .join("spaceterm-appearance-exerciser")
-            .join(super::super::app_directories::APP_DIR_NAME);
-
-        assert_eq!(directories.settings_file(), config.join("settings.json"));
-        assert_eq!(
-            directories.managed_ssh_config().path(),
-            config.join("ssh_config")
-        );
-    }
 
     #[test]
     fn macos_shell_capture_preserves_mode_compatibility_and_inherited_values() {
