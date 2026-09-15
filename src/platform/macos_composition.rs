@@ -240,7 +240,7 @@ fn compose(
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(12.0), px(11.0))),
+            traffic_light_position: Some(point(px(15.5), px(14.0))),
         }),
     })
     .map(|host| {
