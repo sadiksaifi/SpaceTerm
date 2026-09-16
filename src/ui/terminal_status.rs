@@ -1,9 +1,9 @@
 //! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph itself carries the status: OSC 9;4 progress recolors it or, with a reported
-//! percentage, takes its place as a ring, and attention blinks it in the warning color. Each state
-//! is typed from sanitized Terminal Metadata and never from the title text, which stays opaque: a
+//! here once. The glyph slot carries the status: a reported percentage becomes a ring, other work
+//! states use distinct shapes and semantic colors, and attention blinks the mark in the warning
+//! color. Each state is typed from sanitized Terminal Metadata and never from the title text: a
 //! loader a program draws in its own cells or title is not something host chrome can see or
 //! restate.
 
@@ -295,9 +295,9 @@ impl StatusGlyph {
     /// Draws the glyph in a square of its size.
     ///
     /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
-    /// active, inactive, and hovered paints. Work in progress takes the busy color, as a ring when
-    /// it reports a percentage. Error takes the error color, and paused work dims the glyph.
-    /// Attention blinks the glyph in the attention color and then leaves it in that color.
+    /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors,
+    /// with reported percentages drawn as rings. Attention blinks the mark in the attention color
+    /// and then leaves it in that color.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -386,8 +386,8 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     }
 }
 
-/// The glyph for `progress`: a ring in the glyph's place for a reported percentage, otherwise the
-/// glyph the program reported, or the Session's own.
+/// The mark for `progress`: a percentage ring, a distinct semantic shape, the program's reported
+/// glyph, or the Session's own glyph, all within the same slot.
 fn status_mark(
     icon: IconName,
     reported: Option<gpui::SharedString>,
@@ -397,11 +397,18 @@ fn status_mark(
     colors: StatusColors,
 ) -> AnyElement {
     let (tint, opacity) = treatment(progress, blinked);
-    let mark = match (progress, reported) {
+    let mark = match (status_shape(progress), reported) {
         // A reported percentage says more than any glyph, so the ring takes the slot.
-        (TerminalProgress::Normal(percent), _) => progress_ring(percent, size).into_any_element(),
-        (_, Some(glyph)) => reported_glyph(&glyph, size),
-        (_, None) => Icon::inherited(icon, size).into_any_element(),
+        (StatusShape::ProgressRing(percent), _) => progress_ring(percent, size).into_any_element(),
+        (StatusShape::Indeterminate, _) => {
+            Icon::inherited(IconName::LoaderCircle, size).into_any_element()
+        }
+        (StatusShape::Error, _) => {
+            Icon::inherited(IconName::TriangleAlert, size).into_any_element()
+        }
+        (StatusShape::Paused, _) => Icon::inherited(IconName::Pause, size).into_any_element(),
+        (StatusShape::Glyph, Some(glyph)) => reported_glyph(&glyph, size),
+        (StatusShape::Glyph, None) => Icon::inherited(icon, size).into_any_element(),
     };
     div()
         .size_full()
@@ -412,6 +419,25 @@ fn status_mark(
         .when_some(tint.color(colors), |mark, color| mark.text_color(color))
         .child(mark)
         .into_any_element()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatusShape {
+    Glyph,
+    ProgressRing(u8),
+    Indeterminate,
+    Error,
+    Paused,
+}
+
+fn status_shape(progress: TerminalProgress) -> StatusShape {
+    match progress {
+        TerminalProgress::None => StatusShape::Glyph,
+        TerminalProgress::Normal(percent) => StatusShape::ProgressRing(percent),
+        TerminalProgress::Indeterminate => StatusShape::Indeterminate,
+        TerminalProgress::Error => StatusShape::Error,
+        TerminalProgress::Paused => StatusShape::Paused,
+    }
 }
 
 fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
@@ -712,6 +738,17 @@ mod tests {
                 "{progress:?}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_statuses_keep_distinct_shapes_when_their_colors_coincide() {
+        let shapes = [
+            status_shape(TerminalProgress::Indeterminate),
+            status_shape(TerminalProgress::Error),
+            status_shape(TerminalProgress::Paused),
+        ];
+
+        assert!(shapes[0] != shapes[1] && shapes[0] != shapes[2] && shapes[1] != shapes[2]);
     }
 
     #[test]
