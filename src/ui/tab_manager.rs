@@ -62,9 +62,9 @@ use gpui::{
     ScrollHandle, Task, Window, div, px, relative, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonVariant, CustomIconName, Icon, IconButton, IconName,
-    ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse, WindowDragRegionStatus,
+    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, CustomIconName, Icon, IconButton,
+    IconName, ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 #[cfg(test)]
@@ -250,50 +250,26 @@ impl TabChromePresentation {
         }
     }
 
-    /// A Close control overlaps the title instead of taking layout space, so its backing is a
-    /// floating material rather than another resting Tab surface. The denser material preserves
-    /// the Tab's state color while keeping the covered title from reading through the glyph.
     fn close_control_style(
         &self,
         active: bool,
         ancestor_hovered: bool,
-        appearance: &super::appearance::ChromeAppearance,
+        colors: &ChromeColors,
     ) -> spaceterm_ui::ButtonVariantStyle {
-        let background = if ancestor_hovered {
-            if active {
-                self.active_tab_hover_background
-            } else {
-                self.hover_background
-            }
-        } else if active {
-            self.active_tab_background
-        } else {
-            self.inactive_tab_background
-        };
-        let background = appearance.surface(crate::appearance::SurfaceRole::Floating, background);
-        self.control_style(
-            active,
-            ancestor_hovered,
-            Some(background),
-            &appearance.colors,
-        )
+        self.control_style(active, ancestor_hovered, colors)
     }
 
     fn bar_control_style(&self, colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
-        self.control_style(false, false, None, colors)
+        self.control_style(false, false, colors)
     }
 
     fn control_style(
         &self,
         active: bool,
         ancestor_hovered: bool,
-        background: Option<Color>,
         colors: &ChromeColors,
     ) -> spaceterm_ui::ButtonVariantStyle {
         let clear = gpui::rgba(0);
-        let normal_background = background.map_or(clear, gpui_color);
-        let hover_background =
-            background.map_or_else(|| gpui_color(self.hover_background), gpui_color);
         let icon = if ancestor_hovered {
             if active {
                 self.active_tab_hover_icon
@@ -305,14 +281,14 @@ impl TabChromePresentation {
         } else {
             self.inactive_tab_icon
         };
-        let normal = spaceterm_ui::ButtonPaint::new(normal_background, gpui_color(icon), clear);
-        let hover =
-            spaceterm_ui::ButtonPaint::new(hover_background, gpui_color(self.hover_icon), clear);
-        let disabled = spaceterm_ui::ButtonPaint::new(
-            normal_background,
-            gpui_color(colors.text_disabled),
+        let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
+        let hover = spaceterm_ui::ButtonPaint::new(
+            gpui_color(self.hover_background),
+            gpui_color(self.hover_icon),
             clear,
         );
+        let disabled =
+            spaceterm_ui::ButtonPaint::new(clear, gpui_color(colors.text_disabled), clear);
         spaceterm_ui::ButtonVariantStyle::new(normal, hover, hover, disabled)
     }
 }
@@ -1231,8 +1207,14 @@ impl TabManager {
         let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
-        let control_style = presentation.close_control_style(active, ancestor_hovered, appearance);
+        let control_style =
+            presentation.close_control_style(active, ancestor_hovered, &appearance.colors);
         let hover_foreground = presentation.tab_hover_foreground(active);
+        let close_clearance = (active || ancestor_hovered).then(|| {
+            cx.global::<ButtonTheme>()
+                .icon_button_size(ButtonSize::Compact)
+                + appearance.spacing(TAB_TRAILING_GAP)
+        });
         let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
         #[cfg(test)]
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
@@ -1302,7 +1284,12 @@ impl TabManager {
                 });
                 cx.stop_propagation();
             })
-            .child(render_tab_identity(tab_id, identity, appearance))
+            .child(render_tab_identity(
+                tab_id,
+                identity,
+                close_clearance,
+                appearance,
+            ))
             .child(
                 div()
                     .absolute()
@@ -1632,6 +1619,7 @@ fn render_tab_separator(
 fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
+    close_clearance: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let origin_location = if identity.remote { "remote" } else { "local" };
@@ -1644,6 +1632,7 @@ fn render_tab_identity(
     };
     let mut words = div()
         .id(("tab-identity", tab_id.get()))
+        .debug_selector(move || format!("tab-identity-{}", tab_id.get()))
         .flex_1()
         .min_w_0()
         .flex()
@@ -1695,6 +1684,8 @@ fn render_tab_identity(
         .debug_selector(move || format!("tab-title-{}", tab_id.get()))
         .flex_1()
         .min_w_0()
+        .overflow_hidden()
+        .when_some(close_clearance, |item, clearance| item.pr(clearance))
         .flex()
         .flex_row()
         .items_center()
@@ -1843,12 +1834,6 @@ mod tests {
             tab_hover_icon: Color::rgb(0x778899),
             ..ChromeColors::default()
         };
-        let appearance = super::super::appearance::ChromeAppearance {
-            control_colors: colors.clone(),
-            colors: colors.clone(),
-            ..Default::default()
-        };
-
         for window_active in [true, false] {
             let presentation = TabChromePresentation::resolve(window_active, &colors);
             let (fill, rim) = if window_active {
@@ -1890,10 +1875,11 @@ mod tests {
                 presentation.tab_hover_foreground(false),
                 colors.tab_hover_foreground
             );
-            let close = presentation.close_control_style(true, true, &appearance);
+            let close = presentation.close_control_style(true, true, &colors);
             assert_eq!(
                 close.hovered().background(),
-                gpui_color(colors.tab_active_hover_background)
+                gpui_color(colors.tab_hover_background),
+                "window_active={window_active}: directly hovering Close should refine the Tab hover state"
             );
             assert_eq!(
                 close.hovered().foreground(),
@@ -1901,7 +1887,7 @@ mod tests {
             );
             assert_eq!(
                 presentation
-                    .close_control_style(false, true, &appearance)
+                    .close_control_style(false, true, &colors)
                     .normal()
                     .foreground(),
                 gpui_color(colors.tab_hover_icon),
@@ -2074,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_close_control_should_use_dense_parent_colored_material_and_state_foregrounds() {
+    fn tab_close_control_should_share_parent_at_rest_and_keep_direct_interaction_states() {
         let colors = ChromeColors {
             tab_active_background: Color::rgb(0x445566),
             tab_inactive_selected_background: Color::rgb(0x556677),
@@ -2085,45 +2071,18 @@ mod tests {
             tab_hover_icon: Color::rgb(0x334455),
             ..ChromeColors::default()
         };
-        let preferences = crate::appearance::AppearancePreferences::default();
-        let materials =
-            crate::appearance::ResolvedWindowComposition::resolve(&preferences.background, true)
-                .materials;
         let colors = colors.opaque_presentation();
-        let appearance = super::super::appearance::ChromeAppearance {
-            control_colors: colors.material_presentation(materials),
-            colors: colors.clone(),
-            materials,
-            ..Default::default()
-        };
         for window_active in [false, true] {
             let presentation = TabChromePresentation::resolve(window_active, &colors);
-            let style = presentation.close_control_style(true, false, &appearance);
-            let selected_background = if window_active {
-                colors.tab_active_background
-            } else {
-                colors.tab_inactive_selected_background
-            };
-            let floating_background = appearance.surface(
-                crate::appearance::SurfaceRole::Floating,
-                selected_background,
+            let style = presentation.close_control_style(true, false, &colors);
+            assert_eq!(style.normal().background(), rgba(0));
+            assert_eq!(
+                style.hovered().background(),
+                gpui_color(colors.tab_hover_background)
             );
             assert_eq!(
-                [
-                    style.normal().background(),
-                    style.hovered().background(),
-                    style.pressed().background(),
-                ],
-                [gpui_color(floating_background); 3]
-            );
-            assert!(
-                floating_background.a
-                    > if window_active {
-                        appearance.control_colors.tab_active_background.a
-                    } else {
-                        appearance.control_colors.tab_inactive_selected_background.a
-                    },
-                "the floating Close plate should retain more material than the Tab chip so title text cannot read through"
+                style.pressed().background(),
+                gpui_color(colors.tab_hover_background)
             );
             assert_eq!(
                 style.normal().foreground(),
@@ -2142,20 +2101,17 @@ mod tests {
                 gpui_color(colors.tab_hover_icon)
             );
 
-            for (active, background) in [
-                (true, colors.tab_active_hover_background),
-                (false, colors.tab_hover_background),
-            ] {
-                let style = presentation.close_control_style(active, true, &appearance);
-                let floating_background =
-                    appearance.surface(crate::appearance::SurfaceRole::Floating, background);
+            for active in [true, false] {
+                let style = presentation.close_control_style(active, true, &colors);
                 assert_eq!(
-                    [
-                        style.normal().background(),
-                        style.hovered().background(),
-                        style.pressed().background(),
-                    ],
-                    [gpui_color(floating_background); 3]
+                    style.normal().background(),
+                    rgba(0),
+                    "window_active={window_active} active={active}: the revealed Close control should leave the parent Tab surface continuous"
+                );
+                assert_eq!(
+                    style.hovered().background(),
+                    gpui_color(colors.tab_hover_background),
+                    "window_active={window_active} active={active}: direct hover should still give the Close control its own state"
                 );
             }
         }
@@ -3533,7 +3489,7 @@ mod tests {
             .debug_bounds("tab-pane-count-1")
             .expect("a multi-Pane Tab should carry a terse count");
         // The glyph leads and the count trails the words, so neither competes with the Tab's name
-        // for room. The close control independently overlays this identity when revealed.
+        // for room. Revealing Close clips this identity without moving the absolute control.
         assert!(origin.right() <= count.left());
         assert!(origin.size.width > px(0.0) && count.size.width > px(0.0));
     }
@@ -3631,6 +3587,9 @@ mod tests {
         let close_button = cx
             .debug_bounds("tab-close-button-1")
             .expect("the Active Tab close button was not rendered");
+        let identity = cx
+            .debug_bounds("tab-identity-1")
+            .expect("the Active Tab identity was not rendered");
 
         assert_eq!(
             (
@@ -3639,10 +3598,16 @@ mod tests {
             ),
             (px(TAB_ITEM_RIGHT_PADDING), gpui::size(px(20.0), px(20.0)),)
         );
+        assert!(
+            identity.right() + px(TAB_TRAILING_GAP) <= close_button.left(),
+            "the visible Active Tab identity {identity:?} should stop before its floating Close control {close_button:?}"
+        );
     }
 
     #[gpui::test]
-    fn inactive_tab_close_button_should_overlay_the_full_width_title(cx: &mut TestAppContext) {
+    fn inactive_tab_identity_should_use_full_width_until_close_is_revealed(
+        cx: &mut TestAppContext,
+    ) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
@@ -3658,6 +3623,19 @@ mod tests {
 
         assert_eq!(item.right() - title.right(), px(TAB_ITEM_RIGHT_PADDING));
         assert!(title.right() > close_button.left());
+
+        cx.simulate_mouse_move(item.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let identity = cx
+            .debug_bounds("tab-identity-1")
+            .expect("the hovered inactive Tab title was not rendered");
+        let close_button = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the hovered inactive Tab close button was not rendered");
+        assert!(
+            identity.right() + px(TAB_TRAILING_GAP) <= close_button.left(),
+            "revealing Close should clip the identity {identity:?} before the floating control {close_button:?} without reserving room at rest"
+        );
     }
 
     #[gpui::test]
