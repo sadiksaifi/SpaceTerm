@@ -5,7 +5,7 @@ use gpui::{App, AppContext, Window};
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{
@@ -127,6 +127,7 @@ pub(super) enum AskPassHelperReply {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AskPassProtocolError {
+    TimedOut,
     Disconnected,
     OversizedFrame,
     MalformedFrame,
@@ -143,7 +144,7 @@ pub(super) fn read_request<S: Read + ?Sized>(
     let mut frame = Zeroizing::new(vec![0_u8; length]);
     stream
         .read_exact(frame.as_mut_slice())
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+        .map_err(classify_read_error)?;
     let mut cursor = FrameCursor::new(frame.as_slice());
     if cursor.byte()? != PROTOCOL_VERSION {
         return Err(AskPassProtocolError::MalformedFrame);
@@ -237,7 +238,7 @@ pub(super) fn read_reply<S: Read + ?Sized>(
     let mut frame = Zeroizing::new(vec![0_u8; length]);
     stream
         .read_exact(frame.as_mut_slice())
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+        .map_err(classify_read_error)?;
     match frame[0] {
         REPLY_SECRET => {
             frame.remove(0);
@@ -258,13 +259,20 @@ fn read_frame_length<S: Read + ?Sized>(
     let mut encoded = [0_u8; 4];
     stream
         .read_exact(&mut encoded)
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+        .map_err(classify_read_error)?;
     let length = usize::try_from(u32::from_be_bytes(encoded))
         .map_err(|_| AskPassProtocolError::OversizedFrame)?;
     if length == 0 || length > maximum {
         return Err(AskPassProtocolError::OversizedFrame);
     }
     Ok(length)
+}
+
+fn classify_read_error(error: io::Error) -> AskPassProtocolError {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => AskPassProtocolError::TimedOut,
+        _ => AskPassProtocolError::Disconnected,
+    }
 }
 
 fn write_frame_length<S: Write + ?Sized>(
@@ -1043,7 +1051,7 @@ impl AskPassAttemptObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Result as IoResult};
+    use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
     use std::sync::Mutex;
 
     struct MemoryStream {
@@ -1074,6 +1082,14 @@ mod tests {
 
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
+        }
+    }
+
+    struct FailingReader(ErrorKind);
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> IoResult<usize> {
+            Err(Error::from(self.0))
         }
     }
 
@@ -1131,6 +1147,20 @@ mod tests {
         let token = token();
         let bytes = request_bytes(token.as_str().as_bytes(), b"Password:", REQUEST_SECRET);
         assert!(read_request(&mut OneByteReader(Cursor::new(bytes)), &token).is_ok());
+    }
+
+    #[test]
+    fn protocol_distinguishes_read_timeouts_from_disconnections() {
+        for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            assert_eq!(
+                read_reply(&mut FailingReader(kind)).err(),
+                Some(AskPassProtocolError::TimedOut)
+            );
+        }
+        assert_eq!(
+            read_reply(&mut FailingReader(ErrorKind::UnexpectedEof)).err(),
+            Some(AskPassProtocolError::Disconnected)
+        );
     }
 
     #[test]
