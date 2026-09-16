@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
-use super::terminal_status::{attention_glyph, progress_indicator};
+use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
@@ -251,7 +251,7 @@ impl TabChromePresentation {
         }
     }
 
-    /// The attention and error marks, readable on every surface a Tab can rest on or hover over.
+    /// The status glyph colors, readable on every surface a Tab can rest on or hover over.
     fn tab_status(&self, colors: &ChromeColors) -> crate::appearance::StatusPaint {
         colors.status(&[
             self.active_tab_background.source_over(self.background),
@@ -1626,10 +1626,10 @@ fn render_tab_separator(
         .into_any_element()
 }
 
-/// One Tab's identity: `<attention?> <terminal glyph> <progress?> <activity> · <place>`.
+/// One Tab's identity: `<status glyph> <activity> · <place>`.
 ///
-/// The attention mark, the glyph, and the progress status are the segments a Tab never gives up.
-/// Only the words after them narrow: the activity first, then the place.
+/// The status glyph is the segment a Tab never gives up. Only the words after it narrow: the
+/// activity first, then the place.
 fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
@@ -1688,8 +1688,8 @@ fn render_tab_identity(
         .flex()
         .flex_row()
         .items_center()
-        // Attention belongs to the Tab rather than to any one segment of its name, so it breathes in
-        // the terminal glyph that leads the row and survives every narrowing.
+        // Status belongs to the Tab rather than to any one segment of its name, so the terminal glyph
+        // that leads the row carries it and survives every narrowing.
         .child(
             div()
                 .debug_selector(move || format!("tab-origin-{}-{origin_location}", tab_id.get()))
@@ -1697,34 +1697,22 @@ fn render_tab_identity(
                 .mr(appearance.spacing(TAB_ORIGIN_GAP))
                 .flex()
                 .items_center()
-                .child(attention_glyph(
-                    IconName::Terminal,
-                    icon_size,
-                    identity.attention.then(|| {
-                        (
-                            ("tab-attention", tab_id.get()).into(),
-                            format!("tab-attention-{}", tab_id.get()),
-                            gpui_color(status.attention),
-                        )
-                    }),
-                )),
-        )
-        .when_some(
-            progress_indicator(
-                identity.progress,
-                ("tab-progress", tab_id.get()).into(),
-                &format!("tab-progress-{}", tab_id.get()),
-                icon_size,
-                gpui_color(status.error),
-            ),
-            |item, mark| {
-                item.child(
-                    div()
-                        .flex_shrink_0()
-                        .mr(appearance.spacing(TAB_ORIGIN_GAP))
-                        .child(mark),
-                )
-            },
+                .child(
+                    StatusGlyph {
+                        icon: IconName::Terminal,
+                        size: icon_size,
+                        progress: identity.progress,
+                        attention: identity.attention,
+                        id: ("tab-status", tab_id.get()).into(),
+                        selector_prefix: format!("tab-status-{}", tab_id.get()),
+                        colors: StatusColors {
+                            attention: gpui_color(status.attention),
+                            busy: gpui_color(status.busy),
+                            error: gpui_color(status.error),
+                        },
+                    }
+                    .render(),
+                ),
         )
         .child(words)
         .into_any_element()
@@ -3472,12 +3460,10 @@ mod tests {
         );
     }
 
-    /// A Tab reads `<glyph, breathing on attention> <progress> <activity> · <place>`, and neither the account,
-    /// the Workspace name, nor a Pane count competes with those segments for room.
+    /// A Tab reads `<status glyph> <activity> · <place>`, and neither the account, the Workspace
+    /// name, nor a Pane count competes with those segments for room.
     #[gpui::test]
-    fn tab_should_present_attention_glyph_progress_activity_and_place_in_order(
-        cx: &mut TestAppContext,
-    ) {
+    fn tab_should_present_status_glyph_activity_and_place_in_order(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
         let (manager, records, cx) = tab_manager(cx);
         report_metadata(&records, 1, 1, |metadata| {
@@ -3499,25 +3485,27 @@ mod tests {
         cx.run_until_parked();
 
         let attention = cx
-            .debug_bounds("tab-attention-1")
-            .expect("a Tab whose Pane has unread attention should breathe in its glyph");
+            .debug_bounds("tab-status-1-attention")
+            .expect("a Tab whose Pane has unread attention should blink its glyph");
+        let progress = cx
+            .debug_bounds("tab-status-1-normal")
+            .expect("the Tab should present its reported progress");
         let origin = cx
             .debug_bounds("tab-origin-1-local")
             .expect("the Tab should carry its terminal glyph");
-        let progress = cx
-            .debug_bounds("tab-progress-1-normal")
-            .expect("the Tab should present its reported progress");
         let activity = cx.debug_bounds("tab-activity-1").unwrap();
         let place = cx.debug_bounds("tab-place-1").unwrap();
         let glyph =
             cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
-        // The cue is the terminal glyph itself, not a separate mark beside it.
-        assert_eq!(attention.size, gpui::size(glyph, glyph));
-        assert!(
-            attention.left() >= origin.left() && attention.right() <= origin.right(),
-            "{attention:?} should sit on the glyph {origin:?}"
-        );
-        for (leading, trailing) in [(origin, progress), (progress, activity), (activity, place)] {
+        // Attention and progress are the terminal glyph itself, not separate marks beside it.
+        for status in [attention, progress] {
+            assert_eq!(status.size, gpui::size(glyph, glyph));
+            assert!(
+                status.left() >= origin.left() && status.right() <= origin.right(),
+                "{status:?} should sit on the glyph {origin:?}"
+            );
+        }
+        for (leading, trailing) in [(origin, activity), (activity, place)] {
             assert!(
                 leading.right() <= trailing.left(),
                 "{leading:?} should precede {trailing:?}"
@@ -3535,8 +3523,8 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("tab-attention-1").is_some());
-        assert!(cx.debug_bounds("pane-attention-1").is_some());
+        assert!(cx.debug_bounds("tab-status-1-attention").is_some());
+        assert!(cx.debug_bounds("pane-status-1-attention").is_some());
     }
 
     /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane
@@ -3565,25 +3553,22 @@ mod tests {
             (
                 ProgressMetadata::Normal(55),
                 TerminalProgress::Normal(55),
-                Some(["tab-progress-1-normal", "pane-progress-1-normal"]),
+                Some(["tab-status-1-normal", "pane-status-1-normal"]),
             ),
             (
                 ProgressMetadata::Indeterminate,
                 TerminalProgress::Indeterminate,
-                Some([
-                    "tab-progress-1-indeterminate",
-                    "pane-progress-1-indeterminate",
-                ]),
+                Some(["tab-status-1-indeterminate", "pane-status-1-indeterminate"]),
             ),
             (
                 ProgressMetadata::Error(10),
                 TerminalProgress::Error,
-                Some(["tab-progress-1-error", "pane-progress-1-error"]),
+                Some(["tab-status-1-error", "pane-status-1-error"]),
             ),
             (
                 ProgressMetadata::Paused(20),
                 TerminalProgress::Paused,
-                Some(["tab-progress-1-paused", "pane-progress-1-paused"]),
+                Some(["tab-status-1-paused", "pane-status-1-paused"]),
             ),
             (ProgressMetadata::None, TerminalProgress::None, None),
         ];
@@ -3598,7 +3583,7 @@ mod tests {
                 metadata.progress = progress;
             });
             cx.run_until_parked();
-            // Progress is presented beside the title and never replaces it.
+            // Progress is presented in the glyph and never replaces the title.
             let identity = manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_identity()
             });
@@ -3648,13 +3633,13 @@ mod tests {
             ("agent", TerminalProgress::Error)
         );
         assert!(cx.debug_bounds("tab-item-1-inactive").is_some());
-        assert!(cx.debug_bounds("tab-progress-1-error").is_some());
+        assert!(cx.debug_bounds("tab-status-1-error").is_some());
     }
 
-    /// A narrow Tab gives up its words before it gives up its glyph, its progress, or its close
-    /// control, so every Tab stays identifiable and closable at the narrowest width.
+    /// A narrow Tab gives up its words before it gives up its status glyph or its close control,
+    /// so every Tab stays identifiable and closable at the narrowest width.
     #[gpui::test]
-    fn narrow_tabs_should_keep_glyph_progress_and_close_reachable(cx: &mut TestAppContext) {
+    fn narrow_tabs_should_keep_status_glyph_and_close_reachable(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
         let (_manager, records, cx) = tab_manager(cx);
         report_metadata(&records, 1, 1, |metadata| {
@@ -3676,8 +3661,8 @@ mod tests {
             .debug_bounds("tab-origin-1-local")
             .expect("a narrowed Tab should keep its origin glyph");
         let progress = cx
-            .debug_bounds("tab-progress-1-indeterminate")
-            .expect("a narrowed Tab should keep its progress");
+            .debug_bounds("tab-status-1-indeterminate")
+            .expect("a narrowed Tab should keep its status");
         let close = cx
             .debug_bounds("tab-close-button-1")
             .expect("a narrowed Tab should keep its close control");

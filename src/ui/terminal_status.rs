@@ -1,9 +1,11 @@
-//! The status marks a Pane Caption and a Tab item present beside a Terminal's title.
+//! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
-//! Both surfaces describe the same Terminal Session, so the attention cue and the OSC 9;4 progress
-//! status are drawn here once. Each mark is typed from sanitized Terminal Metadata and never from
-//! the title text, which stays opaque: a loader a program draws in its own cells or title is not
-//! something host chrome can see or restate.
+//! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
+//! here once. The glyph itself carries the status: OSC 9;4 progress recolors it or, with a reported
+//! percentage, takes its place as a ring, and attention blinks it in the warning color. Each state
+//! is typed from sanitized Terminal Metadata and never from the title text, which stays opaque: a
+//! loader a program draws in its own cells or title is not something host chrome can see or
+//! restate.
 
 use std::time::Duration;
 
@@ -16,29 +18,20 @@ use spaceterm_ui::{Icon, IconName};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 
-/// How many positions one breath of the attention cue steps through.
-const BREATH_STEPS: u32 = 24;
-/// How long the attention cue rests on each position, for a breath of about 1.7 seconds.
-const BREATH_STEP: Duration = Duration::from_millis(70);
-/// How many breaths the attention cue takes before it rests in the warning color.
+/// How long an attention blink holds each of its two colors.
+const BLINK_STEP: Duration = Duration::from_millis(500);
+/// How many times the glyph blinks before it rests in the warning color.
 ///
-/// The breathing draws the eye when attention arrives. Resting afterwards keeps an unread Tab in
-/// the background from repainting its window for as long as it stays unread.
-const BREATHS: u32 = 6;
+/// Blinking draws the eye when attention arrives. Resting afterwards keeps an unread Tab in the
+/// background from repainting its window for as long as it stays unread.
+const BLINKS: u32 = 4;
+/// How strongly a paused Session's glyph shows, as a share of its usual opacity.
+const PAUSED_OPACITY: f32 = 0.4;
 
-/// How far the ring's stroke sits inside the indicator's square, as a share of its size.
+/// How far the ring's stroke sits inside the glyph's square, as a share of its size.
 const PROGRESS_STROKE_SHARE: f32 = 0.14;
 /// The resting ring behind a reported percentage, as a share of the foreground's opacity.
 const PROGRESS_TRACK_OPACITY: f32 = 0.28;
-/// The loader's arc length, in degrees.
-const LOADER_SWEEP_DEGREES: f32 = 100.0;
-/// How many positions the loader steps through per revolution.
-const LOADER_STEPS: u32 = 12;
-/// How long the loader rests on each position.
-///
-/// Stepping keeps an indeterminate Session from repainting its window at the display's full rate
-/// for as long as the program leaves the status up.
-const LOADER_STEP: Duration = Duration::from_millis(80);
 
 /// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it.
 ///
@@ -84,83 +77,135 @@ impl TerminalProgress {
     }
 }
 
-/// A Terminal glyph that breathes into `attention_color` while its Session asks for attention.
-///
-/// The glyph at rest inherits the surrounding text color, so it keeps following the host's active,
-/// inactive, and hovered paints. Attention layers the same glyph in `attention_color` over it and
-/// fades that layer in and out, then leaves it fully shown. `selector` names the attention layer.
-pub(crate) fn attention_glyph(
-    icon: IconName,
-    size: Pixels,
-    attention: Option<(ElementId, String, Rgba)>,
-) -> AnyElement {
-    let glyph = div()
-        .relative()
-        .size(size)
-        .flex_shrink_0()
-        .child(Icon::inherited(icon, size));
-    let Some((id, selector, color)) = attention else {
-        return glyph.into_any_element();
-    };
-    glyph
-        .child(Stepped::new(
-            id,
-            BREATH_STEP,
-            // The last breath stops at its peak, so settling never jumps.
-            Some(BREATH_STEPS * (BREATHS - 1) + BREATH_STEPS / 2 + 1),
-            move |step| {
-                // Each breath rises from nothing to full and back, ending on full once settled.
-                let opacity = step.map_or(1.0, |step| {
-                    let phase = (step % BREATH_STEPS) as f32 / BREATH_STEPS as f32;
-                    (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0
-                });
-                div()
-                    .debug_selector(move || selector)
-                    .absolute()
-                    .inset_0()
-                    .opacity(opacity)
-                    .child(Icon::new(icon, size, color))
-                    .into_any_element()
-            },
-        ))
-        .into_any_element()
+/// Status colors a host resolves for the surfaces its glyph rests on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StatusColors {
+    pub(crate) attention: Rgba,
+    pub(crate) busy: Rgba,
+    pub(crate) error: Rgba,
 }
 
-/// Draws one progress status in a square of `size`, or nothing when no progress is reported.
-///
-/// Normal and indeterminate progress take the surrounding text color, so they follow the host's
-/// active, inactive, and hovered paints. Error takes `error_color`, which the host resolves for
-/// its own surfaces. `selector_prefix` names the mark as `{prefix}-{state}`, and `id` keys the
-/// loader's clock so it survives across frames.
-pub(crate) fn progress_indicator(
-    progress: TerminalProgress,
-    id: ElementId,
-    selector_prefix: &str,
-    size: Pixels,
-    error_color: Rgba,
-) -> Option<AnyElement> {
-    let name = progress.name()?;
-    let selector = format!("{selector_prefix}-{name}");
-    let mark = match progress {
-        TerminalProgress::None => return None,
-        TerminalProgress::Normal(percent) => progress_ring(percent, size).into_any_element(),
-        TerminalProgress::Indeterminate => loader(id, size).into_any_element(),
-        TerminalProgress::Error => {
-            Icon::new(IconName::CircleX, size, error_color).into_any_element()
-        }
-        TerminalProgress::Paused => Icon::inherited(IconName::CirclePause, size).into_any_element(),
-    };
-    Some(
-        div()
-            .debug_selector(move || selector)
+/// One Terminal Session's glyph and the status it presents.
+pub(crate) struct StatusGlyph {
+    pub(crate) icon: IconName,
+    pub(crate) size: Pixels,
+    pub(crate) progress: TerminalProgress,
+    pub(crate) attention: bool,
+    /// Keys the attention blink's clock so it survives across frames.
+    pub(crate) id: ElementId,
+    /// Names the glyph as `{prefix}-{progress state}` and its blink as `{prefix}-attention`.
+    pub(crate) selector_prefix: String,
+    pub(crate) colors: StatusColors,
+}
+
+impl StatusGlyph {
+    /// Draws the glyph in a square of its size.
+    ///
+    /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
+    /// active, inactive, and hovered paints. Work in progress takes the busy color, as a ring when
+    /// it reports a percentage. Error takes the error color, and paused work dims the glyph.
+    /// Attention blinks the glyph in the attention color and then leaves it in that color.
+    pub(crate) fn render(self) -> AnyElement {
+        let Self {
+            icon,
+            size,
+            progress,
+            attention,
+            id,
+            selector_prefix,
+            colors,
+        } = self;
+        let state = progress
+            .name()
+            .map(|name| format!("{selector_prefix}-{name}"));
+        let glyph = div()
+            .when_some(state, |glyph, state| glyph.debug_selector(move || state))
             .size(size)
             .flex_shrink_0()
             .flex()
             .items_center()
-            .justify_center()
-            .child(mark)
-            .into_any_element(),
-    )
+            .justify_center();
+        if !attention {
+            return glyph
+                .child(status_mark(icon, size, progress, false, colors))
+                .into_any_element();
+        }
+        let selector = format!("{selector_prefix}-attention");
+        glyph
+            .child(Stepped::new(id, BLINK_STEP, BLINKS * 2, move |step| {
+                // Even steps and the settled state show the attention color.
+                let blinked = step.is_none_or(|step| step % 2 == 0);
+                div()
+                    .debug_selector(move || selector)
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(status_mark(icon, size, progress, blinked, colors))
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+}
+
+/// Which status color a glyph takes, before a host resolves it for its surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Tint {
+    /// The surrounding text color.
+    Inherited,
+    Attention,
+    Busy,
+    Error,
+}
+
+impl Tint {
+    fn color(self, colors: StatusColors) -> Option<Rgba> {
+        match self {
+            Self::Inherited => None,
+            Self::Attention => Some(colors.attention),
+            Self::Busy => Some(colors.busy),
+            Self::Error => Some(colors.error),
+        }
+    }
+}
+
+/// The tint and opacity `progress` gives a glyph, with attention's color taking precedence while
+/// `blinked`.
+fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
+    if blinked {
+        return (Tint::Attention, 1.0);
+    }
+    match progress {
+        TerminalProgress::None => (Tint::Inherited, 1.0),
+        TerminalProgress::Normal(_) | TerminalProgress::Indeterminate => (Tint::Busy, 1.0),
+        TerminalProgress::Error => (Tint::Error, 1.0),
+        TerminalProgress::Paused => (Tint::Inherited, PAUSED_OPACITY),
+    }
+}
+
+/// The glyph for `progress`: a ring in the glyph's place for a reported percentage, otherwise the
+/// glyph itself.
+fn status_mark(
+    icon: IconName,
+    size: Pixels,
+    progress: TerminalProgress,
+    blinked: bool,
+    colors: StatusColors,
+) -> AnyElement {
+    let (tint, opacity) = treatment(progress, blinked);
+    let mark = match progress {
+        TerminalProgress::Normal(percent) => progress_ring(percent, size).into_any_element(),
+        _ => Icon::inherited(icon, size).into_any_element(),
+    };
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(opacity)
+        .when_some(tint.color(colors), |mark, color| mark.text_color(color))
+        .child(mark)
+        .into_any_element()
 }
 
 fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
@@ -179,30 +224,15 @@ fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
     .size(size)
 }
 
-fn loader(id: ElementId, size: Pixels) -> impl IntoElement {
-    Stepped::new(id, LOADER_STEP, None, move |step| {
-        let start = step.unwrap_or(0) as f32 * 360.0 / LOADER_STEPS as f32;
-        canvas(
-            |_, _, _| (),
-            move |bounds, (), window, _| {
-                let color = window.text_style().color;
-                paint_arc(bounds, start, start + LOADER_SWEEP_DEGREES, color, window);
-            },
-        )
-        .size(size)
-        .into_any_element()
-    })
-}
-
 /// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
 ///
 /// Only the owning view is notified on each step, at the step's pace rather than the display's.
-/// A bounded clock stops after `limit` steps and then renders `None`, so a settled animation costs
+/// The clock stops after `limit` steps and then renders `None`, so a settled animation costs
 /// nothing more. The clock restarts when the element leaves the screen and returns.
 struct Stepped {
     id: ElementId,
     interval: Duration,
-    limit: Option<u32>,
+    limit: u32,
     render: Option<Box<dyn FnOnce(Option<u32>) -> AnyElement>>,
 }
 
@@ -210,7 +240,7 @@ impl Stepped {
     fn new(
         id: ElementId,
         interval: Duration,
-        limit: Option<u32>,
+        limit: u32,
         render: impl FnOnce(Option<u32>) -> AnyElement + 'static,
     ) -> Self {
         Self {
@@ -229,7 +259,7 @@ struct StepClock {
 }
 
 impl StepClock {
-    fn start(interval: Duration, limit: Option<u32>, cx: &mut gpui::Context<Self>) -> Self {
+    fn start(interval: Duration, limit: u32, cx: &mut gpui::Context<Self>) -> Self {
         Self {
             step: Some(0),
             _tick: cx.spawn(async move |clock, cx| {
@@ -237,7 +267,7 @@ impl StepClock {
                     cx.background_executor().timer(interval).await;
                     let running = clock.update(cx, |clock: &mut StepClock, cx| {
                         let next = clock.step.map(|step| step.wrapping_add(1));
-                        clock.step = next.filter(|next| limit.is_none_or(|limit| *next < limit));
+                        clock.step = next.filter(|next| *next < limit);
                         cx.notify();
                         clock.step.is_some()
                     });
@@ -375,7 +405,7 @@ mod tests {
     #[gpui::test]
     fn bounded_step_clock_should_settle_and_stop(cx: &mut gpui::TestAppContext) {
         let interval = Duration::from_millis(10);
-        let clock = cx.new(|cx| StepClock::start(interval, Some(3), cx));
+        let clock = cx.new(|cx| StepClock::start(interval, 3, cx));
         let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
         let _observation = cx.update(|cx| {
             let notifications = std::rc::Rc::clone(&notifications);
@@ -391,6 +421,25 @@ mod tests {
         }
         assert_eq!(steps, [Some(0), Some(1), Some(2), None, None, None, None]);
         assert_eq!(notifications.get(), 3);
+    }
+
+    /// Each status recolors the glyph, a paused one dims it, and a blink shows attention over all.
+    #[test]
+    fn glyph_should_take_the_color_of_its_status() {
+        for (progress, resting) in [
+            (TerminalProgress::None, (Tint::Inherited, 1.0)),
+            (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
+            (TerminalProgress::Indeterminate, (Tint::Busy, 1.0)),
+            (TerminalProgress::Error, (Tint::Error, 1.0)),
+            (TerminalProgress::Paused, (Tint::Inherited, PAUSED_OPACITY)),
+        ] {
+            assert_eq!(treatment(progress, false), resting, "{progress:?}");
+            assert_eq!(
+                treatment(progress, true),
+                (Tint::Attention, 1.0),
+                "{progress:?}"
+            );
+        }
     }
 
     #[test]

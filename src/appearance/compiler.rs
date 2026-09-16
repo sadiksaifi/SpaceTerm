@@ -971,6 +971,7 @@ pub(crate) struct CaptionPaint {
     pub(crate) icon: Color,
     pub(crate) focus: Color,
     pub(crate) attention: Color,
+    pub(crate) busy: Color,
     pub(crate) error: Color,
     pub(crate) control: SemanticPaint,
     pub(crate) control_hover: SemanticPaint,
@@ -1009,6 +1010,7 @@ impl ChromeColors {
             icon: foreground,
             focus: contrast(self.border_focused, surface, 3.0),
             attention: contrast(self.warning, surface, 4.5),
+            busy: contrast(self.info, surface, 4.5),
             error: contrast(self.error, surface, 4.5),
             control: paint(surface, foreground),
             control_hover: paint(surface.mix(foreground, 0.10), foreground),
@@ -1022,6 +1024,7 @@ impl ChromeColors {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StatusPaint {
     pub(crate) attention: Color,
+    pub(crate) busy: Color,
     pub(crate) error: Color,
 }
 
@@ -1038,6 +1041,7 @@ impl ChromeColors {
             .collect::<Vec<_>>();
         StatusPaint {
             attention: contrast_on_all(self.warning, &surfaces, 3.0),
+            busy: contrast_on_all(self.info, &surfaces, 3.0),
             error: contrast_on_all(self.error, &surfaces, 3.0),
         }
     }
@@ -1571,6 +1575,7 @@ mod tests {
                         caption.secondary,
                         caption.icon,
                         caption.attention,
+                        caption.busy,
                         caption.error,
                     ] {
                         assert!(text.contrast_ratio(surface) >= 4.5);
@@ -1605,7 +1610,7 @@ mod tests {
                 vec![Color::rgb(0xfbfbfc), Color::rgb(0xe0a75c)],
             ] {
                 let status = colors.status(&surfaces);
-                for mark in [status.attention, status.error] {
+                for mark in [status.attention, status.busy, status.error] {
                     for surface in &surfaces {
                         let surface = surface.source_over(base);
                         assert!(
