@@ -250,13 +250,45 @@ impl TabChromePresentation {
         }
     }
 
-    fn control_style(
+    fn close_control_style(
         &self,
         active: bool,
         ancestor_hovered: bool,
         colors: &ChromeColors,
     ) -> spaceterm_ui::ButtonVariantStyle {
+        let background = if ancestor_hovered {
+            if active {
+                colors.tab_active_hover_background
+            } else {
+                colors.tab_hover_background
+            }
+        } else if active {
+            if self.window_active {
+                colors.tab_active_background
+            } else {
+                colors.tab_inactive_selected_background
+            }
+        } else {
+            colors.tab_inactive_background
+        };
+        self.control_style(active, ancestor_hovered, Some(background), colors)
+    }
+
+    fn bar_control_style(&self, colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
+        self.control_style(false, false, None, colors)
+    }
+
+    fn control_style(
+        &self,
+        active: bool,
+        ancestor_hovered: bool,
+        background: Option<Color>,
+        colors: &ChromeColors,
+    ) -> spaceterm_ui::ButtonVariantStyle {
         let clear = gpui::rgba(0);
+        let normal_background = background.map_or(clear, gpui_color);
+        let hover_background =
+            background.map_or_else(|| gpui_color(self.hover_background), gpui_color);
         let icon = if ancestor_hovered {
             if active {
                 self.active_tab_hover_icon
@@ -268,14 +300,14 @@ impl TabChromePresentation {
         } else {
             self.inactive_tab_icon
         };
-        let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
-        let hover = spaceterm_ui::ButtonPaint::new(
-            gpui_color(self.hover_background),
-            gpui_color(self.hover_icon),
+        let normal = spaceterm_ui::ButtonPaint::new(normal_background, gpui_color(icon), clear);
+        let hover =
+            spaceterm_ui::ButtonPaint::new(hover_background, gpui_color(self.hover_icon), clear);
+        let disabled = spaceterm_ui::ButtonPaint::new(
+            normal_background,
+            gpui_color(colors.text_disabled),
             clear,
         );
-        let disabled =
-            spaceterm_ui::ButtonPaint::new(clear, gpui_color(colors.text_disabled), clear);
         spaceterm_ui::ButtonVariantStyle::new(normal, hover, hover, disabled)
     }
 }
@@ -1195,7 +1227,7 @@ impl TabManager {
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
         let control_style =
-            presentation.control_style(active, ancestor_hovered, &appearance.colors);
+            presentation.close_control_style(active, ancestor_hovered, &appearance.control_colors);
         let hover_foreground = presentation.tab_hover_foreground(active);
         let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
         #[cfg(test)]
@@ -1393,7 +1425,7 @@ impl TabManager {
                         })
                         .variant(ButtonVariant::Ghost)
                         .contextual_style(
-                            presentation.control_style(false, false, &appearance.colors),
+                            presentation.bar_control_style(&appearance.colors),
                             gpui_color(appearance.colors.border_focused),
                         )
                         .size(ButtonSize::Regular)
@@ -1849,10 +1881,10 @@ mod tests {
                 presentation.tab_hover_foreground(false),
                 colors.tab_hover_foreground
             );
-            let close = presentation.control_style(true, false, &colors);
+            let close = presentation.close_control_style(true, true, &colors);
             assert_eq!(
                 close.hovered().background(),
-                gpui_color(colors.tab_hover_background)
+                gpui_color(colors.tab_active_hover_background)
             );
             assert_eq!(
                 close.hovered().foreground(),
@@ -1860,7 +1892,7 @@ mod tests {
             );
             assert_eq!(
                 presentation
-                    .control_style(false, true, &colors)
+                    .close_control_style(false, true, &colors)
                     .normal()
                     .foreground(),
                 gpui_color(colors.tab_hover_icon),
@@ -2033,16 +2065,33 @@ mod tests {
     }
 
     #[test]
-    fn tab_control_styles_keep_state_foregrounds_in_both_window_states() {
+    fn tab_close_control_styles_should_keep_parent_surfaces_and_state_foregrounds() {
         let colors = ChromeColors {
+            tab_active_background: Color::rgb(0x445566),
+            tab_inactive_selected_background: Color::rgb(0x556677),
+            tab_active_hover_background: Color::rgb(0x667788),
+            tab_hover_background: Color::rgb(0x778899),
             tab_active_icon: Color::rgb(0x112233),
             tab_inactive_selected_icon: Color::rgb(0x223344),
             tab_hover_icon: Color::rgb(0x334455),
             ..ChromeColors::default()
         };
         for window_active in [false, true] {
-            let style = TabChromePresentation::resolve(window_active, &colors)
-                .control_style(true, false, &colors);
+            let presentation = TabChromePresentation::resolve(window_active, &colors);
+            let style = presentation.close_control_style(true, false, &colors);
+            let selected_background = if window_active {
+                colors.tab_active_background
+            } else {
+                colors.tab_inactive_selected_background
+            };
+            assert_eq!(
+                [
+                    style.normal().background(),
+                    style.hovered().background(),
+                    style.pressed().background(),
+                ],
+                [gpui_color(selected_background); 3]
+            );
             assert_eq!(
                 style.normal().foreground(),
                 gpui_color(if window_active {
@@ -2059,6 +2108,21 @@ mod tests {
                 style.pressed().foreground(),
                 gpui_color(colors.tab_hover_icon)
             );
+
+            for (active, background) in [
+                (true, colors.tab_active_hover_background),
+                (false, colors.tab_hover_background),
+            ] {
+                let style = presentation.close_control_style(active, true, &colors);
+                assert_eq!(
+                    [
+                        style.normal().background(),
+                        style.hovered().background(),
+                        style.pressed().background(),
+                    ],
+                    [gpui_color(background); 3]
+                );
+            }
         }
     }
 
