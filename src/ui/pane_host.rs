@@ -75,10 +75,10 @@ const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
 const PANE_CAPTION_TEXT_SIZE: f32 = 12.65;
-/// Width reserved by the middle dot that separates a directory from its Pane label.
+/// Width reserved by the middle dot that separates a directory from its status.
 const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 17.25;
-const PANE_ORIGIN_ICON_SIZE: f32 = 13.8;
-const PANE_ORIGIN_ICON_GAP: f32 = 6.0;
+const PANE_STATUS_ICON_SIZE: f32 = 13.8;
+const PANE_STATUS_ICON_GAP: f32 = 6.0;
 /// Width reserved by the chevron that separates a Pane's origin from its directory.
 const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
 const PANE_CONTROL_SIZE: f32 = 20.0;
@@ -95,8 +95,8 @@ const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
 /// size they share. This applies to the Pane Caption's close control alone.
 const PANE_CLOSE_ICON_SIZE: f32 = 16.75;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
-/// The origin glyph, which every Pane Caption keeps at every width.
-const PANE_STATUS_WIDTH: f32 = PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP;
+/// The status glyph and its trailing air, which every Pane Caption keeps at every width.
+const PANE_STATUS_WIDTH: f32 = PANE_STATUS_ICON_SIZE + PANE_STATUS_ICON_GAP;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CAPTION_RIGHT_PADDING
     + PANE_STATUS_WIDTH
@@ -125,12 +125,12 @@ impl PaneCaptionAction {
 
 /// Which caption segments this frame's Pane width can hold.
 ///
-/// The Pane name is never dropped. Segments leave in order of how little they identify the Pane:
-/// the running label first, then the account, then the leading directory, and then the machine.
-/// The origin glyph is fixed, so the narrowest Pane still carries exactly one glyph.
+/// The Pane name and status glyph are never dropped. Segments leave in order of how little they
+/// identify the Pane: the running label first, then the account, then the leading directory, then
+/// the machine, and finally the directory-status separator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaptionLayout {
-    show_origin: bool,
+    show_status_separator: bool,
     show_host: bool,
     show_directory: bool,
     show_user: bool,
@@ -139,15 +139,16 @@ struct CaptionLayout {
 }
 
 /// How many caption segments beyond the Pane name a narrowing caption can give up.
-const CAPTION_LADDER: usize = 4;
+const CAPTION_LADDER: usize = 5;
 
-/// Rendered widths of the caption segments, each including the separator that precedes it.
+/// Rendered widths of the caption segments, including separators where present.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CaptionMetrics {
     user: Pixels,
     host: Pixels,
     directory: Pixels,
     name: Pixels,
+    status_separator: Pixels,
     label: Pixels,
 }
 
@@ -171,18 +172,24 @@ impl CaptionMetrics {
             },
             directory: measure_caption_segment(&text.directory, window, appearance),
             name: measure_caption_segment(&text.name, window, appearance),
-            label: if text.label.is_empty() {
-                px(0.0)
+            status_separator: if text.has_directory {
+                appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
             } else {
-                measure_caption_segment(&text.label, window, appearance)
-                    + appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
+                px(0.0)
             },
+            label: measure_caption_segment(&text.label, window, appearance),
         }
     }
 
-    /// The droppable segments in the order a narrowing caption gives them up, last one first.
+    /// The droppable segments in the order a widening caption admits them.
     const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
-        [self.host, self.directory, self.user, self.label]
+        [
+            self.status_separator,
+            self.host,
+            self.directory,
+            self.user,
+            self.label,
+        ]
     }
 }
 
@@ -234,9 +241,15 @@ impl CaptionLayout {
             claimed += width;
             *admitted = true;
         }
-        let [show_host, show_directory, show_user, show_label] = shown;
+        let [
+            show_status_separator,
+            show_host,
+            show_directory,
+            show_user,
+            show_label,
+        ] = shown;
         Self {
-            show_origin: true,
+            show_status_separator,
             show_host,
             show_directory,
             show_user,
@@ -1789,11 +1802,13 @@ impl TabIdentity {
 ///
 /// `origin` is the account and machine the Terminal runs on, `directory` the leading path up to
 /// and including its last separator, `name` the directory leaf that identifies the Pane, and
-/// `label` the Terminal title or running command. `running` marks a label that is a live command,
-/// and `progress` the status the Session reported independently of its title.
+/// `label` the Terminal title or running command. `has_directory` distinguishes a promoted label
+/// from a root directory with no leading path. `running` marks a label that is a live command, and
+/// `progress` the status the Session reported independently of its title.
 #[derive(Clone, Default, Eq, PartialEq)]
 struct PaneCaptionText {
     origin: PaneOrigin,
+    has_directory: bool,
     directory: gpui::SharedString,
     name: gpui::SharedString,
     label: gpui::SharedString,
@@ -1811,6 +1826,7 @@ impl PaneCaptionText {
         if facts.directory.is_empty() {
             return Self {
                 origin: facts.origin,
+                has_directory: false,
                 directory: gpui::SharedString::default(),
                 name: facts.label,
                 label: gpui::SharedString::default(),
@@ -1822,6 +1838,7 @@ impl PaneCaptionText {
         let (leading, name) = split_directory_leaf(&facts.directory);
         Self {
             origin: facts.origin,
+            has_directory: true,
             directory: leading,
             name,
             label: facts.label,
@@ -2072,6 +2089,83 @@ fn render_pane_caption_content(
             }),
         );
     }
+    let mut caption_content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .child(render_pane_origin(
+            pane_id,
+            &text.origin,
+            layout,
+            color,
+            appearance,
+        ));
+    if text.has_directory {
+        caption_content = caption_content
+            .when(layout.show_directory && !text.directory.is_empty(), |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("pane-caption-directory-{}", pane_id.get()))
+                        .flex_shrink_0()
+                        .text_color(gpui_color(color))
+                        .child(text.directory),
+                )
+            })
+            .child(
+                div()
+                    .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
+                    .min_w_0()
+                    .truncate()
+                    .child(text.name),
+            )
+            .when(layout.show_status_separator, |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || {
+                            format!("pane-caption-status-separator-{}", pane_id.get())
+                        })
+                        .flex_shrink_0()
+                        .mx(appearance.spacing(5.0))
+                        .text_color(gpui_color(color))
+                        .child("·"),
+                )
+            })
+            .child(render_pane_status(
+                pane_id,
+                text.origin.remote,
+                (text.progress, text.glyph, attention),
+                &paint,
+                appearance,
+            ))
+            .when(layout.show_label && !text.label.is_empty(), |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(gpui_color(color))
+                        .child(text.label),
+                )
+            });
+    } else {
+        caption_content = caption_content
+            .child(render_pane_status(
+                pane_id,
+                text.origin.remote,
+                (text.progress, text.glyph, attention),
+                &paint,
+                appearance,
+            ))
+            .child(
+                div()
+                    .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
+                    .min_w_0()
+                    .truncate()
+                    .child(text.name),
+            );
+    }
     div()
         .id(("pane-caption", pane_id.get()))
         .debug_selector(move || {
@@ -2104,109 +2198,25 @@ fn render_pane_caption_content(
             });
             cx.stop_propagation();
         })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .child(render_pane_origin(
-                    pane_id,
-                    &text.origin,
-                    layout,
-                    (text.progress, text.glyph.clone(), attention),
-                    &paint,
-                    appearance,
-                ))
-                .when(layout.show_directory && !text.directory.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .debug_selector(move || {
-                                format!("pane-caption-directory-{}", pane_id.get())
-                            })
-                            .flex_shrink_0()
-                            .text_color(gpui_color(color))
-                            .child(text.directory),
-                    )
-                })
-                .child(
-                    div()
-                        .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
-                        .min_w_0()
-                        .truncate()
-                        .child(text.name),
-                )
-                .when(layout.show_label && !text.label.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .flex_shrink_0()
-                            .mx(appearance.spacing(5.0))
-                            .text_color(gpui_color(color))
-                            .child("·"),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
-                            .min_w_0()
-                            .truncate()
-                            .text_color(gpui_color(color))
-                            .child(text.label),
-                    )
-                }),
-        )
+        .child(caption_content)
         .child(controls)
         .into_any_element()
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
-///
-/// The icon states Local or Remote from the Terminal's own classification, so a Remote Pane stays
-/// distinguishable by shape at the width where its account and machine text no longer fit.
 fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
-    (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
-    paint: &crate::appearance::CaptionPaint,
+    color: crate::appearance::Color,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
-    let color = paint.foreground;
-    let (icon, location) = if origin.remote {
-        (IconName::Globe, "remote")
-    } else {
-        (IconName::Terminal, "local")
-    };
+    let location = if origin.remote { "remote" } else { "local" };
     div()
         .debug_selector(move || format!("pane-caption-origin-{}-{location}", pane_id.get()))
         .flex()
         .items_center()
         .flex_shrink_0()
-        .child(
-            div()
-                .mr(appearance.spacing(PANE_ORIGIN_ICON_GAP))
-                .flex()
-                .items_center()
-                .text_color(gpui_color(color))
-                .child(
-                    StatusGlyph {
-                        icon,
-                        reported,
-                        size: appearance.spacing(PANE_ORIGIN_ICON_SIZE),
-                        progress,
-                        attention,
-                        id: ("pane-status", pane_id.get()).into(),
-                        selector_prefix: format!("pane-status-{}", pane_id.get()),
-                        colors: StatusColors {
-                            attention: gpui_color(paint.attention),
-                            busy: gpui_color(paint.busy),
-                            error: gpui_color(paint.error),
-                            paused: gpui_color(paint.secondary),
-                        },
-                    }
-                    .render(),
-                ),
-        )
         .when(layout.show_user && !origin.user.is_empty(), |row| {
             row.child(
                 div()
@@ -2230,6 +2240,49 @@ fn render_pane_origin(
                     .child("›"),
             )
         })
+        .into_any_element()
+}
+
+/// Renders the status after the Pane's directory and before its activity.
+///
+/// The glyph states Local or Remote from the Terminal's own classification, so a Remote Pane stays
+/// distinguishable by shape when its account and machine text no longer fit.
+fn render_pane_status(
+    pane_id: PaneId,
+    remote: bool,
+    (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
+    paint: &crate::appearance::CaptionPaint,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let icon = if remote {
+        IconName::Globe
+    } else {
+        IconName::Terminal
+    };
+    div()
+        .mr(appearance.spacing(PANE_STATUS_ICON_GAP))
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .text_color(gpui_color(paint.foreground))
+        .child(
+            StatusGlyph {
+                icon,
+                reported,
+                size: appearance.spacing(PANE_STATUS_ICON_SIZE),
+                progress,
+                attention,
+                id: ("pane-status", pane_id.get()).into(),
+                selector_prefix: format!("pane-status-{}", pane_id.get()),
+                colors: StatusColors {
+                    attention: gpui_color(paint.attention),
+                    busy: gpui_color(paint.busy),
+                    error: gpui_color(paint.error),
+                    paused: gpui_color(paint.secondary),
+                },
+            }
+            .render(),
+        )
         .into_any_element()
 }
 
@@ -3072,8 +3125,17 @@ mod tests {
         let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
         for selector in ["pane-split-right-1", "pane-split-down-1"] {
             let button = cx.debug_bounds(selector).unwrap();
-            assert!(caption.contains(&button.origin) && caption.contains(&button.bottom_right()));
+            assert!(
+                caption.contains(&button.origin) && caption.contains(&button.bottom_right()),
+                "caption must contain {selector}, got {caption:?} and {button:?}"
+            );
         }
+        let status = cx.debug_bounds("pane-status-1-attention").unwrap();
+        let first_control = cx.debug_bounds("pane-split-right-1").unwrap();
+        assert!(
+            status.right() <= first_control.left(),
+            "status must remain visible before controls, got {status:?} and {first_control:?}"
+        );
         assert!(cx.debug_bounds("pane-toggle-zoom-1").is_none());
         assert!(cx.debug_bounds("pane-close-1").is_none());
     }
@@ -3274,6 +3336,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[gpui::test]
+    fn caption_should_present_origin_directory_status_then_activity(cx: &mut TestAppContext) {
+        let (_, _, records, cx) = caption_host(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/Users/tester"),
+            ),
+        );
+        metadata.directory.path = Arc::from("/Users/tester/Projects/app");
+        metadata.title.value = Arc::from("build");
+        metadata.title.provenance = crate::terminal::metadata::TitleProvenance::TerminalControl;
+        metadata.progress = crate::terminal::metadata::ProgressMetadata::Normal(40);
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(SessionEvent::Screen(screen))
+            .unwrap();
+        cx.run_until_parked();
+
+        let centers = [
+            "pane-caption-account-1",
+            "pane-caption-host-1",
+            "pane-caption-directory-1",
+            "pane-caption-name-1",
+            "pane-caption-status-separator-1",
+            "pane-status-1-normal",
+            "pane-caption-label-1",
+        ]
+        .map(|selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("caption must render {selector}"))
+                .center()
+                .x
+        });
+
+        assert!(
+            centers.windows(2).all(|pair| pair[0] < pair[1]),
+            "caption segments must render left-to-right, got {centers:?}"
+        );
     }
 
     #[gpui::test]
@@ -3511,6 +3621,7 @@ mod tests {
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
             label: px(30.0),
         };
         let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
@@ -3519,8 +3630,8 @@ mod tests {
             + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2);
-        let layout = |origin, host, directory, user, label| CaptionLayout {
-            show_origin: origin,
+        let layout = |separator, host, directory, user, label| CaptionLayout {
+            show_status_separator: separator,
             show_host: host,
             show_directory: directory,
             show_user: user,
@@ -3529,28 +3640,28 @@ mod tests {
         };
 
         assert_eq!(
-            resolve(controls + 291.0),
+            resolve(controls + 308.0),
             layout(true, true, true, true, true)
         );
         assert_eq!(
-            resolve(controls + 261.0),
+            resolve(controls + 278.0),
             layout(true, true, true, true, false)
         );
         assert_eq!(
-            resolve(controls + 221.0),
+            resolve(controls + 238.0),
             layout(true, true, true, false, false)
         );
         assert_eq!(
-            resolve(controls + 101.0),
+            resolve(controls + 118.0),
             layout(true, true, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 41.0),
+            resolve(controls + 58.0),
             layout(true, false, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 39.0),
-            layout(true, false, false, false, false)
+            resolve(controls + 40.0),
+            layout(false, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
     }
@@ -3570,7 +3681,7 @@ mod tests {
         let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
 
         let narrow = resolve(controls + 10.0);
-        assert!(narrow.show_origin && narrow.show_splits);
+        assert!(narrow.show_splits);
     }
 
     #[gpui::test]
