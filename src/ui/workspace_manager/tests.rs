@@ -6275,6 +6275,32 @@ fn collapsed_top_chrome_should_fit_a_short_workspace_name(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn collapsed_workspace_switcher_should_stop_at_the_tab_item_maximum(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(
+                WorkspaceId::new(1),
+                "A Workspace Name That Must Be Truncated".to_owned(),
+            )
+            .expect("the Active Workspace should be renamed");
+        cx.notify();
+    });
+
+    click("toggle-sidebar-button", cx);
+
+    let switcher = cx
+        .debug_bounds("workspace-switcher")
+        .expect("the collapsed Workspace switcher was not rendered");
+    let expected = cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        appearance.spacing(super::super::tab_manager::TAB_ITEM_MAXIMUM_WIDTH)
+    });
+    assert_eq!(switcher.size.width, expected);
+}
+
+#[gpui::test]
 fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut TestAppContext) {
     let directory = temporary_directory("collapsed-pin");
     fs::create_dir_all(&directory).unwrap();

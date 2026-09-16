@@ -34,8 +34,6 @@ const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_SIZE: f32 = 12.0;
 const PIN_NAME_GAP: f32 = 5.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
-// Name and optional pin share this budget. Outer spacing never consumes label room.
-const NAME_AND_PIN_MAXIMUM_WIDTH: f32 = 58.0;
 
 /// The air the top-left chrome keeps at its trailing edge.
 ///
@@ -79,8 +77,15 @@ impl WorkspaceChromeLayout {
         } else {
             px(0.0)
         };
-        let identity_width =
-            (name_width + pin_width).min(appearance.spacing(NAME_AND_PIN_MAXIMUM_WIDTH));
+        // The collapsed switcher trigger stops at the Tab item maximum, so a long Workspace
+        // name truncates where a long Tab title does. Outer spacing never consumes label room.
+        let switcher_maximum = appearance.spacing(super::tab_manager::TAB_ITEM_MAXIMUM_WIDTH);
+        let chrome_theme = cx.global::<ComboBoxTheme>();
+        let content_maximum = switcher_maximum
+            - chrome_theme.custom_trigger_width(px(0.0))
+            - appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
+            - appearance.spacing(ICON_SIZE + SWITCHER_IDENTITY_GAP);
+        let identity_width = (name_width + pin_width).min(content_maximum.max(px(0.0)));
         let content_width = appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
             + appearance.spacing(ICON_SIZE + SWITCHER_IDENTITY_GAP)
             + identity_width;
