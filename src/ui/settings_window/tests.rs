@@ -3,7 +3,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, AppearanceMode, ChromeDensity, SchemeKind,
+    Appearance, AppearanceMode, ChromeDensity, SchemeKind, SettingsDocument,
     builtin_fallback_scheme,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -28,7 +28,7 @@ fn open_settings(
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     open_settings_with(
         cx,
-        MemoryStorage::with_document(&AppearanceDocument::default()),
+        MemoryStorage::with_document(&SettingsDocument::default()),
     )
 }
 
@@ -604,7 +604,7 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
     const RESET: &str = "settings-row-terminal-bold-as-bright-reset";
     const RESET_SLOT: &str = "settings-row-terminal-bold-as-bright-reset-slot";
 
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     // The largest chrome type with the roomiest density, where the reset is furthest from its
     // default size.
     document.preferences.chrome.typography.base_size = 24.0;
@@ -715,29 +715,77 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
     }
 }
 
+/// Reset All says "all", so the imported catalog goes back to empty alongside the preferences.
+/// The two reset together: a selection naming an imported scheme is valid only while that scheme
+/// is installed, so clearing one without the other would leave the document contradicting itself.
 #[gpui::test]
-fn resetting_everything_restores_defaults_and_keeps_installed_schemes(cx: &mut TestAppContext) {
-    let mut document = AppearanceDocument::default();
+fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
+    cx: &mut TestAppContext,
+) {
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.density = ChromeDensity::Comfortable;
     document.custom_schemes = crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
         .expect("fixture color package")
         .schemes;
-    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    let installed = installed_count(&window, cx);
-    assert!(installed > 0, "the fixture should install one scheme");
+    let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    assert!(
+        installed_count(&window, cx) > 0,
+        "the fixture should install one scheme"
+    );
 
-    cx.update(|_, cx| {
-        window.update(cx, |window, cx| {
-            window
-                .editor
-                .reset(crate::appearance::ResetTarget::AllAppearance, cx);
-        });
-    });
-    cx.run_until_parked();
+    click("settings-reset-all", cx);
+    click("modal-action-settings-reset-all-confirm", cx);
+    settle(cx);
 
     let after = document_of(&window, cx);
     assert_eq!(after.preferences.chrome.density, ChromeDensity::Compact);
-    assert_eq!(after.custom_schemes.len(), installed);
+    assert!(
+        after.custom_schemes.is_empty(),
+        "Reset All should empty the imported catalog, got {} schemes",
+        after.custom_schemes.len()
+    );
+    let retained = harness
+        .storage
+        .document()
+        .expect("the retained document should parse");
+    assert!(
+        retained.custom_schemes.is_empty(),
+        "the emptied catalog should reach storage"
+    );
+}
+
+/// A scheme the preferences select cannot survive the catalog that defines it, so the reset must
+/// return the selection to a built-in scheme in the same edit the catalog is emptied by.
+#[gpui::test]
+fn resetting_everything_releases_a_selected_imported_scheme(cx: &mut TestAppContext) {
+    let mut document = SettingsDocument {
+        custom_schemes: crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
+            .expect("fixture color package")
+            .schemes,
+        ..Default::default()
+    };
+    let imported = document.custom_schemes[0].id().clone();
+    document.preferences.chrome.schemes.light = imported.clone();
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    assert_eq!(
+        document_of(&window, cx).preferences.chrome.schemes.light,
+        imported,
+        "the fixture should select the imported scheme"
+    );
+
+    click("settings-reset-all", cx);
+    click("modal-action-settings-reset-all-confirm", cx);
+    settle(cx);
+
+    let after = document_of(&window, cx);
+    assert_eq!(
+        after.preferences.chrome.schemes.light,
+        SettingsDocument::default().preferences.chrome.schemes.light
+    );
+    assert!(after.custom_schemes.is_empty());
+    after
+        .validate()
+        .expect("the reset document should stay valid");
 }
 
 // Search and navigation ----------------------------------------------------------------------
@@ -891,6 +939,35 @@ fn escape_inside_a_confirmation_dismisses_it_rather_than_clearing_search(cx: &mu
     );
 }
 
+/// Reset All is reached by a single click on a quiet strip, and what it destroys cannot be given
+/// back, so the click may only ever open the confirmation. Nothing is written until the
+/// confirmation is answered, which is what makes a mistaken click harmless.
+#[gpui::test]
+fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    settle(cx);
+    let writes = harness.storage.writes();
+
+    click("settings-reset-all", cx);
+    settle(cx);
+
+    assert!(
+        cx.update(|gpui_window, cx| spaceterm_ui::window_modal_is_open(gpui_window, cx)),
+        "the reset confirmation should be presented"
+    );
+    assert_eq!(
+        document_of(&window, cx).preferences.chrome.density,
+        ChromeDensity::Comfortable,
+        "the unanswered confirmation must not have reset anything"
+    );
+    assert_eq!(
+        harness.storage.writes(),
+        writes,
+        "the unanswered confirmation must not have written anything"
+    );
+}
+
 #[gpui::test]
 fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
@@ -965,7 +1042,7 @@ fn the_terminal_font_list_offers_only_monospace_families() {
 
 #[gpui::test]
 fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.terminal.typography.base_size = 8.0;
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Terminal, cx);
@@ -1295,49 +1372,128 @@ fn borderless_groups_preserve_content_alignment_and_spacing(cx: &mut TestAppCont
     }
 }
 
-fn assert_reset_all_matches_sidebar(document: AppearanceDocument, cx: &mut TestAppContext) {
+fn assert_reset_all_leads_the_content_footer(document: SettingsDocument, cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    // A button holds its label clear of its edge by a padding that follows the density scale and a
+    // border that does not, so the expected offset is built from each in its own scale.
+    let label_inset = cx.update(|_, cx| {
+        crate::ui::appearance::chrome(cx)
+            .spacing(crate::ui::button_theme::COMPACT_HORIZONTAL_PADDING)
+            + px(crate::ui::button_theme::CONTROL_BORDER_WIDTH)
+    });
     for section in SettingsSectionId::ALL {
         select_section(section, cx);
-        let search = cx.debug_bounds("settings-search-frame").unwrap();
         let navigation = cx.debug_bounds("settings-navigation").unwrap();
+        // The heading spans the content gutter on both sides, and the title, group headings and
+        // row labels all start on it, so it is the column the strip has to join.
+        let heading = cx
+            .debug_bounds(leaked_owned(format!("{}-heading", section.selector())))
+            .unwrap();
         let reset = cx.debug_bounds("settings-reset-all").unwrap();
         let footer = cx.debug_bounds("settings-footer").unwrap();
         let status = cx.debug_bounds("settings-save-status").unwrap();
+        // The button's label, not its edge, carries that alignment, so the edge sits exactly one
+        // label inset to the left of the column it continues.
         assert_eq!(
-            (reset.left(), reset.right()),
-            (search.left(), search.right()),
-            "Reset All should fill the search column in {section:?}"
+            reset.left() + label_inset,
+            heading.left(),
+            "Reset All's label should land on the content gutter in {section:?}"
         );
         assert_eq!(
-            (reset.left(), reset.right()),
-            (navigation.left(), navigation.right()),
-            "Reset All should fill the navigation column in {section:?}"
+            status.right(),
+            heading.right(),
+            "the save status should end on the content gutter in {section:?}"
+        );
+        assert!(
+            reset.left() >= navigation.right(),
+            "Reset All should leave the navigation column in {section:?}"
         );
         assert!(reset.top() >= footer.top() && reset.bottom() <= footer.bottom());
         assert!(
-            status.left() > reset.right() && status.right() < footer.right(),
-            "save status should stay in the right footer column"
+            status.left() > reset.right(),
+            "the save status should stay clear of the action in {section:?}"
         );
     }
 }
 
 #[gpui::test]
-fn reset_all_fills_the_sidebar_column_on_every_settings_page(cx: &mut TestAppContext) {
-    assert_reset_all_matches_sidebar(AppearanceDocument::default(), cx);
+fn the_footer_strip_meets_the_content_gutter_on_every_settings_page(cx: &mut TestAppContext) {
+    assert_reset_all_leads_the_content_footer(SettingsDocument::default(), cx);
 }
 
 #[gpui::test]
-fn reset_all_tracks_sidebar_width_with_larger_type_and_comfortable_density(
+fn the_footer_strip_tracks_the_content_gutter_with_larger_type_and_comfortable_density(
     cx: &mut TestAppContext,
 ) {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.typography.base_size = 20.0;
     document.preferences.chrome.density = ChromeDensity::Comfortable;
-    assert_reset_all_matches_sidebar(document, cx);
+    assert_reset_all_leads_the_content_footer(document, cx);
 }
 
-fn assert_client_chrome_geometry(document: AppearanceDocument, cx: &mut TestAppContext) {
+/// The sidebar's width is the one width in the footer that means anything, and a destructive
+/// action stretched to it reads as the heaviest element in the window.
+#[gpui::test]
+fn reset_all_takes_the_width_of_its_label(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
+    let footer = cx.debug_bounds("settings-footer").unwrap();
+    let reset = cx.debug_bounds("settings-reset-all").unwrap();
+    assert!(
+        reset.size.width < sidebar.size.width,
+        "Reset All should hug its label, got {:?} against a {:?} sidebar",
+        reset.size.width,
+        sidebar.size.width
+    );
+    assert!(
+        reset.size.width < footer.size.width / 2.0,
+        "Reset All should leave the content footer to the save status, got {:?}",
+        reset.size.width
+    );
+}
+
+/// The strip is a status line, so its one action rests at the status's weight rather than
+/// outranking the settings it would undo. Both sit at the same step of the ramp and the same
+/// muted foreground, and the action lifts to full text only on approach.
+#[gpui::test]
+fn reset_all_rests_at_the_weight_of_the_save_status(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    let reset = cx.debug_bounds("settings-reset-all").unwrap();
+    let (muted, full, compact_height) = cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        let theme = crate::ui::button_theme::theme(&appearance.colors);
+        (
+            appearance.colors.text_muted,
+            appearance.colors.text,
+            theme.icon_button_size(spaceterm_ui::ButtonSize::Compact),
+        )
+    });
+    let style = cx.update(|_, cx| {
+        crate::ui::button_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+            .paints(spaceterm_ui::ButtonVariant::Bare)
+    });
+    assert_eq!(
+        style.normal().foreground(),
+        super::controls::gpui_color(muted),
+        "the resting action should take the save status's muted foreground"
+    );
+    assert_eq!(
+        style.normal().background().a,
+        0.0,
+        "the resting action should paint no surface on the strip"
+    );
+    assert_eq!(
+        style.hovered().foreground(),
+        super::controls::gpui_color(full),
+        "approach should lift the action to full text"
+    );
+    assert_eq!(
+        reset.size.height, compact_height,
+        "the action should sit at the compact step, not a form control's height"
+    );
+}
+
+fn assert_client_chrome_geometry(document: SettingsDocument, cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     let surface = cx
         .debug_bounds("settings-window-surface")
@@ -1395,12 +1551,12 @@ fn assert_client_chrome_geometry(document: AppearanceDocument, cx: &mut TestAppC
 
 #[gpui::test]
 fn client_chrome_extends_both_columns_to_the_top_edge(cx: &mut TestAppContext) {
-    assert_client_chrome_geometry(AppearanceDocument::default(), cx);
+    assert_client_chrome_geometry(SettingsDocument::default(), cx);
 }
 
 #[gpui::test]
 fn client_chrome_geometry_tracks_larger_type_and_comfortable_density(cx: &mut TestAppContext) {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.typography.base_size = 20.0;
     document.preferences.chrome.density = ChromeDensity::Comfortable;
     assert_client_chrome_geometry(document, cx);
@@ -1435,7 +1591,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
     let window_drag: Rc<dyn OperatingSystemWindowDragPlatform> = records.clone();
     let (_window, _harness, cx) = open_settings_with_drag(
         cx,
-        MemoryStorage::with_document(&AppearanceDocument::default()),
+        MemoryStorage::with_document(&SettingsDocument::default()),
         window_drag,
     );
     let drag_target = cx
@@ -2001,7 +2157,7 @@ fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
 
 const IMPORTABLE_PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
 
-fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> AppearanceDocument {
+fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> SettingsDocument {
     window.read_with(cx, |window, _| window.editor.document().clone())
 }
 
@@ -2204,7 +2360,7 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
 
 #[gpui::test]
 fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.schemes.dark =
         crate::appearance::SchemeId::new("custom.previous.chrome").unwrap();
     document.preferences.terminal.schemes.dark =
@@ -2226,7 +2382,7 @@ fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut Test
         })
     });
     let preferences = document_of(&window, cx).preferences;
-    let defaults = AppearanceDocument::default().preferences;
+    let defaults = SettingsDocument::default().preferences;
     assert_eq!(preferences.chrome.schemes, defaults.chrome.schemes);
     assert_eq!(preferences.terminal.schemes, defaults.terminal.schemes);
 }

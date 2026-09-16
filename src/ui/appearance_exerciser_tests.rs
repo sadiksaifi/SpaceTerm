@@ -51,7 +51,7 @@ impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
 
 #[gpui::test]
 fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
-    use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode};
+    use crate::appearance::{Appearance, AppearanceMode, SettingsDocument};
     use crate::platform::appearance::testing::RecordingAppearancePlatform;
     use crate::ui::appearance_runtime;
 
@@ -72,7 +72,7 @@ fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppConte
     );
 
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = AppearanceDocument::default();
+    let mut candidate = SettingsDocument::default();
     candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();

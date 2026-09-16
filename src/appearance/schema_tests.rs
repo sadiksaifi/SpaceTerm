@@ -64,7 +64,7 @@ fn published_schemas_resolve_external_draft_2020_12_references() {
             .expect("published color-scheme schema must be JSON");
     assert_eq!(definitions["$id"], DEFINITIONS_ID);
 
-    let settings = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+    let settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
     let settings_validator = jsonschema::draft202012::options()
         .with_retriever(PublishedSchemaRetriever(definitions.clone()))
         .build(&settings_schema)
@@ -144,13 +144,13 @@ fn named_font_families_have_matching_schema_and_runtime_character_rules() {
         .unwrap();
 
     for surface in ["chrome", "terminal"] {
-        let mut invalid = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+        let mut invalid = serde_json::to_value(super::SettingsDocument::default()).unwrap();
         invalid["preferences"][surface]["typography"]["family"] =
             serde_json::json!({"source": "named", "family": "Broken\nFamily"});
         assert!(!validator.is_valid(&invalid));
         assert!(super::parse_settings(&serde_json::to_vec(&invalid).unwrap()).is_err());
 
-        let mut unicode = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+        let mut unicode = serde_json::to_value(super::SettingsDocument::default()).unwrap();
         unicode["preferences"][surface]["typography"]["family"] =
             serde_json::json!({"source": "named", "family": "ヒラギノ角ゴシック"});
         assert!(validator.is_valid(&unicode));
@@ -182,7 +182,7 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
         "../../docs/schema/appearance-settings.schema.json"
     ))
     .expect("published appearance schema must be JSON");
-    let runtime = serde_json::to_value(super::AppearanceDocument::default()).unwrap();
+    let runtime = serde_json::to_value(super::SettingsDocument::default()).unwrap();
 
     assert_eq!(
         runtime["schema_version"],

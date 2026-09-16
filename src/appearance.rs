@@ -197,7 +197,7 @@ pub(crate) use composition::{
     ResolvedWindowComposition, SurfaceMaterials, SurfaceRole, WindowBackgroundAppearance,
 };
 pub(crate) use document::{
-    AppearanceDocument, AppearanceDocumentError, ImportCandidate, ImportError, ZedImportKind,
+    ImportCandidate, ImportError, SettingsDocument, SettingsDocumentError, ZedImportKind,
     export_resolved_schemes, export_schemes, export_settings, import_zed, list_zed_candidates,
     parse_color_document, parse_settings,
 };

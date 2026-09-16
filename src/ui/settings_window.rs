@@ -42,8 +42,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, AppearanceDocument, AppearanceMode, ChromeDensity, ChromeFontFamily, Color,
-    FontClass, ResetTarget, SchemeId, SchemeKind, TerminalFontFamily,
+    Appearance, AppearanceMode, ChromeDensity, ChromeFontFamily, Color, FontClass, SchemeId,
+    SchemeKind, SettingsDocument, TerminalFontFamily,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
 #[cfg(test)]
@@ -546,7 +546,7 @@ impl SettingsWindow {
             .resolve(Appearance::Dark)
     }
 
-    fn edit(&mut self, edit: impl FnOnce(&mut AppearanceDocument), cx: &mut Context<Self>) {
+    fn edit(&mut self, edit: impl FnOnce(&mut SettingsDocument), cx: &mut Context<Self>) {
         self.editor.edit(edit, cx);
     }
 
@@ -1132,7 +1132,7 @@ impl SettingsWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .px(appearance.spacing(CONTENT_GUTTER - ROW_INSET))
+                            .px(appearance.spacing(CARD_GUTTER))
                             .pt(appearance.spacing(8.0))
                             .pb(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
@@ -1211,6 +1211,14 @@ impl SettingsWindow {
 /// Rows carry part of it themselves so a card's own edge clears the text it holds, and the column
 /// gives back the rest. The two together are what a reader sees as the content's left edge.
 const CONTENT_GUTTER: f32 = 26.0;
+
+/// The space between the detail pane's edge and the cards standing in it.
+///
+/// It is the content gutter less the inset a row carries, so a card's edge stands outside the text
+/// it holds by exactly that inset and a row's own fill can reach that edge. A card is a container
+/// rather than something to read, so this line belongs to the cards alone: everything a reader
+/// tracks down the page stays on [`CONTENT_GUTTER`].
+const CARD_GUTTER: f32 = CONTENT_GUTTER - ROW_INSET;
 
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
 ///
@@ -1926,7 +1934,7 @@ impl SettingsWindow {
                 // The same inset notice the Color Schemes page carries, at the window's own scope
                 // rather than the page's. A strip ruled off across the pane would be the one square
                 // edge left on a surface made of cards.
-                .mx(appearance.spacing(CONTENT_GUTTER - ROW_INSET))
+                .mx(appearance.spacing(CARD_GUTTER))
                 .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
                 .rounded(appearance.spacing(CARD_RADIUS))
@@ -1992,8 +2000,28 @@ impl SettingsWindow {
 
     /// The window's own strip: what the last edit did, and the one action that undoes all of them.
     ///
-    /// Reset All sits at the foot of the sidebar column, filling its width, so the sidebar surface
-    /// runs to the window's bottom edge. Only the content column is ruled off from the save status.
+    /// Reset All acts on the content column, not on navigation, so it sits in the content column
+    /// opposite the save status. It takes the width of its label: the sidebar is the only column
+    /// whose width means anything here, and a destructive action stretched to it reads as the
+    /// heaviest thing in the window. One rule runs the full width, and the sidebar surface
+    /// continues beneath it to the window's bottom edge.
+    ///
+    /// The strip is a status line rather than a form, and the only other thing on it is the save
+    /// status, so the action rests at that status's weight: Bare paints no surface and carries the
+    /// muted foreground, and the compact size sets it at the same step of the ramp the status
+    /// takes. Pointer and keyboard lift it to full text, so the affordance arrives on approach
+    /// rather than competing at rest with the settings it would undo.
+    ///
+    /// Both ends align to the content gutter, which is the line the title, the group headings, and
+    /// every row label already sit on. A card's edge stands outside that line by the inset its rows
+    /// carry, but a card is a container rather than something to read: the column a reader tracks
+    /// down the page is the text, so the strip that closes the column joins the text.
+    ///
+    /// On the leading end that alignment is carried by the action's label, not its edge. A button
+    /// insets its label by the padding it paints and by the border it reserves whether or not the
+    /// variant paints one, and only the padding follows the density scale, so the strip removes
+    /// each in its own scale. Bare paints no edge for the eye to align to, so the label is the only
+    /// thing left on that line. The save status is plain text and needs no such correction.
     fn render_footer(
         &mut self,
         appearance: &ChromeAppearance,
@@ -2008,28 +2036,14 @@ impl SettingsWindow {
             .w_full()
             .flex_none()
             .h(appearance.height(FOOTER_HEIGHT, text::BODY))
+            .border_t_1()
+            .border_color(gpui_color(appearance.colors.border))
             .child(
                 div()
-                    .flex()
-                    .items_center()
                     .flex_none()
                     .h_full()
                     .w(appearance.text_size(SIDEBAR_WIDTH))
-                    .px(appearance.spacing(SIDEBAR_INSET))
-                    .bg(gpui_color(appearance.control_colors.panel_background))
-                    .child(
-                        action_button(
-                            "settings-reset-all",
-                            "Reset All…",
-                            self.editor.editable(),
-                            move |window, cx| {
-                                let _ = owner.update(cx, |settings, cx| {
-                                    settings.confirm_reset_all(window, cx);
-                                });
-                            },
-                        )
-                        .full_width(true),
-                    ),
+                    .bg(gpui_color(appearance.control_colors.panel_background)),
             )
             .child(
                 div()
@@ -2042,10 +2056,26 @@ impl SettingsWindow {
                         appearance.colors.background,
                     )))
                     .items_center()
-                    .justify_end()
-                    .px(appearance.spacing(CONTENT_GUTTER))
-                    .border_t_1()
-                    .border_color(gpui_color(appearance.colors.border))
+                    .justify_between()
+                    .gap(appearance.spacing(CONTENT_GUTTER))
+                    .pl(appearance
+                        .spacing(CONTENT_GUTTER - super::button_theme::COMPACT_HORIZONTAL_PADDING)
+                        - px(super::button_theme::CONTROL_BORDER_WIDTH))
+                    .pr(appearance.spacing(CONTENT_GUTTER))
+                    .child(
+                        action_button(
+                            "settings-reset-all",
+                            "Reset All…",
+                            self.editor.editable(),
+                            move |window, cx| {
+                                let _ = owner.update(cx, |settings, cx| {
+                                    settings.confirm_reset_all(window, cx);
+                                });
+                            },
+                        )
+                        .variant(spaceterm_ui::ButtonVariant::Bare)
+                        .size(spaceterm_ui::ButtonSize::Compact),
+                    )
                     .child(
                         div()
                             .debug_selector(|| "settings-save-status".to_owned())
@@ -2064,9 +2094,9 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
-            "Reset all appearance settings",
-            "Reset All Appearance Settings",
-            "Every appearance choice returns to its default. Color schemes you imported are kept.",
+            "Reset all settings",
+            "Reset All Settings",
+            "Every setting returns to its default, and the color schemes you imported are removed.",
             vec![
                 ModalAction::new(
                     true,
@@ -2085,6 +2115,12 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
+        // An imported scheme is the one thing here the reset cannot give back, so the alert says
+        // so and names the action that would keep it rather than leaving that to be discovered.
+        .detail(
+            "This cannot be undone. Export any imported scheme you want to keep first. \
+             Microphone access is a system permission and is not affected.",
+        )
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -2096,7 +2132,7 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
-                settings.editor.reset(ResetTarget::AllAppearance, cx);
+                settings.editor.reset_all(cx);
                 cx.notify();
             });
         });

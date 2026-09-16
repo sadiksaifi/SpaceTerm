@@ -222,7 +222,7 @@ fn zed_candidates_require_explicit_selection_and_install_through_settings() {
     assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
     assert_eq!(
         settings.snapshot().candidate.preferences,
-        AppearanceDocument::default().preferences
+        SettingsDocument::default().preferences
     );
 }
 
@@ -408,7 +408,7 @@ fn direct_deletion_commits_only_the_named_custom_scheme() {
 #[test]
 fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
     let (settings, storage) = setup();
-    let mut first = AppearanceDocument::default();
+    let mut first = SettingsDocument::default();
     first.preferences.chrome.typography.base_size = 20.0;
     settings.update_committed(0, first).unwrap().run().unwrap();
     let committed = settings.snapshot().committed;

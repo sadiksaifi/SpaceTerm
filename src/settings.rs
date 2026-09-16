@@ -22,9 +22,8 @@ use std::{
 #[cfg(test)]
 use crate::appearance::SchemeKind;
 use crate::appearance::{
-    AppearanceDocument, AppearanceDocumentError, CatalogError, CustomScheme, ImportCandidate,
-    ImportError, ResetTarget, SchemeCatalog, SchemeId, ZedImportKind, export_settings,
-    parse_settings,
+    CatalogError, CustomScheme, ImportCandidate, ImportError, ResetTarget, SchemeCatalog, SchemeId,
+    SettingsDocument, SettingsDocumentError, ZedImportKind, export_settings, parse_settings,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
 use storage::{Durability, SettingsStorage, StorageError};
@@ -47,8 +46,8 @@ pub(crate) enum SettingsError {
     Storage(#[from] StorageError),
 }
 
-impl From<AppearanceDocumentError> for SettingsError {
-    fn from(_: AppearanceDocumentError) -> Self {
+impl From<SettingsDocumentError> for SettingsError {
+    fn from(_: SettingsDocumentError) -> Self {
         Self::Invalid
     }
 }
@@ -62,10 +61,10 @@ pub(crate) enum PreviewPhase {
 
 #[derive(Clone)]
 pub(crate) struct SettingsSnapshot {
-    pub(crate) committed: Arc<AppearanceDocument>,
-    pub(crate) candidate: Arc<AppearanceDocument>,
+    pub(crate) committed: Arc<SettingsDocument>,
+    pub(crate) candidate: Arc<SettingsDocument>,
     /// A failed direct save remains recoverable without applying it as a live preview.
-    pub(crate) recoverable_candidate: Option<Arc<AppearanceDocument>>,
+    pub(crate) recoverable_candidate: Option<Arc<SettingsDocument>>,
     /// Retires import/replacement plans whenever the live editing state changes.
     pub(crate) catalog_revision: u64,
     pub(crate) phase: PreviewPhase,
@@ -96,8 +95,8 @@ struct SettingsInner {
 }
 
 struct State {
-    committed: Arc<AppearanceDocument>,
-    recoverable_candidate: Option<Arc<AppearanceDocument>>,
+    committed: Arc<SettingsDocument>,
+    recoverable_candidate: Option<Arc<SettingsDocument>>,
     catalog_revision: u64,
     expected: Option<SecureEntryIdentity>,
     storage_ready: bool,
@@ -110,11 +109,11 @@ enum Transaction {
     Idle,
     Preview {
         id: u64,
-        candidate: Arc<AppearanceDocument>,
+        candidate: Arc<SettingsDocument>,
     },
     Committing {
         id: Option<u64>,
-        candidate: Arc<AppearanceDocument>,
+        candidate: Arc<SettingsDocument>,
         owner_alive: bool,
     },
 }
@@ -206,7 +205,7 @@ impl UserSettings {
     pub(crate) fn load(storage: Arc<dyn SettingsStorage>) -> (Self, async_channel::Receiver<()>) {
         let (changed, receiver) = async_channel::bounded(1);
         let mut state = State {
-            committed: Arc::new(AppearanceDocument::default()),
+            committed: Arc::new(SettingsDocument::default()),
             recoverable_candidate: None,
             catalog_revision: 0,
             expected: None,
@@ -283,7 +282,7 @@ impl UserSettings {
     pub(crate) fn update_preview(
         &self,
         token: &PreviewToken,
-        candidate: AppearanceDocument,
+        candidate: SettingsDocument,
     ) -> Result<(), SettingsError> {
         let mut state = self.0.lock();
         self.require_token(&state, token)?;
@@ -322,7 +321,7 @@ impl UserSettings {
     pub(crate) fn update_committed(
         &self,
         revision: u64,
-        candidate: AppearanceDocument,
+        candidate: SettingsDocument,
     ) -> Result<CommitJob, SettingsError> {
         let mut state = self.0.lock();
         state.require_idle(revision)?;
@@ -502,7 +501,7 @@ impl UserSettings {
     fn edit_preview(
         &self,
         token: &PreviewToken,
-        edit: impl FnOnce(&mut AppearanceDocument) -> Result<(), SettingsError>,
+        edit: impl FnOnce(&mut SettingsDocument) -> Result<(), SettingsError>,
     ) -> Result<(), SettingsError> {
         let mut state = self.0.lock();
         self.require_token(&state, token)?;
@@ -524,7 +523,7 @@ impl UserSettings {
     fn prepare_direct_commit(
         &self,
         state: &mut State,
-        candidate: AppearanceDocument,
+        candidate: SettingsDocument,
     ) -> Result<CommitJob, SettingsError> {
         let candidate = Arc::new(validate_candidate(candidate, state.committed.revision)?);
         let result = self.prepare_commit(state, None, Arc::clone(&candidate));
@@ -588,7 +587,7 @@ impl UserSettings {
         &self,
         state: &mut State,
         id: Option<u64>,
-        candidate: Arc<AppearanceDocument>,
+        candidate: Arc<SettingsDocument>,
     ) -> Result<CommitJob, SettingsError> {
         if !state.storage_ready {
             return Err(state
@@ -650,7 +649,7 @@ impl State {
 /// Owns a started write even after the originating preview/window is destroyed.
 pub(crate) struct CommitJob {
     owner: Arc<SettingsInner>,
-    candidate: Arc<AppearanceDocument>,
+    candidate: Arc<SettingsDocument>,
     bytes: Vec<u8>,
     expected: Option<SecureEntryIdentity>,
     completed: bool,
@@ -727,10 +726,10 @@ fn restore_preview_after_failure(state: &mut State) {
 }
 
 fn install_schemes(
-    document: &AppearanceDocument,
+    document: &SettingsDocument,
     schemes: Vec<CustomScheme>,
     replace: &BTreeSet<SchemeId>,
-) -> Result<(AppearanceDocument, Vec<SchemeId>), SettingsError> {
+) -> Result<(SettingsDocument, Vec<SchemeId>), SettingsError> {
     let mut catalog = SchemeCatalog::from_custom_schemes(&document.custom_schemes)?;
     let installed = catalog.install_batch(&schemes, catalog.revision(), replace)?;
     let mut candidate = document.clone();
@@ -746,9 +745,9 @@ fn install_schemes(
     reason = "shared validation for the optional preview and direct deletion operations"
 )]
 fn remove_custom_scheme(
-    document: &AppearanceDocument,
+    document: &SettingsDocument,
     id: &SchemeId,
-) -> Result<AppearanceDocument, SettingsError> {
+) -> Result<SettingsDocument, SettingsError> {
     if id.is_reserved() {
         return Err(CatalogError::ReservedId.into());
     }
@@ -762,9 +761,9 @@ fn remove_custom_scheme(
 }
 
 fn validate_candidate(
-    candidate: AppearanceDocument,
+    candidate: SettingsDocument,
     revision: u64,
-) -> Result<AppearanceDocument, SettingsError> {
+) -> Result<SettingsDocument, SettingsError> {
     if candidate.revision != revision {
         return Err(SettingsError::Stale);
     }
@@ -775,9 +774,9 @@ fn validate_candidate(
 
 fn read_document(
     storage: &dyn SettingsStorage,
-) -> Result<(AppearanceDocument, Option<SecureEntryIdentity>), SettingsError> {
+) -> Result<(SettingsDocument, Option<SecureEntryIdentity>), SettingsError> {
     let Some(snapshot) = storage.read()? else {
-        return Ok((AppearanceDocument::default(), None));
+        return Ok((SettingsDocument::default(), None));
     };
     Ok((parse_settings(&snapshot.bytes)?, Some(snapshot.identity)))
 }

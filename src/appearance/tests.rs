@@ -299,7 +299,7 @@ fn transparency_rejects_invalid_numbers_and_defaults_for_documents_without_backg
         preferences.background.transparency = invalid;
         assert!(preferences.validate().is_err());
     }
-    let mut document = serde_json::to_value(AppearanceDocument::default()).unwrap();
+    let mut document = serde_json::to_value(SettingsDocument::default()).unwrap();
     document["preferences"]
         .as_object_mut()
         .unwrap()
@@ -453,7 +453,7 @@ fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency()
 
 #[test]
 fn retired_builtin_selections_retain_overrides_without_missing_scheme_diagnostics() {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.mode = AppearanceMode::Dark;
     let chrome = SchemeId::builtin("builtin.vague-pro.chrome.dark");
     let terminal = SchemeId::builtin("builtin.vague-pro.terminal.dark");
@@ -751,29 +751,29 @@ fn a_known_wrong_kind_or_classification_is_rejected() {
         Err(ResolutionError::AppearanceMismatch)
     ));
 
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.overrides.insert(
         SchemeId::builtin("builtin.spaceterm.terminal.dark"),
         ChromeColorOverrides::default(),
     );
     assert!(matches!(
         document.validate(),
-        Err(AppearanceDocumentError::InvalidPreferences)
+        Err(SettingsDocumentError::InvalidPreferences)
     ));
 
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.terminal.overrides.insert(
         SchemeId::builtin("builtin.spaceterm.chrome.dark"),
         TerminalColorOverrides::default(),
     );
     assert!(matches!(
         document.validate(),
-        Err(AppearanceDocumentError::InvalidPreferences)
+        Err(SettingsDocumentError::InvalidPreferences)
     ));
 }
 
-fn reset_fixture() -> AppearanceDocument {
-    let mut document = AppearanceDocument::default();
+fn reset_fixture() -> SettingsDocument {
+    let mut document = SettingsDocument::default();
     document.preferences.mode = AppearanceMode::Light;
     document.preferences.chrome.schemes.light = SchemeId::new("missing.reset.chrome").unwrap();
     document.preferences.chrome.typography.family = ChromeFontFamily::Named {
@@ -995,6 +995,53 @@ fn group_and_all_resets_have_exact_scope_and_retain_custom_schemes() {
     }
 }
 
+/// `reset_all` is the document's factory reset, so it goes further than any [`ResetTarget`]: the
+/// imported catalog empties with the preferences, and the identity fields that order the write
+/// against concurrent editors carry forward untouched.
+#[test]
+fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
+    let mut document = reset_fixture();
+    document.revision = 17;
+    let schema_version = document.schema_version;
+    assert!(
+        !document.custom_schemes.is_empty(),
+        "the fixture should install one scheme"
+    );
+
+    document.reset_all();
+
+    assert_eq!(
+        document.preferences,
+        AppearancePreferences::default(),
+        "every preference should return to its default"
+    );
+    assert!(
+        document.custom_schemes.is_empty(),
+        "the imported catalog should empty"
+    );
+    assert_eq!(
+        document.revision, 17,
+        "the write order should carry forward"
+    );
+    assert_eq!(document.schema_version, schema_version);
+    document.validate().unwrap();
+}
+
+/// A selection naming an imported scheme is valid only while that scheme is installed, so
+/// emptying the catalog and defaulting the preferences have to land in the same edit.
+#[test]
+fn resetting_the_whole_document_releases_a_selected_imported_scheme() {
+    let mut document = reset_fixture();
+    let imported = document.custom_schemes[0].id().clone();
+    document.preferences.chrome.schemes.dark = imported.clone();
+    document.validate().unwrap();
+
+    document.reset_all();
+
+    assert_ne!(document.preferences.chrome.schemes.dark, imported);
+    document.validate().unwrap();
+}
+
 #[test]
 fn every_color_role_can_be_removed_without_changing_other_overrides() {
     macro_rules! role_names {
@@ -1093,7 +1140,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
     assert!(ResetTarget::chrome_color_override(chrome_id, "not_a_role").is_none());
     assert!(ResetTarget::terminal_color_override(terminal_id, "not_a_role").is_none());
 
-    let mut sparse = AppearanceDocument::default();
+    let mut sparse = SettingsDocument::default();
     let chrome_id = SchemeId::builtin("builtin.spaceterm.chrome.dark");
     sparse.preferences.chrome.overrides.insert(
         chrome_id.clone(),
@@ -1129,7 +1176,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
 
 #[test]
 fn native_settings_are_canonical_strict_and_round_trip() {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.mode = AppearanceMode::Auto;
     document.preferences.chrome.schemes.light = SchemeId::new("missing.chrome.light").unwrap();
     document.preferences.chrome.schemes.dark = SchemeId::new("missing.chrome.dark").unwrap();
@@ -1142,10 +1189,10 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     let unsupported = encoded.replacen("\"schema_version\": 2", "\"schema_version\": 1", 1);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
-        Err(AppearanceDocumentError::UnsupportedVersion)
+        Err(SettingsDocumentError::UnsupportedVersion)
     ));
     assert!(matches!(parse_settings(br#"{"schema_version":2,"schema_version":2,"revision":0,"preferences":{},"custom_schemes":[]}"#),
-        Err(AppearanceDocumentError::DuplicateKey)));
+        Err(SettingsDocumentError::DuplicateKey)));
 
     let unknown = encoded.replacen(
         "\"revision\": 0,",
@@ -1154,17 +1201,17 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     );
     assert!(matches!(
         parse_settings(unknown.as_bytes()),
-        Err(AppearanceDocumentError::InvalidJson)
+        Err(SettingsDocumentError::InvalidJson)
     ));
 }
 
 #[test]
 fn invalid_bounds_and_protocol_alpha_are_rejected() {
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.chrome.typography.base_size = f32::NAN;
     assert!(matches!(
         export_settings(&document),
-        Err(AppearanceDocumentError::InvalidPreferences)
+        Err(SettingsDocumentError::InvalidPreferences)
     ));
 
     let custom = CustomScheme::Terminal(Box::new(TerminalScheme {
@@ -1177,13 +1224,13 @@ fn invalid_bounds_and_protocol_alpha_are_rejected() {
             ..Default::default()
         },
     }));
-    let document = AppearanceDocument {
+    let document = SettingsDocument {
         custom_schemes: vec![custom],
-        ..AppearanceDocument::default()
+        ..SettingsDocument::default()
     };
     assert!(matches!(
         export_settings(&document),
-        Err(AppearanceDocumentError::InvalidCatalog)
+        Err(SettingsDocumentError::InvalidCatalog)
     ));
 }
 

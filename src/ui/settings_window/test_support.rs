@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::appearance::{AppearanceDocument, export_settings};
+use crate::appearance::{SettingsDocument, export_settings};
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, StorageError};
 
@@ -64,7 +64,7 @@ impl MemoryStorage {
         BlockedWrite(gate)
     }
 
-    pub(super) fn with_document(document: &AppearanceDocument) -> Arc<Self> {
+    pub(super) fn with_document(document: &SettingsDocument) -> Arc<Self> {
         let storage = Arc::new(Self::default());
         let bytes = export_settings(document)
             .expect("fixture document")
@@ -77,7 +77,7 @@ impl MemoryStorage {
         self.0.lock().unwrap().writes
     }
 
-    pub(super) fn document(&self) -> Option<AppearanceDocument> {
+    pub(super) fn document(&self) -> Option<SettingsDocument> {
         let state = self.0.lock().unwrap();
         let (bytes, _) = state.snapshot.as_ref()?;
         crate::appearance::parse_settings(bytes).ok()
@@ -92,7 +92,7 @@ impl MemoryStorage {
     }
 
     pub(super) fn repair(&self) {
-        let bytes = export_settings(&AppearanceDocument::default())
+        let bytes = export_settings(&SettingsDocument::default())
             .expect("default document")
             .into_bytes();
         self.0.lock().unwrap().snapshot = Some((bytes, 2));
