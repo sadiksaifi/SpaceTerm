@@ -19,6 +19,7 @@ mod menu;
 mod middle_truncated_text;
 mod modal;
 mod overlay_scrollbar;
+mod progress;
 mod resize_handle;
 mod search_field;
 mod segmented_control;

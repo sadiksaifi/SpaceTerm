@@ -117,6 +117,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use gpui::{Global, Pixels, Rgba, SharedString, Size, px, size};
 
+pub use crate::progress::{DeterminateProgress, ProgressState, ProgressValueError};
 pub use alert::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, AlertSuppression,
     MAX_ALERT_DETAIL_CHARACTERS, MAX_ALERT_MESSAGE_CHARACTERS,
@@ -132,9 +133,8 @@ pub use dialog::{
 use policy::{ActionAxis, ModalInitialFocus};
 pub use policy::{ModalDesktopPolicy, TextDirection, install_modal_policy};
 pub use progress_dialog::{
-    DeterminateProgress, MAX_PROGRESS_DETAIL_CHARACTERS, MAX_PROGRESS_STATUS_CHARACTERS,
-    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState, ProgressValueError,
+    MAX_PROGRESS_DETAIL_CHARACTERS, MAX_PROGRESS_STATUS_CHARACTERS, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogOutcome, ProgressDialogUpdate,
 };
 pub use render::{
     ModalKeybindingProfile, ModalLayer, install_modal_keybindings,
