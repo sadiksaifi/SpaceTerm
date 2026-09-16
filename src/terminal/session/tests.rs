@@ -2299,6 +2299,44 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
 }
 
 #[test]
+fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(worker.process_output_chunks(vec![b"\x1b]133;A\x07".to_vec()]));
+
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::MetadataChanged(_)
+    ));
+    assert_eq!(
+        worker.metadata_state.snapshot().unwrap().prompt_zone,
+        crate::terminal::metadata::PromptZone::Prompt
+    );
+    worker.finish();
+}
+
+#[test]
 fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);

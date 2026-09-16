@@ -78,7 +78,7 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 #[derive(Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
-    /// Presented Terminal Metadata changed; read it from the retained snapshot.
+    /// Retained Terminal Metadata changed; read it from the retained snapshot.
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
@@ -341,8 +341,7 @@ impl RecordingAccessibilitySelectionReceiver {
 /// The newest Terminal Metadata, retained apart from Screen presentation.
 ///
 /// Presentation events may evict any earlier queue entry, and a hidden Pane receives no Screens at
-/// all, yet its Tab item and Workspace still present the Session's directory, title, command, and
-/// progress.
+/// all, yet its Pane and Workspace still need current presentation and close-confirmation facts.
 #[derive(Clone, Default)]
 struct SessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
 
@@ -1541,8 +1540,8 @@ impl TerminalWorker {
 
         if received_output {
             let metadata = self.emulator.metadata();
-            let metadata_changed = metadata.presentation_differs(&previous_metadata);
-            if metadata_changed {
+            let metadata_revised = metadata.revision != previous_metadata.revision;
+            if metadata_revised {
                 self.metadata_state.publish(metadata);
                 self.schedules.note_metadata_changed();
             }
@@ -1554,7 +1553,7 @@ impl TerminalWorker {
             // A presentable Session's next Screen carries the retained metadata wakeup. Publishing
             // a separate event first can evict lossless attention when that Screen replaces an
             // older queue entry. Hidden Sessions receive no Screens, so they still need the wakeup.
-            if metadata_changed
+            if metadata_revised
                 && !self.schedules.is_presentable()
                 && !self.publish_metadata_changed()
             {
