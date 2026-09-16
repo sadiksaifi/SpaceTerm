@@ -1026,6 +1026,7 @@ pub(crate) struct StatusPaint {
     pub(crate) attention: Color,
     pub(crate) busy: Color,
     pub(crate) error: Color,
+    pub(crate) paused: Color,
 }
 
 impl ChromeColors {
@@ -1043,6 +1044,7 @@ impl ChromeColors {
             attention: contrast_on_all(self.warning, &surfaces, 3.0),
             busy: contrast_on_all(self.info, &surfaces, 3.0),
             error: contrast_on_all(self.error, &surfaces, 3.0),
+            paused: contrast_on_all(self.text_muted, &surfaces, 3.0),
         }
     }
 }
@@ -1610,7 +1612,7 @@ mod tests {
                 vec![Color::rgb(0xfbfbfc), Color::rgb(0xe0a75c)],
             ] {
                 let status = colors.status(&surfaces);
-                for mark in [status.attention, status.busy, status.error] {
+                for mark in [status.attention, status.busy, status.error, status.paused] {
                     for surface in &surfaces {
                         let surface = surface.source_over(base);
                         assert!(

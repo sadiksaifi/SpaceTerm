@@ -2177,6 +2177,7 @@ fn render_pane_origin(
                             attention: gpui_color(paint.attention),
                             busy: gpui_color(paint.busy),
                             error: gpui_color(paint.error),
+                            paused: gpui_color(paint.secondary),
                         },
                     }
                     .render(),

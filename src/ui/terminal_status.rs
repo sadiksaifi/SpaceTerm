@@ -25,9 +25,6 @@ const BLINK_STEP: Duration = Duration::from_millis(500);
 /// Blinking draws the eye when attention arrives. Resting afterwards keeps an unread Tab in the
 /// background from repainting its window for as long as it stays unread.
 const BLINKS: u32 = 4;
-/// How strongly a paused Session's glyph shows, as a share of its usual opacity.
-const PAUSED_OPACITY: f32 = 0.4;
-
 /// How far the ring's stroke sits inside the glyph's square, as a share of its size.
 const PROGRESS_STROKE_SHARE: f32 = 0.14;
 /// The resting ring behind a reported percentage, as a share of the foreground's opacity.
@@ -204,6 +201,7 @@ pub(crate) struct StatusColors {
     pub(crate) attention: Rgba,
     pub(crate) busy: Rgba,
     pub(crate) error: Rgba,
+    pub(crate) paused: Rgba,
 }
 
 /// One Terminal Session's glyph and the status it presents.
@@ -287,6 +285,7 @@ enum Tint {
     Attention,
     Busy,
     Error,
+    Paused,
 }
 
 impl Tint {
@@ -296,6 +295,7 @@ impl Tint {
             Self::Attention => Some(colors.attention),
             Self::Busy => Some(colors.busy),
             Self::Error => Some(colors.error),
+            Self::Paused => Some(colors.paused),
         }
     }
 }
@@ -310,7 +310,7 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
         TerminalProgress::None => (Tint::Inherited, 1.0),
         TerminalProgress::Normal(_) | TerminalProgress::Indeterminate => (Tint::Busy, 1.0),
         TerminalProgress::Error => (Tint::Error, 1.0),
-        TerminalProgress::Paused => (Tint::Inherited, PAUSED_OPACITY),
+        TerminalProgress::Paused => (Tint::Paused, 1.0),
     }
 }
 
@@ -615,7 +615,7 @@ mod tests {
             (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
             (TerminalProgress::Indeterminate, (Tint::Busy, 1.0)),
             (TerminalProgress::Error, (Tint::Error, 1.0)),
-            (TerminalProgress::Paused, (Tint::Inherited, PAUSED_OPACITY)),
+            (TerminalProgress::Paused, (Tint::Paused, 1.0)),
         ] {
             assert_eq!(treatment(progress, false), resting, "{progress:?}");
             assert_eq!(

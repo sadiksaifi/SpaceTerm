@@ -1711,6 +1711,7 @@ fn render_tab_identity(
                             attention: gpui_color(status.attention),
                             busy: gpui_color(status.busy),
                             error: gpui_color(status.error),
+                            paused: gpui_color(status.paused),
                         },
                     }
                     .render(),
