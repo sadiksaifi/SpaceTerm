@@ -92,7 +92,7 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
-/// Gap within which two Escape presses leave macOS fullscreen.
+/// Gap within which two Escape presses leave Operating-System Window fullscreen.
 ///
 /// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
 /// because the caller filters those out before recording.
@@ -2120,9 +2120,9 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        // A bare Escape pair leaves macOS fullscreen without stealing terminal input: each press
-        // still reaches the session below. Presses an overlay owns (find, paste confirmation) or
-        // an IME composition owns never count, and any other key breaks the pair.
+        // A bare Escape pair leaves Operating-System Window fullscreen without stealing terminal
+        // input: each press still reaches the session below. Presses an overlay owns (find, paste
+        // confirmation) or an IME composition owns never count, and any other key breaks the pair.
         let bare_escape = event.keystroke.key == "escape"
             && !event.is_held
             && !event.keystroke.modifiers.modified();

@@ -20,8 +20,8 @@ pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
 
 /// Leading inset of the top-left chrome.
 ///
-/// macOS hides the traffic lights while fullscreen, so the clearance guards nothing. The header
-/// still keeps the frame's own edge air rather than running flush to the window edge.
+/// Fullscreen hides the native window controls, so the clearance guards nothing. The header still
+/// keeps the frame's own edge air rather than running flush to the window edge.
 pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels) -> Pixels {
     if fullscreen {
         frame_space
