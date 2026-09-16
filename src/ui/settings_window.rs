@@ -239,8 +239,11 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     }
 }
 
-/// Runs only after Workspace close authorization, retaining Settings until its latest edit is saved.
-pub(crate) fn quit_when_saved(cx: &mut App) {
+/// Retains Settings until its latest edit is saved, then completes an authorized application quit.
+pub(crate) fn quit_when_saved(
+    cx: &mut App,
+    application_quit: Rc<dyn crate::platform::application_quit::ApplicationQuitAdapter>,
+) {
     if let Some(settings) = cx
         .windows()
         .into_iter()
@@ -248,17 +251,17 @@ pub(crate) fn quit_when_saved(cx: &mut App) {
     {
         let _ = settings.update(cx, |settings, window, cx| {
             window.activate_window();
-            settings.request_close(CloseIntent::Application, cx);
+            settings.request_close(CloseIntent::Application(application_quit), cx);
         });
     } else {
-        cx.quit();
+        application_quit.confirm_quit(cx);
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CloseIntent {
     Window(AnyWindowHandle),
-    Application,
+    Application(Rc<dyn crate::platform::application_quit::ApplicationQuitAdapter>),
 }
 
 /// Registers the application-scoped Settings actions.
@@ -445,14 +448,17 @@ impl SettingsWindow {
     }
 
     fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
-        if !matches!(self.close_after_save, Some(CloseIntent::Application)) {
+        if !matches!(
+            self.close_after_save.as_ref(),
+            Some(CloseIntent::Application(_))
+        ) {
             self.close_after_save = Some(intent);
         }
         self.finish_close(cx);
     }
 
     fn finish_close(&mut self, cx: &mut Context<Self>) {
-        let Some(intent) = self.close_after_save else {
+        let Some(intent) = self.close_after_save.clone() else {
             return;
         };
         if self.editor.flush(cx) {
@@ -461,7 +467,7 @@ impl SettingsWindow {
                 CloseIntent::Window(handle) => cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
                 }),
-                CloseIntent::Application => cx.quit(),
+                CloseIntent::Application(application_quit) => application_quit.confirm_quit(cx),
             }
         } else if !self.editor.is_writing() {
             // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed

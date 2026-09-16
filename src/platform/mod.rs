@@ -3,6 +3,7 @@ pub(crate) mod app_paths;
 pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
+pub(crate) mod application_quit;
 pub(crate) mod control_socket;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
@@ -39,6 +40,11 @@ pub(crate) mod macos_application;
 mod macos_application_menu;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application_menu;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_application_quit;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_application_quit;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_control_socket;

@@ -2275,10 +2275,15 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
         })
     });
 
-    cx.cx.update(super::quit_when_saved);
+    let application_quit = Rc::new(
+        crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+    );
+    cx.cx.update(|cx| {
+        super::quit_when_saved(cx, application_quit.clone());
+    });
     assert!(window.read_with(cx, |settings, _| matches!(
-        settings.close_after_save,
-        Some(super::CloseIntent::Application)
+        settings.close_after_save.as_ref(),
+        Some(super::CloseIntent::Application(_))
     )));
     blocked.release();
     worker.join().unwrap();
@@ -2296,6 +2301,7 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
         21.0
     );
     assert_eq!(harness.storage.writes(), 2);
+    assert_eq!(application_quit.confirmations(), 1);
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_none()));
 }
 

@@ -1,14 +1,19 @@
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext, Bounds, PromptButton, PromptLevel, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, px, size,
 };
 
 use crate::platform::app_directories::AppDirectoryEnvironment;
 use crate::platform::app_paths::AppPaths;
 use crate::platform::application_menu::{ApplicationMenuAdapter, ApplicationMenuCommand};
+use crate::platform::application_quit::{
+    ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
+};
 use crate::platform::control_socket::ControlSocketProbe;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{
@@ -130,10 +135,15 @@ actions!(
     ]
 );
 
-pub(crate) fn init(cx: &mut App, application_menu: Rc<dyn ApplicationMenuAdapter>) {
+pub(crate) fn init(
+    cx: &mut App,
+    application_menu: Rc<dyn ApplicationMenuAdapter>,
+    application_quit: Rc<dyn ApplicationQuitAdapter>,
+) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
+    install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
-    cx.on_action(request_application_quit);
+    cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
@@ -142,6 +152,7 @@ pub(crate) fn init(cx: &mut App, application_menu: Rc<dyn ApplicationMenuAdapter
     if let Err(error) = application_menu.install(cx) {
         eprintln!("failed to install the application menu: {error}");
     }
+    Ok(())
 }
 
 fn install_application_menu_actions(
@@ -205,28 +216,93 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
     });
 }
 
-fn request_application_quit(_: &QuitApplication, cx: &mut App) {
-    cx.defer(|cx| {
-        // Resolve live roots at dispatch time, including inactive windows. GPUI owns the
-        // window registry, so a removed window cannot leave stale application quit authority.
-        let confirmation_window = application_quit_confirmation_window(cx);
-        if let Some(handle) = confirmation_window {
-            let _ = handle.update(cx, |manager, window, cx| {
-                window.activate_window();
-                manager.request_application_quit(window, cx);
-            });
-        } else {
-            crate::ui::settings_window::quit_when_saved(cx);
-        }
-    });
+fn install_application_quit(
+    cx: &mut App,
+    adapter: Rc<dyn ApplicationQuitAdapter>,
+) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
+    let prompt_pending = Rc::new(Cell::new(false));
+    let prompt_adapter = Rc::downgrade(&adapter);
+    adapter.install(ApplicationQuitHandler::new(
+        cx,
+        Rc::new(move |cx| {
+            let Some(prompt_adapter) = prompt_adapter.upgrade() else {
+                return ApplicationQuitDecision::Cancel;
+            };
+            request_application_quit(cx, prompt_adapter, Rc::clone(&prompt_pending))
+        }),
+    ))
 }
 
-fn application_quit_confirmation_window(cx: &App) -> Option<gpui::WindowHandle<WorkspaceManager>> {
-    workspace_windows(cx).into_iter().find(|window| {
+fn request_application_quit(
+    cx: &mut App,
+    adapter: Rc<dyn ApplicationQuitAdapter>,
+    prompt_pending: Rc<Cell<bool>>,
+) -> ApplicationQuitDecision {
+    let windows = workspace_windows(cx);
+    if windows.iter().any(|window| {
         window
             .read(cx)
-            .is_ok_and(|manager| manager.blocks_unconfirmed_application_quit(cx))
+            .is_ok_and(WorkspaceManager::has_pending_close_confirmation)
+    }) {
+        return ApplicationQuitDecision::Cancel;
+    }
+
+    let mut facts = crate::close_confirmation::ApplicationCloseFacts::default();
+    for window in &windows {
+        if let Ok(manager) = window.read(cx) {
+            facts.merge(manager.application_close_facts(cx));
+        }
+    }
+    if !facts.requires_confirmation() {
+        crate::ui::settings_window::quit_when_saved(cx, adapter);
+        return ApplicationQuitDecision::Cancel;
+    }
+    if prompt_pending.replace(true) {
+        return ApplicationQuitDecision::Cancel;
+    }
+
+    let confirmation_window = cx
+        .active_window()
+        .and_then(|window| window.downcast::<WorkspaceManager>())
+        .or_else(|| windows.into_iter().next());
+    let Some(confirmation_window) = confirmation_window else {
+        prompt_pending.set(false);
+        crate::ui::settings_window::quit_when_saved(cx, adapter);
+        return ApplicationQuitDecision::Cancel;
+    };
+    let count = facts.pane_count;
+    let noun = if count == 1 { "Pane" } else { "Panes" };
+    let detail = format!(
+        "Quit with {count} open {noun}? Open Workspaces and Tabs will close, and any running commands will stop."
+    );
+    let prompt = confirmation_window.update(cx, |_, window, cx| {
+        window.activate_window();
+        window.prompt(
+            PromptLevel::Critical,
+            "Quit SpaceTerm?",
+            Some(&detail),
+            &[
+                PromptButton::ok("Quit SpaceTerm"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        )
+    });
+    let Ok(prompt) = prompt else {
+        prompt_pending.set(false);
+        return ApplicationQuitDecision::Cancel;
+    };
+    cx.spawn(async move |cx| {
+        let confirmed = prompt.await == Ok(0);
+        let _ = cx.update(|cx| {
+            prompt_pending.set(false);
+            if confirmed {
+                crate::ui::settings_window::quit_when_saved(cx, adapter);
+            }
+        });
     })
+    .detach();
+    ApplicationQuitDecision::Cancel
 }
 
 pub(crate) fn open(
@@ -350,10 +426,16 @@ mod tests {
         )
     }
 
+    fn application_quit() -> Rc<dyn ApplicationQuitAdapter> {
+        Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        )
+    }
+
     #[gpui::test]
     fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init).expect("UI initialization");
-        cx.update(|cx| init(cx, application_menu()));
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
         let expected = [
             ("cmd-q", QuitApplication.name()),
             ("cmd-h", HideApplication.name()),
@@ -388,7 +470,7 @@ mod tests {
     fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        cx.update(|cx| init(cx, application_menu()));
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
@@ -430,7 +512,7 @@ mod tests {
             crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
         );
         let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
-        cx.update(|cx| init(cx, adapter));
+        cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
 
         cx.update(|cx| {
             cx.dispatch_action(&ShowAboutApplication);
@@ -522,6 +604,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
+    pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
@@ -682,7 +765,12 @@ fn start_application(
         host.adapters.microphone_access.clone(),
         cx,
     );
-    init(cx, Rc::clone(&host.adapters.application_menu));
+    init(
+        cx,
+        Rc::clone(&host.adapters.application_menu),
+        Rc::clone(&host.adapters.application_quit),
+    )
+    .map_err(|_| RuntimeError::Initialization)?;
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
@@ -763,6 +851,9 @@ mod runtime_tests {
                 selected_files: None,
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+                ),
+                application_quit: Rc::new(
+                    crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
                 ),
                 local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
@@ -1031,8 +1122,11 @@ mod runtime_tests {
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
-        // The Workspace has running work, so it does block quit while it exists.
-        assert!(cx.update(|cx| application_quit_confirmation_window(cx).is_some()));
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
 
         cx.update(|cx| {
             workspace
@@ -1044,10 +1138,9 @@ mod runtime_tests {
         // Only Settings remains. A window that presents no Workspace has no work to confirm, so
         // quit must proceed rather than wait on it.
         assert_eq!(cx.update(|cx| cx.windows().len()), 1);
-        assert_eq!(
-            cx.update(|cx| application_quit_confirmation_window(cx)),
-            None
-        );
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
     }
 
     #[gpui::test]
@@ -1058,6 +1151,10 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let application_quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        wiring.adapters.application_quit = application_quit.clone();
         let host = HostComposition::new(wiring).unwrap();
         let (running, idle) = cx.update(|cx| {
             let running = start_application(cx, &host).unwrap();
@@ -1080,49 +1177,27 @@ mod runtime_tests {
             (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
                 .clone();
         screen.metadata = metadata.snapshot();
-        records
-            .event_sender(2)
-            .unwrap()
-            .try_send(crate::terminal::SessionEvent::Screen(Arc::new(screen)))
-            .unwrap();
+        let screen = Arc::new(screen);
+        for session_id in [1, 2] {
+            records
+                .event_sender(session_id)
+                .unwrap()
+                .try_send(crate::terminal::SessionEvent::Screen(Arc::clone(&screen)))
+                .unwrap();
+        }
         cx.run_until_parked();
 
         cx.update(|cx| {
             assert!(cx.active_window() == Some(idle.into()));
-            assert!(
-                !idle
-                    .read(cx)
-                    .unwrap()
-                    .blocks_unconfirmed_application_quit(cx)
-            );
-            assert_eq!(application_quit_confirmation_window(cx), Some(running));
-            request_application_quit(&QuitApplication, cx);
+            cx.dispatch_action(&QuitApplication);
         });
         cx.run_until_parked();
-        cx.update(|cx| {
-            assert!(cx.active_window() == Some(running.into()));
-            assert!(
-                running
-                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
-                        window, cx
-                    ))
-                    .unwrap()
-            );
-            assert!(
-                !idle
-                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
-                        window, cx
-                    ))
-                    .unwrap()
-            );
-        });
-        cx.simulate_keystrokes(running.into(), "escape");
+        assert!(cx.has_pending_prompt());
+        assert!(cx.update(|cx| cx.active_window() == Some(idle.into())));
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert!(records.dropped_session_ids().is_empty());
         cx.update(|cx| {
-            // Remove the old owner before deferred quit dispatch. The remaining idle root
-            // must not inherit its pending state or receive a stale confirmation.
-            request_application_quit(&QuitApplication, cx);
             running
                 .update(cx, |_, window, _| window.remove_window())
                 .unwrap();
@@ -1131,14 +1206,12 @@ mod runtime_tests {
         cx.update(|cx| {
             assert!(running.read(cx).is_err());
             assert_eq!(cx.windows().len(), 1);
-            assert_eq!(application_quit_confirmation_window(cx), None);
-            assert!(
-                !idle
-                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
-                        window, cx
-                    ))
-                    .unwrap()
-            );
         });
+        assert_eq!(
+            application_quit.simulate_native_request(),
+            ApplicationQuitDecision::Cancel
+        );
+        assert_eq!(application_quit.confirmations(), 1);
+        assert!(!cx.has_pending_prompt());
     }
 }

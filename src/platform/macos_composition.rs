@@ -171,6 +171,9 @@ fn compose(
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),
+            application_quit: Rc::new(
+                super::macos_application_quit::MacosApplicationQuitAdapter::new(),
+            ),
             local_filesystem,
             key_input: Rc::new(
                 super::macos_keyboard::MacosTerminalKeyInputAdapterFactory::new(

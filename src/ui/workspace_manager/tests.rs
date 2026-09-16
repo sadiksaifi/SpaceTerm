@@ -1141,17 +1141,23 @@ fn workspace_manager_with_application_actions(
 ) -> (
     Entity<WorkspaceManager>,
     TestTerminalSessionRecords,
+    Rc<crate::platform::application_quit::testing::RecordingApplicationQuitAdapter>,
     &mut VisualTestContext,
 ) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
+    let application_quit = Rc::new(
+        crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+    );
     cx.update(|cx| {
         crate::app::init(
             cx,
             Rc::new(
                 crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
             ),
-        );
+            application_quit.clone(),
+        )
+        .unwrap();
     });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -1170,7 +1176,7 @@ fn workspace_manager_with_application_actions(
         manager.update(cx, |manager, cx| manager.focus(window, cx));
     });
     cx.run_until_parked();
-    (manager, records, cx)
+    (manager, records, application_quit, cx)
 }
 
 fn workspace_manager_with_remote_backend(
@@ -4796,10 +4802,10 @@ fn confirmed_stale_pane_identity_should_not_close_its_successor(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn native_window_and_application_close_should_share_the_pending_coordinator(
+fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
     cx: &mut TestAppContext,
 ) {
-    let (manager, _, cx) = workspace_manager(cx);
+    let (manager, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
 
     assert!(!cx.update(|window, cx| manager.update(cx, |manager, cx| {
@@ -4812,11 +4818,8 @@ fn native_window_and_application_close_should_share_the_pending_coordinator(
             .map(|pending| pending.target)),
         Some(CloseTarget::Window)
     );
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.request_application_quit(window, cx)
-        });
-    });
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .close_confirmation
@@ -4824,20 +4827,8 @@ fn native_window_and_application_close_should_share_the_pending_coordinator(
             .map(|pending| pending.target)),
         Some(CloseTarget::Window)
     );
-    click("modal-action-close-confirmation-cancel", cx);
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.request_application_quit(window, cx)
-        });
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Application)
-    );
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(application_quit.requests(), 1);
     click("modal-action-close-confirmation-cancel", cx);
 }
 
@@ -4942,45 +4933,39 @@ fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mu
 
 #[gpui::test]
 fn command_q_and_quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager_with_application_actions(cx);
+    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
-
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert_eq!(application_quit.requests(), 1);
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Application)
+        application_quit.simulate_native_request(),
+        crate::platform::application_quit::ApplicationQuitDecision::Cancel
     );
-    cx.simulate_keystrokes("escape");
+    cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
+    assert!(!cx.has_pending_prompt());
     assert!(records.dropped_session_ids().is_empty());
 
     cx.dispatch_action(crate::app::QuitApplication);
     cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Application)
-    );
-    cx.simulate_keystrokes("cmd-.");
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
     assert!(records.dropped_session_ids().is_empty());
 
-    cx.dispatch_action(crate::app::QuitApplication);
+    assert_eq!(
+        application_quit.simulate_native_request(),
+        crate::platform::application_quit::ApplicationQuitDecision::Cancel
+    );
     cx.run_until_parked();
-    click("modal-action-close-confirmation-confirm", cx);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Quit SpaceTerm");
+    cx.run_until_parked();
 
+    assert_eq!(application_quit.requests(), 4);
+    assert_eq!(application_quit.confirmations(), 1);
     assert!(manager.read_with(cx, |manager, _| {
         manager.close_confirmation.pending().is_none()
     }));
