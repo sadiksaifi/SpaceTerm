@@ -57,6 +57,16 @@ fn read_file_urls_from_pasteboard(
     // SAFETY: The caller owns the pasteboard and an autorelease pool for this synchronous read.
     unsafe {
         let items: cocoa::base::id = msg_send![pasteboard, pasteboardItems];
+        read_file_urls_from_items(items, paths)
+    }
+}
+
+fn read_file_urls_from_items(
+    items: cocoa::base::id,
+    paths: crate::local_path::LocalPathSemantics,
+) -> Result<Vec<PathBuf>, String> {
+    // SAFETY: The caller retains the NSArray and its NSPasteboardItems for this synchronous read.
+    unsafe {
         let count: usize = msg_send![items, count];
         let file_url_type = NSString::alloc(nil)
             .init_str("public.file-url")
@@ -152,7 +162,7 @@ mod tests {
     fn native_file_discovery_counts_only_file_representations() {
         use cocoa::base::id;
         use objc::class;
-        // SAFETY: Each case owns an isolated pasteboard and autoreleases its items.
+        // SAFETY: Each case owns its local item array and autoreleases its items.
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
             let file_type = NSString::alloc(nil)
@@ -165,7 +175,6 @@ mod tests {
                 (1, MAX_FILE_ITEMS),
                 (0, MAX_FILE_ITEMS + 1),
             ] {
-                let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
                 let mut items = Vec::new();
                 for index in 0..text_count + file_count {
                     let item: id = msg_send![class!(NSPasteboardItem), new];
@@ -180,13 +189,8 @@ mod tests {
                     items.push(item);
                 }
                 let items = NSArray::arrayWithObjects(nil, &items);
-                let written: bool = msg_send![pasteboard, writeObjects: items];
-                assert!(written);
-                let result = read_file_urls_from_pasteboard(
-                    pasteboard,
-                    crate::local_path::LocalPathSemantics::Posix,
-                );
-                pasteboard.releaseGlobally();
+                let result =
+                    read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix);
                 if file_count > MAX_FILE_ITEMS {
                     assert!(result.is_err());
                 } else {
@@ -201,10 +205,9 @@ mod tests {
     fn native_file_discovery_rejects_unreadable_file_representation_with_text() {
         use cocoa::base::id;
         use objc::class;
-        // SAFETY: This test owns an isolated pasteboard and autoreleases its item and data.
+        // SAFETY: This test owns the local item array and autoreleases its item and data.
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
-            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
             let file_type = NSString::alloc(nil)
                 .init_str("public.file-url")
                 .autorelease();
@@ -221,13 +224,8 @@ mod tests {
             let written: bool = msg_send![item, setString: text forType: NSPasteboardTypeString];
             assert!(written);
             let items = NSArray::arrayWithObjects(nil, &[item]);
-            let written: bool = msg_send![pasteboard, writeObjects: items];
-            assert!(written);
-            let result = read_file_urls_from_pasteboard(
-                pasteboard,
-                crate::local_path::LocalPathSemantics::Posix,
-            );
-            pasteboard.releaseGlobally();
+            let result =
+                read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix);
             pool.drain();
             assert!(result.is_err());
         }
@@ -237,10 +235,9 @@ mod tests {
     fn native_file_discovery_preserves_items_and_rejects_invalid_authority() {
         use cocoa::base::id;
         use objc::class;
-        // SAFETY: This test owns an isolated pasteboard and balances all retained objects.
+        // SAFETY: This test owns its local item arrays and balances all retained objects.
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
-            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
             let file_type = NSString::alloc(nil)
                 .init_str("public.file-url")
                 .autorelease();
@@ -251,29 +248,26 @@ mod tests {
             let _: bool = msg_send![first, setString: a forType: file_type];
             let _: bool = msg_send![second, setString: b forType: file_type];
             let items = NSArray::arrayWithObjects(nil, &[first, second]);
-            let _: NSInteger = msg_send![pasteboard, clearContents];
-            let _: bool = msg_send![pasteboard, writeObjects: items];
-            let paths = read_file_urls_from_pasteboard(
-                pasteboard,
-                crate::local_path::LocalPathSemantics::Posix,
-            )
-            .unwrap();
+            let paths =
+                read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix)
+                    .unwrap();
             assert!(paths == vec![PathBuf::from("/a b"), PathBuf::from("/c")]);
             let remote = NSString::alloc(nil)
                 .init_str("file://remote/a")
                 .autorelease();
-            let _: NSInteger = msg_send![pasteboard, clearContents];
-            let _: bool = msg_send![pasteboard, setString: remote forType: file_type];
+            let remote_item: id = msg_send![class!(NSPasteboardItem), new];
+            let _: bool = msg_send![remote_item, setString: remote forType: file_type];
+            let remote_items = NSArray::arrayWithObjects(nil, &[remote_item]);
             assert!(
-                read_file_urls_from_pasteboard(
-                    pasteboard,
-                    crate::local_path::LocalPathSemantics::Posix
+                read_file_urls_from_items(
+                    remote_items,
+                    crate::local_path::LocalPathSemantics::Posix,
                 )
                 .is_err()
             );
             let _: () = msg_send![first, release];
             let _: () = msg_send![second, release];
-            pasteboard.releaseGlobally();
+            let _: () = msg_send![remote_item, release];
             pool.drain();
         }
     }
