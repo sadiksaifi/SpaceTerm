@@ -4545,6 +4545,21 @@ fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppContext) {
+    let (_pane, cx) = terminal_pane(cx);
+
+    cx.update(|window, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        assert!(!crate::ui::terminal_status::reported_glyph_is_drawable(
+            "🚀\u{200d}🚀",
+            &appearance.regular,
+            appearance.text_size(DEFAULT_FONT_SIZE),
+            window,
+        ));
+    });
+}
+
+#[gpui::test]
 fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let screen_before = pane.read_with(cx, |pane, _| pane.screen.clone());

@@ -185,7 +185,12 @@ pub(crate) fn reported_glyph_is_drawable(
         .iter()
         .map(|run| run.font_id)
         .collect::<Vec<_>>();
-    !fonts.is_empty()
+    let rendered_glyphs = shaped
+        .runs
+        .iter()
+        .map(|run| run.glyphs.len())
+        .sum::<usize>();
+    rendered_glyphs == 1
         && glyph_bases_are_drawable(glyph, |character| {
             fonts.iter().any(|font| {
                 window
