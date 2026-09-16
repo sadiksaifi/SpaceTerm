@@ -251,7 +251,7 @@ pub(crate) fn quit_when_saved(cx: &mut App, completion: crate::app::ApplicationQ
             settings.request_close(CloseIntent::Application(completion), cx);
         });
     } else {
-        completion.complete(cx);
+        completion.saved(cx);
     }
 }
 
@@ -464,12 +464,16 @@ impl SettingsWindow {
                 CloseIntent::Window(handle) => cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
                 }),
-                CloseIntent::Application(completion) => completion.complete(cx),
+                CloseIntent::Application(completion) => completion.saved(cx),
             }
         } else if !self.editor.is_writing() {
             // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed
             // save. A competing preview is reported once rather than spinning during close.
-            self.close_after_save = None;
+            if let Some(CloseIntent::Application(completion)) = self.close_after_save.take() {
+                completion.failed(cx);
+            } else {
+                self.close_after_save = None;
+            }
         }
     }
 

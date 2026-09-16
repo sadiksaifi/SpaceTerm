@@ -45,7 +45,7 @@ use super::{
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
-    ApplicationCloseFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
+    ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
 };
 #[cfg(test)]
 use crate::directory_selection::GpuiDirectorySelection;
@@ -2420,6 +2420,10 @@ impl WorkspaceManager {
 
     pub(crate) fn application_close_facts(&self, cx: &App) -> ApplicationCloseFacts {
         self.close_hierarchy(cx).application_close_facts()
+    }
+
+    pub(crate) fn application_pane_facts(&self, cx: &App) -> Vec<ApplicationPaneFacts> {
+        self.close_hierarchy(cx).application_pane_facts().collect()
     }
 
     pub(crate) const fn has_pending_close_confirmation(&self) -> bool {

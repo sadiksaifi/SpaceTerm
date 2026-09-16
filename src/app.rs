@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -222,7 +222,7 @@ fn install_application_quit(
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     let coordinator = Rc::new(ApplicationQuitCoordinator {
         adapter: Rc::downgrade(&adapter),
-        prompt_pending: Cell::new(false),
+        state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
     });
     adapter.install(ApplicationQuitHandler::new(
         cx,
@@ -232,34 +232,82 @@ fn install_application_quit(
 
 #[derive(Clone)]
 pub(crate) struct ApplicationQuitAfterSave {
-    complete: Rc<dyn Fn(&mut App)>,
+    settle: Rc<ApplicationQuitSaveSettlement>,
 }
 
+type ApplicationQuitSaveSettlement = dyn Fn(&mut App, ApplicationQuitSaveOutcome);
+
 impl ApplicationQuitAfterSave {
-    pub(crate) fn new(complete: impl Fn(&mut App) + 'static) -> Self {
+    pub(crate) fn new(settle: impl Fn(&mut App, ApplicationQuitSaveOutcome) + 'static) -> Self {
         Self {
-            complete: Rc::new(complete),
+            settle: Rc::new(settle),
         }
     }
 
-    pub(crate) fn complete(&self, cx: &mut App) {
-        (self.complete)(cx);
+    pub(crate) fn saved(&self, cx: &mut App) {
+        (self.settle)(cx, ApplicationQuitSaveOutcome::Saved);
     }
+
+    pub(crate) fn failed(&self, cx: &mut App) {
+        (self.settle)(cx, ApplicationQuitSaveOutcome::Failed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApplicationQuitSaveOutcome {
+    Saved,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplicationQuitCoordinatorState {
+    Idle,
+    Prompting,
+    WaitingForSettings,
 }
 
 struct ApplicationQuitCoordinator {
     adapter: Weak<dyn ApplicationQuitAdapter>,
-    prompt_pending: Cell<bool>,
+    state: RefCell<ApplicationQuitCoordinatorState>,
+}
+
+#[derive(Clone)]
+struct ApplicationQuitSnapshot {
+    facts: crate::close_confirmation::ApplicationCloseFacts,
+    panes: Vec<ApplicationQuitPane>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ApplicationQuitPane {
+    window: gpui::WindowHandle<WorkspaceManager>,
+    facts: crate::close_confirmation::ApplicationPaneFacts,
+}
+
+impl ApplicationQuitSnapshot {
+    fn authorizes(&self, current: &Self) -> bool {
+        current.panes.iter().all(|current| {
+            self.panes.iter().any(|authorized| {
+                authorized.window == current.window
+                    && authorized.facts.workspace_id == current.facts.workspace_id
+                    && authorized.facts.tab_id == current.facts.tab_id
+                    && authorized.facts.pane_id == current.facts.pane_id
+                    && (!current.facts.has_running_work || authorized.facts.has_running_work)
+            })
+        })
+    }
 }
 
 impl ApplicationQuitCoordinator {
     fn request(self: &Rc<Self>, cx: &mut App) -> ApplicationQuitDecision {
+        if *self.state.borrow() != ApplicationQuitCoordinatorState::Idle {
+            return ApplicationQuitDecision::Cancel;
+        }
         if application_has_pending_close_confirmation(cx) {
             return ApplicationQuitDecision::Cancel;
         }
-        let facts = application_close_facts(cx);
-        if facts.requires_confirmation() {
-            self.present_confirmation(facts, cx);
+        let snapshot = application_quit_snapshot(cx);
+        if snapshot.facts.requires_confirmation() {
+            self.present_confirmation(snapshot, cx);
         } else {
             self.wait_for_settings(None, cx);
         }
@@ -268,16 +316,26 @@ impl ApplicationQuitCoordinator {
 
     fn complete_after_settings_save(
         self: &Rc<Self>,
-        authorization: Option<crate::close_confirmation::ApplicationCloseFacts>,
+        authorization: Option<ApplicationQuitSnapshot>,
+        outcome: ApplicationQuitSaveOutcome,
         cx: &mut App,
     ) {
+        let mut state = self.state.borrow_mut();
+        if *state != ApplicationQuitCoordinatorState::WaitingForSettings {
+            return;
+        }
+        *state = ApplicationQuitCoordinatorState::Idle;
+        drop(state);
+        if matches!(outcome, ApplicationQuitSaveOutcome::Failed) {
+            return;
+        }
         if application_has_pending_close_confirmation(cx) {
             return;
         }
-        let current = application_close_facts(cx);
+        let current = application_quit_snapshot(cx);
         let authorized = authorization.map_or_else(
-            || !current.requires_confirmation(),
-            |authorization| authorization.authorizes(current),
+            || !current.facts.requires_confirmation(),
+            |authorization| authorization.authorizes(&current),
         );
         if authorized {
             if let Some(adapter) = self.adapter.upgrade() {
@@ -290,36 +348,36 @@ impl ApplicationQuitCoordinator {
 
     fn wait_for_settings(
         self: &Rc<Self>,
-        authorization: Option<crate::close_confirmation::ApplicationCloseFacts>,
+        authorization: Option<ApplicationQuitSnapshot>,
         cx: &mut App,
     ) {
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForSettings;
         let coordinator = Rc::clone(self);
         crate::ui::settings_window::quit_when_saved(
             cx,
-            ApplicationQuitAfterSave::new(move |cx| {
-                coordinator.complete_after_settings_save(authorization, cx);
+            ApplicationQuitAfterSave::new(move |cx, outcome| {
+                coordinator.complete_after_settings_save(authorization.clone(), outcome, cx);
             }),
         );
     }
 
-    fn present_confirmation(
-        self: &Rc<Self>,
-        facts: crate::close_confirmation::ApplicationCloseFacts,
-        cx: &mut App,
-    ) {
-        if self.prompt_pending.replace(true) {
+    fn present_confirmation(self: &Rc<Self>, snapshot: ApplicationQuitSnapshot, cx: &mut App) {
+        let mut state = self.state.borrow_mut();
+        if *state != ApplicationQuitCoordinatorState::Idle {
             return;
         }
+        *state = ApplicationQuitCoordinatorState::Prompting;
+        drop(state);
         let windows = workspace_windows(cx);
         let confirmation_window = cx
             .active_window()
             .and_then(|window| window.downcast::<WorkspaceManager>())
             .or_else(|| windows.into_iter().next());
         let Some(confirmation_window) = confirmation_window else {
-            self.prompt_pending.set(false);
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
         };
-        let count = facts.pane_count;
+        let count = snapshot.facts.pane_count;
         let noun = if count == 1 { "Pane" } else { "Panes" };
         let detail = format!(
             "Quit with {count} open {noun}? Open Workspaces and Tabs will close, and any running commands will stop."
@@ -338,16 +396,17 @@ impl ApplicationQuitCoordinator {
             )
         });
         let Ok(prompt) = prompt else {
-            self.prompt_pending.set(false);
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
         };
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
             let confirmed = prompt.await == Ok(0);
             let _ = cx.update(|cx| {
-                coordinator.prompt_pending.set(false);
                 if confirmed {
-                    coordinator.wait_for_settings(Some(facts), cx);
+                    coordinator.wait_for_settings(Some(snapshot), cx);
+                } else {
+                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
                 }
             });
         })
@@ -363,14 +422,21 @@ fn application_has_pending_close_confirmation(cx: &App) -> bool {
     })
 }
 
-fn application_close_facts(cx: &App) -> crate::close_confirmation::ApplicationCloseFacts {
+fn application_quit_snapshot(cx: &App) -> ApplicationQuitSnapshot {
     let mut facts = crate::close_confirmation::ApplicationCloseFacts::default();
+    let mut panes = Vec::new();
     for window in workspace_windows(cx) {
         if let Ok(manager) = window.read(cx) {
             facts.merge(manager.application_close_facts(cx));
+            panes.extend(
+                manager
+                    .application_pane_facts(cx)
+                    .into_iter()
+                    .map(|facts| ApplicationQuitPane { window, facts }),
+            );
         }
     }
-    facts
+    ApplicationQuitSnapshot { facts, panes }
 }
 
 pub(crate) fn open(
@@ -1212,6 +1278,71 @@ mod runtime_tests {
     }
 
     #[gpui::test]
+    fn application_quit_suppresses_repeated_requests_while_settings_are_saving(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let adapter: Rc<dyn ApplicationQuitAdapter> = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let coordinator = Rc::new(ApplicationQuitCoordinator {
+            adapter: Rc::downgrade(&adapter),
+            state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
+        });
+
+        let decision = cx.update(|cx| coordinator.request(cx));
+
+        assert_eq!(decision, ApplicationQuitDecision::Cancel);
+        assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
+    fn application_quit_returns_to_idle_after_settings_save_failure(cx: &mut gpui::TestAppContext) {
+        let adapter: Rc<dyn ApplicationQuitAdapter> = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let coordinator = Rc::new(ApplicationQuitCoordinator {
+            adapter: Rc::downgrade(&adapter),
+            state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
+        });
+
+        cx.update(|cx| {
+            coordinator.complete_after_settings_save(None, ApplicationQuitSaveOutcome::Failed, cx);
+        });
+
+        assert_eq!(
+            *coordinator.state.borrow(),
+            ApplicationQuitCoordinatorState::Idle
+        );
+    }
+
+    #[gpui::test]
+    fn application_quit_does_not_move_running_work_between_authorized_panes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let window = cx.update(|cx| start_application(cx, &host).unwrap());
+        let pane = |pane_id, has_running_work| ApplicationQuitPane {
+            window,
+            facts: crate::close_confirmation::ApplicationPaneFacts {
+                workspace_id: crate::domain::WorkspaceId::new(1),
+                tab_id: crate::domain::TabId::new(1),
+                pane_id: crate::domain::PaneId::new(pane_id),
+                has_running_work,
+            },
+        };
+        let authorized = ApplicationQuitSnapshot {
+            facts: Default::default(),
+            panes: vec![pane(1, true), pane(2, false)],
+        };
+        let current = ApplicationQuitSnapshot {
+            facts: Default::default(),
+            panes: vec![pane(1, false), pane(2, true)],
+        };
+
+        assert!(!authorized.authorizes(&current));
+    }
+
+    #[gpui::test]
     fn application_quit_checks_inactive_windows_and_discards_removed_roots(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1284,7 +1415,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn application_quit_revalidates_workspace_structure_after_settings_save(
+    fn application_quit_revalidates_equal_count_window_replacement_after_settings_save(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::ui::settings_window::test_support::MemoryStorage;
@@ -1326,10 +1457,10 @@ mod runtime_tests {
         assert!(settings_cx.has_pending_prompt());
         settings_cx.simulate_prompt_answer("Quit SpaceTerm");
         settings_cx.cx.update(|cx| {
+            open(cx, &host).unwrap();
             workspace
-                .update(cx, |_, window, _| window.activate_window())
+                .update(cx, |_, window, _| window.remove_window())
                 .unwrap();
-            cx.dispatch_action(&NewWorkspace);
         });
         let release = std::thread::spawn(move || {
             blocked.wait_until_started();

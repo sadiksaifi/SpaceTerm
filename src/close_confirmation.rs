@@ -80,6 +80,14 @@ pub(crate) struct ApplicationCloseFacts {
     pub(crate) has_running_work: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ApplicationPaneFacts {
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) tab_id: TabId,
+    pub(crate) pane_id: PaneId,
+    pub(crate) has_running_work: bool,
+}
+
 impl ApplicationCloseFacts {
     pub(crate) const fn requires_confirmation(self) -> bool {
         self.workspace_count > 1
@@ -93,13 +101,6 @@ impl ApplicationCloseFacts {
         self.tab_count += other.tab_count;
         self.pane_count += other.pane_count;
         self.has_running_work |= other.has_running_work;
-    }
-
-    pub(crate) const fn authorizes(self, current: Self) -> bool {
-        current.workspace_count <= self.workspace_count
-            && current.tab_count <= self.tab_count
-            && current.pane_count <= self.pane_count
-            && (!current.has_running_work || self.has_running_work)
     }
 }
 
@@ -172,6 +173,19 @@ impl CloseHierarchy {
             pane_count: self.panes.len(),
             has_running_work,
         }
+    }
+
+    pub(crate) fn application_pane_facts(&self) -> impl Iterator<Item = ApplicationPaneFacts> + '_ {
+        self.panes
+            .iter()
+            .map(
+                |&(workspace_id, tab_id, pane_id, has_running_work)| ApplicationPaneFacts {
+                    workspace_id,
+                    tab_id,
+                    pane_id,
+                    has_running_work,
+                },
+            )
     }
 
     fn matching_panes(

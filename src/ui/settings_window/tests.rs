@@ -2258,6 +2258,30 @@ fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_failed_application_quit_save_reports_failure(cx: &mut TestAppContext) {
+    let (_, harness, cx) = open_settings(cx);
+    click("settings-chrome-density-comfortable", cx);
+    harness.storage.fail_writes(Some(StorageError::Unavailable));
+    let outcome = Rc::new(std::cell::Cell::new(None));
+    let recorded_outcome = Rc::clone(&outcome);
+
+    cx.cx.update(|cx| {
+        super::quit_when_saved(
+            cx,
+            crate::app::ApplicationQuitAfterSave::new(move |_, outcome| {
+                recorded_outcome.set(Some(outcome));
+            }),
+        );
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        outcome.get(),
+        Some(crate::app::ApplicationQuitSaveOutcome::Failed)
+    );
+}
+
+#[gpui::test]
 fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-chrome-density-comfortable", cx);
@@ -2280,8 +2304,10 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
     cx.cx.update(|cx| {
         super::quit_when_saved(
             cx,
-            crate::app::ApplicationQuitAfterSave::new(move |_| {
-                recorded_completions.set(recorded_completions.get() + 1);
+            crate::app::ApplicationQuitAfterSave::new(move |_, outcome| {
+                if matches!(outcome, crate::app::ApplicationQuitSaveOutcome::Saved) {
+                    recorded_completions.set(recorded_completions.get() + 1);
+                }
             }),
         );
     });
