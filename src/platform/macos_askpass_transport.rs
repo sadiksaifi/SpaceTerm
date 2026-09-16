@@ -72,7 +72,7 @@ impl AskPassLocalListener for MacosAskPassListener {
         if validate_same_user_peer(&stream).is_err() {
             return AskPassLocalAccept::Rejected;
         }
-        if set_connection_timeouts(&stream).is_err() {
+        if configure_broker_connection(&stream).is_err() {
             return AskPassLocalAccept::Rejected;
         }
         AskPassLocalAccept::Connected(Box::new(stream))
@@ -96,9 +96,10 @@ fn validate_same_user_peer(stream: &UnixStream) -> Result<(), AskPassUnavailable
     }
 }
 
-fn set_connection_timeouts(stream: &UnixStream) -> Result<(), AskPassUnavailable> {
+fn configure_broker_connection(stream: &UnixStream) -> Result<(), AskPassUnavailable> {
     stream
-        .set_read_timeout(Some(CONNECTION_IO_TIMEOUT))
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT)))
         .and_then(|()| stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT)))
         .map_err(|_| AskPassUnavailable)
 }
@@ -307,6 +308,13 @@ mod tests {
             .unwrap()
     }
 
+    fn is_nonblocking(stream: &UnixStream) -> bool {
+        // SAFETY: `fcntl` reads the status flags for this live socket and retains no pointer.
+        let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        flags & libc::O_NONBLOCK != 0
+    }
+
     #[test]
     fn authenticated_endpoint_preserves_non_utf8_socket_path() {
         let path = PathBuf::from(OsString::from_vec(
@@ -352,18 +360,21 @@ mod tests {
     }
 
     #[test]
-    fn helper_should_wait_for_the_prompt_without_a_protocol_read_deadline() {
+    fn broker_should_restore_blocking_io_while_helper_waits_without_a_read_deadline() {
         let directory = TestDirectory::new();
         let socket_path = directory.0.join("prompt-timeout.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let endpoint = authenticated_endpoint(&socket_path, std::process::id());
 
         let helper = MacosHelperConnector.connect(&endpoint).unwrap();
         let (broker, _) = listener.accept().unwrap();
-        set_connection_timeouts(&broker).unwrap();
+        assert!(is_nonblocking(&broker));
+        configure_broker_connection(&broker).unwrap();
 
         assert_eq!(helper.read_timeout().unwrap(), None);
         assert_eq!(helper.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
+        assert!(!is_nonblocking(&broker));
         assert_eq!(broker.read_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
         assert_eq!(broker.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
     }
