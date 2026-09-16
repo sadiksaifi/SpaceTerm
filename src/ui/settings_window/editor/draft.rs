@@ -10,7 +10,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::appearance::{
-    AppearanceDocument, ResetTarget, SchemeCatalog, SchemeId, SchemeKind, SchemeSummary,
+    ResetTarget, SchemeCatalog, SchemeId, SchemeKind, SchemeSummary, SettingsDocument,
 };
 use crate::settings::storage::StorageError;
 use crate::settings::{
@@ -32,7 +32,7 @@ pub(in crate::ui::settings_window) enum SaveStatus {
 
 pub(super) struct SettingsDraft {
     settings: UserSettings,
-    draft: Arc<AppearanceDocument>,
+    draft: Arc<SettingsDocument>,
     preview: Option<PreviewToken>,
     status: SaveStatus,
     unwritten: bool,
@@ -58,7 +58,7 @@ impl SettingsDraft {
     }
 
     /// The values every control renders from.
-    pub(super) fn document(&self) -> &AppearanceDocument {
+    pub(super) fn document(&self) -> &SettingsDocument {
         &self.draft
     }
 
@@ -75,7 +75,7 @@ impl SettingsDraft {
     }
 
     /// Applies and previews one edit, returning whether the Adapter should schedule a write.
-    pub(super) fn edit(&mut self, edit: impl FnOnce(&mut AppearanceDocument)) -> bool {
+    pub(super) fn edit(&mut self, edit: impl FnOnce(&mut SettingsDocument)) -> bool {
         if !self.editable() {
             return false;
         }
@@ -98,6 +98,14 @@ impl SettingsDraft {
             // in `edit` discards it rather than scheduling an empty write.
             let _ = draft.reset(target);
         })
+    }
+
+    /// Restores every Setting, including the imported scheme catalog, to its default.
+    ///
+    /// This goes through `edit` rather than `edit_catalog`: emptying the catalog cannot strand a
+    /// selection, because the same edit returns the selections to built-in schemes.
+    pub(super) fn reset_all(&mut self) -> bool {
+        self.edit(SettingsDocument::reset_all)
     }
 
     /// Installs parsed schemes without selecting any of them.

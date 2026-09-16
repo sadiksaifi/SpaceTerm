@@ -607,7 +607,7 @@ mod tests {
     fn schemes_beyond_the_twelfth_row_can_be_scrolled_to_and_removed(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::appearance::{Appearance, AppearanceDocument};
+        use crate::appearance::{Appearance, SettingsDocument};
         use crate::platform::appearance::testing::RecordingAppearancePlatform;
         use crate::ui::appearance_runtime;
         use crate::ui::settings_window::test_support::MemoryStorage;
@@ -626,9 +626,9 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let document = AppearanceDocument {
+        let document = SettingsDocument {
             custom_schemes: serde_json::from_value(serde_json::json!(schemes)).unwrap(),
-            ..AppearanceDocument::default()
+            ..SettingsDocument::default()
         };
         let storage = MemoryStorage::with_document(&document);
         let (settings, changed) = UserSettings::load(storage);

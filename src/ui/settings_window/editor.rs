@@ -13,7 +13,7 @@ use std::{
 
 use gpui::{Context, Task};
 
-use crate::appearance::{AppearanceDocument, ResetTarget, SchemeId, SchemeKind, SchemeSummary};
+use crate::appearance::{ResetTarget, SchemeId, SchemeKind, SchemeSummary, SettingsDocument};
 use crate::settings::storage::StorageError;
 use crate::settings::{CommitOutcome, ImportReceipt, SchemeImport, SettingsError, UserSettings};
 
@@ -70,7 +70,7 @@ impl SettingsEditor {
         }
     }
 
-    pub(super) fn document(&self) -> &AppearanceDocument {
+    pub(super) fn document(&self) -> &SettingsDocument {
         self.draft.document()
     }
 
@@ -84,7 +84,7 @@ impl SettingsEditor {
 
     pub(super) fn edit(
         &mut self,
-        edit: impl FnOnce(&mut AppearanceDocument),
+        edit: impl FnOnce(&mut SettingsDocument),
         cx: &mut Context<SettingsWindow>,
     ) {
         if self.draft.edit(edit) {
@@ -94,6 +94,13 @@ impl SettingsEditor {
 
     pub(super) fn reset(&mut self, target: ResetTarget, cx: &mut Context<SettingsWindow>) {
         if self.draft.reset(target) {
+            self.schedule(cx);
+        }
+    }
+
+    /// Restores every Setting, including the imported scheme catalog, to its default.
+    pub(super) fn reset_all(&mut self, cx: &mut Context<SettingsWindow>) {
+        if self.draft.reset_all() {
             self.schedule(cx);
         }
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceDocument, AppearanceMode, SchemeId};
+use crate::appearance::{Appearance, AppearanceMode, SchemeId, SettingsDocument};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
@@ -108,7 +108,7 @@ fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_pro
         crate::appearance::WindowBackgroundAppearance::Blurred
     );
     let token = settings.begin_preview(0).unwrap();
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     document.preferences.background.transparency = 0.5;
     document.preferences.background.blur = false;
     settings.update_preview(&token, document).unwrap();
@@ -162,7 +162,7 @@ fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_pro
 fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut TestAppContext) {
     let (settings, platform) = start(cx);
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = AppearanceDocument::default();
+    let mut candidate = SettingsDocument::default();
     candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     platform.set_system_appearance(Some(Appearance::Light));
@@ -185,7 +185,7 @@ fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
 ) {
     let (settings, _) = start(cx);
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = AppearanceDocument::default();
+    let mut candidate = SettingsDocument::default();
     candidate.preferences.chrome.schemes.dark = SchemeId::new("custom.missing").unwrap();
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
@@ -214,7 +214,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     });
     let native_calls = platform.applied.borrow().len();
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = AppearanceDocument::default();
+    let mut candidate = SettingsDocument::default();
     candidate.preferences.terminal.typography.base_size = 24.0;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
@@ -246,7 +246,7 @@ fn repeated_system_notifications_without_effective_change_do_not_publish(cx: &mu
 
 #[gpui::test]
 fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppContext) {
-    let mut committed = AppearanceDocument::default();
+    let mut committed = SettingsDocument::default();
     committed.preferences.mode = AppearanceMode::Auto;
     let bytes = crate::appearance::export_settings(&committed)
         .unwrap()
@@ -260,7 +260,7 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     });
     let token = settings.begin_preview(0).unwrap();
     settings
-        .update_preview(&token, AppearanceDocument::default())
+        .update_preview(&token, SettingsDocument::default())
         .unwrap();
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
@@ -278,7 +278,7 @@ fn chrome_palette_and_typography_preview_preserve_native_classification_and_term
     let before = cx.update(|cx| current(cx));
     let native_calls = platform.applied.borrow().len();
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = AppearanceDocument::default();
+    let mut candidate = SettingsDocument::default();
     candidate.preferences.chrome.typography.base_size = 17.0;
     candidate.preferences.chrome.overrides.insert(
         before.chrome.effective_scheme.clone(),

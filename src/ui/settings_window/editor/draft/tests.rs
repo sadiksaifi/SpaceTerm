@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::appearance::{AppearanceDocument, ChromeDensity, ResetTarget, SchemeKind};
+use crate::appearance::{ChromeDensity, ResetTarget, SchemeKind, SettingsDocument};
 use crate::settings::storage::StorageError;
 use crate::settings::{PreviewPhase, SchemeImport, SettingsError, UserSettings};
 use crate::ui::settings_window::test_support::MemoryStorage;
@@ -10,7 +10,7 @@ use super::{SaveStatus, SettingsDraft};
 const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
 
 fn setup() -> (SettingsDraft, UserSettings, Arc<MemoryStorage>) {
-    let storage = MemoryStorage::with_document(&AppearanceDocument::default());
+    let storage = MemoryStorage::with_document(&SettingsDocument::default());
     let (settings, _) = UserSettings::load(storage.clone());
     (SettingsDraft::new(settings.clone()), settings, storage)
 }

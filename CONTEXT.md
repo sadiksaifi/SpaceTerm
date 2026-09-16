@@ -61,6 +61,11 @@ A native window that presents SpaceTerm.
 **Settings**:
 The application-scoped preferences SpaceTerm retains in `settings.json`.
 
+**Settings Document**:
+The retained form of Settings: every preference SpaceTerm persists together with the Color Schemes
+imported into it. It is named for what it holds rather than for any one Section, so an operation
+scoped to all of Settings keeps that meaning as Sections are added.
+
 **Settings Window**:
 The separate modeless Operating-System Window that presents Settings. It presents no Workspace and
 never stands in for a Workspace window.

@@ -5,6 +5,16 @@ use spaceterm_ui::{
 
 use crate::appearance::{ChromeColors, Color};
 
+/// The horizontal padding a compact button paints around its label.
+pub(crate) const COMPACT_HORIZONTAL_PADDING: f32 = 4.0;
+
+/// The border every button reserves inside its edge, whether or not the variant paints one.
+///
+/// It is separate from the padding because it scales differently: padding follows the density
+/// scale and this does not, so a surface aligning a button's label to a text column has to remove
+/// each of them in its own scale rather than one combined figure.
+pub(crate) const CONTROL_BORDER_WIDTH: f32 = 1.0;
+
 pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
     ButtonTheme::new(
         ButtonVariants::new(
@@ -93,7 +103,8 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
         ),
         ButtonSizes::new(
             ButtonMetrics::new(px(20.0))
-                .horizontal_padding(px(4.0))
+                .horizontal_padding(px(COMPACT_HORIZONTAL_PADDING))
+                .border_width(px(CONTROL_BORDER_WIDTH))
                 .gap(px(4.0))
                 .corner_radius(px(4.0))
                 .font_size(px(11.0)),

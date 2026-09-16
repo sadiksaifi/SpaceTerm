@@ -26,7 +26,7 @@ const MAX_IMPORT_SCHEMES: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AppearanceDocument {
+pub(crate) struct SettingsDocument {
     pub(crate) schema_version: u32,
     pub(crate) revision: u64,
     pub(crate) preferences: AppearancePreferences,
@@ -34,7 +34,7 @@ pub(crate) struct AppearanceDocument {
     pub(crate) custom_schemes: Vec<CustomScheme>,
 }
 
-impl Default for AppearanceDocument {
+impl Default for SettingsDocument {
     fn default() -> Self {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
@@ -45,16 +45,16 @@ impl Default for AppearanceDocument {
     }
 }
 
-impl AppearanceDocument {
-    pub(crate) fn validate(&self) -> Result<(), AppearanceDocumentError> {
+impl SettingsDocument {
+    pub(crate) fn validate(&self) -> Result<(), SettingsDocumentError> {
         if self.schema_version != SETTINGS_SCHEMA_VERSION {
-            return Err(AppearanceDocumentError::UnsupportedVersion);
+            return Err(SettingsDocumentError::UnsupportedVersion);
         }
         self.preferences
             .validate()
-            .map_err(|_| AppearanceDocumentError::InvalidPreferences)?;
+            .map_err(|_| SettingsDocumentError::InvalidPreferences)?;
         let catalog = SchemeCatalog::from_custom_schemes(&self.custom_schemes)
-            .map_err(|_| AppearanceDocumentError::InvalidCatalog)?;
+            .map_err(|_| SettingsDocumentError::InvalidCatalog)?;
         if self
             .preferences
             .chrome
@@ -68,7 +68,7 @@ impl AppearanceDocument {
                 .keys()
                 .any(|id| catalog.chrome(id).is_some())
         {
-            return Err(AppearanceDocumentError::InvalidPreferences);
+            return Err(SettingsDocumentError::InvalidPreferences);
         }
         validate_selection(
             &catalog,
@@ -83,12 +83,26 @@ impl AppearanceDocument {
         Ok(())
     }
 
-    pub(crate) fn reset(&mut self, target: ResetTarget) -> Result<(), AppearanceDocumentError> {
+    pub(crate) fn reset(&mut self, target: ResetTarget) -> Result<(), SettingsDocumentError> {
         let mut candidate = self.clone();
         candidate.preferences.reset(target);
         candidate.validate()?;
         *self = candidate;
         Ok(())
+    }
+
+    /// Returns every Setting this document owns to its default, imported schemes included.
+    ///
+    /// Preferences and the imported catalog reset together because they constrain each other: a
+    /// selection naming an imported scheme is only valid while that scheme is installed. Clearing
+    /// the catalog alone would strand such a selection, and defaulting preferences alone would
+    /// leave a library the reset claims to have emptied. The identity fields carry the document
+    /// forward instead: `revision` orders the write against concurrent editors, and
+    /// `schema_version` states the format this build writes.
+    pub(crate) fn reset_all(&mut self) {
+        let defaults = Self::default();
+        self.preferences = defaults.preferences;
+        self.custom_schemes = defaults.custom_schemes;
     }
 }
 
@@ -96,7 +110,7 @@ fn validate_selection(
     catalog: &SchemeCatalog,
     slots: &SchemeSlots,
     kind: SchemeKind,
-) -> Result<(), AppearanceDocumentError> {
+) -> Result<(), SettingsDocumentError> {
     let selections = [
         (&slots.light, Appearance::Light),
         (&slots.dark, Appearance::Dark),
@@ -113,7 +127,7 @@ fn validate_selection(
             ),
         };
         if other || same.is_some_and(|actual| actual != expected) {
-            return Err(AppearanceDocumentError::InvalidPreferences);
+            return Err(SettingsDocumentError::InvalidPreferences);
         }
     }
     Ok(())
@@ -126,10 +140,10 @@ pub(crate) struct ColorSchemeDocument {
     pub(crate) schemes: Vec<CustomScheme>,
 }
 
-pub(crate) fn parse_settings(bytes: &[u8]) -> Result<AppearanceDocument, AppearanceDocumentError> {
-    preflight(bytes).map_err(AppearanceDocumentError::from_preflight)?;
-    let mut document: AppearanceDocument =
-        serde_json::from_slice(bytes).map_err(|_| AppearanceDocumentError::InvalidJson)?;
+pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
+    preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
+    let mut document: SettingsDocument =
+        serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
     replace_retired_builtin_ids(&mut document.preferences);
     document.validate()?;
     Ok(document)
@@ -239,15 +253,15 @@ fn replace_retired_builtin_ids(preferences: &mut AppearancePreferences) {
 }
 
 pub(crate) fn export_settings(
-    document: &AppearanceDocument,
-) -> Result<String, AppearanceDocumentError> {
+    document: &SettingsDocument,
+) -> Result<String, SettingsDocumentError> {
     document.validate()?;
     serde_json::to_string_pretty(document)
         .map(|mut output| {
             output.push('\n');
             output
         })
-        .map_err(|_| AppearanceDocumentError::Serialization)
+        .map_err(|_| SettingsDocumentError::Serialization)
 }
 
 pub(crate) fn parse_color_document(bytes: &[u8]) -> Result<ColorSchemeDocument, ImportError> {
@@ -819,25 +833,25 @@ impl<'de> Visitor<'de> for DepthVisitor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum AppearanceDocumentError {
-    #[error("appearance document is too large")]
+pub(crate) enum SettingsDocumentError {
+    #[error("settings document is too large")]
     TooLarge,
-    #[error("appearance document is invalid JSON")]
+    #[error("settings document is invalid JSON")]
     InvalidJson,
-    #[error("appearance document contains a duplicate key")]
+    #[error("settings document contains a duplicate key")]
     DuplicateKey,
-    #[error("appearance document nesting is too deep")]
+    #[error("settings document nesting is too deep")]
     TooDeep,
-    #[error("appearance document version is unsupported")]
+    #[error("settings document version is unsupported")]
     UnsupportedVersion,
     #[error("appearance preferences are invalid")]
     InvalidPreferences,
     #[error("appearance catalog is invalid")]
     InvalidCatalog,
-    #[error("appearance document cannot be serialized")]
+    #[error("settings document cannot be serialized")]
     Serialization,
 }
-impl AppearanceDocumentError {
+impl SettingsDocumentError {
     fn from_preflight(error: PreflightError) -> Self {
         match error {
             PreflightError::TooLarge => Self::TooLarge,

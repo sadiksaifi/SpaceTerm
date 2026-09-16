@@ -107,7 +107,7 @@ fn retired_override_collisions_merge_by_field_with_current_ids_winning() {
         super::scheme::TerminalPaletteOverrides::sparse(colors).unwrap()
     };
 
-    let mut document = AppearanceDocument::default();
+    let mut document = SettingsDocument::default();
     let retired_chrome = SchemeId::builtin("builtin.vague-pro.chrome.dark");
     let current_chrome = super::builtin::dark_chrome_id();
     document.preferences.chrome.overrides.insert(
