@@ -6,7 +6,7 @@ use super::app_paths::{
 };
 use super::askpass::{
     AskPassHelperConnector, AskPassLocalAccept, AskPassLocalIpc, AskPassLocalListener,
-    AskPassUnavailable, BoundAskPassEndpoint,
+    AskPassUnavailable, BROKER_CANCELLATION_POLL_INTERVAL, BoundAskPassEndpoint,
     GpuiAskPassBrokerFactory as PortableAskPassBrokerFactory,
     dispatch_helper_from_environment as dispatch_portable_helper,
 };
@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const BROKER_PID_HEX_BYTES: usize = 8;
 const AUTHENTICATED_ENDPOINT_PREFIX_BYTES: usize = BROKER_PID_HEX_BYTES + 1;
 
@@ -99,8 +99,8 @@ fn validate_same_user_peer(stream: &UnixStream) -> Result<(), AskPassUnavailable
 fn configure_broker_connection(stream: &UnixStream) -> Result<(), AskPassUnavailable> {
     stream
         .set_nonblocking(false)
-        .and_then(|()| stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT)))
-        .and_then(|()| stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT)))
+        .and_then(|()| stream.set_read_timeout(Some(BROKER_CANCELLATION_POLL_INTERVAL)))
+        .and_then(|()| stream.set_write_timeout(Some(CONNECTION_WRITE_TIMEOUT)))
         .map_err(|_| AskPassUnavailable)
 }
 
@@ -123,7 +123,7 @@ impl AskPassHelperConnector for MacosHelperConnector {
         validate_broker_process(&stream, expected_broker)?;
         // The reply waits for a human prompt; its lifetime is governed by broker cancellation.
         stream
-            .set_write_timeout(Some(CONNECTION_IO_TIMEOUT))
+            .set_write_timeout(Some(CONNECTION_WRITE_TIMEOUT))
             .map_err(|_| AskPassUnavailable)?;
         Ok(stream)
     }
@@ -373,10 +373,19 @@ mod tests {
         configure_broker_connection(&broker).unwrap();
 
         assert_eq!(helper.read_timeout().unwrap(), None);
-        assert_eq!(helper.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
+        assert_eq!(
+            helper.write_timeout().unwrap(),
+            Some(CONNECTION_WRITE_TIMEOUT)
+        );
         assert!(!is_nonblocking(&broker));
-        assert_eq!(broker.read_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
-        assert_eq!(broker.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
+        assert_eq!(
+            broker.read_timeout().unwrap(),
+            Some(BROKER_CANCELLATION_POLL_INTERVAL)
+        );
+        assert_eq!(
+            broker.write_timeout().unwrap(),
+            Some(CONNECTION_WRITE_TIMEOUT)
+        );
     }
 
     #[test]
