@@ -3922,6 +3922,107 @@ fn windowed_double_escape_still_reaches_the_session(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn fullscreen_double_escape_exits_and_reaches_the_session(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let key_count_before = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+    cx.update(|window, _| window.toggle_fullscreen());
+
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    let key_count_after = records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .count();
+    assert!(!cx.update(|window, _| window.is_fullscreen()));
+    assert_eq!(key_count_after, key_count_before + 2);
+}
+
+#[gpui::test]
+fn terminal_shortcut_between_escapes_should_keep_fullscreen(cx: &mut TestAppContext) {
+    let (_pane, cx, _records) = connected_terminal_pane(cx);
+    cx.update(|window, _| window.toggle_fullscreen());
+    assert!(cx.update(|window, _| window.is_fullscreen()));
+
+    cx.simulate_keystrokes("escape cmd-c escape");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| window.is_fullscreen()));
+}
+
+#[gpui::test]
+fn find_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    cx.update(|window, _| window.toggle_fullscreen());
+    cx.simulate_keystrokes("escape");
+    cx.dispatch_action(OpenTerminalFind);
+
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
+    assert!(cx.update(|window, _| window.is_fullscreen()));
+}
+
+#[gpui::test]
+fn paste_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(10),
+        byte_len: 12,
+        line_count: 2,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (_pane, cx, records) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Cancelled),
+    );
+    cx.update(|window, _| window.toggle_fullscreen());
+    cx.simulate_keystrokes("escape");
+    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| window.is_fullscreen()));
+    assert!(records.commands().iter().any(|call| {
+        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+    }));
+}
+
+#[gpui::test]
+fn ime_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    cx.update(|window, _| window.toggle_fullscreen());
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| {
+            pane.replace_and_mark_text_in_range(None, "に", Some(1..1), window, pane_cx);
+        });
+    });
+
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| pane.unmark_text(window, pane_cx));
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| window.is_fullscreen()));
+}
+
+#[gpui::test]
 fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
     cx.update(|_, cx| {

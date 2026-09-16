@@ -686,6 +686,14 @@ impl TerminalPane {
             cx.notify();
         })
         .detach();
+        // GPUI resolves bound actions before raw key listeners, so those keystrokes must also
+        // interrupt a pending bare-Escape pair.
+        cx.observe_keystrokes(|pane, event, _, _| {
+            if event.action.is_some() {
+                pane.fullscreen_escape.reset();
+            }
+        })
+        .detach();
 
         Self {
             terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
@@ -2115,16 +2123,16 @@ impl TerminalPane {
         // A bare Escape pair leaves macOS fullscreen without stealing terminal input: each press
         // still reaches the session below. Presses an overlay owns (find, paste confirmation) or
         // an IME composition owns never count, and any other key breaks the pair.
-        if event.keystroke.key == "escape"
+        let bare_escape = event.keystroke.key == "escape"
             && !event.is_held
-            && !event.keystroke.modifiers.modified()
-        {
-            if self.find_input.is_none()
-                && self.pending_paste.is_none()
-                && self.ime.marked_text().is_none()
-                && window.is_fullscreen()
-                && self.fullscreen_escape.escape_pressed(Instant::now())
-            {
+            && !event.keystroke.modifiers.modified();
+        let eligible_escape = bare_escape
+            && self.find_input.is_none()
+            && self.pending_paste.is_none()
+            && self.ime.marked_text().is_none()
+            && window.is_fullscreen();
+        if eligible_escape {
+            if self.fullscreen_escape.escape_pressed(Instant::now()) {
                 window.toggle_fullscreen();
             }
         } else {
