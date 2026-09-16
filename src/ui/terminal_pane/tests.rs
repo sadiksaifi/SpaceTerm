@@ -3870,9 +3870,10 @@ fn escape_pair_within_window_requests_fullscreen_exit() {
     let mut sequence = FullscreenEscapeSequence::default();
 
     assert!(!sequence.escape_pressed(start));
-    assert!(sequence.escape_pressed(
-        start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW - Duration::from_millis(100)
-    ));
+    assert!(
+        sequence
+            .escape_pressed(start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW - Duration::from_millis(100))
+    );
 }
 
 #[test]
@@ -3881,9 +3882,10 @@ fn slow_escape_pair_does_not_request_fullscreen_exit() {
     let mut sequence = FullscreenEscapeSequence::default();
 
     assert!(!sequence.escape_pressed(start));
-    assert!(!sequence.escape_pressed(
-        start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW + Duration::from_millis(1)
-    ));
+    assert!(
+        !sequence
+            .escape_pressed(start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW + Duration::from_millis(1))
+    );
 }
 
 #[test]

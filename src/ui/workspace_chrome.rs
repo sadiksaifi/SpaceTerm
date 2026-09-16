@@ -29,8 +29,6 @@ pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels) -> Pixels
         px(TRAFFIC_LIGHT_CLEARANCE)
     }
 }
-const EXPANDED_MINIMUM_ACTION_GAP: f32 = 4.0;
-const COLLAPSED_ACTION_GAP: f32 = 0.0;
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_SIZE: f32 = 12.0;
@@ -88,7 +86,7 @@ impl WorkspaceChromeLayout {
             + identity_width;
         let edge_reserve = trailing_reserve(appearance, cx);
         (leading_clearance(window.is_fullscreen(), edge_reserve)
-            + appearance.spacing(COLLAPSED_ACTION_GAP)
+            + edge_reserve
             + edge_reserve
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
@@ -126,11 +124,9 @@ impl WorkspaceChromeLayout {
             .right(edge_reserve)
             .flex()
             .items_center()
-            .gap(appearance.spacing(if self.sidebar_visible {
-                EXPANDED_MINIMUM_ACTION_GAP
-            } else {
-                COLLAPSED_ACTION_GAP
-            }))
+            // The toggle keeps the frame's edge air on its right as well, in every mode, so it
+            // never hugs the switcher beside it.
+            .gap(edge_reserve)
             .child(toggle)
             .child(
                 div()
