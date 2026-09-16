@@ -1,5 +1,7 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
-use super::terminal_status::{StatusColors, StatusGlyph, TerminalProgress, reported_title};
+use super::terminal_status::{
+    StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
+};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
@@ -349,9 +351,9 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance = super::appearance::chrome(cx);
+        let appearance = super::appearance::chrome(cx).clone();
         let radius =
-            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).pane_radius();
+            super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
         let minimum_pane_size = match PaneSize::new(
             MINIMUM_PANE_WIDTH,
             f32::from(appearance.caption_height() + radius) + 4.0,
@@ -376,7 +378,8 @@ impl PaneHost {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
-        let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
+        let initial_caption =
+            PaneCaptionText::from_terminal(initial_terminal.read(cx), window, &appearance);
 
         Self {
             terminal_tab,
@@ -422,7 +425,11 @@ impl PaneHost {
                     cx.notify();
                 }
                 TerminalPaneEvent::CaptionChanged => {
-                    let caption = PaneCaptionText::from_terminal(terminal.read(cx));
+                    let caption = PaneCaptionText::from_terminal(
+                        terminal.read(cx),
+                        window,
+                        super::appearance::chrome(cx),
+                    );
                     if host.pane_captions.get(&pane_id) != Some(&caption) {
                         host.pane_captions.insert(pane_id, caption);
                         if pane_id == host.terminal_tab.root_pane_id()
@@ -1057,8 +1064,14 @@ impl PaneHost {
                 self.advance_native_service_hierarchy_generation(cx);
                 if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
-                    self.pane_captions
-                        .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
+                    self.pane_captions.insert(
+                        pane_id,
+                        PaneCaptionText::from_terminal(
+                            terminal.read(cx),
+                            window,
+                            super::appearance::chrome(cx),
+                        ),
+                    );
                 }
                 self.pane_attention.insert(pane_id, 0);
                 self.split_bounds.clear();
@@ -1794,8 +1807,20 @@ struct PaneCaptionText {
 }
 
 impl PaneCaptionText {
-    fn from_terminal(terminal: &TerminalPane) -> Self {
-        Self::from_facts(terminal.caption())
+    fn from_terminal(
+        terminal: &TerminalPane,
+        window: &Window,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> Self {
+        let mut facts = terminal.caption();
+        if facts.glyph.as_ref().is_some_and(|glyph| {
+            let size = appearance.text_size(PANE_CAPTION_TEXT_SIZE);
+            !reported_glyph_is_drawable(glyph, &appearance.caption, size, window)
+                || !reported_glyph_is_drawable(glyph, &appearance.regular, size, window)
+        }) {
+            facts.glyph = None;
+        }
+        Self::from_facts(facts)
     }
 
     fn from_facts(facts: super::terminal_pane::PaneCaptionFacts) -> Self {

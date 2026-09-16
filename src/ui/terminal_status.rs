@@ -80,7 +80,7 @@ pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
         return plain;
     }
     ReportedTitle {
-        glyph: is_drawable_glyph(first).then_some(first),
+        glyph: is_glyph_candidate(first).then_some(first),
         words,
     }
 }
@@ -130,12 +130,12 @@ fn is_glyph_mark(character: char) -> bool {
     )
 }
 
-/// Whether host chrome can draw a reported glyph at the size a Session's own glyph takes.
+/// Whether a title prefix has the structural shape of a reported glyph candidate.
 ///
 /// A Private-Use character is drawn by the font a program expects rather than by the font the host
 /// paints its chrome in, so it would paint as a missing-glyph box. An ASCII one says less than the
-/// Session's own glyph does. Either way the Session keeps its own.
-fn is_drawable_glyph(glyph: &str) -> bool {
+/// Session's own glyph does. Actual Chrome-font support is checked after shaping.
+fn is_glyph_candidate(glyph: &str) -> bool {
     // Two glyphs would crowd the one square a Session's glyph gets, unless they are joined into one.
     let joined = glyph.contains('\u{200D}');
     let bases = glyph
@@ -150,6 +150,55 @@ fn is_drawable_glyph(glyph: &str) -> bool {
                     0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
                 )
         })
+}
+
+/// Whether the active Chrome typography and its selected fallbacks can draw every base in a
+/// reported glyph.
+///
+/// Shape first so the text system chooses the same fallback run painting will use. Then ask the
+/// selected fonts for each base character; an unassigned or unsupported scalar has no glyph and
+/// leaves the Session's own icon in the slot.
+pub(crate) fn reported_glyph_is_drawable(
+    glyph: &str,
+    font: &gpui::Font,
+    font_size: Pixels,
+    window: &Window,
+) -> bool {
+    let text = gpui::SharedString::from(glyph.to_owned());
+    let shaped = window.text_system().shape_line(
+        text,
+        font_size,
+        &[gpui::TextRun {
+            len: glyph.len(),
+            font: font.clone(),
+            color: gpui::rgba(0).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let fonts = shaped
+        .runs
+        .iter()
+        .map(|run| run.font_id)
+        .collect::<Vec<_>>();
+    !fonts.is_empty()
+        && glyph_bases_are_drawable(glyph, |character| {
+            fonts.iter().any(|font| {
+                window
+                    .text_system()
+                    .typographic_bounds(*font, font_size, character)
+                    .is_ok()
+            })
+        })
+}
+
+fn glyph_bases_are_drawable(glyph: &str, mut supports: impl FnMut(char) -> bool) -> bool {
+    glyph
+        .chars()
+        .filter(|character| !is_glyph_mark(*character))
+        .all(&mut supports)
 }
 
 /// Draws a glyph a program reported, in a square of `size`.
@@ -623,6 +672,16 @@ mod tests {
                 "{reported:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_reported_glyph_requires_font_support_for_every_base() {
+        assert!(glyph_bases_are_drawable("\u{3c0}", |character| character == '\u{3c0}'));
+        assert!(!glyph_bases_are_drawable("\u{0378}", |_| false));
+        assert!(!glyph_bases_are_drawable(
+            "\u{1f469}\u{200d}\u{1f4bb}",
+            |character| character == '\u{1f469}'
+        ));
     }
 
     /// Each status recolors the glyph, a paused one dims it, and a blink shows attention over all.
