@@ -61,9 +61,9 @@ pub(crate) struct ReportedTitle<'a> {
 /// Programs often open the title they report with their own icon or a spinner frame. One Session
 /// gets one glyph, so the program's takes the place of the glyph host chrome would draw rather than
 /// sitting beside it, and never appears twice. Only a first word that names nothing on its own is
-/// taken: one character that is not a letter or digit a Session could be named after, with the
-/// marks that belong to it. No glyph is recognised by name, so this stays the same for every
-/// program.
+/// taken: a short decorative sequence that is not a word a Session could be named after. No glyph
+/// is recognised by name, so this stays the same for every program. The active chrome font's
+/// shaper decides whether the candidate occupies the Session's one glyph slot.
 pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
     let title = title.trim();
     let plain = ReportedTitle {
@@ -138,20 +138,13 @@ fn is_glyph_mark(character: char) -> bool {
 /// paints its chrome in, so it would paint as a missing-glyph box. An ASCII one says less than the
 /// Session's own glyph does. Actual Chrome-font support is checked after shaping.
 fn is_glyph_candidate(glyph: &str) -> bool {
-    // Two glyphs would crowd the one square a Session's glyph gets, unless they are joined into one.
-    let joined = glyph.contains('\u{200D}');
-    let bases = glyph
-        .chars()
-        .filter(|character| !is_glyph_mark(*character))
-        .count();
-    (joined || bases == 1)
-        && glyph.chars().all(|character| {
-            !character.is_ascii()
-                && !matches!(
-                    u32::from(character),
-                    0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
-                )
-        })
+    glyph.chars().all(|character| {
+        !character.is_ascii()
+            && !matches!(
+                u32::from(character),
+                0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+            )
+    })
 }
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
@@ -682,10 +675,16 @@ mod tests {
                 Some("\u{2733}\u{fe0f}"),
                 "Claude Code",
             ),
+            ("🇺🇸 build", Some("🇺🇸"), "build"),
             // A Private-Use glyph would paint as a box, so the Session keeps its own.
             ("\u{f0316} nvim", None, "nvim"),
-            // Two glyphs cannot share one slot, so both go and the Session keeps its own.
-            ("\u{2726}\u{2726} two frames", None, "two frames"),
+            // Structural candidates are retained until the active font's shaper decides whether
+            // they occupy one glyph slot.
+            (
+                "\u{2726}\u{2726} two frames",
+                Some("\u{2726}\u{2726}"),
+                "two frames",
+            ),
             // Nothing a Session would be named after is a glyph.
             ("zsh", None, "zsh"),
             ("~ zsh", None, "~ zsh"),
