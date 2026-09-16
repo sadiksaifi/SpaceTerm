@@ -557,6 +557,13 @@ impl PaneHost {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn cached_focused_progress(&self) -> TerminalProgress {
+        self.pane_captions
+            .get(&self.terminal_tab.focused_pane_id())
+            .map_or(TerminalProgress::None, |caption| caption.progress)
+    }
+
     /// Records unread attention for one Pane as its Terminal would report it.
     #[cfg(test)]
     pub(crate) fn set_test_attention(

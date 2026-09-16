@@ -1379,6 +1379,7 @@ impl TerminalPane {
     }
 
     fn suspend_remote_session(&mut self, cx: &mut Context<Self>) {
+        let was_available = self.terminal_session_available();
         self.sync_metadata(self.terminal_session.session_epoch);
         self.terminal_session.suspend();
         self.reset_hidden_input();
@@ -1387,6 +1388,9 @@ impl TerminalPane {
         self.pressed_button = None;
         self.selection_copy_pending = false;
         self.pressed_link = None;
+        if was_available != self.terminal_session_available() {
+            cx.emit(TerminalPaneEvent::CaptionChanged);
+        }
         cx.notify();
     }
 
@@ -2052,12 +2056,17 @@ impl TerminalPane {
                 if self.suspend_if_remote_channel_unavailable(cx) {
                     return false;
                 }
+                let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
-                self.present_failure(failure, true, None);
+                if self.present_failure(failure, true, None)
+                    && was_available != self.terminal_session_available()
+                {
+                    cx.emit(TerminalPaneEvent::CaptionChanged);
+                }
             }
         }
         true

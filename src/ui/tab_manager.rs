@@ -2368,7 +2368,7 @@ mod tests {
     };
     use crate::terminal::{
         RemoteChannelUnavailable, RemoteTerminalChannelProvider, SessionEvent, SessionExit,
-        TerminalSessionFactory,
+        SessionFailure, TerminalSessionFactory,
     };
     use crate::ui::TogglePaneZoom;
 
@@ -3547,6 +3547,59 @@ mod tests {
     fn remote_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
         assert_reported_glyph(&manager, &records, true, cx);
+    }
+
+    #[gpui::test]
+    fn remote_disconnect_should_clear_cached_pane_and_tab_progress(cx: &mut TestAppContext) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::ProgressMetadata;
+
+        let (manager, records, cx) = remote_tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.progress = ProgressMetadata::Indeterminate;
+        });
+        cx.run_until_parked();
+
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| {
+                let host = manager.tabs.active_tab().read(cx);
+                (host.cached_focused_progress(), host.tab_identity().progress)
+            }),
+            (TerminalProgress::None, TerminalProgress::None)
+        );
+    }
+
+    #[gpui::test]
+    fn fatal_failure_should_clear_cached_pane_and_tab_progress(cx: &mut TestAppContext) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::ProgressMetadata;
+
+        let (manager, records, cx) = tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.progress = ProgressMetadata::Normal(45);
+        });
+        cx.run_until_parked();
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(SessionEvent::Failed(SessionFailure::Runtime(
+                "worker stopped".to_owned(),
+            )))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| {
+                let host = manager.tabs.active_tab().read(cx);
+                (host.cached_focused_progress(), host.tab_identity().progress)
+            }),
+            (TerminalProgress::None, TerminalProgress::None)
+        );
     }
 
     fn assert_reported_glyph(
