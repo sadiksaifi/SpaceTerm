@@ -57,6 +57,7 @@ pub(super) struct WorkerSchedules {
     paste_confirmations: PasteConfirmationSchedule,
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
+    metadata_presentation_pending: bool,
     graphics_animation: Option<Instant>,
 }
 
@@ -144,6 +145,18 @@ impl WorkerSchedules {
         self.presentation.request();
     }
 
+    pub(super) fn note_metadata_changed(&mut self) {
+        self.metadata_presentation_pending = true;
+    }
+
+    pub(super) fn take_metadata_presentation(&mut self) -> bool {
+        std::mem::take(&mut self.metadata_presentation_pending)
+    }
+
+    pub(super) fn metadata_presented(&mut self) {
+        self.metadata_presentation_pending = false;
+    }
+
     pub(super) fn is_presentable(&self) -> bool {
         self.presentation.presentable
     }
@@ -219,6 +232,7 @@ impl WorkerSchedules {
             paste_confirmations: PasteConfirmationSchedule::default(),
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
+            metadata_presentation_pending: false,
             graphics_animation: None,
         }
     }

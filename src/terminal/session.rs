@@ -1249,7 +1249,9 @@ impl TerminalWorker {
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
                 self.schedules.set_presentable(presentable, now);
-                if self.schedules.presentation_due(now) {
+                if !presentable && !self.publish_metadata_changed() {
+                    false
+                } else if self.schedules.presentation_due(now) {
                     self.publish_screen()
                 } else {
                     true
@@ -1516,6 +1518,7 @@ impl TerminalWorker {
             let metadata_changed = metadata.presentation_differs(&previous_metadata);
             if metadata_changed {
                 self.metadata_state.publish(metadata);
+                self.schedules.note_metadata_changed();
             }
             if !self.flush_ordered_terminal_replies(&mut focus_reports)
                 || !self.hidden_input_transition()
@@ -1527,7 +1530,7 @@ impl TerminalWorker {
             // older queue entry. Hidden Sessions receive no Screens, so they still need the wakeup.
             if metadata_changed
                 && !self.schedules.is_presentable()
-                && !self.send_terminal_event(SessionEvent::MetadataChanged)
+                && !self.publish_metadata_changed()
             {
                 return false;
             }
@@ -1688,6 +1691,7 @@ impl TerminalWorker {
                     .is_ok();
                 if result {
                     let now = Instant::now();
+                    self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
                     self.schedules.update_accessibility(false);
                     if !self.accessibility.is_closed() {
@@ -1710,6 +1714,11 @@ impl TerminalWorker {
 
     fn request_presentation(&mut self) -> bool {
         self.request_presentation_at(Instant::now())
+    }
+
+    fn publish_metadata_changed(&mut self) -> bool {
+        !self.schedules.take_metadata_presentation()
+            || self.send_terminal_event(SessionEvent::MetadataChanged)
     }
 
     fn request_presentation_at(&mut self, now: Instant) -> bool {
