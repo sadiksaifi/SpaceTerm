@@ -3104,7 +3104,7 @@ mod tests {
         metadata.title.provenance = TitleProvenance::Fallback;
         metadata.directory.path = Arc::from("/srv/new-place");
         metadata.command = Some(CommandMetadata {
-            line: Arc::from("cargo build --release"),
+            line: Arc::from("π build"),
             state: CommandState::Running,
         });
         records
@@ -3119,15 +3119,12 @@ mod tests {
                 caption.directory.clone(),
                 caption.name.clone(),
                 caption.label.clone(),
+                caption.glyph.clone(),
             )
         });
         assert_eq!(
             caption,
-            (
-                "/srv/".into(),
-                "new-place".into(),
-                "cargo build --release".into()
-            )
+            ("/srv/".into(), "new-place".into(), "π build".into(), None,)
         );
         let snapshot = Arc::make_mut(&mut screen);
         snapshot.generation = crate::terminal::PresentationGeneration::test(2);
@@ -3148,9 +3145,13 @@ mod tests {
                 caption.directory.clone(),
                 caption.name.clone(),
                 caption.label.clone(),
+                caption.glyph.clone(),
             )
         });
-        assert_eq!(caption, ("/srv/".into(), "new-place".into(), "zsh".into()));
+        assert_eq!(
+            caption,
+            ("/srv/".into(), "new-place".into(), "zsh".into(), None)
+        );
     }
 
     #[gpui::test]

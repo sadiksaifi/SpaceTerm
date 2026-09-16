@@ -1239,20 +1239,22 @@ impl TerminalPane {
         let command = running
             .map(|command| sanitize_title(&command.line))
             .filter(|line| !line.is_empty());
-        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
-            sanitize_title(&metadata.title.value)
+        let (label, glyph) = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            let label = sanitize_title(&metadata.title.value);
+            // Only explicit Terminal-controlled titles may donate their leading glyph. Commands
+            // and fallbacks are opaque activity labels, even when their first word is symbolic.
+            let reported = super::terminal_status::reported_title(&label);
+            (
+                reported.words.to_owned(),
+                reported
+                    .glyph
+                    .map(|glyph| SharedString::from(glyph.to_owned())),
+            )
         } else if let Some(command) = command {
-            command
+            (command, None)
         } else {
-            normalized_pane_title("", &self.fallback_title)
+            (normalized_pane_title("", &self.fallback_title), None)
         };
-        // One Session gets one glyph, so a glyph the program draws at the front of its own title
-        // takes the place of the Session's rather than sitting beside it.
-        let reported = super::terminal_status::reported_title(&label);
-        let glyph = reported
-            .glyph
-            .map(|glyph| SharedString::from(glyph.to_owned()));
-        let label = reported.words.to_owned();
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
             directory: compact_home_directory(&directory, metadata.context.home()).into(),
