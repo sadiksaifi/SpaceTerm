@@ -105,7 +105,7 @@ const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
 const TAB_ORIGIN_GAP: f32 = 6.0;
 /// The air after the status glyph, and before the close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
-/// How much of a Tab's identity the activity may claim before the place beside it gets a share.
+/// How much of a Tab's identity the activity may claim when a place beside it needs a share.
 ///
 /// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
 /// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
@@ -1658,6 +1658,7 @@ fn render_tab_identity(
 ) -> AnyElement {
     let origin_location = if identity.remote { "remote" } else { "local" };
     let icon_size = appearance.spacing(TAB_ORIGIN_ICON_SIZE);
+    let has_place = !identity.place.is_empty();
     let mut words = div()
         .id(("tab-identity", tab_id.get()))
         .debug_selector(move || format!("tab-identity-{}", tab_id.get()))
@@ -1672,7 +1673,9 @@ fn render_tab_identity(
                 .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
                 .flex_shrink_0()
                 .min_w_0()
-                .max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
+                .when(has_place, |activity| {
+                    activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
+                })
                 .truncate()
                 .child(if identity.activity.is_empty() {
                     gpui::SharedString::from("Terminal")
@@ -1680,7 +1683,7 @@ fn render_tab_identity(
                     identity.activity.clone()
                 }),
         );
-    if !identity.place.is_empty() {
+    if has_place {
         words = words
             .child(
                 div()
@@ -3480,6 +3483,36 @@ mod tests {
             focused_first.size.width > focused_second.size.width,
             "the rendered Tab should replace the second Pane's short place after focus changes: \
              {focused_second:?} {focused_first:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_activity_without_a_place_should_use_the_full_identity_width(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, records, cx) = tab_manager(cx);
+        let activity = "long-activity-name-that-needs-the-full-tab-identity-width";
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from(format!("/tmp/{activity}"));
+            metadata.title.value = Arc::from(activity);
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+
+        let place = manager.read_with(cx, |manager, cx| {
+            manager
+                .tabs
+                .active_tab()
+                .read(cx)
+                .tab_identity()
+                .place
+                .clone()
+        });
+        let identity = cx.debug_bounds("tab-identity-1").unwrap();
+        let activity = cx.debug_bounds("tab-activity-1").unwrap();
+        assert!(place.is_empty(), "expected no place, got {place:?}");
+        assert!(
+            activity.size.width > identity.size.width * 0.9,
+            "place-less activity should fill its identity: {activity:?} {identity:?}"
         );
     }
 
