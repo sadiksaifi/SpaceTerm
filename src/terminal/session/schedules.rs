@@ -144,6 +144,10 @@ impl WorkerSchedules {
         self.presentation.request();
     }
 
+    pub(super) fn is_presentable(&self) -> bool {
+        self.presentation.presentable
+    }
+
     pub(super) fn presentation_due(&mut self, now: Instant) -> bool {
         self.presentation.take_due(now)
     }

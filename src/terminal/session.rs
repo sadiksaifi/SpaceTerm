@@ -1513,14 +1513,21 @@ impl TerminalWorker {
 
         if received_output {
             let metadata = self.emulator.metadata();
-            if metadata.presentation_differs(&previous_metadata) {
+            let metadata_changed = metadata.presentation_differs(&previous_metadata);
+            if metadata_changed {
                 self.metadata_state.publish(metadata);
-                if !self.send_terminal_event(SessionEvent::MetadataChanged) {
-                    return false;
-                }
             }
             if !self.flush_ordered_terminal_replies(&mut focus_reports)
                 || !self.hidden_input_transition()
+            {
+                return false;
+            }
+            // A presentable Session's next Screen carries the retained metadata wakeup. Publishing
+            // a separate event first can evict lossless attention when that Screen replaces an
+            // older queue entry. Hidden Sessions receive no Screens, so they still need the wakeup.
+            if metadata_changed
+                && !self.schedules.is_presentable()
+                && !self.send_terminal_event(SessionEvent::MetadataChanged)
             {
                 return false;
             }

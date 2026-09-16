@@ -2171,6 +2171,41 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
 }
 
 #[test]
+fn visible_metadata_screen_does_not_evict_bell_attention() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(2);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.process_output_chunks(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::Attention(_)
+    ));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::Screen(_)
+    ));
+    assert!(receiver.try_recv().is_err());
+    worker.finish();
+}
+
+#[test]
 fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
