@@ -31,6 +31,7 @@ mod terminal_focus;
 mod terminal_graphics;
 mod terminal_ime;
 mod terminal_pane;
+mod terminal_status;
 mod terminal_symbols;
 mod text_input_theme;
 mod toggle_theme;

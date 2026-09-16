@@ -14,6 +14,7 @@ use std::mem;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -45,7 +46,7 @@ use crate::terminal::key::InputModifiers;
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{KeyInput, PhysicalKey};
 use crate::terminal::metadata::{
-    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext,
+    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
 use crate::terminal::paste::{
@@ -74,14 +75,40 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 
 // Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
-    CurrentDirectoryChanged,
+    /// Retained Terminal Metadata changed; read it from the retained snapshot.
+    MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Exited(SessionExit),
     Failed(SessionFailure),
+}
+
+#[derive(Debug)]
+pub(crate) struct MetadataWakeup {
+    queued: Arc<AtomicBool>,
+}
+
+impl MetadataWakeup {
+    fn new(queued: Arc<AtomicBool>) -> Self {
+        Self { queued }
+    }
+}
+
+impl Drop for MetadataWakeup {
+    fn drop(&mut self) {
+        self.queued.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl SessionEvent {
+    pub(crate) fn metadata_changed_for_test() -> Self {
+        let queued = Arc::new(AtomicBool::new(true));
+        Self::MetadataChanged(MetadataWakeup::new(queued))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -311,38 +338,29 @@ impl RecordingAccessibilitySelectionReceiver {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SessionDirectorySnapshot {
-    pub(crate) revision: u64,
-    pub(crate) current: Option<crate::domain::CurrentDirectory>,
-}
-
-// Retained separately because presentation events may evict any earlier queue entry.
+/// The newest Terminal Metadata, retained apart from Screen presentation.
+///
+/// Presentation events may evict any earlier queue entry, and a hidden Pane receives no Screens at
+/// all, yet its Pane and Workspace still need current presentation and close-confirmation facts.
 #[derive(Clone, Default)]
-struct SessionDirectoryState(Arc<Mutex<Option<SessionDirectorySnapshot>>>);
+struct SessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
 
-impl SessionDirectoryState {
-    fn snapshot(&self) -> Option<SessionDirectorySnapshot> {
+impl SessionMetadataState {
+    fn snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
-    fn publish(&self, metadata: &crate::terminal::metadata::TerminalMetadataSnapshot) {
-        let current = (metadata.freshness == crate::terminal::metadata::MetadataFreshness::Live)
-            .then(|| metadata.context.current_directory(&metadata.directory.path))
-            .flatten();
-        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        *state = Some(SessionDirectorySnapshot {
-            revision: metadata.revision,
-            current,
-        });
+    fn publish(&self, metadata: Arc<TerminalMetadataSnapshot>) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(metadata);
     }
 }
 
 pub(crate) trait TerminalSessionHandle {
-    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
+    /// The newest Terminal Metadata the Session has retained, whether or not it is presentable.
+    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
     }
 
@@ -402,7 +420,7 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 pub(crate) struct TerminalSession {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -475,8 +493,8 @@ impl TerminalSession {
 }
 
 impl TerminalSessionHandle for TerminalSession {
-    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
-        self.directory_state.snapshot()
+    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+        self.metadata_state.snapshot()
     }
 
     fn key(&self, input: KeyInput) {
@@ -798,7 +816,7 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     native_pty: NativePtyOwner,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
@@ -823,7 +841,7 @@ struct TerminalWorkerContext {
 }
 
 struct TerminalWorkerPublishers {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -956,7 +974,7 @@ impl TerminalWorker {
             initial_appearance,
         } = context;
         let TerminalWorkerPublishers {
-            directory_state,
+            metadata_state,
             events,
             accessibility,
         } = publishers;
@@ -989,7 +1007,7 @@ impl TerminalWorker {
         });
 
         let mut worker = Self {
-            directory_state,
+            metadata_state,
             native_pty,
             emulator,
             commands,
@@ -1256,7 +1274,9 @@ impl TerminalWorker {
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
                 self.schedules.set_presentable(presentable, now);
-                if self.schedules.presentation_due(now) {
+                if !presentable && !self.publish_metadata_changed() {
+                    false
+                } else if self.schedules.presentation_due(now) {
                     self.publish_screen()
                 } else {
                     true
@@ -1520,14 +1540,22 @@ impl TerminalWorker {
 
         if received_output {
             let metadata = self.emulator.metadata();
-            if metadata.directory != previous_metadata.directory {
-                self.directory_state.publish(&metadata);
-                if !self.send_terminal_event(SessionEvent::CurrentDirectoryChanged) {
-                    return false;
-                }
+            let metadata_revised = metadata.revision != previous_metadata.revision;
+            if metadata_revised {
+                self.metadata_state.publish(metadata);
+                self.schedules.note_metadata_changed();
             }
             if !self.flush_ordered_terminal_replies(&mut focus_reports)
                 || !self.hidden_input_transition()
+            {
+                return false;
+            }
+            // A presentable Session's next Screen carries the retained metadata wakeup. Publishing
+            // a separate event first can evict lossless attention when that Screen replaces an
+            // older queue entry. Hidden Sessions receive no Screens, so they still need the wakeup.
+            if metadata_revised
+                && !self.schedules.is_presentable()
+                && !self.publish_metadata_changed()
             {
                 return false;
             }
@@ -1672,7 +1700,7 @@ impl TerminalWorker {
     }
 
     fn publish_screen(&mut self) -> bool {
-        self.directory_state.publish(&self.emulator.metadata());
+        self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
             return false;
         }
@@ -1688,6 +1716,7 @@ impl TerminalWorker {
                     .is_ok();
                 if result {
                     let now = Instant::now();
+                    self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
                     self.schedules.update_accessibility(false);
                     if !self.accessibility.is_closed() {
@@ -1710,6 +1739,16 @@ impl TerminalWorker {
 
     fn request_presentation(&mut self) -> bool {
         self.request_presentation_at(Instant::now())
+    }
+
+    fn publish_metadata_changed(&mut self) -> bool {
+        let Some(wakeup) = self.schedules.take_metadata_presentation() else {
+            return true;
+        };
+        match self.events.try_send(SessionEvent::MetadataChanged(wakeup)) {
+            Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
+            Err(async_channel::TrySendError::Closed(_)) => false,
+        }
     }
 
     fn request_presentation_at(&mut self, now: Instant) -> bool {

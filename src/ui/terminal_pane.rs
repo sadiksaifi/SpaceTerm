@@ -251,7 +251,8 @@ struct PaneSessionLifecycle {
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
-    accepted_directory_revision: Option<u64>,
+    /// The newest Terminal Metadata accepted from Screens or the Session's retained snapshot.
+    metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
     remote_restart_start_pending: bool,
@@ -276,7 +277,7 @@ impl PaneSessionLifecycle {
             session_start_attempted: false,
             session_epoch: 0,
             accepted_screen_generation: None,
-            accepted_directory_revision: None,
+            metadata: None,
             remote_connection_generation: None,
             remote_input_blocked: false,
             remote_restart_start_pending: false,
@@ -327,7 +328,7 @@ impl PaneSessionLifecycle {
         self.remote_input_blocked = false;
         self.remote_restart_start_pending = true;
         self.accepted_screen_generation = None;
-        self.accepted_directory_revision = None;
+        self.metadata = None;
     }
 
     fn attach(
@@ -349,15 +350,16 @@ impl PaneSessionLifecycle {
                 if this
                     .update(cx, |this, cx| {
                         // Capture retained metadata before a final event can retire this epoch.
-                        let previous_directory = this.current_directory();
-                        let mut changed = this.sync_directory_metadata(session_epoch);
+                        let mut presentation_changed = this.sync_metadata(session_epoch);
+                        let mut changed = false;
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
-                        changed |= this.sync_directory_metadata(session_epoch);
-                        if previous_directory != this.current_directory() {
+                        presentation_changed |= this.sync_metadata(session_epoch);
+                        if presentation_changed {
                             cx.emit(TerminalPaneEvent::CaptionChanged);
                         }
+                        changed |= presentation_changed;
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
@@ -1222,7 +1224,7 @@ impl TerminalPane {
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
-        let metadata = &self.screen.metadata;
+        let metadata = self.metadata();
         let directory = match self.current_directory() {
             Some(crate::domain::CurrentDirectory::Local(path)) => {
                 sanitize_title(&path.to_string_lossy())
@@ -1234,19 +1236,46 @@ impl TerminalPane {
             .command
             .as_ref()
             .filter(|command| command.state == CommandState::Running);
-        let label = if metadata.title.provenance == TitleProvenance::TerminalControl {
-            sanitize_title(&metadata.title.value)
-        } else if let Some(command) = running {
-            sanitize_title(&command.line)
+        let command = running
+            .map(|command| sanitize_title(&command.line))
+            .filter(|line| !line.is_empty());
+        let (label, glyph) = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            let label = sanitize_title(&metadata.title.value);
+            // Only explicit Terminal-controlled titles may donate their leading glyph. Commands
+            // and fallbacks are opaque activity labels, even when their first word is symbolic.
+            let reported = super::terminal_status::reported_title(&label);
+            (
+                reported.words.to_owned(),
+                reported
+                    .glyph
+                    .map(|glyph| SharedString::from(glyph.to_owned())),
+            )
+        } else if let Some(command) = command {
+            (command, None)
         } else {
-            normalized_pane_title("", &self.fallback_title)
+            (normalized_pane_title("", &self.fallback_title), None)
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
             directory: compact_home_directory(&directory, metadata.context.home()).into(),
             label: label.into(),
+            glyph,
             running: running.is_some(),
+            progress: super::terminal_status::TerminalProgress::from_metadata(
+                metadata,
+                self.terminal_session_available(),
+            ),
         }
+    }
+
+    fn terminal_session_available(&self) -> bool {
+        self.terminal_session.session.is_some()
+            && !self.terminal_session.remote_input_blocked
+            && !matches!(self.pane_state, PaneTerminalState::Exited(_))
+            && !self
+                .pane_state
+                .failure()
+                .is_some_and(TerminalFailure::is_fatal)
     }
 
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {
@@ -1254,7 +1283,7 @@ impl TerminalPane {
             live_session: self.terminal_session.session.is_some(),
             state: &self.pane_state,
             disconnected: self.terminal_session.remote_input_blocked,
-            metadata: &self.screen.metadata,
+            metadata: self.metadata(),
         }
     }
 
@@ -1350,7 +1379,8 @@ impl TerminalPane {
     }
 
     fn suspend_remote_session(&mut self, cx: &mut Context<Self>) {
-        self.sync_directory_metadata(self.terminal_session.session_epoch);
+        let was_available = self.terminal_session_available();
+        self.sync_metadata(self.terminal_session.session_epoch);
         self.terminal_session.suspend();
         self.reset_hidden_input();
         self.apply_terminal_input_focus(false);
@@ -1358,6 +1388,9 @@ impl TerminalPane {
         self.pressed_button = None;
         self.selection_copy_pending = false;
         self.pressed_link = None;
+        if was_available != self.terminal_session_available() {
+            cx.emit(TerminalPaneEvent::CaptionChanged);
+        }
         cx.notify();
     }
 
@@ -1902,7 +1935,15 @@ impl TerminalPane {
         self.accessibility_needs_presentation = false;
     }
 
-    fn sync_directory_metadata(&mut self, session_epoch: u64) -> bool {
+    /// The newest Terminal Metadata this Pane presents, including while it is hidden.
+    fn metadata(&self) -> &crate::terminal::metadata::TerminalMetadataSnapshot {
+        self.terminal_session
+            .metadata
+            .as_deref()
+            .unwrap_or(&self.screen.metadata)
+    }
+
+    fn sync_metadata(&mut self, session_epoch: u64) -> bool {
         if self.terminal_session.session_epoch != session_epoch {
             return false;
         }
@@ -1910,33 +1951,36 @@ impl TerminalPane {
             .terminal_session
             .session
             .as_ref()
-            .and_then(|session| session.directory_snapshot())
+            .and_then(|session| session.metadata_snapshot())
         else {
             return false;
         };
-        self.accept_directory_metadata(snapshot)
+        self.accept_metadata(snapshot)
     }
 
-    fn accept_directory_metadata(
+    /// Accepts metadata no older than what this Pane already presents.
+    ///
+    /// Returns whether any presented fact changed.
+    fn accept_metadata(
         &mut self,
-        snapshot: crate::terminal::SessionDirectorySnapshot,
+        snapshot: Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
     ) -> bool {
-        if self
-            .terminal_session
-            .accepted_directory_revision
-            .is_some_and(|revision| snapshot.revision < revision)
-        {
+        let previous = self.terminal_session.metadata.as_deref();
+        if previous.is_some_and(|previous| snapshot.revision < previous.revision) {
             return false;
         }
-        self.terminal_session.accepted_directory_revision = Some(snapshot.revision);
-        let changed = self.terminal_session.current_directory != snapshot.current;
-        self.terminal_session.current_directory = snapshot.current;
-        changed
+        let presentation_changed =
+            previous.is_none_or(|previous| previous.presentation_differs(&snapshot));
+        let current = snapshot.current_directory();
+        let directory_changed = self.terminal_session.current_directory != current;
+        self.terminal_session.current_directory = current;
+        self.terminal_session.metadata = Some(snapshot);
+        presentation_changed || directory_changed
     }
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
-            SessionEvent::CurrentDirectoryChanged => {}
+            SessionEvent::MetadataChanged(wakeup) => drop(wakeup),
             SessionEvent::Screen(screen) => {
                 if screen.appearance_generation < self.requested_terminal_generation
                     || self
@@ -1946,9 +1990,6 @@ impl TerminalPane {
                 {
                     return false;
                 }
-                let caption_changed = self.screen.metadata.directory != screen.metadata.directory
-                    || self.screen.metadata.title != screen.metadata.title
-                    || self.screen.metadata.command != screen.metadata.command;
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
                 if self.title.as_ref() != title {
                     self.title = title.into();
@@ -1956,21 +1997,9 @@ impl TerminalPane {
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
+                let caption_changed = self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
-                let current = (self.screen.metadata.freshness
-                    == crate::terminal::metadata::MetadataFreshness::Live)
-                    .then(|| {
-                        self.screen
-                            .metadata
-                            .context
-                            .current_directory(&self.screen.metadata.directory.path)
-                    })
-                    .flatten();
-                self.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
-                    revision: self.screen.metadata.revision,
-                    current,
-                });
                 if caption_changed {
                     cx.emit(TerminalPaneEvent::CaptionChanged);
                 }
@@ -2027,12 +2056,17 @@ impl TerminalPane {
                 if self.suspend_if_remote_channel_unavailable(cx) {
                     return false;
                 }
+                let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
-                self.present_failure(failure, true, None);
+                if self.present_failure(failure, true, None)
+                    && was_available != self.terminal_session_available()
+                {
+                    cx.emit(TerminalPaneEvent::CaptionChanged);
+                }
             }
         }
         true
@@ -4158,12 +4192,20 @@ fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
-/// The identity one Pane caption presents: where its Terminal runs, where it is, and what it runs.
+/// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
+/// how far along it reports being.
+///
+/// This is the one presentation boundary between a Pane's sanitized Terminal Metadata and the
+/// chrome that describes it. The Pane Caption and the Tab item both read these facts, so neither
+/// parses terminal controls or interprets title text on its own.
 pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
+    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
+    pub(crate) progress: super::terminal_status::TerminalProgress,
 }
 
 /// The account and machine one Pane runs on, split so a caption can emphasize each part.
@@ -4193,10 +4235,6 @@ impl PaneOrigin {
                 remote: true,
             },
         }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.user.is_empty() && self.host.is_empty()
     }
 }
 

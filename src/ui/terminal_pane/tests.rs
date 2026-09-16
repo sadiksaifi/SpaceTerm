@@ -508,19 +508,20 @@ fn retained_directory_metadata_should_reject_older_screens_and_clear_stale_direc
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
     let (pane, cx) = terminal_pane(cx);
     let latest = CurrentDirectory::Local(PathBuf::from("/projects/latest"));
+    let retained = |revision, freshness| {
+        let screen = directory_screen(1, "/projects/latest", freshness);
+        let mut metadata = Arc::clone(&screen.metadata);
+        Arc::make_mut(&mut metadata).revision = revision;
+        metadata
+    };
     pane.update(cx, |pane, cx| {
-        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
-            revision: 20,
-            current: Some(latest.clone()),
-        });
-        let mut old_screen = directory_screen(1, "/projects/old", MetadataFreshness::Live);
+        assert!(pane.accept_metadata(retained(20, MetadataFreshness::Live)));
+        let mut old_screen = directory_screen(2, "/projects/old", MetadataFreshness::Live);
         Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata).revision = 10;
         pane.handle_event(SessionEvent::Screen(old_screen), cx);
         assert_eq!(pane.current_directory(), Some(latest.clone()));
-        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
-            revision: 21,
-            current: None,
-        });
+        assert_eq!(pane.caption().directory.as_ref(), "/projects/latest");
+        assert!(pane.accept_metadata(retained(21, MetadataFreshness::Stale)));
         assert_eq!(pane.current_directory(), None);
     });
 }
@@ -818,6 +819,57 @@ fn connected_remote_terminal_pane_with_readiness(
     });
     cx.run_until_parked();
     (pane, cx, records)
+}
+
+#[gpui::test]
+fn remote_disconnect_clears_live_terminal_progress(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_remote_terminal_pane(cx);
+    let session_id = records.starts().last().unwrap().session_id;
+    records.report_metadata(session_id, |metadata| {
+        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
+        metadata.progress = crate::terminal::metadata::ProgressMetadata::Indeterminate;
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::Indeterminate
+    );
+
+    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::None
+    );
+}
+
+#[gpui::test]
+fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let session_id = records.starts().last().unwrap().session_id;
+    records.report_metadata(session_id, |metadata| {
+        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
+        metadata.progress = crate::terminal::metadata::ProgressMetadata::Normal(45);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::Normal(45)
+    );
+
+    records
+        .event_sender(session_id)
+        .unwrap()
+        .try_send(SessionEvent::Failed(SessionFailure::Runtime(
+            "worker stopped".to_owned(),
+        )))
+        .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::None
+    );
 }
 
 #[gpui::test]
@@ -4489,6 +4541,21 @@ fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppConte
                 .flat_map(|run| &run.glyphs)
                 .any(|glyph| glyph.is_emoji)
         );
+    });
+}
+
+#[gpui::test]
+fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppContext) {
+    let (_pane, cx) = terminal_pane(cx);
+
+    cx.update(|window, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        assert!(!crate::ui::terminal_status::reported_glyph_is_drawable(
+            "🚀\u{200d}🚀",
+            &appearance.regular,
+            appearance.text_size(DEFAULT_FONT_SIZE),
+            window,
+        ));
     });
 }
 

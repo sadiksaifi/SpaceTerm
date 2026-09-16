@@ -1452,7 +1452,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
         let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
-            directory_state: SessionDirectoryState::default(),
+            metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(records.clone()),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
@@ -1482,7 +1482,7 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1539,7 +1539,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1577,7 +1577,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1622,7 +1622,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
     let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1670,7 +1670,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let schedule_input = ScheduleInput::default();
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1735,7 +1735,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1785,7 +1785,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     drop(accessibility_receiver);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1837,7 +1837,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             let _ = command_tx.send(Command::GraphicsBudgetAvailable);
         });
         let mut worker = TerminalWorker {
-            directory_state: SessionDirectoryState::default(),
+            metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             emulator,
             commands,
@@ -1907,7 +1907,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1956,7 +1956,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2002,7 +2002,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
     let (events, receiver) = async_channel::bounded(1);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2034,7 +2034,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2096,7 +2096,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             )
         };
         let mut worker = TerminalWorker {
-            directory_state: SessionDirectoryState::default(),
+            metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             emulator: TerminalEmulator::new_with_metadata_context(
                 test_geometry(),
@@ -2139,19 +2139,201 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             crate::domain::CurrentDirectory::Local(PathBuf::from("/srv/latest"))
         };
         assert_eq!(
-            worker.directory_state.snapshot().unwrap().current,
+            worker
+                .metadata_state
+                .snapshot()
+                .unwrap()
+                .current_directory(),
             Some(expected.clone())
         );
         assert_eq!(worker.emulator.presentation_generation(), generation);
         assert!(receiver.try_recv().is_err());
         assert!(worker.process_output_chunks(vec![b"ordinary hidden output".to_vec()]));
         assert!(receiver.try_recv().is_err());
+        // A hidden Session's title and progress reach its Tab through the same retained facts.
+        assert!(worker.process_output_chunks(vec![b"\x1b]2;agent\x07\x1b]9;4;2\x07".to_vec()]));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SessionEvent::MetadataChanged(_)
+        ));
+        let retained = worker.metadata_state.snapshot().unwrap();
+        assert_eq!(retained.title.value.as_ref(), "agent");
+        assert_eq!(
+            retained.progress,
+            crate::terminal::metadata::ProgressMetadata::Error(0)
+        );
         worker.emulator.mark_metadata_stale();
         assert!(worker.publish_screen());
-        let retained = worker.directory_state.snapshot().unwrap();
-        assert_eq!(retained.current, None);
+        let retained = worker.metadata_state.snapshot().unwrap();
+        assert_eq!(retained.current_directory(), None);
         worker.finish();
     }
+}
+
+#[test]
+fn visible_metadata_screen_does_not_evict_bell_attention() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(2);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.process_output_chunks(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::Attention(_)
+    ));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::Screen(_)
+    ));
+    assert!(receiver.try_recv().is_err());
+    worker.finish();
+}
+
+#[test]
+fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_output_chunks(vec![b"\x1b]2;latest title\x07".to_vec()]));
+    assert!(receiver.try_recv().is_err());
+
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::MetadataChanged(_)
+    ));
+    assert_eq!(
+        worker
+            .metadata_state
+            .snapshot()
+            .unwrap()
+            .title
+            .value
+            .as_ref(),
+        "latest title"
+    );
+    worker.finish();
+}
+
+#[test]
+fn hidden_metadata_bursts_do_not_evict_bell_attention() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(2);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(worker.process_output_chunks(vec![b"\x07\x1b]2;first\x07".to_vec()]));
+    assert!(worker.process_output_chunks(vec![b"\x1b]2;latest\x07".to_vec()]));
+
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::Attention(_)
+    ));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::MetadataChanged(_)
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        worker
+            .metadata_state
+            .snapshot()
+            .unwrap()
+            .title
+            .value
+            .as_ref(),
+        "latest"
+    );
+    worker.finish();
+}
+
+#[test]
+fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(worker.process_output_chunks(vec![b"\x1b]133;A\x07".to_vec()]));
+
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionEvent::MetadataChanged(_)
+    ));
+    assert_eq!(
+        worker.metadata_state.snapshot().unwrap().prompt_zone,
+        crate::terminal::metadata::PromptZone::Prompt
+    );
+    worker.finish();
 }
 
 #[test]
@@ -2162,7 +2344,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2568,7 +2750,7 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -2601,7 +2783,7 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -2630,7 +2812,7 @@ fn find_close_should_supersede_a_pending_query_update() {
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3160,7 +3342,7 @@ fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
     let session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3215,7 +3397,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let (events, _event_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -3243,7 +3425,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let (commands, receiver) = mpsc::channel();
     worker.commands = receiver;
     let session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3324,7 +3506,7 @@ fn accessibility_selection_authority_is_inert_after_worker_shutdown() {
 #[test]
 fn stopped_session_returns_an_error_for_selection_requests() {
     let session = TerminalSession {
-        directory_state: SessionDirectoryState::default(),
+        metadata_state: SessionMetadataState::default(),
         commands: None,
         worker: None,
         native_pty_close: None,

@@ -57,6 +57,8 @@ pub(super) struct WorkerSchedules {
     paste_confirmations: PasteConfirmationSchedule,
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
+    metadata_presentation_pending: bool,
+    metadata_presentation_queued: Arc<AtomicBool>,
     graphics_animation: Option<Instant>,
 }
 
@@ -144,6 +146,31 @@ impl WorkerSchedules {
         self.presentation.request();
     }
 
+    pub(super) fn note_metadata_changed(&mut self) {
+        self.metadata_presentation_pending = true;
+    }
+
+    pub(super) fn take_metadata_presentation(&mut self) -> Option<MetadataWakeup> {
+        if !std::mem::take(&mut self.metadata_presentation_pending)
+            || self
+                .metadata_presentation_queued
+                .swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(MetadataWakeup::new(Arc::clone(
+            &self.metadata_presentation_queued,
+        )))
+    }
+
+    pub(super) fn metadata_presented(&mut self) {
+        self.metadata_presentation_pending = false;
+    }
+
+    pub(super) fn is_presentable(&self) -> bool {
+        self.presentation.presentable
+    }
+
     pub(super) fn presentation_due(&mut self, now: Instant) -> bool {
         self.presentation.take_due(now)
     }
@@ -215,6 +242,8 @@ impl WorkerSchedules {
             paste_confirmations: PasteConfirmationSchedule::default(),
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
+            metadata_presentation_pending: false,
+            metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             graphics_animation: None,
         }
     }

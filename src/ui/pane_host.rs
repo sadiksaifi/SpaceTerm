@@ -1,4 +1,7 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
+use super::terminal_status::{
+    StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
+};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
@@ -92,10 +95,11 @@ const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
 /// size they share. This applies to the Pane Caption's close control alone.
 const PANE_CLOSE_ICON_SIZE: f32 = 16.75;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
-const PANE_ATTENTION_WIDTH: f32 = 13.0;
+/// The origin glyph, which every Pane Caption keeps at every width.
+const PANE_STATUS_WIDTH: f32 = PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CAPTION_RIGHT_PADDING
-    + PANE_ATTENTION_WIDTH
+    + PANE_STATUS_WIDTH
     + PANE_CONTROL_LEADING_GAP
     + PANE_CONTROL_SIZE * 2.0
     + PANE_CONTROL_GAP;
@@ -122,8 +126,8 @@ impl PaneCaptionAction {
 /// Which caption segments this frame's Pane width can hold.
 ///
 /// The Pane name is never dropped. Segments leave in order of how little they identify the Pane:
-/// the running label first, then the account, then the leading directory, then the machine, and
-/// last the origin icon, so the narrowest Pane still names the directory it sits in.
+/// the running label first, then the account, then the leading directory, and then the machine.
+/// The origin glyph is fixed, so the narrowest Pane still carries exactly one glyph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaptionLayout {
     show_origin: bool,
@@ -135,12 +139,11 @@ struct CaptionLayout {
 }
 
 /// How many caption segments beyond the Pane name a narrowing caption can give up.
-const CAPTION_LADDER: usize = 5;
+const CAPTION_LADDER: usize = 4;
 
 /// Rendered widths of the caption segments, each including the separator that precedes it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CaptionMetrics {
-    origin_icon: Pixels,
     user: Pixels,
     host: Pixels,
     directory: Pixels,
@@ -156,11 +159,6 @@ impl CaptionMetrics {
     ) -> Self {
         let host = measure_caption_segment(&text.origin.host, window, appearance);
         Self {
-            origin_icon: if text.origin.is_empty() {
-                px(0.0)
-            } else {
-                appearance.spacing(PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP)
-            },
             user: if text.origin.user.is_empty() {
                 px(0.0)
             } else {
@@ -184,13 +182,7 @@ impl CaptionMetrics {
 
     /// The droppable segments in the order a narrowing caption gives them up, last one first.
     const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
-        [
-            self.origin_icon,
-            self.host,
-            self.directory,
-            self.user,
-            self.label,
-        ]
+        [self.host, self.directory, self.user, self.label]
     }
 }
 
@@ -202,7 +194,6 @@ impl CaptionLayout {
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         Self::from_metrics(
-            caption.attention,
             caption.has_multiple_panes,
             width,
             CaptionMetrics::measure(&caption.text, window, appearance),
@@ -211,17 +202,15 @@ impl CaptionLayout {
     }
 
     fn from_metrics(
-        attention: bool,
         has_multiple_panes: bool,
         width: Pixels,
         metrics: CaptionMetrics,
         spacing_scale: f32,
     ) -> Self {
         let full_control_count = if has_multiple_panes { 4 } else { 2 };
-        let fixed_width = (PANE_CAPTION_LEFT_PADDING
-            + PANE_CAPTION_RIGHT_PADDING
-            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 })
-            * spacing_scale;
+        let fixed_width =
+            (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_WIDTH)
+                * spacing_scale;
         let show_splits = width
             >= px(fixed_width
                 + (PANE_CONTROL_LEADING_GAP + controls_width(full_control_count)) * spacing_scale);
@@ -245,15 +234,9 @@ impl CaptionLayout {
             claimed += width;
             *admitted = true;
         }
-        let [
-            show_origin,
-            show_host,
-            show_directory,
-            show_user,
-            show_label,
-        ] = shown;
+        let [show_host, show_directory, show_user, show_label] = shown;
         Self {
-            show_origin,
+            show_origin: true,
             show_host,
             show_directory,
             show_user,
@@ -368,9 +351,9 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance = super::appearance::chrome(cx);
+        let appearance = super::appearance::chrome(cx).clone();
         let radius =
-            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).pane_radius();
+            super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
         let minimum_pane_size = match PaneSize::new(
             MINIMUM_PANE_WIDTH,
             f32::from(appearance.caption_height() + radius) + 4.0,
@@ -560,14 +543,35 @@ impl PaneHost {
         let title = self
             .pane_titles
             .get(&self.terminal_tab.focused_pane_id())
-            .cloned()
+            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
             .unwrap_or_else(|| "Terminal".into());
         TabIdentity::resolve(
             caption,
             title,
-            self.terminal_tab.pane_count(),
             self.pane_attention.values().copied().sum::<u32>() > 0,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_focused_progress(&self) -> TerminalProgress {
+        self.pane_captions
+            .get(&self.terminal_tab.focused_pane_id())
+            .map_or(TerminalProgress::None, |caption| caption.progress)
+    }
+
+    /// Records unread attention for one Pane as its Terminal would report it.
+    #[cfg(test)]
+    pub(crate) fn set_test_attention(
+        &mut self,
+        pane_id: PaneId,
+        unread_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_attention.insert(pane_id, unread_count);
+        cx.emit(PaneHostEvent::PresentationChanged {
+            tab_id: self.terminal_tab.id(),
+        });
+        cx.notify();
     }
 
     /// The Tab's identity as one line, for callers that can only carry text.
@@ -1710,96 +1714,72 @@ impl Render for PaneHost {
 
 /// What one Tab presents about the Terminal Session its Focused Pane runs.
 ///
-/// The Tab is a compact restatement of that Pane's own caption, in the caption's own order: where
-/// the Session runs, where it is, and what it is doing. Every segment is a fact the Pane already
-/// resolved and sanitized for presentation; a Tab never composes a path or a machine name of its
-/// own, and leaves a segment empty rather than inventing one.
+/// The Tab is a compact restatement of that Pane's own caption: what the Session is doing, then
+/// where it is. Every segment is a fact the Pane already resolved and sanitized for presentation; a
+/// Tab never composes a path, names its Workspace, or interprets a title, and leaves a segment
+/// empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TabIdentity {
-    /// Local or Remote, as the Terminal Session classified itself. It selects the leading glyph.
+    /// Local or Remote, as the Terminal Session classified itself.
     pub(crate) remote: bool,
-    /// The local user, or the account and machine a Remote Session runs on.
-    pub(crate) account: gpui::SharedString,
-    /// The directory leaf that places the Session, such as `~` or the project it sits in.
-    pub(crate) place: gpui::SharedString,
+    /// The OSC 9;4 status the Session last reported, independent of its title.
+    pub(crate) progress: TerminalProgress,
     /// What the Session is doing: its Terminal title or its running command.
     pub(crate) activity: gpui::SharedString,
-    /// How many Panes the Tab owns. One Pane shows no count.
-    pub(crate) pane_count: usize,
+    /// The Current Directory leaf that places the Session, such as `~` or the project it sits in.
+    pub(crate) place: gpui::SharedString,
+    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
 }
 
 impl TabIdentity {
-    fn resolve(
-        caption: PaneCaptionText,
-        title: gpui::SharedString,
-        pane_count: usize,
-        attention: bool,
-    ) -> Self {
-        let account = if caption.origin.remote {
-            match (
-                caption.origin.user.is_empty(),
-                caption.origin.host.is_empty(),
-            ) {
-                (_, true) => gpui::SharedString::default(),
-                (true, false) => caption.origin.host.clone(),
-                (false, false) => format!("{}@{}", caption.origin.user, caption.origin.host).into(),
-            }
+    fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
+        // A caption without a label has no directory, and its `name` is already what the Session
+        // is doing. Otherwise `name` is the directory leaf and `label` the activity.
+        let (activity, place) = if caption.label.is_empty() {
+            (caption.name, gpui::SharedString::default())
         } else {
-            caption.origin.user.clone()
+            (caption.label, caption.name)
         };
-        // `name` is the directory leaf when the Pane has a directory, and the Pane's own label when
-        // it has none. Keeping both segments from saying the same word leaves room for the one that
-        // still adds something.
-        let place = caption.name;
-        let activity = if caption.label.is_empty() {
-            title
-        } else {
-            caption.label
-        };
-        let activity = if activity == place {
+        let activity = if activity.is_empty() { title } else { activity };
+        // Saying the same word twice adds nothing, so the activity keeps it.
+        let place = if place == activity {
             gpui::SharedString::default()
         } else {
-            activity
+            place
         };
         Self {
             remote: caption.origin.remote,
-            account,
-            place,
+            progress: caption.progress,
             activity,
-            pane_count,
+            place,
+            glyph: caption.glyph,
             attention,
         }
-    }
-
-    /// The terse trailing count a multi-Pane Tab carries, such as `2P`.
-    pub(crate) fn pane_badge(&self) -> Option<gpui::SharedString> {
-        (self.pane_count > 1).then(|| format!("{}P", self.pane_count).into())
     }
 
     /// The identity as one line, in the order the Tab paints it.
     #[cfg(test)]
     pub(crate) fn one_line(&self) -> gpui::SharedString {
         let mut line = String::new();
-        for segment in [&self.account, &self.place, &self.activity] {
-            if segment.is_empty() {
-                continue;
-            }
-            if !line.is_empty() {
-                line.push_str(" · ");
-            }
-            line.push_str(segment);
-        }
-        if line.is_empty() {
-            line.push_str("Terminal");
-        }
-        if let Some(badge) = self.pane_badge() {
-            line.push_str(" · ");
-            line.push_str(&badge);
-        }
         if self.attention {
-            line.insert_str(0, "• ");
+            line.push_str("• ");
+        }
+        if let TerminalProgress::Normal(percent) = self.progress {
+            line.push_str(&format!("[{percent}%] "));
+        } else if self.progress != TerminalProgress::None {
+            line.push_str(&format!("[{:?}] ", self.progress));
+        }
+        line.push_str(if self.activity.is_empty() {
+            "Terminal"
+        } else {
+            &self.activity
+        });
+        if !self.place.is_empty() {
+            line.push_str(" · ");
+            line.push_str(&self.place);
         }
         line.into()
     }
@@ -1809,14 +1789,17 @@ impl TabIdentity {
 ///
 /// `origin` is the account and machine the Terminal runs on, `directory` the leading path up to
 /// and including its last separator, `name` the directory leaf that identifies the Pane, and
-/// `label` the Terminal title or running command. `running` marks a label that is a live command.
+/// `label` the Terminal title or running command. `running` marks a label that is a live command,
+/// and `progress` the status the Session reported independently of its title.
 #[derive(Clone, Default, Eq, PartialEq)]
 struct PaneCaptionText {
     origin: PaneOrigin,
     directory: gpui::SharedString,
     name: gpui::SharedString,
     label: gpui::SharedString,
+    glyph: Option<gpui::SharedString>,
     running: bool,
+    progress: TerminalProgress,
 }
 
 impl PaneCaptionText {
@@ -1831,7 +1814,9 @@ impl PaneCaptionText {
                 directory: gpui::SharedString::default(),
                 name: facts.label,
                 label: gpui::SharedString::default(),
+                glyph: facts.glyph,
                 running: facts.running,
+                progress: facts.progress,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -1840,7 +1825,9 @@ impl PaneCaptionText {
             directory: leading,
             name,
             label: facts.label,
+            glyph: facts.glyph,
             running: facts.running,
+            progress: facts.progress,
         }
     }
 }
@@ -1881,13 +1868,21 @@ fn render_pane_caption(
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
+            let mut caption = caption;
             #[cfg(feature = "appearance-exerciser")]
-            let caption = PaneCaption {
-                text: super::appearance_exerciser::caption_fixture(cx)
+            {
+                caption.text = super::appearance_exerciser::caption_fixture(cx)
                     .map(PaneCaptionText::from_facts)
-                    .unwrap_or(caption.text),
-                ..caption
-            };
+                    .unwrap_or(caption.text);
+            }
+            caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
+                reported_glyph_is_drawable(
+                    glyph,
+                    &appearance.caption,
+                    appearance.text_size(PANE_CAPTION_TEXT_SIZE),
+                    window,
+                )
+            });
             let background = caption.terminal.read(cx).surface_background();
             let pane_radius =
                 super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
@@ -1948,6 +1943,13 @@ fn render_pane_caption(
     .h(caption_height)
     .flex_shrink_0()
     .into_any_element()
+}
+
+pub(super) fn drawable_reported_glyph(
+    glyph: Option<&gpui::SharedString>,
+    supports: impl FnOnce(&str) -> bool,
+) -> Option<gpui::SharedString> {
+    glyph.filter(|glyph| supports(glyph)).cloned()
 }
 
 fn render_pane_caption_content(
@@ -2102,17 +2104,6 @@ fn render_pane_caption_content(
             });
             cx.stop_propagation();
         })
-        .when(attention, |caption| {
-            caption.child(
-                div()
-                    .debug_selector(move || format!("pane-attention-{}", pane_id.get()))
-                    .mr(appearance.spacing(7.0))
-                    .size(appearance.spacing(6.0))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(gpui_color(paint.attention)),
-            )
-        })
         .child(
             div()
                 .flex_1()
@@ -2120,15 +2111,14 @@ fn render_pane_caption_content(
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .when(layout.show_origin && !text.origin.is_empty(), |row| {
-                    row.child(render_pane_origin(
-                        pane_id,
-                        &text.origin,
-                        layout,
-                        color,
-                        appearance,
-                    ))
-                })
+                .child(render_pane_origin(
+                    pane_id,
+                    &text.origin,
+                    layout,
+                    (text.progress, text.glyph.clone(), attention),
+                    &paint,
+                    appearance,
+                ))
                 .when(layout.show_directory && !text.directory.is_empty(), |row| {
                     row.child(
                         div()
@@ -2177,15 +2167,16 @@ fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
-    color: Color,
+    (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
+    paint: &crate::appearance::CaptionPaint,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
+    let color = paint.foreground;
     let (icon, location) = if origin.remote {
         (IconName::Globe, "remote")
     } else {
         (IconName::Terminal, "local")
     };
-    let icon_tint = gpui_color(color);
     div()
         .debug_selector(move || format!("pane-caption-origin-{}-{location}", pane_id.get()))
         .flex()
@@ -2196,11 +2187,25 @@ fn render_pane_origin(
                 .mr(appearance.spacing(PANE_ORIGIN_ICON_GAP))
                 .flex()
                 .items_center()
-                .child(Icon::new(
-                    icon,
-                    appearance.spacing(PANE_ORIGIN_ICON_SIZE),
-                    icon_tint,
-                )),
+                .text_color(gpui_color(color))
+                .child(
+                    StatusGlyph {
+                        icon,
+                        reported,
+                        size: appearance.spacing(PANE_ORIGIN_ICON_SIZE),
+                        progress,
+                        attention,
+                        id: ("pane-status", pane_id.get()).into(),
+                        selector_prefix: format!("pane-status-{}", pane_id.get()),
+                        colors: StatusColors {
+                            attention: gpui_color(paint.attention),
+                            busy: gpui_color(paint.busy),
+                            error: gpui_color(paint.error),
+                            paused: gpui_color(paint.secondary),
+                        },
+                    }
+                    .render(),
+                ),
         )
         .when(layout.show_user && !origin.user.is_empty(), |row| {
             row.child(
@@ -2825,7 +2830,7 @@ mod tests {
 
         assert_eq!(
             host.read_with(cx, |host, _| host.tab_title()),
-            "• spaceterm-test-workspace · Terminal"
+            "• Terminal · spaceterm-test-workspace"
         );
         assert_eq!(
             host.read_with(cx, |host, _| host.pane_attention.clone()),
@@ -2842,7 +2847,9 @@ mod tests {
             origin,
             directory: directory.to_owned().into(),
             label: label.to_owned().into(),
+            glyph: None,
             running: false,
+            progress: TerminalProgress::None,
         })
     }
 
@@ -2862,100 +2869,48 @@ mod tests {
         }
     }
 
-    /// A Tab restates its Focused Pane's own facts, in the caption's order, without composing any
-    /// of its own: a Local Tab keeps the user while dropping the machine, and a Remote Tab joins
-    /// both as `user@host`.
+    /// A Tab restates what its Focused Pane is doing and where, and nothing about who runs it: the
+    /// account, the machine, and the Pane count stay in the Pane Caption and the Workspace chrome.
     #[test]
-    fn tab_identity_should_present_the_focused_pane_facts_in_caption_order() {
-        let local = TabIdentity::resolve(
-            caption_text(local_origin(), "~/Projects/api", "vim"),
-            "vim".into(),
-            1,
-            false,
-        );
-        assert_eq!(
-            (
-                local.remote,
-                local.account.as_ref(),
-                local.place.as_ref(),
-                local.activity.as_ref(),
-                local.pane_badge(),
-            ),
-            (false, "tester", "api", "vim", None)
-        );
-        assert_eq!(local.one_line().as_ref(), "tester · api · vim");
-
-        let remote = TabIdentity::resolve(
-            caption_text(remote_origin(), "~/services", "cargo test"),
-            "cargo test".into(),
-            2,
-            false,
-        );
-        assert_eq!(
-            (
-                remote.remote,
-                remote.account.as_ref(),
-                remote.place.as_ref(),
-                remote.activity.as_ref(),
-                remote.pane_badge().map(|badge| badge.to_string()),
-            ),
-            (
-                true,
-                "tester@build-box",
-                "services",
-                "cargo test",
-                Some("2P".to_owned())
-            )
-        );
-        assert_eq!(
-            remote.one_line().as_ref(),
-            "tester@build-box · services · cargo test · 2P"
-        );
+    fn tab_identity_should_present_activity_then_directory_leaf() {
+        for (origin, remote) in [(local_origin(), false), (remote_origin(), true)] {
+            let mut caption = caption_text(origin, "~/Projects/api", "cargo test");
+            caption.progress = TerminalProgress::Normal(40);
+            let identity = TabIdentity::resolve(caption, "cargo test".into(), false);
+            assert_eq!(
+                (
+                    identity.remote,
+                    identity.progress,
+                    identity.activity.as_ref(),
+                    identity.place.as_ref(),
+                ),
+                (remote, TerminalProgress::Normal(40), "cargo test", "api")
+            );
+            assert_eq!(identity.one_line().as_ref(), "[40%] cargo test · api");
+        }
     }
 
-    /// The Tab never says the same word twice, never invents a segment it was not given, and keeps
-    /// attention and the Pane count as facts about the Tab rather than parts of its name.
+    /// The Tab never says the same word twice and never invents a segment it was not given.
     #[test]
     fn tab_identity_should_drop_empty_and_repeated_segments() {
-        // A Pane with no directory carries its label as the thing that identifies it, so the Tab
-        // presents it once rather than as both place and activity.
-        let untitled = TabIdentity::resolve(
-            caption_text(local_origin(), "", "zsh"),
-            "zsh".into(),
-            1,
-            false,
-        );
+        // A Pane with no directory carries its label as the thing it is doing, with no place.
+        let untitled =
+            TabIdentity::resolve(caption_text(local_origin(), "", "zsh"), "zsh".into(), false);
         assert_eq!(
-            (untitled.place.as_ref(), untitled.activity.as_ref()),
+            (untitled.activity.as_ref(), untitled.place.as_ref()),
             ("zsh", "")
         );
-        assert_eq!(untitled.one_line().as_ref(), "tester · zsh");
 
-        // A Remote destination that names no account leaves the account to the machine alone.
-        let anonymous = TabIdentity::resolve(
-            caption_text(
-                PaneOrigin {
-                    user: gpui::SharedString::default(),
-                    host: "build-box".into(),
-                    remote: true,
-                },
-                "~",
-                "",
-            ),
-            "Terminal".into(),
-            3,
+        // A title that repeats the directory leaf is presented once.
+        let repeated = TabIdentity::resolve(
+            caption_text(remote_origin(), "~/services", "services"),
+            "services".into(),
             true,
         );
-        assert_eq!(anonymous.account.as_ref(), "build-box");
-        assert_eq!(
-            anonymous.one_line().as_ref(),
-            "• build-box · ~ · Terminal · 3P"
-        );
+        assert_eq!(repeated.one_line().as_ref(), "• services");
 
         // Nothing resolved at all still names the Tab rather than leaving it blank.
-        let empty = TabIdentity::default();
-        assert_eq!(empty.one_line().as_ref(), "Terminal");
-        assert_eq!(empty.pane_badge(), None);
+        assert_eq!(TabIdentity::default().one_line().as_ref(), "Terminal");
     }
 
     fn focused_panes_after_shortcuts<const N: usize>(
@@ -3173,7 +3128,7 @@ mod tests {
         metadata.title.provenance = TitleProvenance::Fallback;
         metadata.directory.path = Arc::from("/srv/new-place");
         metadata.command = Some(CommandMetadata {
-            line: Arc::from("cargo build --release"),
+            line: Arc::from("π build"),
             state: CommandState::Running,
         });
         records
@@ -3188,15 +3143,12 @@ mod tests {
                 caption.directory.clone(),
                 caption.name.clone(),
                 caption.label.clone(),
+                caption.glyph.clone(),
             )
         });
         assert_eq!(
             caption,
-            (
-                "/srv/".into(),
-                "new-place".into(),
-                "cargo build --release".into()
-            )
+            ("/srv/".into(), "new-place".into(), "π build".into(), None,)
         );
         let snapshot = Arc::make_mut(&mut screen);
         snapshot.generation = crate::terminal::PresentationGeneration::test(2);
@@ -3217,9 +3169,13 @@ mod tests {
                 caption.directory.clone(),
                 caption.name.clone(),
                 caption.label.clone(),
+                caption.glyph.clone(),
             )
         });
-        assert_eq!(caption, ("/srv/".into(), "new-place".into(), "zsh".into()));
+        assert_eq!(
+            caption,
+            ("/srv/".into(), "new-place".into(), "zsh".into(), None)
+        );
     }
 
     #[gpui::test]
@@ -3516,6 +3472,18 @@ mod tests {
     }
 
     #[test]
+    fn cached_reported_glyph_should_follow_each_current_font_check() {
+        let cached = Some(gpui::SharedString::from("π"));
+
+        assert_eq!(drawable_reported_glyph(cached.as_ref(), |_| false), None);
+        assert_eq!(
+            drawable_reported_glyph(cached.as_ref(), |_| true),
+            Some(gpui::SharedString::from("π"))
+        );
+        assert_eq!(cached, Some(gpui::SharedString::from("π")));
+    }
+
+    #[test]
     fn directory_captions_should_separate_their_leaf_from_the_leading_path() {
         for (directory, expected) in [
             (
@@ -3539,17 +3507,16 @@ mod tests {
     #[test]
     fn narrowing_a_caption_should_give_up_its_segments_in_identity_order() {
         let metrics = CaptionMetrics {
-            origin_icon: px(18.0),
             user: px(40.0),
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
             label: px(30.0),
         };
-        let resolve =
-            |width: f32| CaptionLayout::from_metrics(false, false, px(width), metrics, 1.0);
+        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2);
         let layout = |origin, host, directory, user, label| CaptionLayout {
@@ -3562,30 +3529,48 @@ mod tests {
         };
 
         assert_eq!(
-            resolve(controls + 310.0),
+            resolve(controls + 291.0),
             layout(true, true, true, true, true)
         );
         assert_eq!(
-            resolve(controls + 280.0),
+            resolve(controls + 261.0),
             layout(true, true, true, true, false)
         );
         assert_eq!(
-            resolve(controls + 240.0),
+            resolve(controls + 221.0),
             layout(true, true, true, false, false)
         );
         assert_eq!(
-            resolve(controls + 120.0),
+            resolve(controls + 101.0),
             layout(true, true, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 60.0),
+            resolve(controls + 41.0),
             layout(true, false, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 50.0),
-            layout(false, false, false, false, false)
+            resolve(controls + 39.0),
+            layout(true, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
+    }
+
+    /// A Pane Caption keeps its one glyph at any supported width, even without status.
+    #[test]
+    fn caption_layout_should_keep_its_glyph_when_narrow_without_status() {
+        let metrics = CaptionMetrics {
+            name: px(40.0),
+            ..CaptionMetrics::default()
+        };
+        let controls = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(2);
+        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
+
+        let narrow = resolve(controls + 10.0);
+        assert!(narrow.show_origin && narrow.show_splits);
     }
 
     #[gpui::test]

@@ -971,6 +971,8 @@ pub(crate) struct CaptionPaint {
     pub(crate) icon: Color,
     pub(crate) focus: Color,
     pub(crate) attention: Color,
+    pub(crate) busy: Color,
+    pub(crate) error: Color,
     pub(crate) control: SemanticPaint,
     pub(crate) control_hover: SemanticPaint,
     pub(crate) control_pressed: SemanticPaint,
@@ -1008,10 +1010,38 @@ impl ChromeColors {
             icon: foreground,
             focus: contrast(self.border_focused, surface, 3.0),
             attention: contrast(self.warning, surface, 4.5),
+            busy: contrast(self.info, surface, 4.5),
+            error: contrast(self.error, surface, 4.5),
             control: paint(surface, foreground),
             control_hover: paint(surface.mix(foreground, 0.10), foreground),
             control_pressed: paint(surface.mix(foreground, 0.18), foreground),
             control_disabled: paint(surface, self.text_disabled),
+        }
+    }
+}
+
+/// Status marks resolved for the surface one control currently rests on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StatusPaint {
+    pub(crate) attention: Color,
+    pub(crate) busy: Color,
+    pub(crate) error: Color,
+    pub(crate) paused: Color,
+}
+
+impl ChromeColors {
+    /// Resolves semantic status colors against the control's current surface.
+    ///
+    /// The surface is composed over the opaque Chrome background. Resolving per surface guarantees
+    /// contrast even when a custom scheme gives different Tab states opposing backgrounds.
+    pub(crate) fn status(&self, surface: Color) -> StatusPaint {
+        let base = self.background.with_alpha(255);
+        let surface = surface.source_over(base);
+        StatusPaint {
+            attention: contrast(self.warning, surface, 3.0),
+            busy: contrast(self.info, surface, 3.0),
+            error: contrast(self.error, surface, 3.0),
+            paused: contrast(self.text_muted, surface, 3.0),
         }
     }
 }
@@ -1525,6 +1555,8 @@ mod tests {
                         caption.secondary,
                         caption.icon,
                         caption.attention,
+                        caption.busy,
+                        caption.error,
                     ] {
                         assert!(text.contrast_ratio(surface) >= 4.5);
                     }
@@ -1539,6 +1571,54 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn status_marks_read_on_every_tab_surface_they_rest_on() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin::chrome_base(appearance);
+            let base = colors.background.with_alpha(255);
+            for surfaces in [
+                vec![
+                    colors.tab_active_background,
+                    colors.tab_active_hover_background,
+                    colors.tab_inactive_background,
+                    colors.tab_hover_background,
+                ],
+                // A surface painted in the warning color itself still gets a readable mark.
+                vec![Color::rgb(0xfbfbfc), Color::rgb(0xe0a75c)],
+            ] {
+                for surface in surfaces {
+                    let status = colors.status(surface);
+                    for mark in [status.attention, status.busy, status.error, status.paused] {
+                        let surface = surface.source_over(base);
+                        assert!(
+                            mark.contrast_ratio(surface) >= 3.0,
+                            "{appearance:?} {mark:?} {surface:?}"
+                        );
+                    }
+                }
+            }
+            let resting = [colors.tab_active_background, colors.tab_inactive_background];
+            for surface in resting {
+                if colors.warning.contrast_ratio(surface.source_over(base)) >= 3.0 {
+                    assert_eq!(colors.status(surface).attention, colors.warning);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_fallback_meets_contrast_on_opposing_surfaces() {
+        let surfaces = [Color::rgb(0x000000), Color::rgb(0xffffff)];
+        let colors = ChromeColors {
+            warning: Color::rgb(0x000000),
+            ..builtin::chrome_base(Appearance::Light)
+        };
+        for surface in surfaces {
+            let mark = colors.status(surface).attention;
+            assert!(mark.contrast_ratio(surface) >= 3.0);
         }
     }
 

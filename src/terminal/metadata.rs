@@ -378,6 +378,25 @@ pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) progress: ProgressMetadata,
 }
 
+impl TerminalMetadataSnapshot {
+    /// Whether any fact chrome presents differs: the directory, title, command, progress, or
+    /// whether those facts are still live.
+    pub(crate) fn presentation_differs(&self, other: &Self) -> bool {
+        self.freshness != other.freshness
+            || self.directory != other.directory
+            || self.title != other.title
+            || self.command != other.command
+            || self.progress != other.progress
+    }
+
+    /// The Current Directory these facts establish, or none once they have gone stale.
+    pub(crate) fn current_directory(&self) -> Option<CurrentDirectory> {
+        (self.freshness == MetadataFreshness::Live)
+            .then(|| self.context.current_directory(&self.directory.path))
+            .flatten()
+    }
+}
+
 pub(crate) struct MetadataTracker {
     snapshot: Arc<TerminalMetadataSnapshot>,
     epoch: Instant,

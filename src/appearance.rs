@@ -192,7 +192,7 @@ mod scheme;
 mod tests;
 
 pub(crate) use crate::theme::Color;
-pub(crate) use compiler::{CaptionPaint, SemanticPaint};
+pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ResolvedWindowComposition, SurfaceMaterials, SurfaceRole, WindowBackgroundAppearance,
 };

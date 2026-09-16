@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
+use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
@@ -102,13 +103,13 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
 /// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
 const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
 const TAB_ORIGIN_GAP: f32 = 6.0;
-/// The air before the Pane count and before the close control.
+/// The air after the status glyph, and before the close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
-/// How much of a Tab's identity the place may claim before the activity beside it gets a share.
+/// How much of a Tab's identity the activity may claim when a place beside it needs a share.
 ///
-/// The place is the segment that identifies the Session, so it survives a narrowing Tab; the
-/// activity is what it is doing right now, which the eye can recover from the Pane Caption.
-const TAB_PLACE_MAXIMUM_SHARE: f32 = 0.62;
+/// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
+/// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
+const TAB_ACTIVITY_MAXIMUM_SHARE: f32 = 0.6;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -248,6 +249,22 @@ impl TabChromePresentation {
         } else {
             self.hover_foreground
         }
+    }
+
+    /// Status glyph colors resolved for this Tab's current rest or hover surface.
+    fn tab_status(
+        &self,
+        active: bool,
+        hovered: bool,
+        colors: &ChromeColors,
+    ) -> crate::appearance::StatusPaint {
+        let surface = match (active, hovered) {
+            (true, true) => self.active_tab_hover_background,
+            (true, false) => self.active_tab_background,
+            (false, true) => self.hover_background,
+            (false, false) => self.inactive_tab_background,
+        };
+        colors.status(surface.source_over(self.background))
     }
 
     fn close_control_style(
@@ -1197,6 +1214,7 @@ impl TabManager {
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        window: &Window,
         cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
@@ -1210,6 +1228,7 @@ impl TabManager {
         let control_style =
             presentation.close_control_style(active, ancestor_hovered, &appearance.colors);
         let hover_foreground = presentation.tab_hover_foreground(active);
+        let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let close_clearance = (active || ancestor_hovered).then(|| {
             cx.global::<ButtonTheme>()
                 .icon_button_size(ButtonSize::Compact)
@@ -1220,6 +1239,21 @@ impl TabManager {
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
         #[cfg(test)]
         let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
+        let font = if active {
+            &appearance.emphasis
+        } else {
+            &appearance.regular
+        };
+        let mut identity = identity;
+        identity.glyph =
+            super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
+                super::terminal_status::reported_glyph_is_drawable(
+                    glyph,
+                    font,
+                    appearance.text_size(12.0),
+                    window,
+                )
+            });
         let tab_group = format!("tab-item-{}", tab_id.get());
         div()
             .id(("tab-item", tab_id.get()))
@@ -1257,11 +1291,7 @@ impl TabManager {
                 });
             })
             // Weight marks the Active Tab exactly as it marks the current Settings section.
-            .font(if active {
-                appearance.emphasis.clone()
-            } else {
-                appearance.regular.clone()
-            })
+            .font(font.clone())
             .text_size(appearance.text_size(12.0))
             .text_color(gpui_color(foreground))
             // Content follows the chip's paired hover paint, preserving selected identity.
@@ -1287,6 +1317,7 @@ impl TabManager {
             .child(render_tab_identity(
                 tab_id,
                 identity,
+                status,
                 close_clearance,
                 appearance,
             ))
@@ -1343,6 +1374,7 @@ impl TabManager {
         &self,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
+        window: &Window,
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
@@ -1384,6 +1416,7 @@ impl TabManager {
                     presentation,
                     manager.clone(),
                     appearance,
+                    window,
                     cx,
                 )
                 .children(leading_separator),
@@ -1487,7 +1520,7 @@ impl Render for TabManager {
         let appearance = super::appearance::chrome(cx);
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
-        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
+        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
 
@@ -1612,24 +1645,20 @@ fn render_tab_separator(
         .into_any_element()
 }
 
-/// One Tab's identity: its origin glyph, what it presents in words, and its Pane count.
+/// One Tab's identity: `<status glyph> <activity> · <place>`.
 ///
-/// The glyph and the count are the two segments a Tab never gives up. Only the words in between
-/// narrow, and they narrow in order of how little they identify the Tab.
+/// The status glyph is the segment a Tab never gives up. Only the words after it narrow: the
+/// activity first, then the place.
 fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
+    status: crate::appearance::StatusPaint,
     close_clearance: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let origin_location = if identity.remote { "remote" } else { "local" };
-    let separator = |appearance: &super::appearance::ChromeAppearance| {
-        div()
-            .flex_shrink_0()
-            .mx(appearance.spacing(4.0))
-            .child("·")
-            .into_any_element()
-    };
+    let icon_size = appearance.spacing(TAB_ORIGIN_ICON_SIZE);
+    let has_place = !identity.place.is_empty();
     let mut words = div()
         .id(("tab-identity", tab_id.get()))
         .debug_selector(move || format!("tab-identity-{}", tab_id.get()))
@@ -1638,44 +1667,37 @@ fn render_tab_identity(
         .flex()
         .flex_row()
         .items_center()
-        .overflow_hidden();
-    // The account leads the Tab. Local Sessions show their user; Remote Sessions include the host
-    // as `user@host` so the same position answers both who and where.
-    if !identity.account.is_empty() {
-        words = words
-            .child(
-                div()
-                    .debug_selector(move || format!("tab-account-{}", tab_id.get()))
-                    .flex_shrink_0()
-                    .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
-                    .truncate()
-                    .child(identity.account.clone()),
-            )
-            .when(!identity.place.is_empty(), |words| {
-                words.child(separator(appearance))
-            });
-    }
-    if !identity.place.is_empty() {
-        words = words.child(
+        .overflow_hidden()
+        .child(
             div()
-                .debug_selector(move || format!("tab-place-{}", tab_id.get()))
+                .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
                 .flex_shrink_0()
-                .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                .min_w_0()
+                .when(has_place, |activity| {
+                    activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
+                })
                 .truncate()
-                .child(identity.place.clone()),
+                .child(if identity.activity.is_empty() {
+                    gpui::SharedString::from("Terminal")
+                } else {
+                    identity.activity.clone()
+                }),
         );
-    }
-    if !identity.activity.is_empty() {
-        let leads = identity.place.is_empty() && identity.account.is_empty();
+    if has_place {
         words = words
-            .when(!leads, |words| words.child(separator(appearance)))
             .child(
                 div()
-                    .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
-                    .flex_1()
+                    .flex_shrink_0()
+                    .mx(appearance.spacing(TAB_TRAILING_GAP))
+                    .child("·"),
+            )
+            .child(
+                div()
+                    .debug_selector(move || format!("tab-place-{}", tab_id.get()))
+                    .flex_shrink()
                     .min_w_0()
                     .truncate()
-                    .child(identity.activity.clone()),
+                    .child(identity.place.clone()),
             );
     }
 
@@ -1689,17 +1711,8 @@ fn render_tab_identity(
         .flex()
         .flex_row()
         .items_center()
-        // Attention belongs to the Tab rather than to any one segment of its name, so it leads the
-        // row and survives every narrowing, exactly as the origin glyph does.
-        .when(identity.attention, |item| {
-            item.child(
-                div()
-                    .debug_selector(move || format!("tab-attention-{}", tab_id.get()))
-                    .flex_shrink_0()
-                    .mr(appearance.spacing(TAB_TRAILING_GAP))
-                    .child("•"),
-            )
-        })
+        // Status belongs to the Tab rather than to any one segment of its name, so the terminal glyph
+        // that leads the row carries it and survives every narrowing.
         .child(
             div()
                 .debug_selector(move || format!("tab-origin-{}-{origin_location}", tab_id.get()))
@@ -1707,24 +1720,26 @@ fn render_tab_identity(
                 .mr(appearance.spacing(TAB_ORIGIN_GAP))
                 .flex()
                 .items_center()
-                .child(Icon::inherited(
-                    IconName::Terminal,
-                    appearance.spacing(TAB_ORIGIN_ICON_SIZE),
-                )),
+                .child(
+                    StatusGlyph {
+                        icon: IconName::Terminal,
+                        reported: identity.glyph,
+                        size: icon_size,
+                        progress: identity.progress,
+                        attention: identity.attention,
+                        id: ("tab-status", tab_id.get()).into(),
+                        selector_prefix: format!("tab-status-{}", tab_id.get()),
+                        colors: StatusColors {
+                            attention: gpui_color(status.attention),
+                            busy: gpui_color(status.busy),
+                            error: gpui_color(status.error),
+                            paused: gpui_color(status.paused),
+                        },
+                    }
+                    .render(),
+                ),
         )
         .child(words)
-        .when_some(identity.pane_badge(), |item, badge| {
-            item.child(
-                div()
-                    .debug_selector(move || format!("tab-pane-count-{}", tab_id.get()))
-                    .flex_shrink_0()
-                    .ml(appearance.spacing(TAB_TRAILING_GAP))
-                    // The count is a fact about the Tab rather than part of its name, so it reads
-                    // one step back from the title without taking a color of its own.
-                    .opacity(0.7)
-                    .child(badge),
-            )
-        })
         .into_any_element()
 }
 
@@ -2369,8 +2384,8 @@ mod tests {
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        RemoteChannelUnavailable, RemoteTerminalChannelProvider, ScreenSnapshot, SessionEvent,
-        SessionExit, TerminalSessionFactory,
+        RemoteChannelUnavailable, RemoteTerminalChannelProvider, SessionEvent, SessionExit,
+        SessionFailure, TerminalSessionFactory,
     };
     use crate::ui::TogglePaneZoom;
 
@@ -3354,63 +3369,84 @@ mod tests {
         );
     }
 
+    /// The Tab's activity prefers an explicit Terminal title, then the running command, then the
+    /// fallback title, and is followed by the Current Directory leaf.
     #[gpui::test]
-    fn single_pane_tab_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
+    fn tab_title_should_present_the_terminal_title_or_running_command_then_the_directory_leaf(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
         let (manager, records, cx) = tab_manager(cx);
-        let sender = records
-            .event_sender(1)
-            .expect("the initial Tab session must have started");
+        let tab_title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title()
+            })
+        };
 
-        sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                Default::default(),
-                "Claude Code",
-            )))
-            .unwrap();
-        cx.run_until_parked();
-
-        let title = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_title()
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from("/tmp/api");
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
         });
-        assert_eq!(title.as_ref(), "Terminal · Claude Code");
+        cx.run_until_parked();
+        assert_eq!(tab_title(cx).as_ref(), "cargo test · api");
+
+        report_metadata(&records, 1, 2, |metadata| {
+            metadata.directory.path = Arc::from("/tmp/api");
+            metadata.title.value = Arc::from("✳ Opaque ⠋ title");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+        });
+        cx.run_until_parked();
+        // The glyph the program draws at the front goes; the rest of its title stays opaque.
+        assert_eq!(tab_title(cx).as_ref(), "Opaque ⠋ title · api");
+
+        report_metadata(&records, 1, 3, |metadata| {
+            metadata.directory.path = Arc::from("/tmp/api");
+        });
+        cx.run_until_parked();
+        assert_eq!(tab_title(cx).as_ref(), "Terminal · api");
     }
 
     #[gpui::test]
-    fn split_tab_title_should_show_the_count_and_restore_the_terminal_title_after_close(
+    fn split_tab_title_should_follow_the_focused_pane_without_a_pane_count(
         cx: &mut TestAppContext,
     ) {
+        use crate::terminal::metadata::TitleProvenance;
         let (manager, records, cx) = tab_manager(cx);
-        let sender = records
-            .event_sender(1)
-            .expect("the initial Tab session must have started");
-        sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                Default::default(),
-                "Claude Code",
-            )))
-            .unwrap();
+        let tab_title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title()
+            })
+        };
+        // A reported directory would become the split's inherited, locally validated directory.
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.title.value = Arc::from("editor");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
         cx.run_until_parked();
 
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
-        let split_title = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_title()
+        report_metadata(&records, 2, 1, |metadata| {
+            metadata.directory.path = Arc::from("/tmp/second");
         });
+        cx.run_until_parked();
+        let split_title = tab_title(cx);
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
-        let restored_title = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_title()
-        });
+        let restored_title = tab_title(cx);
 
         assert_eq!(
             (split_title.as_ref(), restored_title.as_ref()),
-            (
-                "spaceterm-tab-manager-test · Terminal · 2P",
-                "Terminal · Claude Code"
-            )
+            ("Terminal · second", "editor")
         );
+        assert!(cx.debug_bounds("tab-pane-count-1").is_none());
     }
 
     #[gpui::test]
@@ -3450,67 +3486,354 @@ mod tests {
         );
     }
 
-    /// A Tab keeps the two segments its words cannot replace: where the Session runs, and whether
-    /// the Tab holds more than one Pane.
     #[gpui::test]
-    fn tab_should_lead_with_an_origin_glyph_and_trail_its_pane_count(cx: &mut TestAppContext) {
-        let (_manager, records, cx) = tab_manager(cx);
-        let sender = records
-            .event_sender(1)
-            .expect("the initial Tab session must have started");
-        sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                Default::default(),
-                "Claude Code",
-            )))
-            .unwrap();
+    fn tab_activity_without_a_place_should_use_the_full_identity_width(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, records, cx) = tab_manager(cx);
+        let activity = "long-activity-name-that-needs-the-full-tab-identity-width";
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from(format!("/tmp/{activity}"));
+            metadata.title.value = Arc::from(activity);
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
         cx.run_until_parked();
 
-        let origin = cx
-            .debug_bounds("tab-origin-1-local")
-            .expect("a single-Pane Tab should lead with its origin glyph");
-        let words = cx
-            .debug_bounds("tab-place-1")
-            .expect("the Tab should present what its Session identifies as");
+        let place = manager.read_with(cx, |manager, cx| {
+            manager
+                .tabs
+                .active_tab()
+                .read(cx)
+                .tab_identity()
+                .place
+                .clone()
+        });
+        let identity = cx.debug_bounds("tab-identity-1").unwrap();
+        let activity = cx.debug_bounds("tab-activity-1").unwrap();
+        assert!(place.is_empty(), "expected no place, got {place:?}");
         assert!(
-            cx.debug_bounds("tab-pane-count-1").is_none(),
-            "a single-Pane Tab should carry no count"
+            activity.size.width > identity.size.width * 0.9,
+            "place-less activity should fill its identity: {activity:?} {identity:?}"
         );
-        assert!(origin.right() <= words.left());
-
-        cx.simulate_keystrokes("cmd-d");
-        cx.run_until_parked();
-
-        let origin = cx
-            .debug_bounds("tab-origin-1-local")
-            .expect("a multi-Pane Tab should keep its origin glyph");
-        let count = cx
-            .debug_bounds("tab-pane-count-1")
-            .expect("a multi-Pane Tab should carry a terse count");
-        // The glyph leads and the count trails the words, so neither competes with the Tab's name
-        // for room. Revealing Close clips this identity without moving the absolute control.
-        assert!(origin.right() <= count.left());
-        assert!(origin.size.width > px(0.0) && count.size.width > px(0.0));
     }
 
-    /// A narrow Tab gives up its words before it gives up its glyph, its count, or its close
-    /// control, so every Tab stays identifiable and closable at the narrowest width.
+    /// A Tab reads `<status glyph> <activity> · <place>`, and neither the account, the Workspace
+    /// name, nor a Pane count competes with those segments for room.
     #[gpui::test]
-    fn narrow_tabs_should_keep_glyph_count_and_close_reachable(cx: &mut TestAppContext) {
-        let (_manager, records, cx) = tab_manager(cx);
-        let sender = records
+    fn tab_should_present_status_glyph_activity_and_place_in_order(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
+        let (manager, records, cx) = tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from("/tmp/api");
+            metadata.title.value = Arc::from("agent");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.progress = ProgressMetadata::Normal(40);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-alt-left");
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager.tabs.active_tab().update(cx, |host, cx| {
+                host.set_test_attention(PaneId::new(2), 1, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let attention = cx
+            .debug_bounds("tab-status-1-attention")
+            .expect("a Tab whose Pane has unread attention should blink its glyph");
+        let progress = cx
+            .debug_bounds("tab-status-1-normal")
+            .expect("the Tab should present its reported progress");
+        let origin = cx
+            .debug_bounds("tab-origin-1-local")
+            .expect("the Tab should carry its terminal glyph");
+        let activity = cx.debug_bounds("tab-activity-1").unwrap();
+        let place = cx.debug_bounds("tab-place-1").unwrap();
+        let glyph =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        // Attention and progress are the terminal glyph itself, not separate marks beside it.
+        for status in [attention, progress] {
+            assert_eq!(status.size, gpui::size(glyph, glyph));
+            assert!(
+                status.left() >= origin.left() && status.right() <= origin.right(),
+                "{status:?} should sit on the glyph {origin:?}"
+            );
+        }
+        for (leading, trailing) in [(origin, activity), (activity, place)] {
+            assert!(
+                leading.right() <= trailing.left(),
+                "{leading:?} should precede {trailing:?}"
+            );
+        }
+        assert!(cx.debug_bounds("tab-pane-count-1").is_none());
+        assert!(cx.debug_bounds("tab-account-1").is_none());
+
+        // A single-Pane Tab carries the same mark as the Pane Caption under it.
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager.tabs.active_tab().update(cx, |host, cx| {
+                host.set_test_attention(PaneId::new(1), 1, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-status-1-attention").is_some());
+        assert!(cx.debug_bounds("pane-status-1-attention").is_some());
+    }
+
+    /// A program that draws its own glyph gets that glyph in the Session's slot, not beside it.
+    #[gpui::test]
+    fn local_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        assert_reported_glyph(&manager, &records, false, cx);
+    }
+
+    #[gpui::test]
+    fn remote_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        assert_reported_glyph(&manager, &records, true, cx);
+    }
+
+    #[gpui::test]
+    fn remote_disconnect_should_clear_cached_pane_and_tab_progress(cx: &mut TestAppContext) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::ProgressMetadata;
+
+        let (manager, records, cx) = remote_tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.progress = ProgressMetadata::Indeterminate;
+        });
+        cx.run_until_parked();
+
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| {
+                let host = manager.tabs.active_tab().read(cx);
+                (host.cached_focused_progress(), host.tab_identity().progress)
+            }),
+            (TerminalProgress::None, TerminalProgress::None)
+        );
+    }
+
+    #[gpui::test]
+    fn fatal_failure_should_clear_cached_pane_and_tab_progress(cx: &mut TestAppContext) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::ProgressMetadata;
+
+        let (manager, records, cx) = tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.progress = ProgressMetadata::Normal(45);
+        });
+        cx.run_until_parked();
+        records
             .event_sender(1)
-            .expect("the initial Tab session must have started");
-        sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                Default::default(),
-                "a terminal title long enough to need truncating in a narrow Tab",
+            .unwrap()
+            .try_send(SessionEvent::Failed(SessionFailure::Runtime(
+                "worker stopped".to_owned(),
             )))
             .unwrap();
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-d");
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| {
+                let host = manager.tabs.active_tab().read(cx);
+                (host.cached_focused_progress(), host.tab_identity().progress)
+            }),
+            (TerminalProgress::None, TerminalProgress::None)
+        );
+    }
+
+    fn assert_reported_glyph(
+        manager: &Entity<TabManager>,
+        records: &TestTerminalSessionRecords,
+        remote: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let identity = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            })
+        };
+        let report = |records: &TestTerminalSessionRecords,
+                      generation: u64,
+                      title: &'static str,
+                      cx: &mut VisualTestContext| {
+            report_metadata(records, 1, generation, move |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                if remote {
+                    metadata.context = remote_metadata_context("/srv/app");
+                }
+                metadata.title.value = Arc::from(title);
+                metadata.title.provenance = TitleProvenance::TerminalControl;
+            });
+            cx.run_until_parked();
+        };
+
+        report(records, 1, "\u{2733} Claude Code", cx);
+        let reported = identity(cx);
+        assert_eq!(
+            (
+                reported.remote,
+                reported.glyph.as_ref().map(|glyph| glyph.as_ref()),
+                reported.activity.as_ref()
+            ),
+            (remote, Some("\u{2733}"), "Claude Code")
+        );
+        // The Tab carries one glyph, in the slot the Session's own glyph would have taken.
+        let origin = if remote {
+            "tab-origin-1-remote"
+        } else {
+            "tab-origin-1-local"
+        };
+        let glyph =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        assert_eq!(
+            cx.debug_bounds(origin)
+                .expect("the Tab lost its glyph")
+                .size,
+            gpui::size(glyph, glyph)
+        );
+
+        // A title without a glyph leaves the Session with its own.
+        report(records, 2, "cargo test", cx);
+        let plain = identity(cx);
+        assert_eq!(
+            (
+                plain.glyph.as_ref().map(|glyph| glyph.as_ref()),
+                plain.activity.as_ref()
+            ),
+            (None, "cargo test")
+        );
+    }
+
+    /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane
+    /// Caption, independently of the title, and removing the status leaves no mark.
+    #[gpui::test]
+    fn local_progress_should_present_each_state_in_tab_and_caption(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        assert_progress_states(&manager, &records, false, cx);
+    }
+
+    #[gpui::test]
+    fn remote_progress_should_present_each_state_in_tab_and_caption(cx: &mut TestAppContext) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        assert_progress_states(&manager, &records, true, cx);
+    }
+
+    fn assert_progress_states(
+        manager: &Entity<TabManager>,
+        records: &TestTerminalSessionRecords,
+        remote: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
+        let states = [
+            (
+                ProgressMetadata::Normal(55),
+                TerminalProgress::Normal(55),
+                Some(["tab-status-1-normal", "pane-status-1-normal"]),
+            ),
+            (
+                ProgressMetadata::Indeterminate,
+                TerminalProgress::Indeterminate,
+                Some(["tab-status-1-indeterminate", "pane-status-1-indeterminate"]),
+            ),
+            (
+                ProgressMetadata::Error(10),
+                TerminalProgress::Error,
+                Some(["tab-status-1-error", "pane-status-1-error"]),
+            ),
+            (
+                ProgressMetadata::Paused(20),
+                TerminalProgress::Paused,
+                Some(["tab-status-1-paused", "pane-status-1-paused"]),
+            ),
+            (ProgressMetadata::None, TerminalProgress::None, None),
+        ];
+        for (generation, (progress, presented, selectors)) in (1..).zip(states) {
+            report_metadata(records, 1, generation, |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                if remote {
+                    metadata.context = remote_metadata_context("/srv/app");
+                }
+                metadata.title.value = Arc::from("build");
+                metadata.title.provenance = TitleProvenance::TerminalControl;
+                metadata.progress = progress;
+            });
+            cx.run_until_parked();
+            // Progress is presented in the glyph and never replaces the title.
+            let identity = manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            });
+            assert_eq!(
+                (
+                    identity.remote,
+                    identity.progress,
+                    identity.activity.as_ref()
+                ),
+                (remote, presented, "build")
+            );
+            // A rendered frame keeps no record of what it stopped drawing, so rendering is checked
+            // for presence only; the typed identity above covers removal.
+            for selector in selectors.into_iter().flatten() {
+                assert!(
+                    cx.debug_bounds(selector).is_some(),
+                    "remote={remote} {selector} {progress:?}"
+                );
+            }
+        }
+    }
+
+    /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.
+    #[gpui::test]
+    fn background_tab_should_follow_retained_title_and_progress(cx: &mut TestAppContext) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        records.report_metadata(1, |metadata| {
+            metadata.title.value = Arc::from("agent");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.progress = ProgressMetadata::Error(0);
+        });
+        cx.run_until_parked();
+
+        let identity = manager.read_with(cx, |manager, cx| {
+            manager
+                .tabs
+                .iter()
+                .find(|(tab_id, _)| *tab_id == TabId::new(1))
+                .map(|(_, host)| host.read(cx).tab_identity())
+                .unwrap()
+        });
+        assert_eq!(
+            (identity.activity.as_ref(), identity.progress),
+            ("agent", TerminalProgress::Error)
+        );
+        assert!(cx.debug_bounds("tab-item-1-inactive").is_some());
+        assert!(cx.debug_bounds("tab-status-1-error").is_some());
+    }
+
+    /// A narrow Tab gives up its words before it gives up its status glyph or its close control,
+    /// so every Tab stays identifiable and closable at the narrowest width.
+    #[gpui::test]
+    fn narrow_tabs_should_keep_status_glyph_and_close_reachable(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
+        let (_manager, records, cx) = tab_manager(cx);
+        report_metadata(&records, 1, 1, |metadata| {
+            metadata.title.value =
+                Arc::from("a terminal title long enough to need truncating in a narrow Tab");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.progress = ProgressMetadata::Indeterminate;
+        });
         cx.run_until_parked();
         for _ in 0..6 {
             click("create-tab-button", cx);
@@ -3523,9 +3846,9 @@ mod tests {
         let origin = cx
             .debug_bounds("tab-origin-1-local")
             .expect("a narrowed Tab should keep its origin glyph");
-        let count = cx
-            .debug_bounds("tab-pane-count-1")
-            .expect("a narrowed Tab should keep its Pane count");
+        let progress = cx
+            .debug_bounds("tab-status-1-indeterminate")
+            .expect("a narrowed Tab should keep its status");
         let close = cx
             .debug_bounds("tab-close-button-1")
             .expect("a narrowed Tab should keep its close control");
@@ -3536,7 +3859,7 @@ mod tests {
             item.size.width >= minimum,
             "got {item:?} against {minimum:?}"
         );
-        for segment in [origin, count, close] {
+        for segment in [origin, progress, close] {
             assert!(
                 segment.left() >= item.left() && segment.right() <= item.right(),
                 "{segment:?} should stay inside its Tab {item:?}"
@@ -4552,22 +4875,39 @@ mod tests {
         directory: &str,
         remote: bool,
     ) {
+        report_metadata(records, session, generation, |metadata| {
+            metadata.directory.path = Arc::from(directory);
+            if remote {
+                metadata.context = remote_metadata_context(directory);
+            }
+        });
+    }
+
+    fn remote_metadata_context(
+        directory: &str,
+    ) -> crate::terminal::metadata::TerminalMetadataContext {
+        crate::terminal::metadata::TerminalMetadataContext::Remote(
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
+                crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
+            ),
+        )
+    }
+
+    /// Delivers one Screen whose sanitized Terminal Metadata the caller shapes.
+    fn report_metadata(
+        records: &TestTerminalSessionRecords,
+        session: usize,
+        generation: u64,
+        change: impl FnOnce(&mut crate::terminal::metadata::TerminalMetadataSnapshot),
+    ) {
         let mut screen = crate::terminal::ScreenSnapshot::from_test_parts_at(
             Arc::from([]),
             crate::terminal::ScrollbarSnapshot::default(),
             "terminal",
             generation,
         );
-        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
-        metadata.directory.path = Arc::from(directory);
-        if remote {
-            metadata.context = crate::terminal::metadata::TerminalMetadataContext::Remote(
-                crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                    crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
-                    crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
-                ),
-            );
-        }
+        change(Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata));
         records
             .event_sender(session)
             .unwrap()
