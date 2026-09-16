@@ -75,17 +75,33 @@ pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
     if !is_glyph_word(first) {
         return plain;
     }
-    let words = rest
-        .trim_start_matches(|character: char| {
-            character.is_whitespace() || TITLE_SEPARATOR_CHARS.contains(character)
-        })
-        .trim_end();
+    let words = title_words_after_glyph(rest);
     if words.is_empty() {
         return plain;
     }
     ReportedTitle {
         glyph: is_drawable_glyph(first).then_some(first),
         words,
+    }
+}
+
+/// Removes whitespace and one standalone delimiter token after a reported glyph.
+///
+/// Punctuation attached to the next opaque word is content, such as `--help` or `:memory`.
+fn title_words_after_glyph(rest: &str) -> &str {
+    let words = rest.trim_start();
+    let Some(split) = words.find(char::is_whitespace) else {
+        return words.trim_end();
+    };
+    let (first, remainder) = words.split_at(split);
+    if first.chars().count() == 1
+        && first
+            .chars()
+            .all(|character| TITLE_SEPARATOR_CHARS.contains(character))
+    {
+        remainder.trim()
+    } else {
+        words.trim_end()
     }
 }
 
@@ -572,6 +588,8 @@ mod tests {
                 Some("\u{2058}"),
                 "diy-nucleus-clients",
             ),
+            ("\u{3c0} --help", Some("\u{3c0}"), "--help"),
+            ("\u{2733} :memory", Some("\u{2733}"), ":memory"),
             // Marks belong to the glyph they follow.
             (
                 "\u{2733}\u{fe0f} Claude Code",
