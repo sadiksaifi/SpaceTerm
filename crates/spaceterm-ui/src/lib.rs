@@ -20,6 +20,7 @@ mod middle_truncated_text;
 mod modal;
 mod overlay_scrollbar;
 mod resize_handle;
+mod search_field;
 mod segmented_control;
 mod text_input;
 mod toggle;
@@ -89,6 +90,7 @@ pub use resize_handle::{
     ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme, ResizeInputSource,
     ResizeInteractionId,
 };
+pub use search_field::{SearchField, SearchFieldMetrics, SearchFieldPaint, SearchFieldTheme};
 pub use segmented_control::{
     MAXIMUM_SEGMENTED_OPTIONS, SegmentedActivationSource, SegmentedBuildError, SegmentedChange,
     SegmentedControl, SegmentedControlTheme, SegmentedMetrics, SegmentedOption, SegmentedPaint,
@@ -153,6 +155,7 @@ pub struct ControlThemeCatalog {
     scrollbar: ScrollbarTheme,
     resize_handle: ResizeHandleTheme,
     segmented_control: SegmentedControlTheme,
+    search_field: SearchFieldTheme,
     menu: MenuTheme,
     command_palette: CommandPaletteTheme,
     combo_box: ComboBoxTheme,
@@ -212,6 +215,7 @@ impl ControlThemeCatalog {
         scrollbar: ScrollbarTheme,
         resize_handle: ResizeHandleTheme,
         segmented_control: SegmentedControlTheme,
+        search_field: SearchFieldTheme,
         menu: MenuTheme,
         command_palette: CommandPaletteTheme,
         combo_box: ComboBoxTheme,
@@ -227,6 +231,7 @@ impl ControlThemeCatalog {
             scrollbar,
             resize_handle,
             segmented_control,
+            search_field,
             menu,
             command_palette,
             combo_box,
@@ -271,6 +276,7 @@ impl ControlThemeCatalog {
         self.segmented_control = self
             .segmented_control
             .scaled_metrics(text_scale, spacing_scale);
+        self.search_field = self.search_field.scaled_metrics(text_scale, spacing_scale);
         self.menu = self.menu.scaled_metrics(text_scale, spacing_scale);
         self.command_palette = self
             .command_palette
@@ -334,6 +340,7 @@ fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.scrollbar);
     cx.set_global(catalog.resize_handle);
     cx.set_global(catalog.segmented_control);
+    cx.set_global(catalog.search_field);
     cx.set_global(catalog.menu);
     cx.set_global(catalog.command_palette);
     cx.set_global(catalog.combo_box);

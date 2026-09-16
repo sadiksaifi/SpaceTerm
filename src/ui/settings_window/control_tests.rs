@@ -276,8 +276,9 @@ fn unmatched_search_skips_navigation_and_reaches_the_footer(cx: &mut TestAppCont
     cx.simulate_input("no matching setting");
     cx.run_until_parked();
 
-    // Clear search remains reachable, then the footer action follows the empty detail pane.
-    cx.simulate_keystrokes("tab tab");
+    // The in-field clear mark follows the native search-field convention and is not a separate
+    // traversal stop, so the footer action follows the empty detail pane directly.
+    cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
     cx.simulate_keystrokes("enter");
@@ -300,8 +301,9 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
         "search should land on the first section that can answer it"
     );
 
-    // A populated search exposes its Clear search button before the navigation list.
-    cx.simulate_keystrokes("tab tab");
+    // The in-field clear mark is pointer-only; Escape clears from the keyboard, while Tab moves
+    // directly into the navigation list.
+    cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
 
