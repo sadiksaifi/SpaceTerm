@@ -51,6 +51,19 @@ impl MacosApplicationQuitAdapter {
             state: Rc::new(ApplicationQuitState::new()),
         }
     }
+
+    unsafe fn install_on_delegate(
+        &self,
+        delegate: id,
+        handler: ApplicationQuitHandler,
+    ) -> Result<(), ApplicationQuitError> {
+        unsafe {
+            install_should_terminate_method(delegate)?;
+            retain_state(delegate, Rc::clone(&self.state))?;
+        }
+        *self.state.handler.borrow_mut() = Some(handler);
+        Ok(())
+    }
 }
 
 impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
@@ -74,10 +87,8 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
             if delegate == nil {
                 return Err(ApplicationQuitError::DelegateUnavailable);
             }
-            install_should_terminate_method(delegate)?;
-            retain_state(delegate, Rc::clone(&self.state))?;
+            self.install_on_delegate(delegate, handler)?;
         }
-        *self.state.handler.borrow_mut() = Some(handler);
         Ok(())
     }
 
@@ -222,6 +233,68 @@ extern "C" fn should_terminate(this: &Object, _: Sel, _: id) -> NSInteger {
         match decision {
             ApplicationQuitDecision::Proceed => NS_TERMINATE_NOW,
             ApplicationQuitDecision::Cancel => NS_TERMINATE_CANCEL,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "macos-native-tests"))]
+mod tests {
+    use std::sync::OnceLock;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    fn test_delegate_class() -> &'static Class {
+        static CLASS: OnceLock<&'static Class> = OnceLock::new();
+        CLASS.get_or_init(|| {
+            ClassDecl::new("SpaceTermApplicationQuitTestDelegate", class!(NSObject))
+                .expect("unique test delegate class")
+                .register()
+        })
+    }
+
+    #[gpui::test]
+    fn native_hook_cancels_policy_then_consumes_one_confirmation(cx: &mut TestAppContext) {
+        let adapter = MacosApplicationQuitAdapter::new();
+        let requests = Rc::new(Cell::new(0));
+        let recorded_requests = Rc::clone(&requests);
+        let handler = cx.update(|cx| {
+            ApplicationQuitHandler::new(
+                cx,
+                Rc::new(move |_| {
+                    recorded_requests.set(recorded_requests.get() + 1);
+                    ApplicationQuitDecision::Cancel
+                }),
+            )
+        });
+        // SAFETY: The test owns this NSObject subclass instance and releases it after all
+        // synchronous selector calls. install_on_delegate registers the production selector and
+        // retains the production associated-state holder for exactly that lifetime.
+        let delegate: id = unsafe { msg_send![test_delegate_class(), new] };
+        unsafe {
+            adapter
+                .install_on_delegate(delegate, handler)
+                .expect("native quit hook should install");
+        }
+
+        // SAFETY: install_on_delegate added applicationShouldTerminate: with this exact signature.
+        let cancelled: NSInteger = unsafe { msg_send![delegate, applicationShouldTerminate: nil] };
+        assert_eq!(cancelled, NS_TERMINATE_CANCEL);
+        assert_eq!(requests.get(), 1);
+
+        cx.update(|cx| adapter.confirm_quit(cx));
+        // SAFETY: The delegate and installed selector remain live until the final release below.
+        let confirmed: NSInteger = unsafe { msg_send![delegate, applicationShouldTerminate: nil] };
+        let cancelled_again: NSInteger =
+            unsafe { msg_send![delegate, applicationShouldTerminate: nil] };
+
+        assert_eq!(confirmed, NS_TERMINATE_NOW);
+        assert_eq!(cancelled_again, NS_TERMINATE_CANCEL);
+        assert_eq!(requests.get(), 2);
+        // SAFETY: new returned one owned retain, and no code uses delegate after this release.
+        unsafe {
+            let _: () = msg_send![delegate, release];
         }
     }
 }
