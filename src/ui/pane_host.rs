@@ -93,7 +93,7 @@ const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
 /// size they share. This applies to the Pane Caption's close control alone.
 const PANE_CLOSE_ICON_SIZE: f32 = 16.75;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
-/// The origin glyph, which a caption presenting a status keeps at every width.
+/// The origin glyph, which every Pane Caption keeps at every width.
 const PANE_STATUS_WIDTH: f32 = PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CAPTION_RIGHT_PADDING
@@ -124,8 +124,8 @@ impl PaneCaptionAction {
 /// Which caption segments this frame's Pane width can hold.
 ///
 /// The Pane name is never dropped. Segments leave in order of how little they identify the Pane:
-/// the running label first, then the account, then the leading directory, then the machine, and
-/// last the origin icon, so the narrowest Pane still names the directory it sits in.
+/// the running label first, then the account, then the leading directory, and then the machine.
+/// The origin glyph is fixed, so the narrowest Pane still carries exactly one glyph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaptionLayout {
     show_origin: bool,
@@ -137,12 +137,11 @@ struct CaptionLayout {
 }
 
 /// How many caption segments beyond the Pane name a narrowing caption can give up.
-const CAPTION_LADDER: usize = 5;
+const CAPTION_LADDER: usize = 4;
 
 /// Rendered widths of the caption segments, each including the separator that precedes it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CaptionMetrics {
-    origin_icon: Pixels,
     user: Pixels,
     host: Pixels,
     directory: Pixels,
@@ -158,11 +157,6 @@ impl CaptionMetrics {
     ) -> Self {
         let host = measure_caption_segment(&text.origin.host, window, appearance);
         Self {
-            origin_icon: if text.origin.is_empty() {
-                px(0.0)
-            } else {
-                appearance.spacing(PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP)
-            },
             user: if text.origin.user.is_empty() {
                 px(0.0)
             } else {
@@ -186,13 +180,7 @@ impl CaptionMetrics {
 
     /// The droppable segments in the order a narrowing caption gives them up, last one first.
     const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
-        [
-            self.origin_icon,
-            self.host,
-            self.directory,
-            self.user,
-            self.label,
-        ]
+        [self.host, self.directory, self.user, self.label]
     }
 }
 
@@ -204,7 +192,6 @@ impl CaptionLayout {
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         Self::from_metrics(
-            caption.attention || caption.text.progress != TerminalProgress::None,
             caption.has_multiple_panes,
             width,
             CaptionMetrics::measure(&caption.text, window, appearance),
@@ -213,21 +200,15 @@ impl CaptionLayout {
     }
 
     fn from_metrics(
-        status: bool,
         has_multiple_panes: bool,
         width: Pixels,
-        mut metrics: CaptionMetrics,
+        metrics: CaptionMetrics,
         spacing_scale: f32,
     ) -> Self {
-        // The origin glyph carries the status, so a glyph with one leaves the ladder for the fixed row.
-        if status {
-            metrics.origin_icon = px(0.0);
-        }
         let full_control_count = if has_multiple_panes { 4 } else { 2 };
-        let fixed_width = (PANE_CAPTION_LEFT_PADDING
-            + PANE_CAPTION_RIGHT_PADDING
-            + if status { PANE_STATUS_WIDTH } else { 0.0 })
-            * spacing_scale;
+        let fixed_width =
+            (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_WIDTH)
+                * spacing_scale;
         let show_splits = width
             >= px(fixed_width
                 + (PANE_CONTROL_LEADING_GAP + controls_width(full_control_count)) * spacing_scale);
@@ -251,15 +232,9 @@ impl CaptionLayout {
             claimed += width;
             *admitted = true;
         }
-        let [
-            show_origin_row,
-            show_host,
-            show_directory,
-            show_user,
-            show_label,
-        ] = shown;
+        let [show_host, show_directory, show_user, show_label] = shown;
         Self {
-            show_origin: show_origin_row || status,
+            show_origin: true,
             show_host,
             show_directory,
             show_user,
@@ -2112,22 +2087,14 @@ fn render_pane_caption_content(
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .when(
-                    layout.show_origin
-                        && (attention
-                            || text.progress != TerminalProgress::None
-                            || !text.origin.is_empty()),
-                    |row| {
-                        row.child(render_pane_origin(
-                            pane_id,
-                            &text.origin,
-                            layout,
-                            (text.progress, text.glyph.clone(), attention),
-                            &paint,
-                            appearance,
-                        ))
-                    },
-                )
+                .child(render_pane_origin(
+                    pane_id,
+                    &text.origin,
+                    layout,
+                    (text.progress, text.glyph.clone(), attention),
+                    &paint,
+                    appearance,
+                ))
                 .when(layout.show_directory && !text.directory.is_empty(), |row| {
                     row.child(
                         div()
@@ -3502,17 +3469,16 @@ mod tests {
     #[test]
     fn narrowing_a_caption_should_give_up_its_segments_in_identity_order() {
         let metrics = CaptionMetrics {
-            origin_icon: px(18.0),
             user: px(40.0),
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
             label: px(30.0),
         };
-        let resolve =
-            |width: f32| CaptionLayout::from_metrics(false, false, px(width), metrics, 1.0);
+        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2);
         let layout = |origin, host, directory, user, label| CaptionLayout {
@@ -3525,52 +3491,48 @@ mod tests {
         };
 
         assert_eq!(
-            resolve(controls + 310.0),
+            resolve(controls + 291.0),
             layout(true, true, true, true, true)
         );
         assert_eq!(
-            resolve(controls + 280.0),
+            resolve(controls + 261.0),
             layout(true, true, true, true, false)
         );
         assert_eq!(
-            resolve(controls + 240.0),
+            resolve(controls + 221.0),
             layout(true, true, true, false, false)
         );
         assert_eq!(
-            resolve(controls + 120.0),
+            resolve(controls + 101.0),
             layout(true, true, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 60.0),
+            resolve(controls + 41.0),
             layout(true, false, false, false, false)
         );
         assert_eq!(
-            resolve(controls + 50.0),
-            layout(false, false, false, false, false)
+            resolve(controls + 39.0),
+            layout(true, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
     }
 
-    /// A glyph presenting a status stays at any width the controls fit in.
+    /// A Pane Caption keeps its one glyph at any supported width, even without status.
     #[test]
-    fn caption_layout_should_keep_a_status_glyph_when_narrow() {
+    fn caption_layout_should_keep_its_glyph_when_narrow_without_status() {
         let metrics = CaptionMetrics {
-            origin_icon: px(20.0),
             name: px(40.0),
             ..CaptionMetrics::default()
         };
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2);
-        let resolve = |status, width: f32| {
-            CaptionLayout::from_metrics(status, false, px(width), metrics, 1.0)
-        };
+        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
 
-        let narrow = resolve(false, controls + 10.0);
-        assert!(!narrow.show_origin && narrow.show_splits);
-        let narrow_status = resolve(true, controls + PANE_STATUS_WIDTH + 10.0);
-        assert!(narrow_status.show_origin && narrow_status.show_splits);
+        let narrow = resolve(controls + 10.0);
+        assert!(narrow.show_origin && narrow.show_splits);
     }
 
     #[gpui::test]

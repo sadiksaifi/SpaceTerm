@@ -4225,10 +4225,6 @@ impl PaneOrigin {
             },
         }
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.user.is_empty() && self.host.is_empty()
-    }
 }
 
 /// Drops the multicast DNS suffix a host may append to a machine name.
