@@ -1701,6 +1701,7 @@ fn render_tab_identity(
                 .child(
                     StatusGlyph {
                         icon: IconName::Terminal,
+                        reported: identity.glyph,
                         size: icon_size,
                         progress: identity.progress,
                         attention: identity.attention,
@@ -3527,6 +3528,73 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("tab-status-1-attention").is_some());
         assert!(cx.debug_bounds("pane-status-1-attention").is_some());
+    }
+
+    /// A program that draws its own glyph gets that glyph in the Session's slot, not beside it.
+    #[gpui::test]
+    fn local_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        assert_reported_glyph(&manager, &records, false, cx);
+    }
+
+    #[gpui::test]
+    fn remote_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        assert_reported_glyph(&manager, &records, true, cx);
+    }
+
+    fn assert_reported_glyph(
+        manager: &Entity<TabManager>,
+        records: &TestTerminalSessionRecords,
+        remote: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let identity = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            })
+        };
+        let report = |records: &TestTerminalSessionRecords,
+                      generation: u64,
+                      title: &'static str,
+                      cx: &mut VisualTestContext| {
+            report_metadata(records, 1, generation, move |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                if remote {
+                    metadata.context = remote_metadata_context("/srv/app");
+                }
+                metadata.title.value = Arc::from(title);
+                metadata.title.provenance = TitleProvenance::TerminalControl;
+            });
+            cx.run_until_parked();
+        };
+
+        report(records, 1, "\u{2733} Claude Code", cx);
+        let reported = identity(cx);
+        assert_eq!(
+            (reported.remote, reported.glyph, reported.activity.as_ref()),
+            (remote, Some('\u{2733}'), "Claude Code")
+        );
+        // The Tab carries one glyph, in the slot the Session's own glyph would have taken.
+        let origin = if remote {
+            "tab-origin-1-remote"
+        } else {
+            "tab-origin-1-local"
+        };
+        let glyph =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        assert_eq!(
+            cx.debug_bounds(origin)
+                .expect("the Tab lost its glyph")
+                .size,
+            gpui::size(glyph, glyph)
+        );
+
+        // A title without a glyph leaves the Session with its own.
+        report(records, 2, "cargo test", cx);
+        let plain = identity(cx);
+        assert_eq!((plain.glyph, plain.activity.as_ref()), (None, "cargo test"));
     }
 
     /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane

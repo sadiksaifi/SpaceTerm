@@ -1246,13 +1246,16 @@ impl TerminalPane {
         } else {
             normalized_pane_title("", &self.fallback_title)
         };
-        // The Session already has one glyph in its Caption and Tab item, so a glyph the program
-        // draws at the front of its own title is dropped rather than shown beside it.
-        let label = super::terminal_status::plain_title(&label).to_owned();
+        // One Session gets one glyph, so a glyph the program draws at the front of its own title
+        // takes the place of the Session's rather than sitting beside it.
+        let reported = super::terminal_status::reported_title(&label);
+        let glyph = reported.glyph;
+        let label = reported.words.to_owned();
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
             directory: compact_home_directory(&directory, metadata.context.home()).into(),
             label: label.into(),
+            glyph,
             running: running.is_some(),
             progress: super::terminal_status::TerminalProgress::from_metadata(metadata),
         }
@@ -4173,6 +4176,8 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
+    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    pub(crate) glyph: Option<char>,
     pub(crate) running: bool,
     pub(crate) progress: super::terminal_status::TerminalProgress,
 }

@@ -57,6 +57,7 @@ pub(crate) fn caption_fixture(cx: &App) -> Option<super::terminal_pane::PaneCapt
             },
             directory: "appearance-fixture".into(),
             label: "Appearance acceptance".into(),
+            glyph: None,
             running: false,
             progress: Default::default(),
         })

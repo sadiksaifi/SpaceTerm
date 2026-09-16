@@ -1,5 +1,5 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
-use super::terminal_status::{StatusColors, StatusGlyph, TerminalProgress, plain_title};
+use super::terminal_status::{StatusColors, StatusGlyph, TerminalProgress, reported_title};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
@@ -566,7 +566,7 @@ impl PaneHost {
         let title = self
             .pane_titles
             .get(&self.terminal_tab.focused_pane_id())
-            .map(|title| gpui::SharedString::from(plain_title(title).to_owned()))
+            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
             .unwrap_or_else(|| "Terminal".into());
         TabIdentity::resolve(
             caption,
@@ -1744,6 +1744,8 @@ pub(crate) struct TabIdentity {
     pub(crate) activity: gpui::SharedString,
     /// The Current Directory leaf that places the Session, such as `~` or the project it sits in.
     pub(crate) place: gpui::SharedString,
+    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    pub(crate) glyph: Option<char>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
 }
@@ -1769,6 +1771,7 @@ impl TabIdentity {
             progress: caption.progress,
             activity,
             place,
+            glyph: caption.glyph,
             attention,
         }
     }
@@ -1810,6 +1813,7 @@ struct PaneCaptionText {
     directory: gpui::SharedString,
     name: gpui::SharedString,
     label: gpui::SharedString,
+    glyph: Option<char>,
     running: bool,
     progress: TerminalProgress,
 }
@@ -1826,6 +1830,7 @@ impl PaneCaptionText {
                 directory: gpui::SharedString::default(),
                 name: facts.label,
                 label: gpui::SharedString::default(),
+                glyph: facts.glyph,
                 running: facts.running,
                 progress: facts.progress,
             };
@@ -1836,6 +1841,7 @@ impl PaneCaptionText {
             directory: leading,
             name,
             label: facts.label,
+            glyph: facts.glyph,
             running: facts.running,
             progress: facts.progress,
         }
@@ -2116,7 +2122,7 @@ fn render_pane_caption_content(
                             pane_id,
                             &text.origin,
                             layout,
-                            (text.progress, attention),
+                            (text.progress, text.glyph, attention),
                             &paint,
                             appearance,
                         ))
@@ -2170,7 +2176,7 @@ fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
-    (progress, attention): (TerminalProgress, bool),
+    (progress, reported, attention): (TerminalProgress, Option<char>, bool),
     paint: &crate::appearance::CaptionPaint,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
@@ -2194,6 +2200,7 @@ fn render_pane_origin(
                 .child(
                     StatusGlyph {
                         icon,
+                        reported,
                         size: appearance.spacing(PANE_ORIGIN_ICON_SIZE),
                         progress,
                         attention,
@@ -2848,6 +2855,7 @@ mod tests {
             origin,
             directory: directory.to_owned().into(),
             label: label.to_owned().into(),
+            glyph: None,
             running: false,
             progress: TerminalProgress::None,
         })

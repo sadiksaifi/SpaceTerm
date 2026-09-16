@@ -36,34 +36,58 @@ const PROGRESS_TRACK_OPACITY: f32 = 0.28;
 /// How many leading decorative characters a title can carry before it is kept as written.
 const MAXIMUM_TITLE_DECORATION_CHARS: usize = 2;
 
-/// Drops the glyph a program draws at the front of its own title.
+/// The share of the glyph's square a reported glyph is drawn at.
 ///
-/// Programs often prefix an icon or a spinner frame to the title they report. Host chrome already
-/// draws one glyph for the Session, and a second glyph beside it says nothing about the Session
-/// that the first does not. Only a short leading run of decoration followed by a space is dropped,
-/// so a title that opens with a path, a flag, or a prompt keeps every character it reported. No
-/// glyph is recognised by name, so this stays the same for every program.
-pub(crate) fn plain_title(title: &str) -> &str {
+/// A character carries its own side bearings, so it is drawn a little smaller than a drawn icon
+/// to settle on the same visual weight beside one.
+const REPORTED_GLYPH_TEXT_SHARE: f32 = 0.86;
+
+/// What a program put at the front of the title it reported, and the words that follow it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReportedTitle<'a> {
+    /// The program's own glyph, when it reported one host chrome can draw.
+    pub(crate) glyph: Option<char>,
+    /// The title without that glyph.
+    pub(crate) words: &'a str,
+}
+
+/// Splits the glyph a program draws at the front of its own title from the words after it.
+///
+/// Programs often prefix an icon or a spinner frame to the title they report. One Session gets one
+/// glyph, so the program's own glyph takes the place of the glyph host chrome would draw, rather
+/// than sitting beside it, and never appears twice. Only a short leading run of decoration
+/// followed by a space is taken, so a title that opens with a path, a flag, or a prompt keeps every
+/// character it reported. No glyph is recognised by name, so this stays the same for every program.
+pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
     let title = title.trim();
-    let Some(end) = title
+    let plain = ReportedTitle {
+        glyph: None,
+        words: title,
+    };
+    let decoration = title
         .char_indices()
         .take(MAXIMUM_TITLE_DECORATION_CHARS)
         .take_while(|(_, character)| is_title_decoration(*character))
-        .map(|(index, character)| index + character.len_utf8())
-        .last()
-    else {
-        return title;
+        .collect::<Vec<_>>();
+    let Some((last_index, last)) = decoration.last().copied() else {
+        return plain;
     };
-    let remainder = &title[end..];
+    let remainder = &title[last_index + last.len_utf8()..];
     // Decoration that runs straight into the words is part of them.
     if !remainder.starts_with(char::is_whitespace) {
-        return title;
+        return plain;
     }
-    let remainder = remainder.trim_start();
-    if remainder.is_empty() {
-        title
-    } else {
-        remainder
+    let words = remainder.trim_start();
+    if words.is_empty() {
+        return plain;
+    }
+    ReportedTitle {
+        // Only a lone glyph can take the Session's own slot; a run of them is dropped instead.
+        glyph: match decoration.as_slice() {
+            [(_, glyph)] if is_drawable_glyph(*glyph) => Some(*glyph),
+            _ => None,
+        },
+        words,
     }
 }
 
@@ -72,6 +96,32 @@ fn is_title_decoration(character: char) -> bool {
     !character.is_alphanumeric()
         && !character.is_whitespace()
         && !"~/\\._-:@$#([{'\"".contains(character)
+}
+
+/// Whether host chrome can draw a reported glyph at the size a Session's own glyph takes.
+///
+/// A character outside the blocks a desktop font covers would paint as a missing-glyph box, which
+/// says less than the Session's own glyph does, so the Session keeps its own.
+fn is_drawable_glyph(glyph: char) -> bool {
+    matches!(
+        u32::from(glyph),
+        // Arrows, box drawing, geometric shapes, braille, dingbats, and their neighbours.
+        0x2190..=0x2BFF
+        // Emoji and pictographs.
+        | 0x1F300..=0x1FAFF
+    )
+}
+
+/// Draws a glyph a program reported, in a square of `size`.
+fn reported_glyph(glyph: char, size: Pixels) -> AnyElement {
+    div()
+        .size(size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(size * REPORTED_GLYPH_TEXT_SHARE)
+        .child(glyph.to_string())
+        .into_any_element()
 }
 
 /// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it.
@@ -129,6 +179,8 @@ pub(crate) struct StatusColors {
 /// One Terminal Session's glyph and the status it presents.
 pub(crate) struct StatusGlyph {
     pub(crate) icon: IconName,
+    /// The glyph the program reported for itself, which takes the place of `icon`.
+    pub(crate) reported: Option<char>,
     pub(crate) size: Pixels,
     pub(crate) progress: TerminalProgress,
     pub(crate) attention: bool,
@@ -149,6 +201,7 @@ impl StatusGlyph {
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
+            reported,
             size,
             progress,
             attention,
@@ -168,7 +221,7 @@ impl StatusGlyph {
             .justify_center();
         if !attention {
             return glyph
-                .child(status_mark(icon, size, progress, false, colors))
+                .child(status_mark(icon, reported, size, progress, false, colors))
                 .into_any_element();
         }
         let selector = format!("{selector_prefix}-attention");
@@ -182,7 +235,7 @@ impl StatusGlyph {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(status_mark(icon, size, progress, blinked, colors))
+                    .child(status_mark(icon, reported, size, progress, blinked, colors))
                     .into_any_element()
             }))
             .into_any_element()
@@ -225,18 +278,21 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
 }
 
 /// The glyph for `progress`: a ring in the glyph's place for a reported percentage, otherwise the
-/// glyph itself.
+/// glyph the program reported, or the Session's own.
 fn status_mark(
     icon: IconName,
+    reported: Option<char>,
     size: Pixels,
     progress: TerminalProgress,
     blinked: bool,
     colors: StatusColors,
 ) -> AnyElement {
     let (tint, opacity) = treatment(progress, blinked);
-    let mark = match progress {
-        TerminalProgress::Normal(percent) => progress_ring(percent, size).into_any_element(),
-        _ => Icon::inherited(icon, size).into_any_element(),
+    let mark = match (progress, reported) {
+        // A reported percentage says more than any glyph, so the ring takes the slot.
+        (TerminalProgress::Normal(percent), _) => progress_ring(percent, size).into_any_element(),
+        (_, Some(glyph)) => reported_glyph(glyph, size),
+        (_, None) => Icon::inherited(icon, size).into_any_element(),
     };
     div()
         .size_full()
@@ -464,27 +520,42 @@ mod tests {
         assert_eq!(notifications.get(), 3);
     }
 
-    /// A program's own icon or spinner frame is dropped, and its words are kept as reported.
+    /// A program's own glyph leaves the title and takes the Session's glyph slot instead.
     #[test]
-    fn a_title_should_keep_its_words_without_the_glyph_the_program_draws() {
-        for (reported, presented) in [
-            ("\u{2733} Claude Code", "Claude Code"),
-            ("\u{25d0} Claude Code", "Claude Code"),
-            ("\u{2058} diy-nucleus-clients", "diy-nucleus-clients"),
-            ("\u{280b} building", "building"),
-            ("\u{2726}\u{2726} two frames", "two frames"),
+    fn a_title_should_give_up_the_glyph_the_program_draws_at_its_front() {
+        for (reported, glyph, words) in [
+            ("\u{2733} Claude Code", Some('\u{2733}'), "Claude Code"),
+            ("\u{25d0} Claude Code", Some('\u{25d0}'), "Claude Code"),
+            ("\u{280b} building", Some('\u{280b}'), "building"),
+            ("\u{1f680} deploying", Some('\u{1f680}'), "deploying"),
+            // A glyph a desktop font may not cover leaves the words alone with the Session's own.
+            ("\u{2058} diy-nucleus-clients", None, "diy-nucleus-clients"),
+            // Two glyphs cannot share one slot, so both go and the Session keeps its own.
+            ("\u{2726}\u{2726} two frames", None, "two frames"),
             // Nothing a Session would be named after is decoration.
-            ("zsh", "zsh"),
-            ("~/Projects/api", "~/Projects/api"),
-            ("cargo test -- --nocapture", "cargo test -- --nocapture"),
-            (".config", ".config"),
-            ("\u{2733}Claude", "\u{2733}Claude"),
+            ("zsh", None, "zsh"),
+            ("~/Projects/api", None, "~/Projects/api"),
+            (
+                "cargo test -- --nocapture",
+                None,
+                "cargo test -- --nocapture",
+            ),
+            (".config", None, ".config"),
+            ("\u{2733}Claude", None, "\u{2733}Claude"),
             // Only the leading glyph goes; whatever follows is the program's own wording.
-            ("\u{2733} \u{2733} words", "\u{2733} words"),
-            ("\u{2733}", "\u{2733}"),
-            ("", ""),
+            (
+                "\u{2733} \u{2733} words",
+                Some('\u{2733}'),
+                "\u{2733} words",
+            ),
+            ("\u{2733}", None, "\u{2733}"),
+            ("", None, ""),
         ] {
-            assert_eq!(plain_title(reported), presented, "{reported:?}");
+            assert_eq!(
+                reported_title(reported),
+                ReportedTitle { glyph, words },
+                "{reported:?}"
+            );
         }
     }
 
