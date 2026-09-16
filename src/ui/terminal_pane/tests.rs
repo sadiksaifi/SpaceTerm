@@ -822,6 +822,57 @@ fn connected_remote_terminal_pane_with_readiness(
 }
 
 #[gpui::test]
+fn remote_disconnect_clears_live_terminal_progress(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_remote_terminal_pane(cx);
+    let session_id = records.starts().last().unwrap().session_id;
+    records.report_metadata(session_id, |metadata| {
+        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
+        metadata.progress = crate::terminal::metadata::ProgressMetadata::Indeterminate;
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::Indeterminate
+    );
+
+    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::None
+    );
+}
+
+#[gpui::test]
+fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let session_id = records.starts().last().unwrap().session_id;
+    records.report_metadata(session_id, |metadata| {
+        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
+        metadata.progress = crate::terminal::metadata::ProgressMetadata::Normal(45);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::Normal(45)
+    );
+
+    records
+        .event_sender(session_id)
+        .unwrap()
+        .try_send(SessionEvent::Failed(SessionFailure::Runtime(
+            "worker stopped".to_owned(),
+        )))
+        .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.caption().progress),
+        super::super::terminal_status::TerminalProgress::None
+    );
+}
+
+#[gpui::test]
 fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
     cx: &mut TestAppContext,
 ) {

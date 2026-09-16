@@ -1259,8 +1259,21 @@ impl TerminalPane {
             label: label.into(),
             glyph,
             running: running.is_some(),
-            progress: super::terminal_status::TerminalProgress::from_metadata(metadata),
+            progress: super::terminal_status::TerminalProgress::from_metadata(
+                metadata,
+                self.terminal_session_available(),
+            ),
         }
+    }
+
+    fn terminal_session_available(&self) -> bool {
+        self.terminal_session.session.is_some()
+            && !self.terminal_session.remote_input_blocked
+            && !matches!(self.pane_state, PaneTerminalState::Exited(_))
+            && !self
+                .pane_state
+                .failure()
+                .is_some_and(TerminalFailure::is_fatal)
     }
 
     pub(crate) fn close_facts(&self) -> PaneCloseFacts<'_> {

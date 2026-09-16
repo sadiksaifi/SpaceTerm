@@ -170,8 +170,11 @@ pub(crate) enum TerminalProgress {
 }
 
 impl TerminalProgress {
-    pub(crate) fn from_metadata(metadata: &TerminalMetadataSnapshot) -> Self {
-        if metadata.freshness != MetadataFreshness::Live {
+    pub(crate) fn from_metadata(
+        metadata: &TerminalMetadataSnapshot,
+        session_available: bool,
+    ) -> Self {
+        if !session_available || metadata.freshness != MetadataFreshness::Live {
             return Self::None;
         }
         match metadata.progress {
@@ -636,11 +639,21 @@ mod tests {
             (ProgressMetadata::Paused(70), TerminalProgress::Paused),
         ] {
             assert_eq!(
-                TerminalProgress::from_metadata(&metadata(reported, MetadataFreshness::Live)),
+                TerminalProgress::from_metadata(&metadata(reported, MetadataFreshness::Live), true,),
                 presented
             );
             assert_eq!(
-                TerminalProgress::from_metadata(&metadata(reported, MetadataFreshness::Stale)),
+                TerminalProgress::from_metadata(
+                    &metadata(reported, MetadataFreshness::Stale),
+                    true,
+                ),
+                TerminalProgress::None
+            );
+            assert_eq!(
+                TerminalProgress::from_metadata(
+                    &metadata(reported, MetadataFreshness::Live),
+                    false,
+                ),
                 TerminalProgress::None
             );
         }
