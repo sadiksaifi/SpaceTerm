@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
-use super::terminal_status::{ATTENTION_INDICATOR_SIZE, attention_indicator, progress_indicator};
+use super::terminal_status::{attention_glyph, progress_indicator};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
@@ -1688,20 +1688,8 @@ fn render_tab_identity(
         .flex()
         .flex_row()
         .items_center()
-        // Attention belongs to the Tab rather than to any one segment of its name, so it leads the
-        // row and survives every narrowing, exactly as the terminal glyph does.
-        .when(identity.attention, |item| {
-            item.child(
-                div()
-                    .flex_shrink_0()
-                    .mr(appearance.spacing(TAB_TRAILING_GAP))
-                    .child(attention_indicator(
-                        format!("tab-attention-{}", tab_id.get()),
-                        appearance.spacing(ATTENTION_INDICATOR_SIZE),
-                        gpui_color(status.attention),
-                    )),
-            )
-        })
+        // Attention belongs to the Tab rather than to any one segment of its name, so it breathes in
+        // the terminal glyph that leads the row and survives every narrowing.
         .child(
             div()
                 .debug_selector(move || format!("tab-origin-{}-{origin_location}", tab_id.get()))
@@ -1709,7 +1697,17 @@ fn render_tab_identity(
                 .mr(appearance.spacing(TAB_ORIGIN_GAP))
                 .flex()
                 .items_center()
-                .child(Icon::inherited(IconName::Terminal, icon_size)),
+                .child(attention_glyph(
+                    IconName::Terminal,
+                    icon_size,
+                    identity.attention.then(|| {
+                        (
+                            ("tab-attention", tab_id.get()).into(),
+                            format!("tab-attention-{}", tab_id.get()),
+                            gpui_color(status.attention),
+                        )
+                    }),
+                )),
         )
         .when_some(
             progress_indicator(
@@ -3474,7 +3472,7 @@ mod tests {
         );
     }
 
-    /// A Tab reads `<attention> <glyph> <progress> <activity> · <place>`, and neither the account,
+    /// A Tab reads `<glyph, breathing on attention> <progress> <activity> · <place>`, and neither the account,
     /// the Workspace name, nor a Pane count competes with those segments for room.
     #[gpui::test]
     fn tab_should_present_attention_glyph_progress_activity_and_place_in_order(
@@ -3502,7 +3500,7 @@ mod tests {
 
         let attention = cx
             .debug_bounds("tab-attention-1")
-            .expect("a Tab whose Pane has unread attention should lead with the mark");
+            .expect("a Tab whose Pane has unread attention should breathe in its glyph");
         let origin = cx
             .debug_bounds("tab-origin-1-local")
             .expect("the Tab should carry its terminal glyph");
@@ -3511,14 +3509,15 @@ mod tests {
             .expect("the Tab should present its reported progress");
         let activity = cx.debug_bounds("tab-activity-1").unwrap();
         let place = cx.debug_bounds("tab-place-1").unwrap();
-        let spacing = cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(6.0));
-        assert_eq!(attention.size, gpui::size(spacing, spacing));
-        for (leading, trailing) in [
-            (attention, origin),
-            (origin, progress),
-            (progress, activity),
-            (activity, place),
-        ] {
+        let glyph =
+            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        // The cue is the terminal glyph itself, not a separate mark beside it.
+        assert_eq!(attention.size, gpui::size(glyph, glyph));
+        assert!(
+            attention.left() >= origin.left() && attention.right() <= origin.right(),
+            "{attention:?} should sit on the glyph {origin:?}"
+        );
+        for (leading, trailing) in [(origin, progress), (progress, activity), (activity, place)] {
             assert!(
                 leading.right() <= trailing.left(),
                 "{leading:?} should precede {trailing:?}"

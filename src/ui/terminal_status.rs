@@ -1,6 +1,6 @@
 //! The status marks a Pane Caption and a Tab item present beside a Terminal's title.
 //!
-//! Both surfaces describe the same Terminal Session, so the attention mark and the OSC 9;4 progress
+//! Both surfaces describe the same Terminal Session, so the attention cue and the OSC 9;4 progress
 //! status are drawn here once. Each mark is typed from sanitized Terminal Metadata and never from
 //! the title text, which stays opaque: a loader a program draws in its own cells or title is not
 //! something host chrome can see or restate.
@@ -9,15 +9,22 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Hsla, PathBuilder, Pixels, Point, Rgba, Task, Window,
-    canvas, div, point, px,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
+    LayoutId, PathBuilder, Pixels, Point, Rgba, Task, Window, canvas, div, point, px,
 };
 use spaceterm_ui::{Icon, IconName};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 
-/// The attention mark's diameter, before density scaling.
-pub(crate) const ATTENTION_INDICATOR_SIZE: f32 = 6.0;
+/// How many positions one breath of the attention cue steps through.
+const BREATH_STEPS: u32 = 24;
+/// How long the attention cue rests on each position, for a breath of about 1.7 seconds.
+const BREATH_STEP: Duration = Duration::from_millis(70);
+/// How many breaths the attention cue takes before it rests in the warning color.
+///
+/// The breathing draws the eye when attention arrives. Resting afterwards keeps an unread Tab in
+/// the background from repainting its window for as long as it stays unread.
+const BREATHS: u32 = 6;
 
 /// How far the ring's stroke sits inside the indicator's square, as a share of its size.
 const PROGRESS_STROKE_SHARE: f32 = 0.14;
@@ -26,7 +33,7 @@ const PROGRESS_TRACK_OPACITY: f32 = 0.28;
 /// The loader's arc length, in degrees.
 const LOADER_SWEEP_DEGREES: f32 = 100.0;
 /// How many positions the loader steps through per revolution.
-const LOADER_STEPS: u8 = 12;
+const LOADER_STEPS: u32 = 12;
 /// How long the loader rests on each position.
 ///
 /// Stepping keeps an indeterminate Session from repainting its window at the display's full rate
@@ -77,14 +84,45 @@ impl TerminalProgress {
     }
 }
 
-/// The steady attention mark shared by Pane Captions and Tab items.
-pub(crate) fn attention_indicator(selector: String, size: Pixels, color: Rgba) -> AnyElement {
-    div()
-        .debug_selector(move || selector)
+/// A Terminal glyph that breathes into `attention_color` while its Session asks for attention.
+///
+/// The glyph at rest inherits the surrounding text color, so it keeps following the host's active,
+/// inactive, and hovered paints. Attention layers the same glyph in `attention_color` over it and
+/// fades that layer in and out, then leaves it fully shown. `selector` names the attention layer.
+pub(crate) fn attention_glyph(
+    icon: IconName,
+    size: Pixels,
+    attention: Option<(ElementId, String, Rgba)>,
+) -> AnyElement {
+    let glyph = div()
+        .relative()
         .size(size)
         .flex_shrink_0()
-        .rounded_full()
-        .bg(color)
+        .child(Icon::inherited(icon, size));
+    let Some((id, selector, color)) = attention else {
+        return glyph.into_any_element();
+    };
+    glyph
+        .child(Stepped::new(
+            id,
+            BREATH_STEP,
+            // The last breath stops at its peak, so settling never jumps.
+            Some(BREATH_STEPS * (BREATHS - 1) + BREATH_STEPS / 2 + 1),
+            move |step| {
+                // Each breath rises from nothing to full and back, ending on full once settled.
+                let opacity = step.map_or(1.0, |step| {
+                    let phase = (step % BREATH_STEPS) as f32 / BREATH_STEPS as f32;
+                    (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0
+                });
+                div()
+                    .debug_selector(move || selector)
+                    .absolute()
+                    .inset_0()
+                    .opacity(opacity)
+                    .child(Icon::new(icon, size, color))
+                    .into_any_element()
+            },
+        ))
         .into_any_element()
 }
 
@@ -141,41 +179,140 @@ fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
     .size(size)
 }
 
-/// The loader's position, advanced on its own clock while the loader stays on screen.
-struct LoaderClock {
-    step: u8,
+fn loader(id: ElementId, size: Pixels) -> impl IntoElement {
+    Stepped::new(id, LOADER_STEP, None, move |step| {
+        let start = step.unwrap_or(0) as f32 * 360.0 / LOADER_STEPS as f32;
+        canvas(
+            |_, _, _| (),
+            move |bounds, (), window, _| {
+                let color = window.text_style().color;
+                paint_arc(bounds, start, start + LOADER_SWEEP_DEGREES, color, window);
+            },
+        )
+        .size(size)
+        .into_any_element()
+    })
+}
+
+/// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
+///
+/// Only the owning view is notified on each step, at the step's pace rather than the display's.
+/// A bounded clock stops after `limit` steps and then renders `None`, so a settled animation costs
+/// nothing more. The clock restarts when the element leaves the screen and returns.
+struct Stepped {
+    id: ElementId,
+    interval: Duration,
+    limit: Option<u32>,
+    render: Option<Box<dyn FnOnce(Option<u32>) -> AnyElement>>,
+}
+
+impl Stepped {
+    fn new(
+        id: ElementId,
+        interval: Duration,
+        limit: Option<u32>,
+        render: impl FnOnce(Option<u32>) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            id,
+            interval,
+            limit,
+            render: Some(Box::new(render)),
+        }
+    }
+}
+
+/// The step a [`Stepped`] element renders, or `None` once a bounded clock has finished.
+struct StepClock {
+    step: Option<u32>,
     _tick: Task<()>,
 }
 
-fn loader(id: ElementId, size: Pixels) -> impl IntoElement {
-    canvas(
-        move |_, window: &mut Window, cx: &mut App| {
-            window
-                .use_keyed_state(id, cx, |_, cx| LoaderClock {
-                    step: 0,
-                    _tick: cx.spawn(async move |clock, cx| {
-                        loop {
-                            cx.background_executor().timer(LOADER_STEP).await;
-                            let advanced = clock.update(cx, |clock: &mut LoaderClock, cx| {
-                                clock.step = (clock.step + 1) % LOADER_STEPS;
-                                cx.notify();
-                            });
-                            if advanced.is_err() {
-                                break;
-                            }
-                        }
-                    }),
-                })
-                .read(cx)
-                .step
-        },
-        move |bounds, step: u8, window: &mut Window, _: &mut App| {
-            let start = f32::from(step) * 360.0 / f32::from(LOADER_STEPS);
-            let color = window.text_style().color;
-            paint_arc(bounds, start, start + LOADER_SWEEP_DEGREES, color, window);
-        },
-    )
-    .size(size)
+impl StepClock {
+    fn start(interval: Duration, limit: Option<u32>, cx: &mut gpui::Context<Self>) -> Self {
+        Self {
+            step: Some(0),
+            _tick: cx.spawn(async move |clock, cx| {
+                loop {
+                    cx.background_executor().timer(interval).await;
+                    let running = clock.update(cx, |clock: &mut StepClock, cx| {
+                        let next = clock.step.map(|step| step.wrapping_add(1));
+                        clock.step = next.filter(|next| limit.is_none_or(|limit| *next < limit));
+                        cx.notify();
+                        clock.step.is_some()
+                    });
+                    if !matches!(running, Ok(true)) {
+                        break;
+                    }
+                }
+            }),
+        }
+    }
+}
+
+impl IntoElement for Stepped {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Stepped {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let (interval, limit) = (self.interval, self.limit);
+        let step = window
+            .use_keyed_state("clock", cx, move |_, cx| {
+                StepClock::start(interval, limit, cx)
+            })
+            .read(cx)
+            .step;
+        let render = self.render.take().expect("a Stepped element lays out once");
+        let mut child = render(step);
+        (child.request_layout(window, cx), child)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        child: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        child: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        child.paint(window, cx);
+    }
 }
 
 /// Strokes the arc from `start` to `end`, in degrees clockwise from the top of `bounds`.
@@ -232,6 +369,28 @@ mod tests {
         snapshot.progress = progress;
         snapshot.freshness = freshness;
         snapshot
+    }
+
+    /// A bounded animation settles and stops ticking, so a settled cue costs no further frames.
+    #[gpui::test]
+    fn bounded_step_clock_should_settle_and_stop(cx: &mut gpui::TestAppContext) {
+        let interval = Duration::from_millis(10);
+        let clock = cx.new(|cx| StepClock::start(interval, Some(3), cx));
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _observation = cx.update(|cx| {
+            let notifications = std::rc::Rc::clone(&notifications);
+            cx.observe(&clock, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+        });
+        let mut steps = vec![clock.read_with(cx, |clock, _| clock.step)];
+        for _ in 0..6 {
+            cx.executor().advance_clock(interval);
+            cx.run_until_parked();
+            steps.push(clock.read_with(cx, |clock, _| clock.step));
+        }
+        assert_eq!(steps, [Some(0), Some(1), Some(2), None, None, None, None]);
+        assert_eq!(notifications.get(), 3);
     }
 
     #[test]

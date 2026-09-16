@@ -1,7 +1,5 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
-use super::terminal_status::{
-    ATTENTION_INDICATOR_SIZE, TerminalProgress, attention_indicator, progress_indicator,
-};
+use super::terminal_status::{TerminalProgress, attention_glyph, progress_indicator};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
@@ -96,13 +94,13 @@ const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
 const PANE_CLOSE_ICON_SIZE: f32 = 16.75;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 const PANE_STATUS_GAP: f32 = 7.0;
-const PANE_ATTENTION_WIDTH: f32 = ATTENTION_INDICATOR_SIZE + PANE_STATUS_GAP;
+/// The origin glyph, which a caption asking for attention keeps at every width.
+const PANE_ATTENTION_WIDTH: f32 = PANE_ORIGIN_ICON_SIZE + PANE_ORIGIN_ICON_GAP;
 const PANE_PROGRESS_SIZE: f32 = 12.0;
 const PANE_PROGRESS_WIDTH: f32 = PANE_PROGRESS_SIZE + PANE_STATUS_GAP;
 const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
     + PANE_CAPTION_RIGHT_PADDING
     + PANE_ATTENTION_WIDTH
-    + PANE_PROGRESS_WIDTH
     + PANE_CONTROL_LEADING_GAP
     + PANE_CONTROL_SIZE * 2.0
     + PANE_CONTROL_GAP;
@@ -138,6 +136,7 @@ struct CaptionLayout {
     show_directory: bool,
     show_user: bool,
     show_label: bool,
+    show_progress: bool,
     show_splits: bool,
 }
 
@@ -223,14 +222,17 @@ impl CaptionLayout {
         progress: bool,
         has_multiple_panes: bool,
         width: Pixels,
-        metrics: CaptionMetrics,
+        mut metrics: CaptionMetrics,
         spacing_scale: f32,
     ) -> Self {
+        // Attention breathes in the origin glyph, so the glyph leaves the ladder for the fixed row.
+        if attention {
+            metrics.origin_icon = px(0.0);
+        }
         let full_control_count = if has_multiple_panes { 4 } else { 2 };
         let fixed_width = (PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
-            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 }
-            + if progress { PANE_PROGRESS_WIDTH } else { 0.0 })
+            + if attention { PANE_ATTENTION_WIDTH } else { 0.0 })
             * spacing_scale;
         let show_splits = width
             >= px(fixed_width
@@ -244,6 +246,15 @@ impl CaptionLayout {
         let available = (width
             - px(fixed_width + leading_gap + controls_width(control_count) * spacing_scale))
         .max(px(0.0));
+        // Progress comes before every text segment, but a Pane too narrow for it still keeps its
+        // controls and attention; the Tab item continues to present the same progress.
+        let progress_width = px(PANE_PROGRESS_WIDTH * spacing_scale);
+        let show_progress = progress && available >= progress_width;
+        let available = if show_progress {
+            available - progress_width
+        } else {
+            available
+        };
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
         let mut claimed = metrics.name;
@@ -256,18 +267,19 @@ impl CaptionLayout {
             *admitted = true;
         }
         let [
-            show_origin,
+            show_origin_row,
             show_host,
             show_directory,
             show_user,
             show_label,
         ] = shown;
         Self {
-            show_origin,
+            show_origin: show_origin_row || attention,
             show_host,
             show_directory,
             show_user,
             show_label,
+            show_progress,
             show_splits,
         }
     }
@@ -2103,26 +2115,19 @@ fn render_pane_caption_content(
             });
             cx.stop_propagation();
         })
-        .when(attention, |caption| {
-            caption.child(
-                div()
-                    .mr(appearance.spacing(PANE_STATUS_GAP))
-                    .flex_shrink_0()
-                    .child(attention_indicator(
-                        format!("pane-attention-{}", pane_id.get()),
-                        appearance.spacing(ATTENTION_INDICATOR_SIZE),
-                        gpui_color(paint.attention),
-                    )),
-            )
-        })
         .when_some(
-            progress_indicator(
-                text.progress,
-                ("pane-progress", pane_id.get()).into(),
-                &format!("pane-progress-{}", pane_id.get()),
-                appearance.spacing(PANE_PROGRESS_SIZE),
-                gpui_color(paint.error),
-            ),
+            layout
+                .show_progress
+                .then_some(text.progress)
+                .and_then(|progress| {
+                    progress_indicator(
+                        progress,
+                        ("pane-progress", pane_id.get()).into(),
+                        &format!("pane-progress-{}", pane_id.get()),
+                        appearance.spacing(PANE_PROGRESS_SIZE),
+                        gpui_color(paint.error),
+                    )
+                }),
             |caption, mark| {
                 caption.child(
                     div()
@@ -2139,15 +2144,19 @@ fn render_pane_caption_content(
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .when(layout.show_origin && !text.origin.is_empty(), |row| {
-                    row.child(render_pane_origin(
-                        pane_id,
-                        &text.origin,
-                        layout,
-                        color,
-                        appearance,
-                    ))
-                })
+                .when(
+                    layout.show_origin && (attention || !text.origin.is_empty()),
+                    |row| {
+                        row.child(render_pane_origin(
+                            pane_id,
+                            &text.origin,
+                            layout,
+                            attention.then_some(paint.attention),
+                            color,
+                            appearance,
+                        ))
+                    },
+                )
                 .when(layout.show_directory && !text.directory.is_empty(), |row| {
                     row.child(
                         div()
@@ -2196,6 +2205,7 @@ fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
+    attention: Option<Color>,
     color: Color,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
@@ -2204,7 +2214,6 @@ fn render_pane_origin(
     } else {
         (IconName::Terminal, "local")
     };
-    let icon_tint = gpui_color(color);
     div()
         .debug_selector(move || format!("pane-caption-origin-{}-{location}", pane_id.get()))
         .flex()
@@ -2215,10 +2224,17 @@ fn render_pane_origin(
                 .mr(appearance.spacing(PANE_ORIGIN_ICON_GAP))
                 .flex()
                 .items_center()
-                .child(Icon::new(
+                .text_color(gpui_color(color))
+                .child(attention_glyph(
                     icon,
                     appearance.spacing(PANE_ORIGIN_ICON_SIZE),
-                    icon_tint,
+                    attention.map(|attention| {
+                        (
+                            ("pane-attention", pane_id.get()).into(),
+                            format!("pane-attention-{}", pane_id.get()),
+                            gpui_color(attention),
+                        )
+                    }),
                 )),
         )
         .when(layout.show_user && !origin.user.is_empty(), |row| {
@@ -3526,6 +3542,7 @@ mod tests {
             show_directory: directory,
             show_user: user,
             show_label: label,
+            show_progress: false,
             show_splits: true,
         };
 
@@ -3554,6 +3571,34 @@ mod tests {
             layout(false, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
+    }
+
+    /// Attention keeps the origin glyph at any width, and progress yields before the controls do.
+    #[test]
+    fn caption_layout_should_keep_attention_and_yield_progress_when_narrow() {
+        let metrics = CaptionMetrics {
+            origin_icon: px(20.0),
+            name: px(40.0),
+            ..CaptionMetrics::default()
+        };
+        let controls = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(2);
+        let resolve = |attention, width: f32| {
+            CaptionLayout::from_metrics(attention, true, false, px(width), metrics, 1.0)
+        };
+
+        let roomy = resolve(false, controls + 200.0);
+        assert!(roomy.show_progress && roomy.show_origin && roomy.show_splits);
+        let narrow = resolve(false, controls + 10.0);
+        assert!(!narrow.show_progress && !narrow.show_origin && narrow.show_splits);
+        let narrow_attention = resolve(true, controls + PANE_ATTENTION_WIDTH + 10.0);
+        assert!(
+            narrow_attention.show_origin
+                && !narrow_attention.show_progress
+                && narrow_attention.show_splits
+        );
     }
 
     #[gpui::test]
