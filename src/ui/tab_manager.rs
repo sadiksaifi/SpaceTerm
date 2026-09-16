@@ -251,15 +251,20 @@ impl TabChromePresentation {
         }
     }
 
-    /// The status glyph colors, readable on every surface a Tab can rest on or hover over.
-    fn tab_status(&self, colors: &ChromeColors) -> crate::appearance::StatusPaint {
-        colors.status(&[
-            self.active_tab_background.source_over(self.background),
-            self.active_tab_hover_background
-                .source_over(self.background),
-            self.inactive_tab_background.source_over(self.background),
-            self.hover_background.source_over(self.background),
-        ])
+    /// Status glyph colors resolved for this Tab's current rest or hover surface.
+    fn tab_status(
+        &self,
+        active: bool,
+        hovered: bool,
+        colors: &ChromeColors,
+    ) -> crate::appearance::StatusPaint {
+        let surface = match (active, hovered) {
+            (true, true) => self.active_tab_hover_background,
+            (true, false) => self.active_tab_background,
+            (false, true) => self.hover_background,
+            (false, false) => self.inactive_tab_background,
+        };
+        colors.status(surface.source_over(self.background))
     }
 
     fn close_control_style(
@@ -1222,7 +1227,7 @@ impl TabManager {
         let control_style =
             presentation.close_control_style(active, ancestor_hovered, &appearance.colors);
         let hover_foreground = presentation.tab_hover_foreground(active);
-        let status = presentation.tab_status(&appearance.colors);
+        let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let close_clearance = (active || ancestor_hovered).then(|| {
             cx.global::<ButtonTheme>()
                 .icon_button_size(ButtonSize::Compact)
