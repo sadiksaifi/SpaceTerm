@@ -44,7 +44,9 @@ use super::{
     ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
-use crate::close_confirmation::{CloseConfirmation, CloseHierarchy, CloseTarget};
+use crate::close_confirmation::{
+    ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
+};
 #[cfg(test)]
 use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
@@ -2395,7 +2397,6 @@ impl WorkspaceManager {
                 }
             }
             CloseTarget::Window => window.remove_window(),
-            CloseTarget::Application => crate::ui::settings_window::quit_when_saved(cx),
         }
     }
 
@@ -2417,13 +2418,16 @@ impl WorkspaceManager {
         false
     }
 
-    pub(crate) fn request_application_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_close(CloseTarget::Application, window, cx);
+    pub(crate) fn application_close_facts(&self, cx: &App) -> ApplicationCloseFacts {
+        self.close_hierarchy(cx).application_close_facts()
     }
 
-    pub(crate) fn blocks_unconfirmed_application_quit(&self, cx: &App) -> bool {
+    pub(crate) fn application_pane_facts(&self, cx: &App) -> Vec<ApplicationPaneFacts> {
+        self.close_hierarchy(cx).application_pane_facts().collect()
+    }
+
+    pub(crate) const fn has_pending_close_confirmation(&self) -> bool {
         self.close_confirmation.pending().is_some()
-            || self.close_target_requires_confirmation(CloseTarget::Application, cx) == Some(true)
     }
 
     fn close_workspace(

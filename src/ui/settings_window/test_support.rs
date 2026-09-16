@@ -11,7 +11,7 @@ use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, Stora
 
 /// In-memory Settings storage that counts writes and can be made to fail on demand.
 #[derive(Default)]
-pub(super) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>>);
+pub(crate) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>>);
 
 #[derive(Default)]
 struct MemoryState {
@@ -29,10 +29,10 @@ struct WriteGate {
     changed: Condvar,
 }
 
-pub(super) struct BlockedWrite(Arc<WriteGate>);
+pub(crate) struct BlockedWrite(Arc<WriteGate>);
 
 impl BlockedWrite {
-    pub(super) fn wait_until_started(&self) {
+    pub(crate) fn wait_until_started(&self) {
         let (state, timeout) = self
             .0
             .changed
@@ -45,7 +45,7 @@ impl BlockedWrite {
         assert!(state.0 && !timeout.timed_out(), "the write should start");
     }
 
-    pub(super) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.0.state.lock().unwrap().1 = true;
         self.0.changed.notify_all();
     }
@@ -58,13 +58,13 @@ impl Drop for BlockedWrite {
 }
 
 impl MemoryStorage {
-    pub(super) fn block_next_write(&self) -> BlockedWrite {
+    pub(crate) fn block_next_write(&self) -> BlockedWrite {
         let gate = Arc::new(WriteGate::default());
         *self.1.lock().unwrap() = Some(gate.clone());
         BlockedWrite(gate)
     }
 
-    pub(super) fn with_document(document: &SettingsDocument) -> Arc<Self> {
+    pub(crate) fn with_document(document: &SettingsDocument) -> Arc<Self> {
         let storage = Arc::new(Self::default());
         let bytes = export_settings(document)
             .expect("fixture document")

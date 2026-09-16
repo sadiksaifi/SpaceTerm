@@ -13,7 +13,7 @@ mod microphone;
 mod schemes;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod control_tests;
@@ -239,8 +239,8 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     }
 }
 
-/// Runs only after Workspace close authorization, retaining Settings until its latest edit is saved.
-pub(crate) fn quit_when_saved(cx: &mut App) {
+/// Retains Settings until its latest edit is saved, then completes an authorized application quit.
+pub(crate) fn quit_when_saved(cx: &mut App, completion: crate::app::ApplicationQuitAfterSave) {
     if let Some(settings) = cx
         .windows()
         .into_iter()
@@ -248,17 +248,17 @@ pub(crate) fn quit_when_saved(cx: &mut App) {
     {
         let _ = settings.update(cx, |settings, window, cx| {
             window.activate_window();
-            settings.request_close(CloseIntent::Application, cx);
+            settings.request_close(CloseIntent::Application(completion), cx);
         });
     } else {
-        cx.quit();
+        completion.saved(cx);
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CloseIntent {
     Window(AnyWindowHandle),
-    Application,
+    Application(crate::app::ApplicationQuitAfterSave),
 }
 
 /// Registers the application-scoped Settings actions.
@@ -445,14 +445,17 @@ impl SettingsWindow {
     }
 
     fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
-        if !matches!(self.close_after_save, Some(CloseIntent::Application)) {
+        if !matches!(
+            self.close_after_save.as_ref(),
+            Some(CloseIntent::Application(_))
+        ) {
             self.close_after_save = Some(intent);
         }
         self.finish_close(cx);
     }
 
     fn finish_close(&mut self, cx: &mut Context<Self>) {
-        let Some(intent) = self.close_after_save else {
+        let Some(intent) = self.close_after_save.clone() else {
             return;
         };
         if self.editor.flush(cx) {
@@ -461,12 +464,16 @@ impl SettingsWindow {
                 CloseIntent::Window(handle) => cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
                 }),
-                CloseIntent::Application => cx.quit(),
+                CloseIntent::Application(completion) => completion.saved(cx),
             }
         } else if !self.editor.is_writing() {
             // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed
             // save. A competing preview is reported once rather than spinning during close.
-            self.close_after_save = None;
+            if let Some(CloseIntent::Application(completion)) = self.close_after_save.take() {
+                completion.failed(cx);
+            } else {
+                self.close_after_save = None;
+            }
         }
     }
 

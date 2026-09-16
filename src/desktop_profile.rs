@@ -296,7 +296,11 @@ mod tests {
                 std::rc::Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
                 ),
-            );
+                std::rc::Rc::new(
+                    crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+                ),
+            )
+            .unwrap();
             cx.key_bindings()
                 .borrow()
                 .bindings()
