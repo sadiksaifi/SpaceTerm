@@ -12,7 +12,9 @@ use spaceterm_ui::{
     Button, ButtonSize, ButtonTheme, ButtonVariant, Icon, IconButton, IconName, Tooltip,
 };
 
-use crate::appearance::{ChromeColors, Color};
+#[cfg(test)]
+use crate::appearance::ChromeColors;
+use crate::appearance::Color;
 use crate::ui::appearance::ChromeAppearance;
 
 /// One stepper step, negative for decrement and positive for increment.
@@ -23,6 +25,7 @@ pub(super) fn gpui_color(color: Color) -> Rgba {
 }
 
 /// A field action rests on its field and uses complete neutral paints while interacting.
+#[cfg(test)]
 pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
     let paint = |background, foreground| {
         spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), rgba(0))

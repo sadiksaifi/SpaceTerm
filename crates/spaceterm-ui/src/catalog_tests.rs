@@ -86,6 +86,11 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
             ResizeHandleMetrics::new(px(1.0), px(8.0)),
         ),
         segmented_control_theme(surface, text, muted, accent),
+        SearchFieldTheme::new(
+            FieldFrameTheme::new(surface, muted, accent, accent, surface, muted),
+            SearchFieldPaint::new(muted, button_variant, accent),
+            SearchFieldMetrics::new(px(28.0)),
+        ),
         menu,
         CommandPaletteTheme::new(
             CommandPalettePaint::new(surface, surface, text, muted, muted, surface, text, accent),
@@ -140,6 +145,7 @@ impl Render for CatalogObserver {
         let _ = cx.global::<ScrollbarTheme>();
         let _ = cx.global::<ResizeHandleTheme>();
         let _ = cx.global::<SegmentedControlTheme>();
+        let _ = cx.global::<SearchFieldTheme>();
         let _ = cx.global::<MenuTheme>();
         let _ = cx.global::<CommandPaletteTheme>();
         let _ = cx.global::<ComboBoxTheme>();
@@ -208,6 +214,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
             cx.global::<SegmentedControlTheme>(),
             &replacement.segmented_control
         );
+        assert_eq!(cx.global::<SearchFieldTheme>(), &replacement.search_field);
         assert_eq!(cx.global::<MenuTheme>(), &replacement.menu);
         assert_eq!(
             cx.global::<CommandPaletteTheme>(),

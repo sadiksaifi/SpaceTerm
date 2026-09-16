@@ -18,6 +18,7 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
+mod search_field_theme;
 mod segmented_control_theme;
 mod selection_chip;
 pub(crate) mod settings_window;
@@ -171,6 +172,7 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::ToggleTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
                 && cx.has_global::<spaceterm_ui::ResizeHandleTheme>()
+                && cx.has_global::<spaceterm_ui::SearchFieldTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
                 && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
                 && cx.has_global::<spaceterm_ui::ComboBoxTheme>()

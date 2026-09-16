@@ -840,6 +840,7 @@ fn clearing_search_restores_every_row(cx: &mut TestAppContext) {
     click("settings-search-clear", cx);
 
     assert!(window.read_with(cx, |window, _| window.query.is_empty()));
+    assert!(window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
     assert!(
         !window
             .read_with(cx, |window, _| window

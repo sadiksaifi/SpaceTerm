@@ -34,11 +34,12 @@ use gpui::{
     WindowOptions, actions, div, px, size,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconButton, IconName, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
-    OverlayScrollbarEvent, ScrollMetrics, SegmentedControl, SegmentedOption, SegmentedSize, Switch,
-    TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
-    ToggleSize, TooltipLayer, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconName, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics, SearchField, SegmentedControl, SegmentedOption,
+    SegmentedSize, Switch, TextInput, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant, ToggleSize, TooltipLayer, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::appearance::{
@@ -1048,57 +1049,18 @@ impl SettingsWindow {
     fn render_search_field(
         &mut self,
         appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) -> AnyElement {
-        let search_focus = self.search.read(cx).focus_handle();
-        let owner = cx.weak_entity();
-        spaceterm_ui::field_frame(
-            "settings-search-frame",
-            &search_focus,
-            spaceterm_ui::FieldState::default(),
-            cx,
-        )
-        .debug_selector(|| "settings-search-frame".to_owned())
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .gap(appearance.spacing(7.0))
-        .px(appearance.spacing(8.0))
-        .h(appearance.height(NAVIGATION_ROW_HEIGHT, text::BODY))
-        // The search field belongs to the window, not to the navigation list under it, so the
-        // break between them is wider than the spacing inside the list.
-        .mb(appearance.spacing(12.0))
-        .rounded(appearance.spacing(NAVIGATION_CHIP_RADIUS))
-        // The same glyph size the navigation icons take, so one icon column and one text
-        // column run the height of the sidebar.
-        .child(div().flex_none().child(Icon::new(
-            IconName::Search,
-            appearance.text_size(13.0),
-            gpui_color(appearance.colors.input_placeholder),
-        )))
-        .child(div().min_w_0().flex_1().child(self.search.clone()))
-        .when(!self.query.is_empty(), |field| {
-            field.child(
-                IconButton::new("settings-search-clear", "Clear search", |foreground| {
-                    Icon::new(IconName::X, px(10.0), foreground).into_any_element()
-                })
-                .variant(spaceterm_ui::ButtonVariant::Ghost)
-                .contextual_style(
-                    controls::field_action_style(&appearance.colors),
-                    gpui_color(appearance.colors.input_focused_border),
-                )
-                .size(spaceterm_ui::ButtonSize::Compact)
-                .tab_stop(true)
-                .debug_selector("settings-search-clear")
-                .on_activate(move |_, window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.clear_search(&ClearSettingsSearch, window, cx);
-                    });
-                }),
+        div()
+            .w_full()
+            // The search field belongs to the window, not to the navigation list under it, so
+            // the break between them is wider than the spacing inside the list.
+            .mb(appearance.spacing(12.0))
+            .child(
+                SearchField::new("settings-search-frame", self.search.clone())
+                    .debug_selectors("settings-search-frame", "settings-search-clear"),
             )
-        })
-        .into_any_element()
+            .into_any_element()
     }
 
     fn render_detail(
