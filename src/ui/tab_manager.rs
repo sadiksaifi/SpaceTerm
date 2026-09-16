@@ -1269,8 +1269,12 @@ impl TabManager {
             .child(render_tab_identity(tab_id, identity, appearance))
             .child(
                 div()
-                    .ml(appearance.spacing(TAB_TRAILING_GAP))
-                    .flex_shrink_0()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
+                    .flex()
+                    .items_center()
                     .when(!active, |button| {
                         button
                             .opacity(0.0)
@@ -3414,14 +3418,11 @@ mod tests {
         let words = cx
             .debug_bounds("tab-place-1")
             .expect("the Tab should present what its Session identifies as");
-        let close = cx
-            .debug_bounds("tab-close-button-1")
-            .expect("the close control was not rendered");
         assert!(
             cx.debug_bounds("tab-pane-count-1").is_none(),
             "a single-Pane Tab should carry no count"
         );
-        assert!(origin.right() <= words.left() && words.right() <= close.left());
+        assert!(origin.right() <= words.left());
 
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
@@ -3432,12 +3433,9 @@ mod tests {
         let count = cx
             .debug_bounds("tab-pane-count-1")
             .expect("a multi-Pane Tab should carry a terse count");
-        let close = cx
-            .debug_bounds("tab-close-button-1")
-            .expect("the close control was not rendered");
-        // The glyph leads, the count trails the words, and the close control stays reachable after
-        // both, so neither the glyph nor the count competes with the Tab's name for room.
-        assert!(origin.right() <= count.left() && count.right() <= close.left());
+        // The glyph leads and the count trails the words, so neither competes with the Tab's name
+        // for room. The close control independently overlays this identity when revealed.
+        assert!(origin.right() <= count.left());
         assert!(origin.size.width > px(0.0) && count.size.width > px(0.0));
     }
 
@@ -3542,6 +3540,25 @@ mod tests {
             ),
             (px(TAB_ITEM_RIGHT_PADDING), gpui::size(px(20.0), px(20.0)),)
         );
+    }
+
+    #[gpui::test]
+    fn inactive_tab_close_button_should_overlay_the_full_width_title(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+
+        let item = cx
+            .debug_bounds("tab-item-1-inactive")
+            .expect("the inactive Tab item was not rendered");
+        let title = cx
+            .debug_bounds("tab-title-1")
+            .expect("the inactive Tab title was not rendered");
+        let close_button = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the inactive Tab close button was not rendered");
+
+        assert_eq!(item.right() - title.right(), px(TAB_ITEM_RIGHT_PADDING));
+        assert!(title.right() > close_button.left());
     }
 
     #[gpui::test]
