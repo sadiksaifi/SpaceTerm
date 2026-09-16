@@ -3573,8 +3573,12 @@ mod tests {
         report(records, 1, "\u{2733} Claude Code", cx);
         let reported = identity(cx);
         assert_eq!(
-            (reported.remote, reported.glyph, reported.activity.as_ref()),
-            (remote, Some('\u{2733}'), "Claude Code")
+            (
+                reported.remote,
+                reported.glyph.as_ref().map(|glyph| glyph.as_ref()),
+                reported.activity.as_ref()
+            ),
+            (remote, Some("\u{2733}"), "Claude Code")
         );
         // The Tab carries one glyph, in the slot the Session's own glyph would have taken.
         let origin = if remote {
@@ -3594,7 +3598,13 @@ mod tests {
         // A title without a glyph leaves the Session with its own.
         report(records, 2, "cargo test", cx);
         let plain = identity(cx);
-        assert_eq!((plain.glyph, plain.activity.as_ref()), (None, "cargo test"));
+        assert_eq!(
+            (
+                plain.glyph.as_ref().map(|glyph| glyph.as_ref()),
+                plain.activity.as_ref()
+            ),
+            (None, "cargo test")
+        );
     }
 
     /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane

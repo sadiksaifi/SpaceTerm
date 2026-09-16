@@ -1249,7 +1249,9 @@ impl TerminalPane {
         // One Session gets one glyph, so a glyph the program draws at the front of its own title
         // takes the place of the Session's rather than sitting beside it.
         let reported = super::terminal_status::reported_title(&label);
-        let glyph = reported.glyph;
+        let glyph = reported
+            .glyph
+            .map(|glyph| SharedString::from(glyph.to_owned()));
         let label = reported.words.to_owned();
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
@@ -4177,7 +4179,7 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
     /// The glyph the program reported for itself, which takes the place of the Session's own.
-    pub(crate) glyph: Option<char>,
+    pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
     pub(crate) progress: super::terminal_status::TerminalProgress,
 }

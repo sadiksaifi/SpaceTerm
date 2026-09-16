@@ -1745,7 +1745,7 @@ pub(crate) struct TabIdentity {
     /// The Current Directory leaf that places the Session, such as `~` or the project it sits in.
     pub(crate) place: gpui::SharedString,
     /// The glyph the program reported for itself, which takes the place of the Session's own.
-    pub(crate) glyph: Option<char>,
+    pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
 }
@@ -1813,7 +1813,7 @@ struct PaneCaptionText {
     directory: gpui::SharedString,
     name: gpui::SharedString,
     label: gpui::SharedString,
-    glyph: Option<char>,
+    glyph: Option<gpui::SharedString>,
     running: bool,
     progress: TerminalProgress,
 }
@@ -2122,7 +2122,7 @@ fn render_pane_caption_content(
                             pane_id,
                             &text.origin,
                             layout,
-                            (text.progress, text.glyph, attention),
+                            (text.progress, text.glyph.clone(), attention),
                             &paint,
                             appearance,
                         ))
@@ -2176,7 +2176,7 @@ fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
     layout: CaptionLayout,
-    (progress, reported, attention): (TerminalProgress, Option<char>, bool),
+    (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
     paint: &crate::appearance::CaptionPaint,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
