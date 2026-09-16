@@ -29,6 +29,8 @@ const BLINKS: u32 = 4;
 const PROGRESS_STROKE_SHARE: f32 = 0.14;
 /// The resting ring behind a reported percentage, as a share of the foreground's opacity.
 const PROGRESS_TRACK_OPACITY: f32 = 0.28;
+/// The smallest full-opacity arc, so zero and low progress retain a readable status mark.
+const MINIMUM_PROGRESS_SWEEP: f32 = 18.0;
 
 /// How many characters the first word of a title can hold and still be a glyph rather than a word.
 const MAXIMUM_GLYPH_CHARS: usize = 2;
@@ -417,10 +419,14 @@ fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
                 ..color
             };
             paint_arc(bounds, 0.0, 360.0, track, window);
-            paint_arc(bounds, 0.0, f32::from(percent) * 3.6, color, window);
+            paint_arc(bounds, 0.0, progress_sweep(percent), color, window);
         },
     )
     .size(size)
+}
+
+fn progress_sweep(percent: u8) -> f32 {
+    (f32::from(percent) * 3.6).max(MINIMUM_PROGRESS_SWEEP)
 }
 
 /// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
@@ -700,6 +706,19 @@ mod tests {
                 (Tint::Attention, 1.0),
                 "{progress:?}"
             );
+        }
+    }
+
+    #[test]
+    fn zero_percent_ring_keeps_readable_busy_and_attention_indicator() {
+        const MINIMUM_STATUS_CONTRAST: f64 = 4.5;
+        let colors = crate::appearance::ChromeColors::default();
+        let surface = colors.tab_active_background;
+        let status = colors.status(surface);
+
+        assert!(progress_sweep(0) > 0.0);
+        for foreground in [status.busy, status.attention] {
+            assert!(foreground.contrast_ratio(surface) >= MINIMUM_STATUS_CONTRAST);
         }
     }
 
