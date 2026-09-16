@@ -1214,6 +1214,7 @@ impl TabManager {
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
+        window: &Window,
         cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
         let press_manager = manager.clone();
@@ -1238,6 +1239,21 @@ impl TabManager {
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
         #[cfg(test)]
         let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
+        let font = if active {
+            &appearance.emphasis
+        } else {
+            &appearance.regular
+        };
+        let mut identity = identity;
+        identity.glyph =
+            super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
+                super::terminal_status::reported_glyph_is_drawable(
+                    glyph,
+                    font,
+                    appearance.text_size(12.0),
+                    window,
+                )
+            });
         let tab_group = format!("tab-item-{}", tab_id.get());
         div()
             .id(("tab-item", tab_id.get()))
@@ -1275,11 +1291,7 @@ impl TabManager {
                 });
             })
             // Weight marks the Active Tab exactly as it marks the current Settings section.
-            .font(if active {
-                appearance.emphasis.clone()
-            } else {
-                appearance.regular.clone()
-            })
+            .font(font.clone())
             .text_size(appearance.text_size(12.0))
             .text_color(gpui_color(foreground))
             // Content follows the chip's paired hover paint, preserving selected identity.
@@ -1362,6 +1374,7 @@ impl TabManager {
         &self,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
+        window: &Window,
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
@@ -1403,6 +1416,7 @@ impl TabManager {
                     presentation,
                     manager.clone(),
                     appearance,
+                    window,
                     cx,
                 )
                 .children(leading_separator),
@@ -1506,7 +1520,7 @@ impl Render for TabManager {
         let appearance = super::appearance::chrome(cx);
         let presentation =
             TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
-        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), cx);
+        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
 

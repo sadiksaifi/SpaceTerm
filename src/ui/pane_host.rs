@@ -378,8 +378,7 @@ impl PaneHost {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
-        let initial_caption =
-            PaneCaptionText::from_terminal(initial_terminal.read(cx), window, &appearance);
+        let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
 
         Self {
             terminal_tab,
@@ -425,11 +424,7 @@ impl PaneHost {
                     cx.notify();
                 }
                 TerminalPaneEvent::CaptionChanged => {
-                    let caption = PaneCaptionText::from_terminal(
-                        terminal.read(cx),
-                        window,
-                        super::appearance::chrome(cx),
-                    );
+                    let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if host.pane_captions.get(&pane_id) != Some(&caption) {
                         host.pane_captions.insert(pane_id, caption);
                         if pane_id == host.terminal_tab.root_pane_id()
@@ -1071,14 +1066,8 @@ impl PaneHost {
                 self.advance_native_service_hierarchy_generation(cx);
                 if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
-                    self.pane_captions.insert(
-                        pane_id,
-                        PaneCaptionText::from_terminal(
-                            terminal.read(cx),
-                            window,
-                            super::appearance::chrome(cx),
-                        ),
-                    );
+                    self.pane_captions
+                        .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
                 }
                 self.pane_attention.insert(pane_id, 0);
                 self.split_bounds.clear();
@@ -1814,20 +1803,8 @@ struct PaneCaptionText {
 }
 
 impl PaneCaptionText {
-    fn from_terminal(
-        terminal: &TerminalPane,
-        window: &Window,
-        appearance: &super::appearance::ChromeAppearance,
-    ) -> Self {
-        let mut facts = terminal.caption();
-        if facts.glyph.as_ref().is_some_and(|glyph| {
-            let size = appearance.text_size(PANE_CAPTION_TEXT_SIZE);
-            !reported_glyph_is_drawable(glyph, &appearance.caption, size, window)
-                || !reported_glyph_is_drawable(glyph, &appearance.regular, size, window)
-        }) {
-            facts.glyph = None;
-        }
-        Self::from_facts(facts)
+    fn from_terminal(terminal: &TerminalPane) -> Self {
+        Self::from_facts(terminal.caption())
     }
 
     fn from_facts(facts: super::terminal_pane::PaneCaptionFacts) -> Self {
@@ -1891,13 +1868,21 @@ fn render_pane_caption(
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
+            let mut caption = caption;
             #[cfg(feature = "appearance-exerciser")]
-            let caption = PaneCaption {
-                text: super::appearance_exerciser::caption_fixture(cx)
+            {
+                caption.text = super::appearance_exerciser::caption_fixture(cx)
                     .map(PaneCaptionText::from_facts)
-                    .unwrap_or(caption.text),
-                ..caption
-            };
+                    .unwrap_or(caption.text);
+            }
+            caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
+                reported_glyph_is_drawable(
+                    glyph,
+                    &appearance.caption,
+                    appearance.text_size(PANE_CAPTION_TEXT_SIZE),
+                    window,
+                )
+            });
             let background = caption.terminal.read(cx).surface_background();
             let pane_radius =
                 super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
@@ -1958,6 +1943,13 @@ fn render_pane_caption(
     .h(caption_height)
     .flex_shrink_0()
     .into_any_element()
+}
+
+pub(super) fn drawable_reported_glyph(
+    glyph: Option<&gpui::SharedString>,
+    supports: impl FnOnce(&str) -> bool,
+) -> Option<gpui::SharedString> {
+    glyph.filter(|glyph| supports(glyph)).cloned()
 }
 
 fn render_pane_caption_content(
@@ -3477,6 +3469,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![home_directory.clone(), home_directory]
         );
+    }
+
+    #[test]
+    fn cached_reported_glyph_should_follow_each_current_font_check() {
+        let cached = Some(gpui::SharedString::from("π"));
+
+        assert_eq!(drawable_reported_glyph(cached.as_ref(), |_| false), None);
+        assert_eq!(
+            drawable_reported_glyph(cached.as_ref(), |_| true),
+            Some(gpui::SharedString::from("π"))
+        );
+        assert_eq!(cached, Some(gpui::SharedString::from("π")));
     }
 
     #[test]
