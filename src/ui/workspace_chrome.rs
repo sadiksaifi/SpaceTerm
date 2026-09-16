@@ -17,8 +17,18 @@ pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 // Reserved native traffic-light region, with no additional leading gap.
 /// Space reserved for native window controls in app-owned top chrome.
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
-const EXPANDED_MINIMUM_ACTION_GAP: f32 = 4.0;
-const COLLAPSED_ACTION_GAP: f32 = 0.0;
+
+/// Leading inset of the top-left chrome.
+///
+/// Fullscreen hides the native window controls, so the clearance guards nothing. The header still
+/// keeps the frame's own edge air rather than running flush to the window edge.
+pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels) -> Pixels {
+    if fullscreen {
+        frame_space
+    } else {
+        px(TRAFFIC_LIGHT_CLEARANCE)
+    }
+}
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_SIZE: f32 = 12.0;
@@ -39,6 +49,7 @@ fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
 pub(super) struct WorkspaceChromeLayout {
     pub(super) width: Pixels,
     sidebar_visible: bool,
+    fullscreen: bool,
 }
 
 impl WorkspaceChromeLayout {
@@ -56,6 +67,7 @@ impl WorkspaceChromeLayout {
                 Self::collapsed_width(name, pinned, window, cx)
             },
             sidebar_visible: sidebar.visible,
+            fullscreen: window.is_fullscreen(),
         }
     }
 
@@ -72,9 +84,10 @@ impl WorkspaceChromeLayout {
         let content_width = appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
             + appearance.spacing(ICON_SIZE + SWITCHER_IDENTITY_GAP)
             + identity_width;
-        (px(TRAFFIC_LIGHT_CLEARANCE)
-            + appearance.spacing(COLLAPSED_ACTION_GAP)
-            + trailing_reserve(appearance, cx)
+        let edge_reserve = trailing_reserve(appearance, cx);
+        (leading_clearance(window.is_fullscreen(), edge_reserve)
+            + edge_reserve
+            + edge_reserve
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
             + cx.global::<ComboBoxTheme>()
                 .custom_trigger_width(content_width))
@@ -88,6 +101,7 @@ impl WorkspaceChromeLayout {
         cx: &App,
     ) -> AnyElement {
         let appearance = chrome(cx);
+        let edge_reserve = trailing_reserve(appearance, cx);
         // Keep drag-region occlusion outside the tooltip target so the toggle cannot
         // block its own help. Its button preserves hover within this control container.
         let toggle = div().flex_none().block_mouse_except_scroll().child(toggle);
@@ -104,17 +118,15 @@ impl WorkspaceChromeLayout {
             // in the same strip, so identity and Tabs stay on one line.
             .top_0()
             .bottom_0()
-            .left(px(TRAFFIC_LIGHT_CLEARANCE))
+            .left(leading_clearance(self.fullscreen, edge_reserve))
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
             // stops, so the identity area and the list under it share one trailing edge.
-            .right(trailing_reserve(appearance, cx))
+            .right(edge_reserve)
             .flex()
             .items_center()
-            .gap(appearance.spacing(if self.sidebar_visible {
-                EXPANDED_MINIMUM_ACTION_GAP
-            } else {
-                COLLAPSED_ACTION_GAP
-            }))
+            // The toggle keeps the frame's edge air on its right as well, in every mode, so it
+            // never hugs the switcher beside it.
+            .gap(edge_reserve)
             .child(toggle)
             .child(
                 div()
@@ -307,6 +319,15 @@ fn gpui_color(color: Color) -> Rgba {
 mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
+
+    #[test]
+    fn fullscreen_header_should_keep_edge_air_without_traffic_lights() {
+        assert_eq!(leading_clearance(true, px(8.0)), px(8.0));
+        assert_eq!(
+            leading_clearance(false, px(8.0)),
+            px(TRAFFIC_LIGHT_CLEARANCE)
+        );
+    }
 
     #[test]
     fn unhealthy_identity_status_should_be_readable_on_resting_and_hovered_triggers() {

@@ -6404,7 +6404,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     let tabs = cx.debug_bounds("tab-bar").unwrap();
     assert_eq!(expanded_toggle.left(), px(78.0));
     assert_eq!(expanded_toggle.size, gpui::size(px(28.0), px(28.0)));
-    assert_eq!(chooser.left(), expanded_toggle.right());
+    assert_eq!(chooser.left(), expanded_toggle.right() + frame_space(cx));
     // Ten pixels of content padding inside the one-pixel trigger border.
     assert_eq!(switcher_icon.left() - chooser.left(), px(11.0));
     let trailing_inset = chooser.right() - label.right();

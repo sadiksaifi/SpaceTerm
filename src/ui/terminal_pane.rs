@@ -92,6 +92,33 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
+/// Gap within which two Escape presses leave Operating-System Window fullscreen.
+///
+/// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
+/// because the caller filters those out before recording.
+const DOUBLE_ESCAPE_FULLSCREEN_WINDOW: Duration = Duration::from_millis(500);
+
+/// Pending first half of a double-Escape fullscreen exit.
+#[derive(Default)]
+struct FullscreenEscapeSequence {
+    first_press: Option<Instant>,
+}
+
+impl FullscreenEscapeSequence {
+    /// Records one Escape press, reporting whether it completes the pair.
+    fn escape_pressed(&mut self, now: Instant) -> bool {
+        let paired = self.first_press.is_some_and(|first| {
+            now.checked_duration_since(first)
+                .is_some_and(|elapsed| elapsed <= DOUBLE_ESCAPE_FULLSCREEN_WINDOW)
+        });
+        self.first_press = if paired { None } else { Some(now) };
+        paired
+    }
+
+    fn reset(&mut self) {
+        self.first_press = None;
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 enum StatusIntent {
@@ -477,6 +504,7 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
+    fullscreen_escape: FullscreenEscapeSequence,
     hovered_link: Option<HoveredTerminalLink>,
     pressed_link: Option<(
         crate::terminal::PresentationGeneration,
@@ -658,6 +686,14 @@ impl TerminalPane {
             cx.notify();
         })
         .detach();
+        // GPUI resolves bound actions before raw key listeners, so those keystrokes must also
+        // interrupt a pending bare-Escape pair.
+        cx.observe_keystrokes(|pane, event, _, _| {
+            if event.action.is_some() {
+                pane.fullscreen_escape.reset();
+            }
+        })
+        .detach();
 
         Self {
             terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
@@ -740,6 +776,7 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
+            fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
             file_preview: FilePreviewPresenter::new(native_service_adapters.file_preview.create()),
@@ -2082,6 +2119,24 @@ impl TerminalPane {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
+        }
+        // A bare Escape pair leaves Operating-System Window fullscreen without stealing terminal
+        // input: each press still reaches the session below. Presses an overlay owns (find, paste
+        // confirmation) or an IME composition owns never count, and any other key breaks the pair.
+        let bare_escape = event.keystroke.key == "escape"
+            && !event.is_held
+            && !event.keystroke.modifiers.modified();
+        let eligible_escape = bare_escape
+            && self.find_input.is_none()
+            && self.pending_paste.is_none()
+            && self.ime.marked_text().is_none()
+            && window.is_fullscreen();
+        if eligible_escape {
+            if self.fullscreen_escape.escape_pressed(Instant::now()) {
+                window.toggle_fullscreen();
+            }
+        } else {
+            self.fullscreen_escape.reset();
         }
         let input = self.key_input_adapter.key_down(event);
         if self.ime.marked_text().is_some() {
