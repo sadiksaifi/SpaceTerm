@@ -60,7 +60,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
             Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
             Ok(
                 SessionEvent::HiddenInputChanged(_)
-                | SessionEvent::MetadataChanged
+                | SessionEvent::MetadataChanged(_)
                 | SessionEvent::Attention(_),
             ) => {}
             Err(async_channel::TryRecvError::Empty) => {
@@ -112,7 +112,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
             Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
             Ok(
                 SessionEvent::HiddenInputChanged(_)
-                | SessionEvent::MetadataChanged
+                | SessionEvent::MetadataChanged(_)
                 | SessionEvent::Attention(_),
             ) => {}
             Err(async_channel::TryRecvError::Empty) => {

@@ -1976,7 +1976,7 @@ impl TerminalPane {
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
-            SessionEvent::MetadataChanged => {}
+            SessionEvent::MetadataChanged(wakeup) => drop(wakeup),
             SessionEvent::Screen(screen) => {
                 if screen.appearance_generation < self.requested_terminal_generation
                     || self

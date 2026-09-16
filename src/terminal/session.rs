@@ -14,6 +14,7 @@ use std::mem;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -74,15 +75,40 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 
 // Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
     /// Presented Terminal Metadata changed; read it from the retained snapshot.
-    MetadataChanged,
+    MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Exited(SessionExit),
     Failed(SessionFailure),
+}
+
+#[derive(Debug)]
+pub(crate) struct MetadataWakeup {
+    queued: Arc<AtomicBool>,
+}
+
+impl MetadataWakeup {
+    fn new(queued: Arc<AtomicBool>) -> Self {
+        Self { queued }
+    }
+}
+
+impl Drop for MetadataWakeup {
+    fn drop(&mut self) {
+        self.queued.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl SessionEvent {
+    pub(crate) fn metadata_changed_for_test() -> Self {
+        let queued = Arc::new(AtomicBool::new(true));
+        Self::MetadataChanged(MetadataWakeup::new(queued))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1717,8 +1743,13 @@ impl TerminalWorker {
     }
 
     fn publish_metadata_changed(&mut self) -> bool {
-        !self.schedules.take_metadata_presentation()
-            || self.send_terminal_event(SessionEvent::MetadataChanged)
+        let Some(wakeup) = self.schedules.take_metadata_presentation() else {
+            return true;
+        };
+        match self.events.try_send(SessionEvent::MetadataChanged(wakeup)) {
+            Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
+            Err(async_channel::TrySendError::Closed(_)) => false,
+        }
     }
 
     fn request_presentation_at(&mut self, now: Instant) -> bool {

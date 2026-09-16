@@ -58,6 +58,7 @@ pub(super) struct WorkerSchedules {
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
     metadata_presentation_pending: bool,
+    metadata_presentation_queued: Arc<AtomicBool>,
     graphics_animation: Option<Instant>,
 }
 
@@ -149,8 +150,17 @@ impl WorkerSchedules {
         self.metadata_presentation_pending = true;
     }
 
-    pub(super) fn take_metadata_presentation(&mut self) -> bool {
-        std::mem::take(&mut self.metadata_presentation_pending)
+    pub(super) fn take_metadata_presentation(&mut self) -> Option<MetadataWakeup> {
+        if !std::mem::take(&mut self.metadata_presentation_pending)
+            || self
+                .metadata_presentation_queued
+                .swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(MetadataWakeup::new(Arc::clone(
+            &self.metadata_presentation_queued,
+        )))
     }
 
     pub(super) fn metadata_presented(&mut self) {
@@ -233,6 +243,7 @@ impl WorkerSchedules {
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
             metadata_presentation_pending: false,
+            metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             graphics_animation: None,
         }
     }
