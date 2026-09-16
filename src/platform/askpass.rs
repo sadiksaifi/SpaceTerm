@@ -5,7 +5,7 @@ use gpui::{App, AppContext, Window};
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{
@@ -14,6 +14,7 @@ use std::sync::{
     mpsc,
 };
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use super::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassSecret};
@@ -31,7 +32,9 @@ const SSH_PROMPT_KIND_ENV: &str = "SSH_ASKPASS_PROMPT";
 const HELPER_SUCCESS: i32 = 0;
 const HELPER_CANCELLED: i32 = 1;
 const HELPER_FAILED: i32 = 2;
-const PRESENTATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
+pub(super) const BROKER_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(15);
+const REQUEST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const PRESENTATION_POLL_INTERVAL: Duration = Duration::from_millis(15);
 
 const PROTOCOL_VERSION: u8 = 1;
 const CAPABILITY_BYTES: usize = CAPABILITY_TEXT_BYTES / 2;
@@ -127,6 +130,8 @@ pub(super) enum AskPassHelperReply {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AskPassProtocolError {
+    TimedOut,
+    Cancelled,
     Disconnected,
     OversizedFrame,
     MalformedFrame,
@@ -138,12 +143,25 @@ pub(super) enum AskPassProtocolError {
 pub(super) fn read_request<S: Read + ?Sized>(
     stream: &mut S,
     capability: &AskPassCapability,
+    stop: &AtomicBool,
 ) -> Result<AskPassRequest, AskPassProtocolError> {
-    let length = read_frame_length(stream, MAX_REQUEST_FRAME_BYTES)?;
+    read_request_before(
+        stream,
+        capability,
+        stop,
+        Instant::now() + REQUEST_FRAME_TIMEOUT,
+    )
+}
+
+fn read_request_before<S: Read + ?Sized>(
+    stream: &mut S,
+    capability: &AskPassCapability,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> Result<AskPassRequest, AskPassProtocolError> {
+    let length = read_frame_length_before(stream, MAX_REQUEST_FRAME_BYTES, stop, deadline)?;
     let mut frame = Zeroizing::new(vec![0_u8; length]);
-    stream
-        .read_exact(frame.as_mut_slice())
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+    read_exact_before(stream, frame.as_mut_slice(), stop, deadline)?;
     let mut cursor = FrameCursor::new(frame.as_slice());
     if cursor.byte()? != PROTOCOL_VERSION {
         return Err(AskPassProtocolError::MalformedFrame);
@@ -237,7 +255,7 @@ pub(super) fn read_reply<S: Read + ?Sized>(
     let mut frame = Zeroizing::new(vec![0_u8; length]);
     stream
         .read_exact(frame.as_mut_slice())
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+        .map_err(classify_read_error)?;
     match frame[0] {
         REPLY_SECRET => {
             frame.remove(0);
@@ -258,13 +276,73 @@ fn read_frame_length<S: Read + ?Sized>(
     let mut encoded = [0_u8; 4];
     stream
         .read_exact(&mut encoded)
-        .map_err(|_| AskPassProtocolError::Disconnected)?;
+        .map_err(classify_read_error)?;
+    decode_frame_length(encoded, maximum)
+}
+
+fn read_frame_length_before<S: Read + ?Sized>(
+    stream: &mut S,
+    maximum: usize,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> Result<usize, AskPassProtocolError> {
+    let mut encoded = [0_u8; 4];
+    read_exact_before(stream, &mut encoded, stop, deadline)?;
+    decode_frame_length(encoded, maximum)
+}
+
+fn decode_frame_length(encoded: [u8; 4], maximum: usize) -> Result<usize, AskPassProtocolError> {
     let length = usize::try_from(u32::from_be_bytes(encoded))
         .map_err(|_| AskPassProtocolError::OversizedFrame)?;
     if length == 0 || length > maximum {
         return Err(AskPassProtocolError::OversizedFrame);
     }
     Ok(length)
+}
+
+fn read_exact_before<S: Read + ?Sized>(
+    stream: &mut S,
+    mut remaining: &mut [u8],
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), AskPassProtocolError> {
+    while !remaining.is_empty() {
+        if stop.load(Ordering::Acquire) {
+            return Err(AskPassProtocolError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(AskPassProtocolError::TimedOut);
+        }
+        match stream.read(remaining) {
+            Ok(0) => return Err(AskPassProtocolError::Disconnected),
+            Ok(length) => remaining = &mut remaining[length..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if is_read_timeout(&error) => {}
+            Err(_) => return Err(AskPassProtocolError::Disconnected),
+        }
+    }
+    if stop.load(Ordering::Acquire) {
+        Err(AskPassProtocolError::Cancelled)
+    } else if Instant::now() >= deadline {
+        Err(AskPassProtocolError::TimedOut)
+    } else {
+        Ok(())
+    }
+}
+
+fn classify_read_error(error: io::Error) -> AskPassProtocolError {
+    if is_read_timeout(&error) {
+        AskPassProtocolError::TimedOut
+    } else {
+        AskPassProtocolError::Disconnected
+    }
+}
+
+fn is_read_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
 }
 
 fn write_frame_length<S: Write + ?Sized>(
@@ -778,6 +856,10 @@ impl Drop for AskPassTeardown {
     }
 }
 
+/// Authenticated local transport with bounded reads for deadline and cancellation polling.
+///
+/// Each read must settle within [`BROKER_CANCELLATION_POLL_INTERVAL`] so portable broker policy can
+/// observe its absolute request deadline and cancellation flag.
 pub(super) trait AskPassLocalStream: Read + Write + Send {}
 
 impl<T: Read + Write + Send> AskPassLocalStream for T {}
@@ -965,7 +1047,7 @@ fn handle_verified_connection<S: Read + Write + ?Sized>(
     presenter: &dyn AskPassPresenter,
     stop: &AtomicBool,
 ) -> Result<(), AskPassProtocolError> {
-    let request = read_request(stream, capability)?;
+    let request = read_request(stream, capability, stop)?;
     let answer = presenter
         .present(request, stop)
         .unwrap_or(AskPassProtocolReply::Failed);
@@ -1043,7 +1125,7 @@ impl AskPassAttemptObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Result as IoResult};
+    use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
     use std::sync::Mutex;
 
     struct MemoryStream {
@@ -1074,6 +1156,41 @@ mod tests {
 
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
+        }
+    }
+
+    struct FailingReader(ErrorKind);
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> IoResult<usize> {
+            Err(Error::from(self.0))
+        }
+    }
+
+    struct SlowProgressReader {
+        bytes: Cursor<Vec<u8>>,
+        delay: std::time::Duration,
+    }
+
+    impl Read for SlowProgressReader {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            thread::sleep(self.delay);
+            let length = buffer.len().min(1);
+            self.bytes.read(&mut buffer[..length])
+        }
+    }
+
+    struct CancellingReader<'a> {
+        bytes: Cursor<Vec<u8>>,
+        stop: &'a AtomicBool,
+    }
+
+    impl Read for CancellingReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            let length = buffer.len().min(1);
+            let read = self.bytes.read(&mut buffer[..length]);
+            self.stop.store(true, Ordering::Release);
+            read
         }
     }
 
@@ -1130,7 +1247,71 @@ mod tests {
         }
         let token = token();
         let bytes = request_bytes(token.as_str().as_bytes(), b"Password:", REQUEST_SECRET);
-        assert!(read_request(&mut OneByteReader(Cursor::new(bytes)), &token).is_ok());
+        assert!(
+            read_request(
+                &mut OneByteReader(Cursor::new(bytes)),
+                &token,
+                &AtomicBool::new(false),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn protocol_request_deadline_is_absolute_across_partial_progress() {
+        let token = token();
+        let bytes = request_bytes(token.as_str().as_bytes(), b"P", REQUEST_SECRET);
+        let mut reader = SlowProgressReader {
+            bytes: Cursor::new(bytes),
+            delay: std::time::Duration::from_millis(1),
+        };
+
+        assert_eq!(
+            read_request_before(
+                &mut reader,
+                &token,
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_millis(10),
+            )
+            .err(),
+            Some(AskPassProtocolError::TimedOut)
+        );
+    }
+
+    #[test]
+    fn protocol_request_read_stops_after_cancellation() {
+        let token = token();
+        let stop = AtomicBool::new(false);
+        let bytes = request_bytes(token.as_str().as_bytes(), b"P", REQUEST_SECRET);
+        let mut reader = CancellingReader {
+            bytes: Cursor::new(bytes),
+            stop: &stop,
+        };
+
+        assert_eq!(
+            read_request_before(
+                &mut reader,
+                &token,
+                &stop,
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .err(),
+            Some(AskPassProtocolError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn protocol_distinguishes_read_timeouts_from_disconnections() {
+        for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            assert_eq!(
+                read_reply(&mut FailingReader(kind)).err(),
+                Some(AskPassProtocolError::TimedOut)
+            );
+        }
+        assert_eq!(
+            read_reply(&mut FailingReader(ErrorKind::UnexpectedEof)).err(),
+            Some(AskPassProtocolError::Disconnected)
+        );
     }
 
     #[test]
@@ -1140,17 +1321,17 @@ mod tests {
             .to_be_bytes()
             .to_vec();
         assert_eq!(
-            read_request(&mut Cursor::new(oversized), &token).err(),
+            read_request(&mut Cursor::new(oversized), &token, &AtomicBool::new(false),).err(),
             Some(AskPassProtocolError::OversizedFrame)
         );
         let unknown = request_bytes(token.as_str().as_bytes(), b"Password:", 0xff);
         assert_eq!(
-            read_request(&mut Cursor::new(unknown), &token).err(),
+            read_request(&mut Cursor::new(unknown), &token, &AtomicBool::new(false),).err(),
             Some(AskPassProtocolError::MalformedFrame)
         );
         let malformed = request_bytes(token.as_str().as_bytes(), &[0xff], REQUEST_SECRET);
         assert_eq!(
-            read_request(&mut Cursor::new(malformed), &token).err(),
+            read_request(&mut Cursor::new(malformed), &token, &AtomicBool::new(false),).err(),
             Some(AskPassProtocolError::InvalidRequest)
         );
     }
@@ -1164,7 +1345,7 @@ mod tests {
             REQUEST_SECRET,
         );
         assert_eq!(
-            read_request(&mut Cursor::new(bytes), &token).err(),
+            read_request(&mut Cursor::new(bytes), &token, &AtomicBool::new(false),).err(),
             Some(AskPassProtocolError::InvalidCapability)
         );
     }
