@@ -971,6 +971,7 @@ pub(crate) struct CaptionPaint {
     pub(crate) icon: Color,
     pub(crate) focus: Color,
     pub(crate) attention: Color,
+    pub(crate) error: Color,
     pub(crate) control: SemanticPaint,
     pub(crate) control_hover: SemanticPaint,
     pub(crate) control_pressed: SemanticPaint,
@@ -1008,11 +1009,56 @@ impl ChromeColors {
             icon: foreground,
             focus: contrast(self.border_focused, surface, 3.0),
             attention: contrast(self.warning, surface, 4.5),
+            error: contrast(self.error, surface, 4.5),
             control: paint(surface, foreground),
             control_hover: paint(surface.mix(foreground, 0.10), foreground),
             control_pressed: paint(surface.mix(foreground, 0.18), foreground),
             control_disabled: paint(surface, self.text_disabled),
         }
+    }
+}
+
+/// Status marks that must stay readable on every surface one control can rest on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StatusPaint {
+    pub(crate) attention: Color,
+    pub(crate) error: Color,
+}
+
+impl ChromeColors {
+    /// Resolves the semantic status colors against every surface a control shows them on.
+    ///
+    /// Each surface is composed over the opaque Chrome background. A semantic color that already
+    /// reads on all of them is kept; otherwise black or white, whichever reads best everywhere.
+    pub(crate) fn status(&self, surfaces: &[Color]) -> StatusPaint {
+        let base = self.background.with_alpha(255);
+        let surfaces = surfaces
+            .iter()
+            .map(|surface| surface.source_over(base))
+            .collect::<Vec<_>>();
+        StatusPaint {
+            attention: contrast_on_all(self.warning, &surfaces, 3.0),
+            error: contrast_on_all(self.error, &surfaces, 3.0),
+        }
+    }
+}
+
+fn contrast_on_all(foreground: Color, surfaces: &[Color], minimum: f64) -> Color {
+    let worst = |color: Color| {
+        surfaces
+            .iter()
+            .map(|surface| color.source_over(*surface).contrast_ratio(*surface))
+            .fold(f64::INFINITY, f64::min)
+    };
+    if worst(foreground) >= minimum {
+        return foreground;
+    }
+    let dark = Color::rgb(0x000000);
+    let light = Color::rgb(0xffffff);
+    if worst(dark) >= worst(light) {
+        dark
+    } else {
+        light
     }
 }
 
@@ -1525,6 +1571,7 @@ mod tests {
                         caption.secondary,
                         caption.icon,
                         caption.attention,
+                        caption.error,
                     ] {
                         assert!(text.contrast_ratio(surface) >= 4.5);
                     }
@@ -1538,6 +1585,42 @@ mod tests {
                         assert!(paint.icon.contrast_ratio(paint.background) >= 4.5);
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn status_marks_read_on_every_tab_surface_they_rest_on() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin::chrome_base(appearance);
+            let base = colors.background.with_alpha(255);
+            for surfaces in [
+                vec![
+                    colors.tab_active_background,
+                    colors.tab_active_hover_background,
+                    colors.tab_inactive_background,
+                    colors.tab_hover_background,
+                ],
+                // A surface painted in the warning color itself still gets a readable mark.
+                vec![Color::rgb(0xfbfbfc), Color::rgb(0xe0a75c)],
+            ] {
+                let status = colors.status(&surfaces);
+                for mark in [status.attention, status.error] {
+                    for surface in &surfaces {
+                        let surface = surface.source_over(base);
+                        assert!(
+                            mark.contrast_ratio(surface) >= 3.0,
+                            "{appearance:?} {mark:?} {surface:?}"
+                        );
+                    }
+                }
+            }
+            let resting = [colors.tab_active_background, colors.tab_inactive_background];
+            if resting
+                .iter()
+                .all(|surface| colors.warning.contrast_ratio(surface.source_over(base)) >= 3.0)
+            {
+                assert_eq!(colors.status(&resting).attention, colors.warning);
             }
         }
     }

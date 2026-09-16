@@ -508,19 +508,20 @@ fn retained_directory_metadata_should_reject_older_screens_and_clear_stale_direc
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
     let (pane, cx) = terminal_pane(cx);
     let latest = CurrentDirectory::Local(PathBuf::from("/projects/latest"));
+    let retained = |revision, freshness| {
+        let screen = directory_screen(1, "/projects/latest", freshness);
+        let mut metadata = Arc::clone(&screen.metadata);
+        Arc::make_mut(&mut metadata).revision = revision;
+        metadata
+    };
     pane.update(cx, |pane, cx| {
-        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
-            revision: 20,
-            current: Some(latest.clone()),
-        });
-        let mut old_screen = directory_screen(1, "/projects/old", MetadataFreshness::Live);
+        assert!(pane.accept_metadata(retained(20, MetadataFreshness::Live)));
+        let mut old_screen = directory_screen(2, "/projects/old", MetadataFreshness::Live);
         Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata).revision = 10;
         pane.handle_event(SessionEvent::Screen(old_screen), cx);
         assert_eq!(pane.current_directory(), Some(latest.clone()));
-        pane.accept_directory_metadata(crate::terminal::SessionDirectorySnapshot {
-            revision: 21,
-            current: None,
-        });
+        assert_eq!(pane.caption().directory.as_ref(), "/projects/latest");
+        assert!(pane.accept_metadata(retained(21, MetadataFreshness::Stale)));
         assert_eq!(pane.current_directory(), None);
     });
 }

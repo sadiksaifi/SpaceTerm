@@ -164,7 +164,8 @@ pub(crate) struct TestTerminalSessionRecords {
     selection_receivers:
         Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
-    directory_snapshots: Rc<RefCell<BTreeMap<usize, super::SessionDirectorySnapshot>>>,
+    metadata_snapshots:
+        Rc<RefCell<BTreeMap<usize, Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
@@ -177,18 +178,63 @@ impl TestTerminalSessionRecords {
         session_id: usize,
         current: Option<crate::domain::CurrentDirectory>,
     ) {
-        let mut snapshots = self.directory_snapshots.borrow_mut();
-        let revision = snapshots
-            .get(&session_id)
-            .map_or(1, |snapshot| snapshot.revision + 1);
-        snapshots.insert(
-            session_id,
-            super::SessionDirectorySnapshot { revision, current },
+        use crate::terminal::metadata::{
+            MetadataFreshness, RemoteTerminalMetadataContext, TerminalMetadataContext,
+        };
+        self.report_metadata(session_id, |metadata| match current {
+            Some(crate::domain::CurrentDirectory::Local(path)) => {
+                let path = path.to_string_lossy();
+                metadata.context = TerminalMetadataContext::local(
+                    crate::local_path::LocalPathSemantics::Posix,
+                    &path,
+                    Default::default(),
+                );
+                metadata.directory.path = Arc::from(path.as_ref());
+                metadata.freshness = MetadataFreshness::Live;
+            }
+            Some(crate::domain::CurrentDirectory::Remote(directory)) => {
+                metadata.context =
+                    TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+                        crate::domain::SshDestination::new("tester@remote".to_owned())
+                            .expect("the test destination is valid"),
+                        directory.clone(),
+                    ));
+                metadata.directory.path = Arc::from(directory.as_str());
+                metadata.freshness = MetadataFreshness::Live;
+            }
+            None => metadata.freshness = MetadataFreshness::Stale,
+        });
+    }
+
+    /// Retains the next Terminal Metadata revision for one Session, as a hidden Session would.
+    pub(crate) fn report_metadata(
+        &self,
+        session_id: usize,
+        change: impl FnOnce(&mut crate::terminal::metadata::TerminalMetadataSnapshot),
+    ) {
+        let mut snapshots = self.metadata_snapshots.borrow_mut();
+        let mut metadata = snapshots.get(&session_id).map_or_else(
+            || {
+                Arc::unwrap_or_clone(
+                    crate::terminal::metadata::MetadataTracker::new(
+                        crate::local_path::LocalPathSemantics::Posix,
+                        "",
+                        "",
+                        Default::default(),
+                        std::time::Instant::now(),
+                    )
+                    .snapshot(),
+                )
+            },
+            |snapshot| (**snapshot).clone(),
         );
+        metadata.revision += 1;
+        change(&mut metadata);
+        snapshots.insert(session_id, Arc::new(metadata));
         self.event_sender(session_id)
             .expect("session must be live")
-            .try_send(SessionEvent::CurrentDirectoryChanged)
-            .expect("directory event must fit");
+            .try_send(SessionEvent::MetadataChanged)
+            .expect("metadata event must fit");
     }
 
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
@@ -425,9 +471,11 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
-    fn directory_snapshot(&self) -> Option<super::SessionDirectorySnapshot> {
+    fn metadata_snapshot(
+        &self,
+    ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
         self.records
-            .directory_snapshots
+            .metadata_snapshots
             .borrow()
             .get(&self.session_id)
             .cloned()

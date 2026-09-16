@@ -84,9 +84,8 @@ pub(crate) use session::{
     TerminalLaunchPlan, test_terminal_appearance_update,
 };
 pub(crate) use session::{
-    NativeTerminalSessionFactory, SelectionCopyError, SessionDirectorySnapshot, SessionEvent,
-    StartedTerminalSession, TerminalAppearanceUpdate, TerminalSessionFactory,
-    TerminalSessionHandle,
+    NativeTerminalSessionFactory, SelectionCopyError, SessionEvent, StartedTerminalSession,
+    TerminalAppearanceUpdate, TerminalSessionFactory, TerminalSessionHandle,
 };
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,

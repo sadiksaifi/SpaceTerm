@@ -45,7 +45,7 @@ use crate::terminal::key::InputModifiers;
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{KeyInput, PhysicalKey};
 use crate::terminal::metadata::{
-    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext,
+    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
 use crate::terminal::paste::{
@@ -77,7 +77,8 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
-    CurrentDirectoryChanged,
+    /// Presented Terminal Metadata changed; read it from the retained snapshot.
+    MetadataChanged,
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Exited(SessionExit),
@@ -311,38 +312,30 @@ impl RecordingAccessibilitySelectionReceiver {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SessionDirectorySnapshot {
-    pub(crate) revision: u64,
-    pub(crate) current: Option<crate::domain::CurrentDirectory>,
-}
-
-// Retained separately because presentation events may evict any earlier queue entry.
+/// The newest Terminal Metadata, retained apart from Screen presentation.
+///
+/// Presentation events may evict any earlier queue entry, and a hidden Pane receives no Screens at
+/// all, yet its Tab item and Workspace still present the Session's directory, title, command, and
+/// progress.
 #[derive(Clone, Default)]
-struct SessionDirectoryState(Arc<Mutex<Option<SessionDirectorySnapshot>>>);
+struct SessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
 
-impl SessionDirectoryState {
-    fn snapshot(&self) -> Option<SessionDirectorySnapshot> {
+impl SessionMetadataState {
+    fn snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
-    fn publish(&self, metadata: &crate::terminal::metadata::TerminalMetadataSnapshot) {
-        let current = (metadata.freshness == crate::terminal::metadata::MetadataFreshness::Live)
-            .then(|| metadata.context.current_directory(&metadata.directory.path))
-            .flatten();
-        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        *state = Some(SessionDirectorySnapshot {
-            revision: metadata.revision,
-            current,
-        });
+    fn publish(&self, metadata: Arc<TerminalMetadataSnapshot>) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(metadata);
     }
 }
 
 pub(crate) trait TerminalSessionHandle {
-    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
+    /// The newest Terminal Metadata the Session has retained, whether or not it is presentable.
+    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
     }
 
@@ -402,7 +395,7 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 pub(crate) struct TerminalSession {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -475,8 +468,8 @@ impl TerminalSession {
 }
 
 impl TerminalSessionHandle for TerminalSession {
-    fn directory_snapshot(&self) -> Option<SessionDirectorySnapshot> {
-        self.directory_state.snapshot()
+    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+        self.metadata_state.snapshot()
     }
 
     fn key(&self, input: KeyInput) {
@@ -798,7 +791,7 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     native_pty: NativePtyOwner,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
@@ -823,7 +816,7 @@ struct TerminalWorkerContext {
 }
 
 struct TerminalWorkerPublishers {
-    directory_state: SessionDirectoryState,
+    metadata_state: SessionMetadataState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -956,7 +949,7 @@ impl TerminalWorker {
             initial_appearance,
         } = context;
         let TerminalWorkerPublishers {
-            directory_state,
+            metadata_state,
             events,
             accessibility,
         } = publishers;
@@ -989,7 +982,7 @@ impl TerminalWorker {
         });
 
         let mut worker = Self {
-            directory_state,
+            metadata_state,
             native_pty,
             emulator,
             commands,
@@ -1520,9 +1513,9 @@ impl TerminalWorker {
 
         if received_output {
             let metadata = self.emulator.metadata();
-            if metadata.directory != previous_metadata.directory {
-                self.directory_state.publish(&metadata);
-                if !self.send_terminal_event(SessionEvent::CurrentDirectoryChanged) {
+            if metadata.presentation_differs(&previous_metadata) {
+                self.metadata_state.publish(metadata);
+                if !self.send_terminal_event(SessionEvent::MetadataChanged) {
                     return false;
                 }
             }
@@ -1672,7 +1665,7 @@ impl TerminalWorker {
     }
 
     fn publish_screen(&mut self) -> bool {
-        self.directory_state.publish(&self.emulator.metadata());
+        self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
             return false;
         }

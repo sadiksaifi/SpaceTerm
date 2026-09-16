@@ -317,8 +317,8 @@ impl TerminalSession {
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
-        let directory_state = SessionDirectoryState::default();
-        let worker_directory_state = directory_state.clone();
+        let metadata_state = SessionMetadataState::default();
+        let worker_metadata_state = metadata_state.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let native_pty_close = NativePtyCloseHandle::default();
@@ -367,7 +367,7 @@ impl TerminalSession {
                     reader_transport,
                     worker_schedule_input,
                     TerminalWorkerPublishers {
-                        directory_state: worker_directory_state,
+                        metadata_state: worker_metadata_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
@@ -378,7 +378,7 @@ impl TerminalSession {
 
         Ok((
             Self {
-                directory_state,
+                metadata_state,
                 commands: Some(command_tx),
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
@@ -422,8 +422,8 @@ impl TerminalSession {
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
-        let directory_state = SessionDirectoryState::default();
-        let worker_directory_state = directory_state.clone();
+        let metadata_state = SessionMetadataState::default();
+        let worker_metadata_state = metadata_state.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -442,7 +442,7 @@ impl TerminalSession {
                     reader_transport,
                     worker_schedule_input,
                     TerminalWorkerPublishers {
-                        directory_state: worker_directory_state,
+                        metadata_state: worker_metadata_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
@@ -454,7 +454,7 @@ impl TerminalSession {
         match startup_rx.recv() {
             Ok(Ok(())) => Ok((
                 Self {
-                    directory_state,
+                    metadata_state,
                     commands: Some(command_tx),
                     worker: Some(worker),
                     native_pty_close: Some(native_pty_close),
