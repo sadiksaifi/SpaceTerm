@@ -13,7 +13,7 @@ mod microphone;
 mod schemes;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod control_tests;
@@ -240,10 +240,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
 }
 
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
-pub(crate) fn quit_when_saved(
-    cx: &mut App,
-    application_quit: Rc<dyn crate::platform::application_quit::ApplicationQuitAdapter>,
-) {
+pub(crate) fn quit_when_saved(cx: &mut App, completion: crate::app::ApplicationQuitAfterSave) {
     if let Some(settings) = cx
         .windows()
         .into_iter()
@@ -251,17 +248,17 @@ pub(crate) fn quit_when_saved(
     {
         let _ = settings.update(cx, |settings, window, cx| {
             window.activate_window();
-            settings.request_close(CloseIntent::Application(application_quit), cx);
+            settings.request_close(CloseIntent::Application(completion), cx);
         });
     } else {
-        application_quit.confirm_quit(cx);
+        completion.complete(cx);
     }
 }
 
 #[derive(Clone)]
 enum CloseIntent {
     Window(AnyWindowHandle),
-    Application(Rc<dyn crate::platform::application_quit::ApplicationQuitAdapter>),
+    Application(crate::app::ApplicationQuitAfterSave),
 }
 
 /// Registers the application-scoped Settings actions.
@@ -467,7 +464,7 @@ impl SettingsWindow {
                 CloseIntent::Window(handle) => cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
                 }),
-                CloseIntent::Application(application_quit) => application_quit.confirm_quit(cx),
+                CloseIntent::Application(completion) => completion.complete(cx),
             }
         } else if !self.editor.is_writing() {
             // Keep the draft and the existing Retry/Reload feedback instead of discarding a failed

@@ -94,6 +94,13 @@ impl ApplicationCloseFacts {
         self.pane_count += other.pane_count;
         self.has_running_work |= other.has_running_work;
     }
+
+    pub(crate) const fn authorizes(self, current: Self) -> bool {
+        current.workspace_count <= self.workspace_count
+            && current.tab_count <= self.tab_count
+            && current.pane_count <= self.pane_count
+            && (!current.has_running_work || self.has_running_work)
+    }
 }
 
 impl PaneCloseFacts<'_> {

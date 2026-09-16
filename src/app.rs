@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use gpui::{
@@ -220,89 +220,157 @@ fn install_application_quit(
     cx: &mut App,
     adapter: Rc<dyn ApplicationQuitAdapter>,
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
-    let prompt_pending = Rc::new(Cell::new(false));
-    let prompt_adapter = Rc::downgrade(&adapter);
+    let coordinator = Rc::new(ApplicationQuitCoordinator {
+        adapter: Rc::downgrade(&adapter),
+        prompt_pending: Cell::new(false),
+    });
     adapter.install(ApplicationQuitHandler::new(
         cx,
-        Rc::new(move |cx| {
-            let Some(prompt_adapter) = prompt_adapter.upgrade() else {
-                return ApplicationQuitDecision::Cancel;
-            };
-            request_application_quit(cx, prompt_adapter, Rc::clone(&prompt_pending))
-        }),
+        Rc::new(move |cx| coordinator.request(cx)),
     ))
 }
 
-fn request_application_quit(
-    cx: &mut App,
-    adapter: Rc<dyn ApplicationQuitAdapter>,
-    prompt_pending: Rc<Cell<bool>>,
-) -> ApplicationQuitDecision {
-    let windows = workspace_windows(cx);
-    if windows.iter().any(|window| {
+#[derive(Clone)]
+pub(crate) struct ApplicationQuitAfterSave {
+    complete: Rc<dyn Fn(&mut App)>,
+}
+
+impl ApplicationQuitAfterSave {
+    pub(crate) fn new(complete: impl Fn(&mut App) + 'static) -> Self {
+        Self {
+            complete: Rc::new(complete),
+        }
+    }
+
+    pub(crate) fn complete(&self, cx: &mut App) {
+        (self.complete)(cx);
+    }
+}
+
+struct ApplicationQuitCoordinator {
+    adapter: Weak<dyn ApplicationQuitAdapter>,
+    prompt_pending: Cell<bool>,
+}
+
+impl ApplicationQuitCoordinator {
+    fn request(self: &Rc<Self>, cx: &mut App) -> ApplicationQuitDecision {
+        if application_has_pending_close_confirmation(cx) {
+            return ApplicationQuitDecision::Cancel;
+        }
+        let facts = application_close_facts(cx);
+        if facts.requires_confirmation() {
+            self.present_confirmation(facts, cx);
+        } else {
+            self.wait_for_settings(None, cx);
+        }
+        ApplicationQuitDecision::Cancel
+    }
+
+    fn complete_after_settings_save(
+        self: &Rc<Self>,
+        authorization: Option<crate::close_confirmation::ApplicationCloseFacts>,
+        cx: &mut App,
+    ) {
+        if application_has_pending_close_confirmation(cx) {
+            return;
+        }
+        let current = application_close_facts(cx);
+        let authorized = authorization.map_or_else(
+            || !current.requires_confirmation(),
+            |authorization| authorization.authorizes(current),
+        );
+        if authorized {
+            if let Some(adapter) = self.adapter.upgrade() {
+                adapter.confirm_quit(cx);
+            }
+        } else {
+            self.present_confirmation(current, cx);
+        }
+    }
+
+    fn wait_for_settings(
+        self: &Rc<Self>,
+        authorization: Option<crate::close_confirmation::ApplicationCloseFacts>,
+        cx: &mut App,
+    ) {
+        let coordinator = Rc::clone(self);
+        crate::ui::settings_window::quit_when_saved(
+            cx,
+            ApplicationQuitAfterSave::new(move |cx| {
+                coordinator.complete_after_settings_save(authorization, cx);
+            }),
+        );
+    }
+
+    fn present_confirmation(
+        self: &Rc<Self>,
+        facts: crate::close_confirmation::ApplicationCloseFacts,
+        cx: &mut App,
+    ) {
+        if self.prompt_pending.replace(true) {
+            return;
+        }
+        let windows = workspace_windows(cx);
+        let confirmation_window = cx
+            .active_window()
+            .and_then(|window| window.downcast::<WorkspaceManager>())
+            .or_else(|| windows.into_iter().next());
+        let Some(confirmation_window) = confirmation_window else {
+            self.prompt_pending.set(false);
+            return;
+        };
+        let count = facts.pane_count;
+        let noun = if count == 1 { "Pane" } else { "Panes" };
+        let detail = format!(
+            "Quit with {count} open {noun}? Open Workspaces and Tabs will close, and any running commands will stop."
+        );
+        let prompt = confirmation_window.update(cx, |_, window, cx| {
+            window.activate_window();
+            window.prompt(
+                PromptLevel::Critical,
+                "Quit SpaceTerm?",
+                Some(&detail),
+                &[
+                    PromptButton::ok("Quit SpaceTerm"),
+                    PromptButton::cancel("Cancel"),
+                ],
+                cx,
+            )
+        });
+        let Ok(prompt) = prompt else {
+            self.prompt_pending.set(false);
+            return;
+        };
+        let coordinator = Rc::clone(self);
+        cx.spawn(async move |cx| {
+            let confirmed = prompt.await == Ok(0);
+            let _ = cx.update(|cx| {
+                coordinator.prompt_pending.set(false);
+                if confirmed {
+                    coordinator.wait_for_settings(Some(facts), cx);
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+fn application_has_pending_close_confirmation(cx: &App) -> bool {
+    workspace_windows(cx).iter().any(|window| {
         window
             .read(cx)
             .is_ok_and(WorkspaceManager::has_pending_close_confirmation)
-    }) {
-        return ApplicationQuitDecision::Cancel;
-    }
+    })
+}
 
+fn application_close_facts(cx: &App) -> crate::close_confirmation::ApplicationCloseFacts {
     let mut facts = crate::close_confirmation::ApplicationCloseFacts::default();
-    for window in &windows {
+    for window in workspace_windows(cx) {
         if let Ok(manager) = window.read(cx) {
             facts.merge(manager.application_close_facts(cx));
         }
     }
-    if !facts.requires_confirmation() {
-        crate::ui::settings_window::quit_when_saved(cx, adapter);
-        return ApplicationQuitDecision::Cancel;
-    }
-    if prompt_pending.replace(true) {
-        return ApplicationQuitDecision::Cancel;
-    }
-
-    let confirmation_window = cx
-        .active_window()
-        .and_then(|window| window.downcast::<WorkspaceManager>())
-        .or_else(|| windows.into_iter().next());
-    let Some(confirmation_window) = confirmation_window else {
-        prompt_pending.set(false);
-        crate::ui::settings_window::quit_when_saved(cx, adapter);
-        return ApplicationQuitDecision::Cancel;
-    };
-    let count = facts.pane_count;
-    let noun = if count == 1 { "Pane" } else { "Panes" };
-    let detail = format!(
-        "Quit with {count} open {noun}? Open Workspaces and Tabs will close, and any running commands will stop."
-    );
-    let prompt = confirmation_window.update(cx, |_, window, cx| {
-        window.activate_window();
-        window.prompt(
-            PromptLevel::Critical,
-            "Quit SpaceTerm?",
-            Some(&detail),
-            &[
-                PromptButton::ok("Quit SpaceTerm"),
-                PromptButton::cancel("Cancel"),
-            ],
-            cx,
-        )
-    });
-    let Ok(prompt) = prompt else {
-        prompt_pending.set(false);
-        return ApplicationQuitDecision::Cancel;
-    };
-    cx.spawn(async move |cx| {
-        let confirmed = prompt.await == Ok(0);
-        let _ = cx.update(|cx| {
-            prompt_pending.set(false);
-            if confirmed {
-                crate::ui::settings_window::quit_when_saved(cx, adapter);
-            }
-        });
-    })
-    .detach();
-    ApplicationQuitDecision::Cancel
+    facts
 }
 
 pub(crate) fn open(
@@ -1213,5 +1281,64 @@ mod runtime_tests {
         );
         assert_eq!(application_quit.confirmations(), 1);
         assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
+    fn application_quit_revalidates_workspace_structure_after_settings_save(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ui::settings_window::test_support::MemoryStorage;
+
+        let storage = MemoryStorage::with_document(&crate::appearance::SettingsDocument::default());
+        let application_quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.adapters.application_quit = application_quit.clone();
+        let host = HostComposition::new(wiring).unwrap().with_appearance(
+            storage.clone(),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+        );
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+        let settings = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+                .expect("Settings window")
+        });
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        let edit = settings_cx
+            .debug_bounds("settings-chrome-density-comfortable")
+            .expect("Settings control")
+            .center();
+        settings_cx.simulate_mouse_move(edit, None, gpui::Modifiers::none());
+        settings_cx.simulate_click(edit, gpui::Modifiers::none());
+        settings_cx.run_until_parked();
+        let blocked = storage.block_next_write();
+
+        settings_cx
+            .cx
+            .update(|cx| cx.dispatch_action(&QuitApplication));
+        settings_cx.run_until_parked();
+        assert!(settings_cx.has_pending_prompt());
+        settings_cx.simulate_prompt_answer("Quit SpaceTerm");
+        settings_cx.cx.update(|cx| {
+            workspace
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            cx.dispatch_action(&NewWorkspace);
+        });
+        let release = std::thread::spawn(move || {
+            blocked.wait_until_started();
+            blocked.release();
+        });
+        settings_cx.run_until_parked();
+        release.join().unwrap();
+
+        assert!(settings_cx.has_pending_prompt());
+        assert_eq!(application_quit.confirmations(), 0);
     }
 }
