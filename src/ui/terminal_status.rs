@@ -33,6 +33,47 @@ const PROGRESS_STROKE_SHARE: f32 = 0.14;
 /// The resting ring behind a reported percentage, as a share of the foreground's opacity.
 const PROGRESS_TRACK_OPACITY: f32 = 0.28;
 
+/// How many leading decorative characters a title can carry before it is kept as written.
+const MAXIMUM_TITLE_DECORATION_CHARS: usize = 2;
+
+/// Drops the glyph a program draws at the front of its own title.
+///
+/// Programs often prefix an icon or a spinner frame to the title they report. Host chrome already
+/// draws one glyph for the Session, and a second glyph beside it says nothing about the Session
+/// that the first does not. Only a short leading run of decoration followed by a space is dropped,
+/// so a title that opens with a path, a flag, or a prompt keeps every character it reported. No
+/// glyph is recognised by name, so this stays the same for every program.
+pub(crate) fn plain_title(title: &str) -> &str {
+    let title = title.trim();
+    let Some(end) = title
+        .char_indices()
+        .take(MAXIMUM_TITLE_DECORATION_CHARS)
+        .take_while(|(_, character)| is_title_decoration(*character))
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+    else {
+        return title;
+    };
+    let remainder = &title[end..];
+    // Decoration that runs straight into the words is part of them.
+    if !remainder.starts_with(char::is_whitespace) {
+        return title;
+    }
+    let remainder = remainder.trim_start();
+    if remainder.is_empty() {
+        title
+    } else {
+        remainder
+    }
+}
+
+/// Whether a character decorates a title rather than naming what the Session is doing.
+fn is_title_decoration(character: char) -> bool {
+    !character.is_alphanumeric()
+        && !character.is_whitespace()
+        && !"~/\\._-:@$#([{'\"".contains(character)
+}
+
 /// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it.
 ///
 /// A Session whose metadata has gone stale reports nothing, so an exited program never leaves a
@@ -421,6 +462,30 @@ mod tests {
         }
         assert_eq!(steps, [Some(0), Some(1), Some(2), None, None, None, None]);
         assert_eq!(notifications.get(), 3);
+    }
+
+    /// A program's own icon or spinner frame is dropped, and its words are kept as reported.
+    #[test]
+    fn a_title_should_keep_its_words_without_the_glyph_the_program_draws() {
+        for (reported, presented) in [
+            ("\u{2733} Claude Code", "Claude Code"),
+            ("\u{25d0} Claude Code", "Claude Code"),
+            ("\u{2058} diy-nucleus-clients", "diy-nucleus-clients"),
+            ("\u{280b} building", "building"),
+            ("\u{2726}\u{2726} two frames", "two frames"),
+            // Nothing a Session would be named after is decoration.
+            ("zsh", "zsh"),
+            ("~/Projects/api", "~/Projects/api"),
+            ("cargo test -- --nocapture", "cargo test -- --nocapture"),
+            (".config", ".config"),
+            ("\u{2733}Claude", "\u{2733}Claude"),
+            // Only the leading glyph goes; whatever follows is the program's own wording.
+            ("\u{2733} \u{2733} words", "\u{2733} words"),
+            ("\u{2733}", "\u{2733}"),
+            ("", ""),
+        ] {
+            assert_eq!(plain_title(reported), presented, "{reported:?}");
+        }
     }
 
     /// Each status recolors the glyph, a paused one dims it, and a blink shows attention over all.

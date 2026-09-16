@@ -1,5 +1,5 @@
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
-use super::terminal_status::{StatusColors, StatusGlyph, TerminalProgress};
+use super::terminal_status::{StatusColors, StatusGlyph, TerminalProgress, plain_title};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
@@ -566,7 +566,7 @@ impl PaneHost {
         let title = self
             .pane_titles
             .get(&self.terminal_tab.focused_pane_id())
-            .cloned()
+            .map(|title| gpui::SharedString::from(plain_title(title).to_owned()))
             .unwrap_or_else(|| "Terminal".into());
         TabIdentity::resolve(
             caption,

@@ -103,13 +103,13 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
 /// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
 const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
 const TAB_ORIGIN_GAP: f32 = 6.0;
-/// The air after the attention mark, and before the close control.
+/// The air after the status glyph, and before the close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
-/// How much of a Tab's identity the place may claim before the activity beside it gets a share.
+/// How much of a Tab's identity the activity may claim before the place beside it gets a share.
 ///
-/// The activity leads and narrows first; the place is capped so a long directory leaf never pushes
-/// the activity out of the Tab entirely.
-const TAB_PLACE_MAXIMUM_SHARE: f32 = 0.45;
+/// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
+/// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
+const TAB_ACTIVITY_MAXIMUM_SHARE: f32 = 0.6;
 /// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
@@ -1651,8 +1651,9 @@ fn render_tab_identity(
         .child(
             div()
                 .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
-                .flex_shrink()
+                .flex_shrink_0()
                 .min_w_0()
+                .max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
                 .truncate()
                 .child(if identity.activity.is_empty() {
                     gpui::SharedString::from("Terminal")
@@ -1671,8 +1672,8 @@ fn render_tab_identity(
             .child(
                 div()
                     .debug_selector(move || format!("tab-place-{}", tab_id.get()))
-                    .flex_shrink_0()
-                    .max_w(relative(TAB_PLACE_MAXIMUM_SHARE))
+                    .flex_shrink()
+                    .min_w_0()
                     .truncate()
                     .child(identity.place.clone()),
             );
@@ -3378,7 +3379,8 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert_eq!(tab_title(cx).as_ref(), "✳ Opaque ⠋ title · api");
+        // The glyph the program draws at the front goes; the rest of its title stays opaque.
+        assert_eq!(tab_title(cx).as_ref(), "Opaque ⠋ title · api");
 
         report_metadata(&records, 1, 3, |metadata| {
             metadata.directory.path = Arc::from("/tmp/api");

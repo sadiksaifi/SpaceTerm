@@ -1246,6 +1246,9 @@ impl TerminalPane {
         } else {
             normalized_pane_title("", &self.fallback_title)
         };
+        // The Session already has one glyph in its Caption and Tab item, so a glyph the program
+        // draws at the front of its own title is dropped rather than shown beside it.
+        let label = super::terminal_status::plain_title(&label).to_owned();
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
             directory: compact_home_directory(&directory, metadata.context.home()).into(),
