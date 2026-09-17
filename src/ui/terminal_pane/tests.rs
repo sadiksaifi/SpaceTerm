@@ -295,6 +295,27 @@ fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualT
     (pane, cx)
 }
 
+#[gpui::test]
+fn terminal_surface_should_use_no_top_inset_and_two_pixel_edge_insets(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    let pane_bounds = cx
+        .debug_bounds("terminal-pane")
+        .expect("terminal Pane should render");
+    let grid_bounds = pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.expect("terminal grid should render")
+    });
+
+    assert_eq!(
+        (
+            grid_bounds.left() - pane_bounds.left(),
+            pane_bounds.right() - grid_bounds.right(),
+            grid_bounds.top() - pane_bounds.top(),
+            pane_bounds.bottom() - grid_bounds.bottom(),
+        ),
+        (px(2.0), px(2.0), px(0.0), px(2.0))
+    );
+}
+
 fn latest_recorded_presentability(records: &TestTerminalSessionRecords) -> Option<bool> {
     records
         .commands()
@@ -4482,7 +4503,7 @@ fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
     let layout = layout_preedit("界", 0, 4, 5, 1);
 
     assert_eq!(
-        ime_candidate_bounds(element_bounds, 5, px(10.0), px(20.0), layout.caret),
+        ime_candidate_bounds(element_bounds, px(10.0), px(20.0), layout.caret),
         Bounds::new(point(px(30.0), px(40.0)), size(px(10.0), px(20.0)))
     );
 }
@@ -4719,7 +4740,7 @@ fn pane_title_should_remove_control_characters() {
 fn maps_rendered_positions_to_reported_terminal_geometry() {
     let bounds = Bounds::new(
         gpui::point(px(10.0), px(20.0)),
-        gpui::size(px(75.0), px(40.0)),
+        gpui::size(px(75.0), px(45.0)),
     );
     let geometry = TerminalGeometry::from_grid(
         CellGridSize::new(10, 2),
@@ -4732,6 +4753,21 @@ fn maps_rendered_positions_to_reported_terminal_geometry() {
             .unwrap();
 
     assert_eq!(position, SurfacePosition { x: 37.5, y: 10.0 });
+    let bottom_remainder =
+        terminal_surface_position(bounds, gpui::point(px(47.5), px(64.0)), geometry, false)
+            .unwrap();
+    assert_eq!(
+        (
+            bottom_remainder,
+            geometry
+                .cell_at_backing_position(BackingPosition::new(
+                    bottom_remainder.x,
+                    bottom_remainder.y,
+                ))
+                .row,
+        ),
+        (SurfacePosition { x: 37.5, y: 44.0 }, 1)
+    );
     assert!(
         terminal_surface_position(bounds, gpui::point(px(9.0), px(20.0)), geometry, false,)
             .is_none()

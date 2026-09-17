@@ -19,7 +19,6 @@ use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation,
-    terminal_grid_content_bounds,
 };
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
@@ -86,7 +85,8 @@ const DEFAULT_FONT_SIZE: f32 = 18.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
-const HORIZONTAL_PADDING: f32 = 4.0;
+const TERMINAL_SIDE_INSET: f32 = 2.0;
+const TERMINAL_BOTTOM_INSET: f32 = 2.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
@@ -1798,11 +1798,7 @@ impl TerminalPane {
             self.line_height,
             self.backing_scale,
         );
-        self.grid_bounds = Some(terminal_grid_content_bounds(
-            bounds,
-            usize::from(geometry.grid().cols),
-            self.cell_width,
-        ));
+        self.grid_bounds = Some(bounds);
         if self.last_geometry == Some(geometry) {
             return;
         }
@@ -3529,7 +3525,6 @@ impl EntityInputHandler for TerminalPane {
             );
             return Some(ime_candidate_bounds(
                 element_bounds,
-                columns,
                 self.cell_width,
                 px(self.line_height),
                 layout.caret,
@@ -3872,11 +3867,13 @@ impl Render for TerminalPane {
                 });
             })
             .id("terminal-pane")
+            .debug_selector(|| "terminal-pane".to_owned())
             .font(appearance.regular.clone())
             .relative()
             .size_full()
             .overflow_hidden()
-            .px(px(HORIZONTAL_PADDING))
+            .px(px(TERMINAL_SIDE_INSET))
+            .pb(px(TERMINAL_BOTTOM_INSET))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
@@ -3965,7 +3962,7 @@ impl Render for TerminalPane {
                         div()
                             .debug_selector(|| "terminal-status".to_owned())
                             .absolute()
-                            .right(px(HORIZONTAL_PADDING))
+                            .right(px(TERMINAL_SIDE_INSET))
                             .bottom_0()
                             .max_w(relative(0.94))
                             .px(appearance.spacing(10.0))
@@ -4036,8 +4033,8 @@ impl Render for TerminalPane {
             .child(
                 div()
                     .absolute()
-                    .left(px(HORIZONTAL_PADDING))
-                    .right(px(HORIZONTAL_PADDING))
+                    .left(px(TERMINAL_SIDE_INSET))
+                    .right(px(TERMINAL_SIDE_INSET))
                     .top_0()
                     .bottom_0()
                     .child(context_menu),
@@ -4173,12 +4170,11 @@ fn terminal_geometry(
 
 fn ime_candidate_bounds(
     element_bounds: Bounds<Pixels>,
-    columns: usize,
     cell_width: Pixels,
     line_height: Pixels,
     caret: PreeditPosition,
 ) -> Bounds<Pixels> {
-    let grid_left = terminal_grid_content_bounds(element_bounds, columns, cell_width).left();
+    let grid_left = element_bounds.left();
     Bounds::new(
         point(
             grid_left + cell_width * caret.column as f32,
