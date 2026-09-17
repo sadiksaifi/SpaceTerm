@@ -2654,6 +2654,9 @@ impl WorkspaceManager {
             }
             SidebarEvent::NewLocalWorkspace => self.create_local_workspace(window, cx),
             SidebarEvent::NewRemoteWorkspace => {
+                // The creation menu returns focus to its trigger on close, so return it to
+                // the terminal before the flow captures its cancel-restore target.
+                self.focus(window, cx);
                 self.present_remote_workspace_flow(String::new(), window, cx)
             }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),

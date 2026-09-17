@@ -16,10 +16,11 @@ use gpui::{
     SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, ContextMenu, CustomIconName, Icon, IconButton, IconName, MenuEntry,
-    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ResizeAxis,
-    ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility,
+    AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ButtonSize, ButtonVariant,
+    ContextMenu, CustomIconName, Icon, IconButton, IconName, Menu, MenuEntry, MenuLifecycleEvent,
+    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ResizeAxis, ResizeFinishReason,
+    ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics,
+    TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility,
     dismiss_active_menu,
 };
 
@@ -81,6 +82,12 @@ pub(super) enum WorkspaceMenuCommand {
 enum RowMenuCommand {
     Workspace(WorkspaceMenuCommand),
     Rename,
+}
+
+#[derive(Clone, Copy)]
+enum NewWorkspaceMenuCommand {
+    Local,
+    Remote,
 }
 
 struct WorkspaceRenameState {
