@@ -463,7 +463,6 @@ struct AlertIntentPresentation {
     icon: IconName,
     selector: &'static str,
     accent: Rgba,
-    background: Rgba,
 }
 
 fn alert_intent_presentation(
@@ -475,19 +474,16 @@ fn alert_intent_presentation(
             icon: IconName::Info,
             selector: "informational",
             accent: paint.informational,
-            background: paint.informational_background,
         },
         super::AlertIntent::Warning => AlertIntentPresentation {
             icon: IconName::TriangleAlert,
             selector: "warning",
             accent: paint.warning,
-            background: paint.warning_background,
         },
         super::AlertIntent::Critical => AlertIntentPresentation {
-            icon: IconName::OctagonAlert,
+            icon: IconName::CircleAlert,
             selector: "critical",
             accent: paint.critical,
-            background: paint.critical_background,
         },
     }
 }
@@ -602,7 +598,7 @@ fn render_body(
                 .flex()
                 .items_start()
                 .min_w_0()
-                .gap(metrics.action_gap)
+                .gap(metrics.action_gap / 2.0)
                 .child(
                     div()
                         .debug_selector(move || marker_selector.clone())
@@ -611,13 +607,9 @@ fn render_body(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(marker_extent / 2.0)
-                        .border(metrics.border_width)
-                        .border_color(intent_presentation.accent)
-                        .bg(intent_presentation.background)
                         .child(Icon::new(
                             intent_presentation.icon,
-                            marker_extent * 0.55,
+                            marker_extent * 0.8,
                             intent_presentation.accent,
                         )),
                 )

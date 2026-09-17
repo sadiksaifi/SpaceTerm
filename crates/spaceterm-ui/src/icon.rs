@@ -315,7 +315,7 @@ mod tests {
             IconName::Check,
             IconName::CircleDot,
             IconName::Info,
-            IconName::OctagonAlert,
+            IconName::CircleAlert,
             IconName::ImageOff,
             IconName::Square,
             IconName::SquareCheckBig,
