@@ -8,9 +8,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Checkbox, CheckboxState, ComboBox, ComboBoxItem,
-    CommandPalette, CommandPaletteItem, ControlPreviewState, FieldState, Icon, IconButton,
-    IconName, ModalLayer, OverlayScrollbar, ResizeAxis, ResizeHandle, ScrollMetrics,
-    SegmentedControl, SegmentedOption, Switch, TextInput, TooltipLayer,
+    CommandPalette, CommandPaletteItem, ControlPreviewState, DeterminateProgress, FieldState, Icon,
+    IconButton, IconName, ModalLayer, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize,
+    ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption,
+    Switch, TextInput, TooltipLayer,
 };
 
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
@@ -502,6 +503,86 @@ impl Render for Gallery {
                         })
                 })),
         );
+        let determinate = |value: f64| {
+            ProgressState::Determinate(
+                DeterminateProgress::new(value).expect("gallery progress fixtures are finite"),
+            )
+        };
+        let progress_columns = [
+            ("Zero", determinate(0.0)),
+            ("Partial", determinate(0.4)),
+            ("Full", determinate(1.0)),
+            ("Indeterminate", ProgressState::Indeterminate),
+        ];
+        content = content
+            .child(
+                div()
+                    .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                    .child("Progress: determinate extents and the installed indeterminate motion"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(div().w(px(130.0)))
+                    .children(progress_columns.iter().map(|(label, _)| cell(label))),
+            );
+        for (row_index, (label, size)) in [
+            ("Bar compact", ProgressSize::Compact),
+            ("Bar regular", ProgressSize::Regular),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            content =
+                content.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(div().w(px(130.0)).child(label))
+                        .children(progress_columns.iter().enumerate().map(
+                            |(index, (_, state))| {
+                                div().w(px(170.0)).child(
+                                    ProgressBar::new(
+                                        ("gallery-progress-bar", row_index * 4 + index),
+                                        "Gallery progress fixture",
+                                        *state,
+                                    )
+                                    .size(size),
+                                )
+                            },
+                        )),
+                );
+        }
+        for (row_index, (label, size)) in [
+            ("Ring compact", ProgressSize::Compact),
+            ("Ring regular", ProgressSize::Regular),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            content =
+                content.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(div().w(px(130.0)).child(label))
+                        .children(progress_columns.iter().enumerate().map(
+                            |(index, (_, state))| {
+                                div().w(px(170.0)).child(
+                                    ProgressRing::new(
+                                        ("gallery-progress-ring", row_index * 4 + index),
+                                        "Gallery progress fixture",
+                                        *state,
+                                    )
+                                    .size(size),
+                                )
+                            },
+                        )),
+                );
+        }
         let palette = self.palette.clone();
         content = content.child(
             div()

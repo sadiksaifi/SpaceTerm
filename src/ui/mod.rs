@@ -12,6 +12,7 @@ mod modal_theme;
 mod native_remote_workspace_flow_backend;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
+mod progress_theme;
 mod remote_child_launch;
 pub(crate) mod remote_directory_picker;
 pub(crate) mod remote_workspace_flow;
@@ -170,6 +171,7 @@ mod tests {
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ToggleTheme>()
+                && cx.has_global::<spaceterm_ui::ProgressTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
                 && cx.has_global::<spaceterm_ui::ResizeHandleTheme>()
                 && cx.has_global::<spaceterm_ui::SearchFieldTheme>()
@@ -179,6 +181,8 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::TextInputTheme>()
                 && cx.has_global::<spaceterm_ui::TooltipTheme>()
                 && cx.has_global::<spaceterm_ui::ModalTheme>()
+                && *cx.global::<spaceterm_ui::ProgressTheme>()
+                    == progress_theme::theme(&appearance::chrome(cx).colors)
                 && *cx.global::<spaceterm_ui::ModalTheme>()
                     == modal_theme::theme(&appearance::chrome(cx).colors)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
