@@ -872,6 +872,8 @@ pub struct Window {
     pub(crate) pending_input_observers: SubscriberSet<(), AnyObserver>,
     prompt: Option<RenderablePromptHandle>,
     pub(crate) client_inset: Option<Pixels>,
+    #[cfg(any(test, feature = "test-support"))]
+    paint_quad_call_count: usize,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
 }
@@ -1263,6 +1265,8 @@ impl Window {
             prompt: None,
             client_inset: None,
             image_cache_stack: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            paint_quad_call_count: 0,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
         })
@@ -2936,12 +2940,33 @@ impl Window {
     /// where the circular arcs meet. This will not display well when combined with dashed borders.
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
     pub fn paint_quad(&mut self, quad: PaintQuad) {
+        self.paint_quad_impl(quad, None);
+    }
+
+    /// Paints a quad once while excluding the part inside `excluded_bounds`.
+    ///
+    /// Scaling, opacity, and primitive preparation run once even when clipping splits the quad
+    /// into multiple scene primitives.
+    pub fn paint_quad_excluding_region(
+        &mut self,
+        quad: PaintQuad,
+        excluded_bounds: Bounds<Pixels>,
+    ) {
+        self.paint_quad_impl(quad, Some(excluded_bounds));
+    }
+
+    fn paint_quad_impl(&mut self, quad: PaintQuad, excluded_bounds: Option<Bounds<Pixels>>) {
         self.invalidator.debug_assert_paint();
+
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.paint_quad_call_count += 1;
+        }
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
-        self.next_frame.scene.insert_primitive(Quad {
+        let painted = Quad {
             order: 0,
             bounds: quad.bounds.scale(scale_factor),
             content_mask: content_mask.scale(scale_factor),
@@ -2950,7 +2975,23 @@ impl Window {
             corner_radii: quad.corner_radii.scale(scale_factor),
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
-        });
+        };
+        let excluded_bounds = excluded_bounds.map(|bounds| bounds.scale(scale_factor));
+        let visible_exclusion = excluded_bounds
+            .map(|bounds| bounds.intersect(&painted.content_mask.bounds))
+            .filter(|bounds| !bounds.is_empty() && painted.bounds.intersects(bounds));
+        if let Some(visible_exclusion) = visible_exclusion {
+            for content_mask in
+                content_masks_excluding_region(painted.content_mask.clone(), visible_exclusion)
+            {
+                self.next_frame.scene.insert_primitive(Quad {
+                    content_mask,
+                    ..painted.clone()
+                });
+            }
+        } else {
+            self.next_frame.scene.insert_primitive(painted);
+        }
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
@@ -4897,6 +4938,18 @@ impl Window {
                 order: quad.order,
             })
             .collect()
+    }
+
+    /// Resets primitive paint call counters for one integration-test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reset_paint_call_counts_for_test(&mut self) {
+        self.paint_quad_call_count = 0;
+    }
+
+    /// Returns the number of quad paint operations requested since the last reset.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn quad_paint_call_count_for_test(&self) -> usize {
+        self.paint_quad_call_count
     }
 }
 

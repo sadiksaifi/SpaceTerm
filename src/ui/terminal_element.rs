@@ -733,15 +733,12 @@ impl TerminalPaintBatch {
                         ),
                         CursorTextPaint::Exclude(bounds)
                         | CursorTextPaint::Recolor { bounds, .. } => {
-                            for bounds in cursor_exclusion_masks(self.grid_bounds, bounds) {
-                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                    paint_prepared_decorations(
-                                        &row.stable.symbols,
-                                        self.blink_phase_visible,
-                                        window,
-                                    );
-                                });
-                            }
+                            paint_prepared_symbols_excluding_region(
+                                &row.stable.symbols,
+                                self.blink_phase_visible,
+                                bounds,
+                                window,
+                            );
                             if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
                                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                     paint_prepared_decorations(
@@ -808,39 +805,6 @@ fn paint_prepared_row_text(
             .map_err(|_| PaintBatchFailure::Presentation)?;
     }
     Ok(())
-}
-
-fn cursor_exclusion_masks(
-    grid_bounds: Bounds<Pixels>,
-    cursor_bounds: Bounds<Pixels>,
-) -> impl Iterator<Item = Bounds<Pixels>> {
-    let cursor_left = cursor_bounds.left().max(grid_bounds.left());
-    let cursor_right = cursor_bounds.right().min(grid_bounds.right());
-    let cursor_top = cursor_bounds.top().max(grid_bounds.top());
-    let cursor_bottom = cursor_bounds.bottom().min(grid_bounds.bottom());
-    [
-        Bounds::new(
-            grid_bounds.origin,
-            size(cursor_left - grid_bounds.left(), grid_bounds.size.height),
-        ),
-        Bounds::new(
-            point(cursor_right, grid_bounds.top()),
-            size(grid_bounds.right() - cursor_right, grid_bounds.size.height),
-        ),
-        Bounds::new(
-            point(cursor_left, grid_bounds.top()),
-            size(cursor_right - cursor_left, cursor_top - grid_bounds.top()),
-        ),
-        Bounds::new(
-            point(cursor_left, cursor_bottom),
-            size(
-                cursor_right - cursor_left,
-                grid_bounds.bottom() - cursor_bottom,
-            ),
-        ),
-    ]
-    .into_iter()
-    .filter(|bounds| bounds.size.width > px(0.0) && bounds.size.height > px(0.0))
 }
 
 fn preflight_text(
@@ -1422,6 +1386,22 @@ fn paint_prepared_decorations(
         .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
     {
         window.paint_underline(prepared.origin, prepared.width, &prepared.style);
+    }
+}
+
+fn paint_prepared_symbols_excluding_region(
+    prepared: &PreparedDecorations,
+    blink_phase_visible: bool,
+    excluded_bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    debug_assert!(prepared.underlines.is_empty());
+    for prepared in prepared
+        .quads
+        .iter()
+        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+    {
+        window.paint_quad_excluding_region(prepared.quad.clone(), excluded_bounds);
     }
 }
 
@@ -2974,6 +2954,7 @@ mod tests {
     struct PaintCapture {
         glyphs: Rc<RefCell<Vec<gpui::PaintedGlyphForTest>>>,
         quads: Rc<RefCell<Vec<gpui::PaintedQuadForTest>>>,
+        quad_paint_calls: Rc<Cell<usize>>,
     }
 
     struct PaintBatches {
@@ -3032,11 +3013,15 @@ mod tests {
             window: &mut Window,
             cx: &mut App,
         ) {
+            window.reset_paint_call_counts_for_test();
             for batch in &self.batches {
                 batch.submit(batch.grid_bounds, window, cx).unwrap();
             }
             *self.capture.glyphs.borrow_mut() = window.painted_glyphs_for_test();
             *self.capture.quads.borrow_mut() = window.painted_quads_for_test();
+            self.capture
+                .quad_paint_calls
+                .set(window.quad_paint_call_count_for_test());
         }
     }
 
@@ -3475,22 +3460,6 @@ mod tests {
     }
 
     #[test]
-    fn block_cursor_exclusion_preserves_overhangs_outside_the_cursor_row() {
-        let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(60.0)));
-        let cursor = Bounds::new(point(px(20.0), px(20.0)), size(px(10.0), px(20.0)));
-
-        assert_eq!(
-            cursor_exclusion_masks(grid, cursor).collect::<Vec<_>>(),
-            vec![
-                Bounds::new(point(px(0.0), px(0.0)), size(px(20.0), px(60.0))),
-                Bounds::new(point(px(30.0), px(0.0)), size(px(70.0), px(60.0))),
-                Bounds::new(point(px(20.0), px(0.0)), size(px(10.0), px(20.0))),
-                Bounds::new(point(px(20.0), px(40.0)), size(px(10.0), px(20.0))),
-            ]
-        );
-    }
-
-    #[test]
     fn block_cursor_excludes_neighbor_overhang_and_recolors_only_its_row() {
         let bounds = Bounds::new(point(px(20.0), px(20.0)), size(px(10.0), px(20.0)));
         let color = rgba(0xffffff).into();
@@ -3656,6 +3625,71 @@ mod tests {
                 && glyph.visible_bounds.intersects(&cursor)
                 && glyph.order > cover_order
         }));
+    }
+
+    #[gpui::test]
+    fn direct_block_cursor_visits_each_symbol_quad_once(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(60.0)),
+            move |_, _| {
+                let stable = Arc::new(PreparedRow {
+                    text: Vec::new(),
+                    symbols: PreparedDecorations {
+                        quads: (0..3)
+                            .map(|index| PreparedQuad {
+                                quad: fill(
+                                    Bounds::new(
+                                        point(px(30.0 + index as f32 * 10.0), px(0.0)),
+                                        size(px(8.0), px(20.0)),
+                                    ),
+                                    rgba(0xff_ff_ff_ff),
+                                ),
+                                blinking: false,
+                            })
+                            .collect(),
+                        underlines: Vec::new(),
+                    },
+                    backgrounds: Vec::new(),
+                    selections: Vec::new(),
+                    under_text_decorations: PreparedDecorations::default(),
+                    over_text_decorations: PreparedDecorations::default(),
+                });
+                let empty = Arc::new(PreparedRow {
+                    text: Vec::new(),
+                    symbols: PreparedDecorations::default(),
+                    backgrounds: Vec::new(),
+                    selections: Vec::new(),
+                    under_text_decorations: PreparedDecorations::default(),
+                    over_text_decorations: PreparedDecorations::default(),
+                });
+                PaintBatches {
+                    batches: vec![TerminalPaintBatch {
+                        surface: None,
+                        grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(60.0))),
+                        line_height: px(20.0),
+                        rows: vec![
+                            PreparedFrameRow::new(stable),
+                            PreparedFrameRow::new(Arc::clone(&empty)),
+                            PreparedFrameRow::new(empty),
+                        ],
+                        cursor_text_overlay: Some(CursorTextOverlay {
+                            row_index: 1,
+                            bounds: Bounds::new(point(px(20.0), px(20.0)), size(px(8.0), px(20.0))),
+                            color: rgba(0xff_ff_ff_ff).into(),
+                        }),
+                        graphics: GraphicsPaintPlan::default(),
+                        blink_phase_visible: true,
+                    }],
+                    capture: paint_capture,
+                }
+            },
+        );
+
+        assert_eq!(capture.quad_paint_calls.get(), 3);
     }
 
     #[test]
