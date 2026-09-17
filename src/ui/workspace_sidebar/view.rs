@@ -431,6 +431,9 @@ impl WorkspaceSidebar {
         let scrollbar = self.scrollbar.clone();
         let menu_sidebar = sidebar.clone();
         let remote_disabled = self.remote_unavailable.is_some();
+        let new_workspace_tooltip = crate::ui::workspace_creation::new_workspace_trigger_tooltip(
+            self.remote_unavailable.as_deref(),
+        );
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
@@ -470,7 +473,7 @@ impl WorkspaceSidebar {
                 });
             }
         });
-        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", "New Workspace")
+        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
             .debug_selector("new-workspace-tooltip")
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
         div()
