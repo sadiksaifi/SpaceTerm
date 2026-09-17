@@ -4766,8 +4766,13 @@ fn maps_rendered_positions_to_reported_terminal_geometry() {
                 ))
                 .row,
         ),
-        (SurfacePosition { x: 37.5, y: 44.0 }, 1)
+        (SurfacePosition { x: 37.5, y: 39.0 }, 1)
     );
+    assert!(bottom_remainder.y < geometry.backing_grid_size().height as f32);
+    let right_remainder =
+        terminal_surface_position(bounds, gpui::point(px(84.0), px(30.0)), geometry, false)
+            .unwrap();
+    assert_eq!(right_remainder, SurfacePosition { x: 74.0, y: 10.0 });
     assert!(
         terminal_surface_position(bounds, gpui::point(px(9.0), px(20.0)), geometry, false,)
             .is_none()
@@ -4775,6 +4780,10 @@ fn maps_rendered_positions_to_reported_terminal_geometry() {
     assert_eq!(
         terminal_surface_position(bounds, gpui::point(px(2.5), px(65.0)), geometry, true),
         Some(SurfacePosition { x: -7.5, y: 45.0 })
+    );
+    assert_eq!(
+        terminal_surface_position(bounds, gpui::point(px(2.5), px(64.0)), geometry, true),
+        Some(SurfacePosition { x: -7.5, y: 39.0 })
     );
 }
 

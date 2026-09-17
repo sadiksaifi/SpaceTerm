@@ -4334,7 +4334,18 @@ fn terminal_surface_position(
 
     let local_x = f32::from(position.x - bounds.origin.x);
     let local_y = f32::from(position.y - bounds.origin.y);
-    let backing = geometry.to_backing_position(LogicalPosition::new(local_x, local_y));
+    let mut backing = geometry.to_backing_position(LogicalPosition::new(local_x, local_y));
+    let backing_grid = geometry.backing_grid_size();
+    if position.x >= bounds.left() && position.x < bounds.right() {
+        backing.x = backing
+            .x
+            .clamp(0.0, backing_grid.width.saturating_sub(1) as f32);
+    }
+    if position.y >= bounds.top() && position.y < bounds.bottom() {
+        backing.y = backing
+            .y
+            .clamp(0.0, backing_grid.height.saturating_sub(1) as f32);
+    }
     Some(SurfacePosition {
         x: backing.x,
         y: backing.y,
