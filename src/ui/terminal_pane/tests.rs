@@ -2872,6 +2872,54 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cursor_blink_retains_the_fitted_grid_line_height(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    let nominal_height = pane.read_with(cx, |pane, _| pane.line_height);
+    cx.simulate_resize(gpui::size(
+        px(800.0),
+        px(nominal_height * 20.5 + TERMINAL_BOTTOM_INSET),
+    ));
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: true,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let fitted_height = pane.read_with(cx, |pane, _| {
+        px(pane
+            .last_geometry
+            .expect("the rendered grid should have geometry")
+            .logical_cell_size()
+            .height)
+    });
+    assert_ne!(fitted_height, px(nominal_height));
+    let storage = pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage());
+    for _ in 0..4 {
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_line_height()),
+            Some(fitted_height),
+            "blink frames must paint with the same baseline as the fitted grid"
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage()),
+            storage,
+            "blinking should retain the prepared cursor batch"
+        );
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
 fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {

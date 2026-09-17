@@ -12,9 +12,9 @@ use super::{
 };
 use crate::terminal::ScreenSnapshot;
 
-/// Retains GPUI's grid scene between cursor phases. The cursor row is composited
-/// over that scene so backgrounds, selection, symbols, and decorations keep their
-/// normal paint order even for a block cursor over a wide or decorated cell.
+/// Retains GPUI's grid scene between cursor phases. The affected cursor rectangle is
+/// composited over that scene so backgrounds, selection, symbols, and decorations keep
+/// their normal paint order even for a block cursor over a wide or decorated cell.
 pub(crate) struct TerminalGridPresentation {
     grid: Option<Entity<GridView>>,
     cursor: CursorLayer,
@@ -100,6 +100,15 @@ impl TerminalGridPresentation {
             .map(|batch| (Rc::as_ptr(batch) as usize, batch.rows.len()))
     }
 
+    #[cfg(test)]
+    pub(crate) fn cursor_line_height(&self) -> Option<gpui::Pixels> {
+        self.cursor
+            .batch
+            .borrow()
+            .as_ref()
+            .map(|batch| batch.line_height)
+    }
+
     pub(crate) fn render(
         &mut self,
         screen: &Arc<ScreenSnapshot>,
@@ -142,7 +151,6 @@ impl TerminalGridPresentation {
                     && previous.active_hyperlink == configuration.active_hyperlink
             });
         let phase = configuration.blink_phase_visible;
-        let line_height = configuration.line_height;
         if !eligible {
             self.evict();
             return TerminalGridElement::new(screen, cache, configuration, cx).into_any_element();
@@ -180,14 +188,14 @@ impl TerminalGridPresentation {
                         }
                         let batch = cursor.batch.borrow().clone();
                         if let Some(batch) = batch
-                            && batch.preflight(line_height, None, window, cx).is_ok()
+                            && batch.preflight(None, window, cx).is_ok()
                         {
                             #[cfg(test)]
                             {
                                 let (grid, draws) = cursor.counts.get();
                                 cursor.counts.set((grid, draws + 1));
                             }
-                            let _ = batch.submit(batch.grid_bounds, line_height, window, cx);
+                            let _ = batch.submit(batch.grid_bounds, window, cx);
                         }
                     },
                 )
