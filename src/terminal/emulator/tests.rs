@@ -2503,33 +2503,39 @@ fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
 }
 
 #[test]
-fn selection_autoscroll_rate_is_bounded_by_offscreen_depth() {
-    assert_eq!(
-        selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 10.0 }, 40, 20,),
-        None
-    );
-    assert_eq!(
-        selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: -1.0 }, 40, 20,),
-        Some(MAX_SELECTION_AUTOSCROLL_INTERVAL)
-    );
-    assert_eq!(
-        selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: -200.0 }, 40, 20,),
-        Some(MIN_SELECTION_AUTOSCROLL_INTERVAL)
-    );
-}
-
-#[test]
-fn selection_autoscroll_starts_at_both_surface_edges() {
-    assert_eq!(
-        (
-            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 0.5 }, 40, 20,),
-            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 39.5 }, 40, 20,),
-        ),
-        (
-            Some(MAX_SELECTION_AUTOSCROLL_INTERVAL),
-            Some(MAX_SELECTION_AUTOSCROLL_INTERVAL),
-        )
-    );
+fn selection_autoscroll_uses_a_steady_cadence_at_both_edges_and_outside() {
+    for y in [0.5, 39.5, -200.0, 240.0] {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        _ = emulator.snapshot().unwrap().unwrap();
+        let press = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                1.0,
+                21.0,
+                false,
+            ),
+        );
+        _ = emulator.pointer(press).unwrap();
+        let drag = current_pointer(
+            &emulator,
+            pointer(PointerPhase::Motion, None, 21.0, y, false),
+        );
+        _ = emulator.pointer(drag).unwrap();
+        assert_eq!(
+            emulator.selection_autoscroll_interval().unwrap(),
+            Some(Duration::from_millis(15)),
+            "pointer y={y}"
+        );
+        let drag = current_pointer(
+            &emulator,
+            pointer(PointerPhase::Motion, None, 21.0, 20.0, false),
+        );
+        _ = emulator.pointer(drag).unwrap();
+        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
+    }
 }
 
 #[test]
@@ -2563,7 +2569,7 @@ fn fitted_surface_bottom_edge_keeps_selection_autoscroll_active() {
 
     assert_eq!(
         emulator.selection_autoscroll_interval().unwrap(),
-        Some(MAX_SELECTION_AUTOSCROLL_INTERVAL)
+        Some(SELECTION_AUTOSCROLL_INTERVAL)
     );
 }
 
@@ -2591,7 +2597,7 @@ fn autoscroll_ticks_move_one_row_across_presentations_until_release() {
     let dragged = emulator.snapshot().unwrap().unwrap();
     assert_eq!(
         emulator.selection_autoscroll_interval().unwrap(),
-        Some(Duration::from_millis(100))
+        Some(SELECTION_AUTOSCROLL_INTERVAL)
     );
 
     for rows in 1..=3 {

@@ -406,6 +406,22 @@ mod tests {
     }
 
     #[test]
+    fn selection_autoscroll_motion_does_not_postpone_the_next_tick() {
+        let epoch = Instant::now();
+        let interval = Duration::from_millis(15);
+        let mut schedule = SelectionAutoscrollSchedule::default();
+        schedule.update(epoch, Some(interval));
+        for millis in 1..15 {
+            schedule.update(epoch + Duration::from_millis(millis), Some(interval));
+        }
+        assert!(schedule.take_due(epoch + interval));
+        assert!(!schedule.take_due(epoch + interval));
+        schedule.update(epoch + interval, Some(interval));
+        assert!(!schedule.take_due(epoch + Duration::from_millis(29)));
+        assert!(schedule.take_due(epoch + Duration::from_millis(30)));
+    }
+
+    #[test]
     fn worker_schedules_preserve_deadline_priority_and_expire_each_payload_once() {
         let now = Instant::now();
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
@@ -894,7 +910,12 @@ struct SelectionAutoscrollSchedule {
 
 impl SelectionAutoscrollSchedule {
     fn update(&mut self, now: Instant, interval: Option<Duration>) {
-        self.deadline = interval.map(|interval| now + interval);
+        if let Some(interval) = interval {
+            // Pointer motion updates the drag position without delaying its clock.
+            self.deadline.get_or_insert(now + interval);
+        } else {
+            self.cancel();
+        }
     }
 
     fn deadline(&self) -> Option<Instant> {

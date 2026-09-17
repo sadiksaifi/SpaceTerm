@@ -65,9 +65,7 @@ const MAX_SCROLLBACK_ROWS: usize = 10_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
-const MIN_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(25);
-const MAX_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(150);
-const SELECTION_AUTOSCROLL_EDGE_BUFFER: f32 = 1.0;
+const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
 
 impl From<RgbColor> for Color {
     fn from(value: RgbColor) -> Self {
@@ -1980,7 +1978,7 @@ impl TerminalEmulator {
         ) {
             return Ok(None);
         }
-        let Some(position) = self.selection_drag_position else {
+        let Some(_) = self.selection_drag_position else {
             return Ok(None);
         };
         let direction = self
@@ -1990,11 +1988,7 @@ impl TerminalEmulator {
         if direction == Autoscroll::None {
             return Ok(None);
         }
-        Ok(selection_autoscroll_interval_for_position(
-            position,
-            self.geometry.backing_grid_size().height,
-            self.geometry.backing_cell_size().height,
-        ))
+        Ok(Some(SELECTION_AUTOSCROLL_INTERVAL))
     }
 
     pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, String> {
@@ -2649,30 +2643,6 @@ fn shift_overrides_application_mouse(
     policy: ShiftSelectionPolicy,
 ) -> bool {
     modifiers.shift && policy == ShiftSelectionPolicy::OverrideApplicationMouse
-}
-
-fn selection_autoscroll_interval_for_position(
-    position: SurfacePosition,
-    screen_height: u32,
-    cell_height: u32,
-) -> Option<Duration> {
-    let screen_bottom = screen_height as f32;
-    let overflow = if position.y < 0.0 {
-        -position.y
-    } else if position.y <= SELECTION_AUTOSCROLL_EDGE_BUFFER {
-        1.0
-    } else if position.y >= screen_bottom {
-        position.y - screen_bottom + 1.0
-    } else if position.y > screen_bottom - SELECTION_AUTOSCROLL_EDGE_BUFFER {
-        1.0
-    } else {
-        return None;
-    };
-    let cell_height = cell_height.max(1) as f32;
-    let depth = (overflow / cell_height).ceil().clamp(1.0, 6.0) as u32;
-    let range = MAX_SELECTION_AUTOSCROLL_INTERVAL - MIN_SELECTION_AUTOSCROLL_INTERVAL;
-    let step = range / 5;
-    Some(MAX_SELECTION_AUTOSCROLL_INTERVAL - step * (depth - 1))
 }
 
 const ANSI_NORMAL_INDICES: [PaletteIndex; 8] = [
