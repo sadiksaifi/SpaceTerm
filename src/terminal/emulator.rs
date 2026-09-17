@@ -65,9 +65,7 @@ const MAX_SCROLLBACK_ROWS: usize = 10_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
-const MIN_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(25);
-const MAX_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(150);
-const SELECTION_AUTOSCROLL_EDGE_BUFFER: f32 = 1.0;
+const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
 
 impl From<RgbColor> for Color {
     fn from(value: RgbColor) -> Self {
@@ -747,6 +745,8 @@ struct ActivePointer {
     button: PointerButton,
     route: PointerRoute,
     generation: PresentationGeneration,
+    position: SurfacePosition,
+    modifiers: InputModifiers,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1690,6 +1690,8 @@ impl TerminalEmulator {
             button,
             route,
             generation: input.generation,
+            position: input.position,
+            modifiers: input.modifiers,
         });
 
         match route {
@@ -1719,6 +1721,10 @@ impl TerminalEmulator {
     }
 
     fn pointer_motion(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+        if let Some(active) = self.active_pointer.as_mut() {
+            active.position = input.position;
+            active.modifiers = input.modifiers;
+        }
         match self.active_pointer {
             Some(ActivePointer {
                 button,
@@ -1955,6 +1961,29 @@ impl TerminalEmulator {
             .map_err(|error| format!("failed to apply terminal selection release: {error}"))
     }
 
+    pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, String> {
+        let Some(active) = self.active_pointer.take() else {
+            return Ok(EmulatorAction::none());
+        };
+        self.selection_gesture.reset(&self.terminal);
+        self.selection_drag_position = None;
+        self.pointer_mapping_invalidated = false;
+
+        if matches!(active.route, PointerRoute::Application) {
+            let mut bytes = Vec::new();
+            self.encode_mouse_event(
+                MouseAction::Release,
+                Some(mouse_button(active.button)),
+                active.position,
+                active.modifiers,
+                false,
+                &mut bytes,
+            )?;
+            return Ok(EmulatorAction::bytes(bytes));
+        }
+        Ok(EmulatorAction::none())
+    }
+
     pub(crate) fn selection_autoscroll_interval(&self) -> Result<Option<Duration>, String> {
         if !matches!(
             self.active_pointer,
@@ -1965,7 +1994,7 @@ impl TerminalEmulator {
         ) {
             return Ok(None);
         }
-        let Some(position) = self.selection_drag_position else {
+        let Some(_) = self.selection_drag_position else {
             return Ok(None);
         };
         let direction = self
@@ -1975,23 +2004,12 @@ impl TerminalEmulator {
         if direction == Autoscroll::None {
             return Ok(None);
         }
-        Ok(selection_autoscroll_interval_for_position(
-            position,
-            self.geometry.backing_grid_size().height,
-            self.geometry.backing_cell_size().height,
-        ))
+        Ok(Some(SELECTION_AUTOSCROLL_INTERVAL))
     }
 
-    pub(crate) fn selection_autoscroll_tick(
-        &mut self,
-        generation: PresentationGeneration,
-    ) -> Result<EmulatorAction, String> {
-        if generation != self.presentation_generation {
-            self.selection_gesture.reset(&self.terminal);
-            self.active_pointer = None;
-            self.selection_drag_position = None;
-            return Ok(EmulatorAction::none());
-        }
+    pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, String> {
+        // The worker owns this gesture; publishing a new snapshot does not end the drag.
+        // libghostty-vt validates the tracked content anchor before scrolling.
         let Some(position) = self.selection_drag_position else {
             return Ok(EmulatorAction::none());
         };
@@ -1999,14 +2017,18 @@ impl TerminalEmulator {
             .selection_gesture
             .autoscroll(&self.terminal)
             .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
-        let delta = match direction {
-            Autoscroll::Up => -1,
-            Autoscroll::Down => 1,
-            Autoscroll::None => return Ok(EmulatorAction::none()),
-            _ => return Ok(EmulatorAction::none()),
+        if !matches!(direction, Autoscroll::Up | Autoscroll::Down) {
+            return Ok(EmulatorAction::none());
+        }
+        // The gesture resolves this coordinate after scrolling. Inspecting the old
+        // row here can shift the endpoint when it contains a wide-cell spacer.
+        let cell = self
+            .geometry
+            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
+        let viewport = PointCoordinate {
+            x: cell.col,
+            y: u32::from(cell.row),
         };
-        self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
-        let viewport = self.selection_viewport_point(position)?;
         let geometry = self.selection_geometry();
         let selection = self
             .selection_autoscroll_tick
@@ -2345,7 +2367,8 @@ impl TerminalEmulator {
 
                 if rebuild_row {
                     let selection = row.selection()?;
-                    let mut rendered_cells = Vec::with_capacity(usize::from(cols));
+                    let mut rendered_cells: Vec<CellSnapshot> =
+                        Vec::with_capacity(usize::from(cols));
                     let mut hyperlink_uri = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut hyperlink_userdata = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut column_index = 0_u16;
@@ -2364,6 +2387,15 @@ impl TerminalEmulator {
                             _ => style.bg_color.into(),
                         };
                         let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
+                        let mut selected = selection.is_some_and(|range| {
+                            column_index >= range.start_x && column_index <= range.end_x
+                        });
+                        if spacer_tail && let Some(head) = rendered_cells.last_mut() {
+                            // Copying includes the complete wide character even when a
+                            // gesture endpoint falls on its spacer. Paint the same range.
+                            selected |= head.selected;
+                            head.selected = selected;
+                        }
                         let text = if spacer_tail {
                             " ".to_owned()
                         } else {
@@ -2432,9 +2464,7 @@ impl TerminalEmulator {
                             underline_source: style.underline_color.into(),
                             strikethrough: style.strikethrough,
                             overline: style.overline,
-                            selected: selection.is_some_and(|range| {
-                                column_index >= range.start_x && column_index <= range.end_x
-                            }),
+                            selected,
                             spacer_tail,
                             semantic_content: raw_cell.semantic_content()?.into(),
                             hyperlink,
@@ -2645,30 +2675,6 @@ fn shift_overrides_application_mouse(
     policy: ShiftSelectionPolicy,
 ) -> bool {
     modifiers.shift && policy == ShiftSelectionPolicy::OverrideApplicationMouse
-}
-
-fn selection_autoscroll_interval_for_position(
-    position: SurfacePosition,
-    screen_height: u32,
-    cell_height: u32,
-) -> Option<Duration> {
-    let screen_bottom = screen_height as f32;
-    let overflow = if position.y < 0.0 {
-        -position.y
-    } else if position.y <= SELECTION_AUTOSCROLL_EDGE_BUFFER {
-        1.0
-    } else if position.y >= screen_bottom {
-        position.y - screen_bottom + 1.0
-    } else if position.y > screen_bottom - SELECTION_AUTOSCROLL_EDGE_BUFFER {
-        1.0
-    } else {
-        return None;
-    };
-    let cell_height = cell_height.max(1) as f32;
-    let depth = (overflow / cell_height).ceil().clamp(1.0, 6.0) as u32;
-    let range = MAX_SELECTION_AUTOSCROLL_INTERVAL - MIN_SELECTION_AUTOSCROLL_INTERVAL;
-    let step = range / 5;
-    Some(MAX_SELECTION_AUTOSCROLL_INTERVAL - step * (depth - 1))
 }
 
 const ANSI_NORMAL_INDICES: [PaletteIndex; 8] = [

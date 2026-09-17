@@ -753,7 +753,7 @@ enum Command {
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
-    SelectionAutoscrollTick(PresentationGeneration),
+    SelectionAutoscrollTick,
     PublishPendingScreen,
     GraphicsAnimationTick,
     GraphicsBudgetAvailable,
@@ -776,7 +776,6 @@ impl Command {
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
                 | Self::PublishAccessibility
-                | Self::SelectionAutoscrollTick(..)
         )
     }
 }
@@ -801,7 +800,7 @@ impl fmt::Debug for Command {
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
-            Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
+            Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
@@ -1247,11 +1246,11 @@ impl TerminalWorker {
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
-            Command::SelectionAutoscrollTick(generation) => {
+            Command::SelectionAutoscrollTick => {
                 if self.emulator.synchronized_output_deadline().is_some() {
-                    return true;
+                    return self.refresh_selection_autoscroll();
                 }
-                match self.emulator.selection_autoscroll_tick(generation) {
+                match self.emulator.selection_autoscroll_tick() {
                     Ok(action) => {
                         self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
                     }
@@ -1274,6 +1273,9 @@ impl TerminalWorker {
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
                 self.schedules.set_presentable(presentable, now);
+                if !presentable && !self.cancel_pointer_drag() {
+                    return false;
+                }
                 if !presentable && !self.publish_metadata_changed() {
                     false
                 } else if self.schedules.presentation_due(now) {
@@ -1423,11 +1425,8 @@ impl TerminalWorker {
     fn refresh_selection_autoscroll(&mut self) -> bool {
         match self.emulator.selection_autoscroll_interval() {
             Ok(interval) => {
-                self.schedules.update_selection_autoscroll(
-                    Instant::now(),
-                    interval,
-                    self.emulator.presentation_generation(),
-                );
+                self.schedules
+                    .update_selection_autoscroll(Instant::now(), interval);
                 true
             }
             Err(message) => {
@@ -1619,7 +1618,20 @@ impl TerminalWorker {
         }
     }
 
+    fn cancel_pointer_drag(&mut self) -> bool {
+        match self.emulator.cancel_pointer_drag() {
+            Ok(action) => self.apply_emulator_action(action) && self.refresh_selection_autoscroll(),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
     fn process_focus(&mut self, focused: bool) -> bool {
+        if !focused && !self.cancel_pointer_drag() {
+            return false;
+        }
         if !self.hidden_input_transition() {
             return false;
         }

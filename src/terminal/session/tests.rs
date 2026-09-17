@@ -3520,6 +3520,195 @@ fn stopped_session_returns_an_error_for_selection_requests() {
 }
 
 #[test]
+fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press() {
+    for hidden in [false, true] {
+        for (button, code) in [
+            (PointerButton::Left, 0),
+            (PointerButton::Middle, 1),
+            (PointerButton::Right, 2),
+        ] {
+            let records = ScriptedPtyRecords::default();
+            let (_command_tx, commands) = mpsc::channel();
+            let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+            let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+            let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+            let mut worker = TerminalWorker {
+                metadata_state: SessionMetadataState::default(),
+                native_pty: direct_native_pty(records.clone()),
+                emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+                commands,
+                reader_events,
+                events,
+                accessibility,
+                pending_command: None,
+                terminal_input_focused: true,
+                focus_reporting_enabled: true,
+                held_keys: HeldKeys::default(),
+                schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+                osc52_filter: Osc52Filter::default(),
+            };
+            worker.emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+            let pointer = |phase, position, modifiers, generation| {
+                Command::Pointer(PointerInput {
+                    generation,
+                    phase,
+                    button: (phase != PointerPhase::Motion).then_some(button),
+                    position,
+                    modifiers,
+                    shift_selection: ShiftSelectionPolicy::default(),
+                })
+            };
+            assert!(worker.process_command(pointer(
+                PointerPhase::Press,
+                SurfacePosition { x: 1.0, y: 1.0 },
+                InputModifiers::default(),
+                worker.emulator.presentation_generation(),
+            )));
+            assert!(worker.process_command(pointer(
+                PointerPhase::Motion,
+                SurfacePosition { x: 17.0, y: 41.0 },
+                InputModifiers {
+                    control: true,
+                    ..InputModifiers::default()
+                },
+                worker.emulator.presentation_generation(),
+            )));
+            let mut expected = format!("\x1b[<{code};1;1M\x1b[<{};3;3M", code + 48);
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+
+            // Both lifecycle paths must release at the last position before focus-out.
+            let release = format!("\x1b[<{};3;3m", code + 16);
+            if hidden {
+                assert!(worker.process_command(Command::SetPresentable(false)));
+                assert_eq!(
+                    records.snapshot().written,
+                    format!("{expected}{release}").as_bytes()
+                );
+            }
+            assert!(worker.process_command(Command::Focus(false)));
+            expected.push_str(&release);
+            expected.push_str("\x1b[O");
+            assert_eq!(records.snapshot().written, expected.as_bytes(), "{hidden}");
+
+            // Repeated cancellation must not send another release.
+            assert!(worker.process_command(Command::SetPresentable(false)));
+            assert!(worker.process_command(Command::Focus(false)));
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+            assert!(worker.process_command(Command::SetPresentable(true)));
+            assert!(worker.process_command(Command::Focus(true)));
+            assert!(worker.process_command(pointer(
+                PointerPhase::Press,
+                SurfacePosition { x: 1.0, y: 1.0 },
+                InputModifiers::default(),
+                worker.emulator.presentation_generation(),
+            )));
+            expected.push_str(&format!("\x1b[I\x1b[<{code};1;1M"));
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+            worker.finish();
+        }
+    }
+}
+
+#[test]
+fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
+    for stop in ["release", "focus", "hidden", "resize"] {
+        let (_command_tx, commands) = mpsc::channel();
+        let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+        let schedule_input = ScheduleInput::default();
+        let mut worker = TerminalWorker {
+            metadata_state: SessionMetadataState::default(),
+            native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events,
+            events,
+            accessibility,
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
+            osc52_filter: Osc52Filter::default(),
+        };
+        for row in 0..40 {
+            worker.emulator.feed(format!("row {row:02}\r\n").as_bytes());
+        }
+        assert!(worker.publish_screen());
+        let SessionEvent::Screen(bottom) = receiver.try_recv().unwrap() else {
+            panic!("expected the initial screen");
+        };
+        let pointer = |phase, y, generation| PointerInput {
+            generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        for (phase, y) in [(PointerPhase::Press, 470.0), (PointerPhase::Motion, -1.0)] {
+            assert!(worker.process_command(Command::Pointer(pointer(phase, y, bottom.generation))));
+        }
+        for rows in 1..=3 {
+            // A presentation may occur between arming and firing a worker-owned tick.
+            worker
+                .emulator
+                .feed(format!("\x1b]2;tick {rows}\x07").as_bytes());
+            assert!(worker.publish_screen());
+            let tick = worker
+                .schedules
+                .take_due(Instant::now() + Duration::from_secs(1))
+                .unwrap();
+            assert!(matches!(tick, Command::SelectionAutoscrollTick));
+            let tick = worker.order_presentation_barrier(tick);
+            assert!(worker.process_command(tick));
+            let screen = std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter_map(|event| match event {
+                    SessionEvent::Screen(screen) => Some(screen),
+                    _ => None,
+                })
+                .last()
+                .unwrap();
+            assert_eq!(
+                screen.scrollbar.offset_rows,
+                bottom.scrollbar.offset_rows - rows
+            );
+        }
+        let stop_command = match stop {
+            "release" => Command::Pointer(pointer(
+                PointerPhase::Release,
+                -1.0,
+                worker.emulator.presentation_generation(),
+            )),
+            "focus" => Command::Focus(false),
+            "hidden" => Command::SetPresentable(false),
+            "resize" => {
+                schedule_input.enqueue_resize(test_geometry());
+                Command::Resize
+            }
+            _ => unreachable!(),
+        };
+        assert!(worker.process_command(stop_command));
+        assert_eq!(
+            worker.emulator.selection_autoscroll_interval().unwrap(),
+            None,
+            "{stop}"
+        );
+        assert!(
+            !matches!(
+                worker
+                    .schedules
+                    .take_due(Instant::now() + Duration::from_secs(1)),
+                Some(Command::SelectionAutoscrollTick)
+            ),
+            "{stop}"
+        );
+        worker.finish();
+    }
+}
+
+#[test]
 fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
     let (result, reader_steps, _records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();

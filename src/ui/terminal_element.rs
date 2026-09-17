@@ -444,7 +444,7 @@ struct PreparedText {
     paint_runs: Arc<[TextPaintRun]>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TextPaintRun {
     end: usize,
     color: Hsla,
@@ -1262,7 +1262,7 @@ fn prepare_stable_row(
                 key.row_top,
             ),
             blinking: text.blinking,
-            paint_runs: text_paint_runs(&fragment.runs),
+            paint_runs: Arc::clone(&fragment.paint_runs),
         })
         .collect();
     let backgrounds = prepare_background_geometry(
@@ -1365,21 +1365,6 @@ fn prepare_stable_row(
         cursor_text,
         cursor_symbols,
     }
-}
-
-fn text_paint_runs(runs: &[TextRun]) -> Arc<[TextPaintRun]> {
-    let mut end = 0;
-    Arc::from(
-        runs.iter()
-            .map(|run| {
-                end += run.len;
-                TextPaintRun {
-                    end,
-                    color: run.color,
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
 }
 
 fn paint_prepared_decorations(
@@ -1702,6 +1687,7 @@ impl Element for TerminalGridElement {
         let Some(pane) = self.input.upgrade() else {
             return;
         };
+        TerminalPane::capture_pointer_drag(&pane, window);
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, pane.clone()),
@@ -1762,28 +1748,29 @@ struct TextFragment {
     start: usize,
     text: SharedString,
     runs: Vec<TextRun>,
+    paint_runs: Arc<[TextPaintRun]>,
     force_cell_width: bool,
     blinking: bool,
 }
 
 struct FragmentBuilder {
     start: usize,
-    selected: bool,
     cursor: bool,
     blinking: bool,
     text: String,
     runs: Vec<TextRun>,
+    paint_runs: Vec<TextPaintRun>,
 }
 
 impl FragmentBuilder {
-    fn new(start: usize, selected: bool, cursor: bool, blinking: bool) -> Self {
+    fn new(start: usize, cursor: bool, blinking: bool) -> Self {
         Self {
             start,
-            selected,
             cursor,
             blinking,
             text: String::new(),
             runs: Vec::new(),
+            paint_runs: Vec::new(),
         }
     }
 
@@ -1798,19 +1785,28 @@ impl FragmentBuilder {
         let color = gpui_color(foreground).into();
         let font = terminal_fonts.cell(cell.bold, cell.italic);
 
+        if let Some(previous) = self.paint_runs.last_mut()
+            && previous.color == color
+        {
+            previous.end = self.text.len();
+        } else {
+            self.paint_runs.push(TextPaintRun {
+                end: self.text.len(),
+                color,
+            });
+        }
+
         if let Some(previous) = self.runs.last_mut()
             && previous.font == *font
-            && previous.color == color
-            && previous.background_color.is_none()
-            && previous.underline.is_none()
-            && previous.strikethrough.is_none()
         {
             previous.len += len;
         } else {
             self.runs.push(TextRun {
                 len,
                 font: font.clone(),
-                color,
+                // GPUI also splits font runs on color changes. Keep selection and Find
+                // colors in paint_runs so they cannot change glyph positioning.
+                color: rgba(0).into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1823,6 +1819,7 @@ impl FragmentBuilder {
             start: self.start,
             text: self.text.into(),
             runs: self.runs,
+            paint_runs: Arc::from(self.paint_runs),
             force_cell_width,
             blinking: self.blinking,
         }
@@ -2656,11 +2653,10 @@ fn prepare_row_cached(
             continue;
         }
 
-        if regular_fragment.as_ref().is_some_and(|fragment| {
-            fragment.selected != cell.selected
-                || fragment.cursor != cursor
-                || fragment.blinking != cell.blinking
-        }) && let Some(fragment) = regular_fragment.take()
+        if regular_fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.cursor != cursor || fragment.blinking != cell.blinking)
+            && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
         }
@@ -2670,14 +2666,12 @@ fn prepare_row_cached(
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor, cell.blinking);
+            let mut fragment = FragmentBuilder::new(column, cursor, cell.blinking);
             fragment.push(cell, foreground, terminal_fonts);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| {
-                    FragmentBuilder::new(column, cell.selected, cursor, cell.blinking)
-                })
+                .get_or_insert_with(|| FragmentBuilder::new(column, cursor, cell.blinking))
                 .push(cell, foreground, terminal_fonts);
         }
     }
@@ -3425,10 +3419,19 @@ mod tests {
         let colors = colors();
         let family: SharedString = "JetBrains Mono".into();
         let terminal_fonts = test_terminal_fonts(&family);
-        let mut fragment = FragmentBuilder::new(0, false, false, false);
+        let mut fragment = FragmentBuilder::new(0, false, false);
         let styles = [(false, false), (true, false), (true, true), (false, true)];
-        let mut expected = Vec::new();
+        let mut expected_fonts = Vec::new();
+        let mut expected_paint = Vec::new();
         for (bold, italic) in styles {
+            expected_fonts.push(TextRun {
+                len: 8,
+                font: terminal_cell_font(&family, bold, italic),
+                color: rgba(0).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
             for foreground in [Color::rgb(0x12_34_56), Color::rgb(0x65_43_21)] {
                 let mut subject = cell("é");
                 subject.bold = bold;
@@ -3437,20 +3440,17 @@ mod tests {
                 let foreground = effective_colors(&subject, &colors).0;
                 fragment.push(&subject, foreground, &terminal_fonts);
                 fragment.push(&subject, foreground, &terminal_fonts);
-                expected.push(TextRun {
-                    len: 4,
-                    font: terminal_cell_font(&family, bold, italic),
+                expected_paint.push(TextPaintRun {
+                    end: (expected_paint.len() + 1) * 4,
                     color: gpui_color(foreground).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
                 });
             }
         }
 
         let fragment = fragment.finish(true);
 
-        assert_eq!(fragment.runs, expected);
+        assert_eq!(fragment.runs, expected_fonts);
+        assert_eq!(fragment.paint_runs.as_ref(), expected_paint);
         assert_eq!(fragment.text.as_ref(), "é".repeat(16));
     }
 
@@ -3461,7 +3461,7 @@ mod tests {
         let second_family: SharedString = "JetBrains Mono".into();
         let first_fonts = test_terminal_fonts(&first_family);
         let second_fonts = test_terminal_fonts(&second_family);
-        let mut fragment = FragmentBuilder::new(0, false, false, false);
+        let mut fragment = FragmentBuilder::new(0, false, false);
         fragment.push(&cell("a"), colors.foreground, &first_fonts);
         let mut empty = cell("");
         empty.bold = true;
@@ -3668,7 +3668,7 @@ mod tests {
         let run_colors = input
             .fragments
             .iter()
-            .flat_map(|fragment| fragment.runs.iter().map(|run| run.color))
+            .flat_map(|fragment| fragment.paint_runs.iter().map(|run| run.color))
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -3950,24 +3950,6 @@ mod tests {
                 len: 2,
                 color: TerminalColors::default().selection_background,
             }]
-        );
-    }
-
-    #[test]
-    fn shaping_fragments_do_not_cross_selection_boundaries() {
-        let mut selected = cell("b");
-        selected.selected = true;
-        let row = Arc::<[CellSnapshot]>::from([cell("a"), selected, cell("c")]);
-
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
-
-        assert_eq!(
-            input
-                .fragments
-                .iter()
-                .map(|fragment| fragment.text.as_ref())
-                .collect::<Vec<_>>(),
-            vec!["a", "b", "c"]
         );
     }
 
@@ -4519,6 +4501,103 @@ mod tests {
                 assert!(!Arc::ptr_eq(&first, &cache.prepared_text[0].prepared));
             })
             .expect("the test window should remain available");
+    }
+
+    #[gpui::test]
+    fn selection_and_find_preserve_shaped_glyphs_at_fractional_cell_widths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let mut colors = colors();
+                let selected_color = Color::rgb(0x12_34_56);
+                let find_color = Color::rgb(0x65_43_21);
+                Arc::make_mut(&mut colors.configured).selection_foreground = Some(selected_color);
+                Arc::make_mut(&mut colors.configured).find_match_foreground = Some(find_color);
+                let mut cells = "abcdefghijklmnop"
+                    .chars()
+                    .map(|ch| cell(&ch.to_string()))
+                    .collect::<Vec<_>>();
+                cells[4].bold = true;
+                cells[7].italic = true;
+                let mut tail = cell(" ");
+                tail.spacer_tail = true;
+                cells.extend([
+                    cell("e\u{301}"),
+                    cell("界"),
+                    tail.clone(),
+                    cell("😀"),
+                    tail,
+                    cell("z"),
+                ]);
+                let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells.clone())]);
+                let mut cache = TerminalGridCache::new();
+                let inputs =
+                    cache.prepare(&rows, &colors, &fonts, &Arc::from([]), None, grid_metrics());
+                let original = cache.prepare_visible_geometry(
+                    &inputs,
+                    1,
+                    prepared_grid_layout(&fonts, px(14.0), px(8.375)),
+                    None,
+                    CursorSnapshot::default(),
+                    window,
+                );
+                for selecting in [true, false] {
+                    for end in 1..=cells.len() {
+                        let mut changed = cells.clone();
+                        let spans = if selecting {
+                            for cell in &mut changed[..end] {
+                                cell.selected = true;
+                            }
+                            Arc::from([])
+                        } else {
+                            Arc::from([FindHighlightSpan {
+                                row: 0,
+                                start_column: 0,
+                                end_column: (end - 1) as u16,
+                                current: false,
+                            }])
+                        };
+                        let rows = Arc::<[RowSnapshot]>::from([Arc::from(changed)]);
+                        let inputs =
+                            cache.prepare(&rows, &colors, &fonts, &spans, None, grid_metrics());
+                        let prepared = cache.prepare_visible_geometry(
+                            &inputs,
+                            1,
+                            prepared_grid_layout(&fonts, px(14.0), px(8.375)),
+                            None,
+                            CursorSnapshot::default(),
+                            window,
+                        );
+                        assert_eq!(
+                            original[0].text.len(),
+                            prepared[0].text.len(),
+                            "selection={selecting}, end={end}"
+                        );
+                        for (before, after) in original[0].text.iter().zip(&prepared[0].text) {
+                            // Reusing the shaped line preserves every glyph, position, and baseline.
+                            assert!(
+                                Arc::ptr_eq(&before.line, &after.line),
+                                "selection={selecting}, end={end}"
+                            );
+                            assert_eq!(before.origin, after.origin);
+                        }
+                        let expected = if selecting {
+                            selected_color
+                        } else {
+                            find_color
+                        };
+                        assert_eq!(
+                            prepared[0].text[0].paint_runs[0].color,
+                            gpui_color(expected).into()
+                        );
+                        assert_eq!(!prepared[0].selections.is_empty(), selecting);
+                    }
+                }
+            })
+            .unwrap();
     }
 
     #[gpui::test]
