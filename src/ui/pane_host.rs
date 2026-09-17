@@ -1532,9 +1532,6 @@ impl PaneHost {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    // GPUI clips descendants to rectangles. Keep every terminal paint above the
-                    // bottom corner arcs, including graphics, status overlays and the scrollbar.
-                    .pb(radius)
                     .child(terminal),
             )
             .child(render_pane_corner_surface(pane_id, frame, appearance))
@@ -2286,9 +2283,7 @@ fn render_pane_status(
         .into_any_element()
 }
 
-/// Fills the empty corner fillets with Chrome, adjoining the rounded Terminal surface.
-/// Descendants stay inside the rounded surface through layout insets. Nothing is painted beneath
-/// these fillets: this is their single backing fill, not a mask over terminal content.
+/// Masks the Pane's corner fillets with Chrome while leaving its rounded interior visible.
 fn render_pane_corner_surface(
     pane_id: PaneId,
     frame: super::workspace_frame::WorkspaceFrame,
@@ -3510,12 +3505,20 @@ mod tests {
         let caption = cx
             .debug_bounds("pane-caption-1-focused")
             .expect("the Pane Caption was rendered");
+        let terminal = cx
+            .debug_bounds("terminal-pane")
+            .expect("the Terminal was rendered");
         assert_eq!(surface, root, "a single Pane should fill its host");
         assert!(
             surface.contains(&caption.origin) && caption.right() <= surface.right(),
             "the Pane Caption should sit inside the Pane surface"
         );
         assert_eq!(caption.top(), surface.top());
+        assert_eq!(
+            terminal.bottom(),
+            surface.bottom(),
+            "the Terminal should reach the rounded Pane edge"
+        );
 
         let (frame, base, measured) = cx.update(|_, cx| {
             let appearance = super::super::appearance::chrome(cx);

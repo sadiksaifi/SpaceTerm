@@ -111,26 +111,52 @@ impl TerminalGeometry {
     ) -> Self {
         let cols = grid_dimension(viewport.width, cell.width, minimum_grid.cols);
         let rows = grid_dimension(viewport.height, cell.height, minimum_grid.rows);
-        Self::from_grid(CellGridSize::new(cols, rows), cell, backing_scale)
+        let grid = CellGridSize::new(cols, rows);
+        let fitted_cell = Self::fitted_cell_size(viewport, cell, grid);
+        Self::from_grid_with_logical_cell(grid, cell, fitted_cell, backing_scale)
     }
 
+    pub(crate) fn fitted_cell_size(
+        viewport: LogicalSize,
+        nominal: LogicalCellSize,
+        grid: CellGridSize,
+    ) -> LogicalCellSize {
+        LogicalCellSize::new(
+            fitted_cell_dimension(viewport.width, nominal.width, grid.cols),
+            fitted_cell_dimension(viewport.height, nominal.height, grid.rows),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_grid(
         grid: CellGridSize,
         cell: LogicalCellSize,
         backing_scale: BackingScale,
     ) -> Self {
-        let backing_cell = backing_size(LogicalSize::new(cell.width, cell.height), backing_scale);
+        Self::from_grid_with_logical_cell(grid, cell, cell, backing_scale)
+    }
+
+    fn from_grid_with_logical_cell(
+        grid: CellGridSize,
+        nominal_cell: LogicalCellSize,
+        logical_cell: LogicalCellSize,
+        backing_scale: BackingScale,
+    ) -> Self {
+        let backing_cell = backing_size(
+            LogicalSize::new(nominal_cell.width, nominal_cell.height),
+            backing_scale,
+        );
         let backing_grid = backing_size(
             LogicalSize::new(
-                cell.width * f32::from(grid.cols),
-                cell.height * f32::from(grid.rows),
+                logical_cell.width * f32::from(grid.cols),
+                logical_cell.height * f32::from(grid.rows),
             ),
             backing_scale,
         );
 
         Self {
             grid,
-            logical_cell: cell,
+            logical_cell,
             backing_scale,
             backing_cell,
             backing_grid,
@@ -139,6 +165,10 @@ impl TerminalGeometry {
 
     pub(crate) const fn grid(self) -> CellGridSize {
         self.grid
+    }
+
+    pub(crate) const fn logical_cell_size(self) -> LogicalCellSize {
+        self.logical_cell
     }
 
     pub(crate) const fn backing_cell_size(self) -> BackingSize {
@@ -186,6 +216,13 @@ fn grid_dimension(available: f32, cell: f32, minimum: u16) -> u16 {
     calculated.max(minimum)
 }
 
+fn fitted_cell_dimension(available: f32, nominal: f32, cells: u16) -> f32 {
+    if !available.is_finite() || !nominal.is_finite() || nominal <= 0.0 || cells == 0 {
+        return nominal;
+    }
+    (available / f32::from(cells)).max(nominal)
+}
+
 fn backing_size(logical: LogicalSize, scale: BackingScale) -> BackingSize {
     BackingSize::new(
         backing_dimension(logical.width, scale),
@@ -202,7 +239,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fractional_logical_cells_scale_the_complete_grid_without_accumulating_rounding() {
+    fn viewport_remainder_should_be_distributed_across_real_cells() {
         let geometry = TerminalGeometry::from_viewport(
             LogicalSize::new(101.0, 52.0),
             LogicalCellSize::new(7.5, 17.25),
@@ -213,15 +250,17 @@ mod tests {
         assert_eq!(
             (
                 geometry.grid(),
+                geometry.logical_cell,
                 geometry.logical_grid_size(),
                 geometry.backing_cell_size(),
                 geometry.backing_grid_size(),
             ),
             (
                 CellGridSize::new(13, 3),
-                LogicalSize::new(97.5, 51.75),
+                LogicalCellSize::new(101.0 / 13.0, 52.0 / 3.0),
+                LogicalSize::new(101.0, 52.0),
                 BackingSize::new(12, 26),
-                BackingSize::new(147, 78),
+                BackingSize::new(152, 78),
             )
         );
     }

@@ -14,7 +14,9 @@ use gpui::{FontFallbacks, FontFeatures, font};
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::appearance::{Color, ResolvedTerminalAppearance, TerminalColors};
-use crate::terminal::geometry::CellGridPosition;
+use crate::terminal::geometry::{
+    CellGridPosition, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
+};
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, FindHighlightSpan,
     RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
@@ -238,10 +240,12 @@ pub(crate) struct TerminalGridElement {
     foreground: Color,
     rows: Arc<[Arc<RowPaintInput>]>,
     cache: Entity<TerminalGridCache>,
-    columns: usize,
+    grid_size: CellGridSize,
     font_size: Pixels,
     line_height: Pixels,
     cell_width: Pixels,
+    nominal_line_height: Pixels,
+    nominal_cell_width: Pixels,
     cursor: Option<(CursorPositionSnapshot, CellSnapshot)>,
     cursor_style: CursorSnapshot,
     cursor_preparation_style: CursorSnapshot,
@@ -273,6 +277,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) font_size: Pixels,
     pub(crate) line_height: Pixels,
     pub(crate) cell_width: Pixels,
+    pub(crate) grid_size: CellGridSize,
     pub(crate) preedit: Option<PreeditLayout>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) input: Entity<TerminalPane>,
@@ -327,6 +332,7 @@ impl TerminalGridElement {
                         font_size: configuration.font_size,
                         line_height: configuration.line_height,
                         cell_width: configuration.cell_width,
+                        grid_size: configuration.grid_size,
                         preedit: None,
                         focus_handle: configuration.focus_handle.clone(),
                         input: configuration.input.clone(),
@@ -385,10 +391,12 @@ impl TerminalGridElement {
             },
             rows,
             cache,
-            columns: screen.rows.first().map_or(0, |row| row.len()),
+            grid_size: configuration.grid_size,
             font_size: configuration.font_size,
             line_height: configuration.line_height,
             cell_width: configuration.cell_width,
+            nominal_line_height: configuration.line_height,
+            nominal_cell_width: configuration.cell_width,
             cursor,
             cursor_style,
             cursor_preparation_style,
@@ -487,8 +495,7 @@ struct PreparedPreeditKey {
     clusters: Arc<[super::terminal_ime::PreeditCluster]>,
     caret: super::terminal_ime::PreeditPosition,
     visible_rows: usize,
-    grid_left: Pixels,
-    grid_top: Pixels,
+    grid_bounds: Bounds<Pixels>,
     font: Font,
     font_size: Pixels,
     cell_width: Pixels,
@@ -504,8 +511,7 @@ impl PartialEq for PreparedPreeditKey {
         Arc::ptr_eq(&self.clusters, &other.clusters)
             && self.caret == other.caret
             && self.visible_rows == other.visible_rows
-            && self.grid_left == other.grid_left
-            && self.grid_top == other.grid_top
+            && self.grid_bounds == other.grid_bounds
             && self.font == other.font
             && self.font_size == other.font_size
             && self.cell_width == other.cell_width
@@ -864,6 +870,7 @@ struct PreparedUnderline {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PreparedRowKey {
     grid_left: Pixels,
+    grid_right: Pixels,
     row_top: Pixels,
     row_bottom: Pixels,
     font_size: Pixels,
@@ -883,8 +890,7 @@ struct PreparedCursorKey {
 }
 
 struct PreparedGridLayout<'a> {
-    grid_left: Pixels,
-    grid_top: Pixels,
+    grid_bounds: Bounds<Pixels>,
     font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
@@ -1003,9 +1009,10 @@ impl TerminalGridCache {
         let mut previous_text = previous_text.into_iter().map(Some).collect::<Vec<_>>();
 
         for (row_index, source) in rows.iter().take(visible_rows).enumerate() {
-            let row_top = layout.grid_top + layout.line_height * row_index as f32;
-            let row_bottom =
-                layout.grid_top + layout.line_height * row_index.saturating_add(1) as f32;
+            let row_top = layout.grid_bounds.top() + layout.line_height * row_index as f32;
+            let row_bottom = (layout.grid_bounds.top()
+                + layout.line_height * row_index.saturating_add(1) as f32)
+                .min(layout.grid_bounds.bottom());
             let cursor = cursor
                 .filter(|(position, _)| usize::from(position.row) == row_index)
                 .filter(|_| cursor_style.visible);
@@ -1039,7 +1046,8 @@ impl TerminalGridCache {
             });
 
             let key = PreparedRowKey {
-                grid_left: layout.grid_left,
+                grid_left: layout.grid_bounds.left(),
+                grid_right: layout.grid_bounds.right(),
                 row_top,
                 row_bottom,
                 font_size: layout.font_size,
@@ -1072,8 +1080,7 @@ impl TerminalGridCache {
         &mut self,
         layout: Option<&PreeditLayout>,
         visible_rows: usize,
-        grid_left: Pixels,
-        grid_top: Pixels,
+        grid_bounds: Bounds<Pixels>,
         font: &Font,
         font_size: Pixels,
         cell_width: Pixels,
@@ -1092,8 +1099,7 @@ impl TerminalGridCache {
             clusters: Arc::clone(&layout.clusters),
             caret: layout.caret,
             visible_rows,
-            grid_left,
-            grid_top,
+            grid_bounds,
             font: font.clone(),
             font_size,
             cell_width,
@@ -1113,7 +1119,8 @@ impl TerminalGridCache {
             .map(|_| PreparedPreeditRow::default())
             .collect::<Vec<_>>();
         for (row_index, row) in rows.iter_mut().enumerate() {
-            let row_top = grid_top + line_height * row_index as f32;
+            let row_top = grid_bounds.top() + line_height * row_index as f32;
+            let row_bottom = (row_top + line_height).min(grid_bounds.bottom());
             let clusters = layout
                 .clusters
                 .iter()
@@ -1121,12 +1128,14 @@ impl TerminalGridCache {
             let mut text = Vec::new();
             let mut backgrounds = Vec::new();
             for cluster in clusters {
-                let cluster_left = grid_left + cell_width * cluster.column as f32;
+                let cluster_left = grid_bounds.left() + cell_width * cluster.column as f32;
                 let width_cells = usize::from(cluster.width).max(1);
+                let cluster_right =
+                    (cluster_left + cell_width * width_cells as f32).min(grid_bounds.right());
                 backgrounds.push(fill(
                     Bounds::new(
                         point(cluster_left, row_top),
-                        size(cell_width * width_cells as f32, line_height),
+                        size(cluster_right - cluster_left, row_bottom - row_top),
                     ),
                     gpui_color(background),
                 ));
@@ -1157,7 +1166,7 @@ impl TerminalGridCache {
             row.text = Arc::from(text);
             row.backgrounds = Arc::from(backgrounds);
             if layout.caret.row == row_index {
-                let caret_left = grid_left + cell_width * layout.caret.column as f32;
+                let caret_left = grid_bounds.left() + cell_width * layout.caret.column as f32;
                 row.caret = Some(fill(
                     Bounds::new(point(caret_left, row_top), size(px(1.0), line_height)),
                     gpui_color(caret_color),
@@ -1258,17 +1267,19 @@ fn prepare_stable_row(
         .collect();
     let backgrounds = prepare_background_geometry(
         &row.backgrounds,
-        key.row_top,
-        key.grid_left,
+        Bounds::new(
+            point(key.grid_left, key.row_top),
+            size(key.grid_right - key.grid_left, key.row_bottom - key.row_top),
+        ),
         key.cell_width,
-        key.line_height,
     );
     let selections = prepare_background_geometry(
         &row.selections,
-        key.row_top,
-        key.grid_left,
+        Bounds::new(
+            point(key.grid_left, key.row_top),
+            size(key.grid_right - key.grid_left, key.row_bottom - key.row_top),
+        ),
         key.cell_width,
-        key.line_height,
     );
     let under_text_decorations = prepare_decoration_geometry(
         &row.under_text_decorations,
@@ -1434,11 +1445,21 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-        let visible_rows = ((f32::from(bounds.size.height) / f32::from(self.line_height)).ceil()
-            as usize)
-            .min(self.rows.len());
+        let fitted_cell = TerminalGeometry::fitted_cell_size(
+            LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            LogicalCellSize::new(
+                f32::from(self.nominal_cell_width),
+                f32::from(self.nominal_line_height),
+            ),
+            self.grid_size,
+        );
+        self.cell_width = px(fitted_cell.width);
+        self.line_height = px(fitted_cell.height);
+        let viewport_rows = usize::from(self.grid_size.rows);
+        let visible_rows = viewport_rows.min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
-        let grid_left = terminal_grid_content_bounds(bounds, self.columns, self.cell_width).left();
+        let grid_bounds = bounds;
+        let grid_left = grid_bounds.left();
         let base_font = self.terminal_fonts.regular.clone();
         let font_id = window.text_system().resolve_font(&base_font);
         let baseline =
@@ -1465,8 +1486,7 @@ impl Element for TerminalGridElement {
                 &rows,
                 visible_rows,
                 PreparedGridLayout {
-                    grid_left,
-                    grid_top: bounds.top(),
+                    grid_bounds,
                     font_size: self.font_size,
                     cell_width: self.cell_width,
                     line_height: self.line_height,
@@ -1481,8 +1501,7 @@ impl Element for TerminalGridElement {
             let preedit_rows = cache.prepare_preedit(
                 self.preedit.as_ref(),
                 visible_rows,
-                grid_left,
-                bounds.top(),
+                grid_bounds,
                 &terminal_fonts.regular,
                 self.font_size,
                 self.cell_width,
@@ -1506,10 +1525,14 @@ impl Element for TerminalGridElement {
                     &self.find_spans,
                     &self.presentation.colors.configured,
                 ),
-                row_top,
-                grid_left,
+                Bounds::new(
+                    point(grid_bounds.left(), row_top),
+                    size(
+                        grid_bounds.size.width,
+                        (row_top + self.line_height).min(grid_bounds.bottom()) - row_top,
+                    ),
+                ),
                 self.cell_width,
-                self.line_height,
             );
             let mut cursor_background = None;
             let mut cursor_overlay_visible = false;
@@ -1521,14 +1544,13 @@ impl Element for TerminalGridElement {
                 && let Some((position, _)) = &self.cursor
                 && usize::from(position.row) == row_index
             {
-                let cursor_left = grid_left + self.cell_width * f32::from(position.column);
-                let plan = cursor_paint_plan(
-                    true,
-                    self.cursor_style.shape,
-                    point(cursor_left, row_top),
+                let plan = frame_cursor_paint_plan(
+                    grid_left,
+                    row_top,
                     self.cell_width,
                     self.line_height,
-                    position.width_cells,
+                    *position,
+                    self.cursor_style,
                 )
                 .expect("a visible cursor always produces a paint plan");
                 cursor_background = Some(match plan.paint {
@@ -1565,14 +1587,6 @@ impl Element for TerminalGridElement {
             prepared_rows.push(frame);
         }
 
-        let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
-        let grid_bounds = Bounds::new(
-            grid_bounds.origin,
-            size(
-                grid_bounds.size.width,
-                (self.line_height * visible_rows as f32).min(grid_bounds.size.height),
-            ),
-        );
         let mut candidate = TerminalPaintBatch {
             surface: None,
             grid_bounds,
@@ -1596,7 +1610,13 @@ impl Element for TerminalGridElement {
                     grid_bounds.left(),
                     bounds.top() + self.line_height * f32::from(position.row),
                 ),
-                size(grid_bounds.size.width, self.line_height),
+                size(
+                    grid_bounds.size.width,
+                    self.line_height.min(
+                        grid_bounds.bottom()
+                            - (bounds.top() + self.line_height * f32::from(position.row)),
+                    ),
+                ),
             )
             .intersect(&grid_bounds);
             Some(std::rc::Rc::new(TerminalPaintBatch {
@@ -1717,23 +1737,6 @@ impl Element for TerminalGridElement {
             });
         }
     }
-}
-
-pub(super) fn terminal_grid_content_bounds(
-    bounds: Bounds<Pixels>,
-    columns: usize,
-    cell_width: Pixels,
-) -> Bounds<Pixels> {
-    if columns == 0 {
-        return bounds;
-    }
-
-    let grid_width = (cell_width * columns as f32).min(bounds.size.width);
-    let horizontal_remainder = (bounds.size.width - grid_width).max(px(0.0));
-    Bounds::new(
-        point(bounds.left() + horizontal_remainder / 2.0, bounds.top()),
-        size(grid_width, bounds.size.height),
-    )
 }
 
 struct RowPaintInput {
@@ -1901,18 +1904,19 @@ fn find_background_spans(
 
 fn prepare_background_geometry(
     spans: &[BackgroundSpan],
-    row_top: Pixels,
-    grid_left: Pixels,
+    row_bounds: Bounds<Pixels>,
     cell_width: Pixels,
-    line_height: Pixels,
 ) -> Vec<PaintQuad> {
     spans
         .iter()
         .map(|span| {
+            let span_end = span.start.saturating_add(span.len);
+            let left = row_bounds.left() + cell_width * span.start as f32;
+            let right = (row_bounds.left() + cell_width * span_end as f32).min(row_bounds.right());
             fill(
                 Bounds::new(
-                    point(grid_left + cell_width * span.start as f32, row_top),
-                    size(cell_width * span.len as f32, line_height),
+                    point(left, row_bounds.top()),
+                    size((right - left).max(px(0.0)), row_bounds.size.height),
                 ),
                 gpui_color(span.color),
             )
@@ -2909,6 +2913,25 @@ fn cursor_paint_plan(
     })
 }
 
+fn frame_cursor_paint_plan(
+    grid_left: Pixels,
+    row_top: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    position: CursorPositionSnapshot,
+    style: CursorSnapshot,
+) -> Option<CursorPaintPlan> {
+    let cursor_left = grid_left + cell_width * f32::from(position.column);
+    cursor_paint_plan(
+        style.visible,
+        style.shape,
+        point(cursor_left, row_top),
+        cell_width,
+        line_height,
+        position.width_cells,
+    )
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -2972,6 +2995,7 @@ mod tests {
     fn prepared_row_key(cursor: Option<PreparedCursorKey>) -> PreparedRowKey {
         PreparedRowKey {
             grid_left: px(0.0),
+            grid_right: px(80.0),
             row_top: px(0.0),
             row_bottom: px(20.0),
             font_size: px(14.0),
@@ -2996,8 +3020,7 @@ mod tests {
         cell_width: Pixels,
     ) -> PreparedGridLayout<'_> {
         PreparedGridLayout {
-            grid_left: px(0.0),
-            grid_top: px(0.0),
+            grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(40.0))),
             font_size,
             cell_width,
             line_height: px(20.0),
@@ -3019,8 +3042,7 @@ mod tests {
             clusters: Arc::clone(&layout.clusters),
             caret: layout.caret,
             visible_rows,
-            grid_left: px(0.0),
-            grid_top: px(0.0),
+            grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(40.0))),
             font: terminal_cell_font(&"Menlo".into(), false, false),
             font_size: px(14.0),
             cell_width: px(8.0),
@@ -3212,6 +3234,36 @@ mod tests {
     }
 
     #[test]
+    fn final_row_cursor_should_keep_normal_cell_geometry() {
+        let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(95.0), px(45.0)));
+        let position = CursorPositionSnapshot {
+            column: 9,
+            row: 1,
+            width_cells: 1,
+        };
+        let style = CursorSnapshot {
+            visible: true,
+            shape: CursorShapeSnapshot::Bar,
+            ..CursorSnapshot::default()
+        };
+
+        let actual =
+            frame_cursor_paint_plan(grid.left(), px(20.0), px(9.0), px(20.0), position, style)
+                .unwrap();
+        let expected = cursor_paint_plan(
+            true,
+            CursorShapeSnapshot::Bar,
+            point(px(81.0), px(20.0)),
+            px(9.0),
+            px(20.0),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn hollow_cursor_is_outline_only_and_preserves_covered_text() {
         let plan = cursor_paint_plan(
             true,
@@ -3263,17 +3315,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_grid_content_bounds_should_balance_horizontal_remainder() {
-        let outer = Bounds::new(point(px(10.0), px(20.0)), size(px(101.0), px(40.0)));
-        let content = terminal_grid_content_bounds(outer, 10, px(9.0));
+    fn final_edge_selection_should_stop_at_the_real_cell_bounds() {
+        let mut selected = cell("x");
+        selected.selected = true;
+        let input = prepare_row(&Arc::from([selected]), &colors(), &"Menlo".into(), None);
+        let shaped = PreparedRowText {
+            text: Vec::new(),
+            cursor_text: Vec::new(),
+        };
+        let mut key = prepared_row_key(None);
+        key.grid_right = px(10.0);
+
+        let prepared = prepare_stable_row(
+            &input,
+            &shaped,
+            key,
+            None,
+            CursorSnapshot::default(),
+            &mut SymbolPlanCache::default(),
+        );
 
         assert_eq!(
-            (
-                content.origin.x - outer.origin.x,
-                outer.right() - content.right(),
-                content.size.width,
-            ),
-            (px(5.5), px(5.5), px(90.0))
+            prepared.selections[0].bounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0)))
         );
     }
 
@@ -3523,17 +3587,13 @@ mod tests {
             symbols: PreparedDecorations::default(),
             backgrounds: prepare_background_geometry(
                 &input.backgrounds,
-                px(0.0),
-                px(0.0),
+                Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0))),
                 px(8.0),
-                px(20.0),
             ),
             selections: prepare_background_geometry(
                 &input.selections,
-                px(0.0),
-                px(0.0),
+                Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0))),
                 px(8.0),
-                px(20.0),
             ),
             under_text_decorations: PreparedDecorations::default(),
             over_text_decorations: PreparedDecorations::default(),
@@ -3541,8 +3601,11 @@ mod tests {
             cursor_symbols: PreparedDecorations::default(),
         });
         let mut prepared = PreparedFrameRow::new(stable);
-        prepared.find_backgrounds =
-            prepare_background_geometry(&find_backgrounds, px(0.0), px(0.0), px(8.0), px(20.0));
+        prepared.find_backgrounds = prepare_background_geometry(
+            &find_backgrounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0))),
+            px(8.0),
+        );
         prepared.cursor_background = Some(fill(
             Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(20.0))),
             rgba(0xffff_ffff),

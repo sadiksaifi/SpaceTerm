@@ -4,7 +4,9 @@ use std::fs;
 use super::*;
 use crate::appearance::TerminalColors;
 use crate::terminal::TerminalAccessibilityModel;
-use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
+use crate::terminal::geometry::{
+    BackingScale, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
+};
 use crate::terminal::metadata::{DirectoryProvenance, ProgressMetadata};
 
 fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
@@ -2513,6 +2515,55 @@ fn selection_autoscroll_rate_is_bounded_by_offscreen_depth() {
     assert_eq!(
         selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: -200.0 }, 40, 20,),
         Some(MIN_SELECTION_AUTOSCROLL_INTERVAL)
+    );
+}
+
+#[test]
+fn selection_autoscroll_starts_at_both_surface_edges() {
+    assert_eq!(
+        (
+            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 0.5 }, 40, 20,),
+            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 39.5 }, 40, 20,),
+        ),
+        (
+            Some(MAX_SELECTION_AUTOSCROLL_INTERVAL),
+            Some(MAX_SELECTION_AUTOSCROLL_INTERVAL),
+        )
+    );
+}
+
+#[test]
+fn fitted_surface_bottom_edge_keeps_selection_autoscroll_active() {
+    let geometry = TerminalGeometry::from_viewport(
+        LogicalSize::new(80.0, 45.0),
+        LogicalCellSize::new(10.0, 20.0),
+        BackingScale::ONE,
+        CellGridSize::new(2, 2),
+    );
+    let mut emulator = TerminalEmulator::new(geometry).unwrap();
+    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
+    _ = emulator.snapshot().unwrap().unwrap();
+    let press = current_pointer(
+        &emulator,
+        pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            22.5,
+            false,
+        ),
+    );
+    _ = emulator.pointer(press).unwrap();
+    let drag = current_pointer(
+        &emulator,
+        pointer(PointerPhase::Motion, None, 1.0, 44.5, false),
+    );
+
+    _ = emulator.pointer(drag).unwrap();
+
+    assert_eq!(
+        emulator.selection_autoscroll_interval().unwrap(),
+        Some(MAX_SELECTION_AUTOSCROLL_INTERVAL)
     );
 }
 
