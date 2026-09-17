@@ -5,9 +5,9 @@ pub(crate) use presentation::TerminalGridPresentation;
 
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    Pixels, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window, fill, outline, point,
-    px, relative, rgba, size,
+    FocusHandle, Font, GlobalElementId, GlyphPaintRegion, Hsla, InspectorElementId, IntoElement,
+    LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
+    fill, outline, point, px, relative, rgba, size,
 };
 #[cfg(test)]
 use gpui::{FontFallbacks, FontFeatures, font};
@@ -459,8 +459,27 @@ struct PreparedRow {
 
 #[derive(Clone, Copy)]
 struct CursorTextOverlay {
+    row_index: usize,
     bounds: Bounds<Pixels>,
     color: Hsla,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CursorTextPaint {
+    Unchanged,
+    Exclude(Bounds<Pixels>),
+    Recolor { bounds: Bounds<Pixels>, color: Hsla },
+}
+
+fn cursor_text_paint(overlay: Option<CursorTextOverlay>, row_index: usize) -> CursorTextPaint {
+    match overlay {
+        None => CursorTextPaint::Unchanged,
+        Some(overlay) if overlay.row_index == row_index => CursorTextPaint::Recolor {
+            bounds: overlay.bounds,
+            color: overlay.color,
+        },
+        Some(overlay) => CursorTextPaint::Exclude(overlay.bounds),
+    }
 }
 
 #[derive(Clone)]
@@ -469,7 +488,6 @@ struct PreparedFrameRow {
     find_backgrounds: Vec<PaintQuad>,
     hyperlink_hover_decorations: PreparedDecorations,
     cursor_background: Option<PaintQuad>,
-    cursor_text_overlay: Option<CursorTextOverlay>,
     cursor_symbols: PreparedDecorations,
     preedit: Option<PreparedPreeditRow>,
 }
@@ -534,7 +552,6 @@ impl PreparedFrameRow {
             find_backgrounds: Vec::new(),
             hyperlink_hover_decorations: PreparedDecorations::default(),
             cursor_background: None,
-            cursor_text_overlay: None,
             cursor_symbols: PreparedDecorations::default(),
             preedit: None,
         }
@@ -577,6 +594,7 @@ struct TerminalPaintBatch {
     grid_bounds: Bounds<Pixels>,
     line_height: Pixels,
     rows: Vec<PreparedFrameRow>,
+    cursor_text_overlay: Option<CursorTextOverlay>,
     graphics: GraphicsPaintPlan,
     blink_phase_visible: bool,
 }
@@ -695,7 +713,7 @@ impl TerminalPaintBatch {
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for row in &self.rows {
+                for (row_index, row) in self.rows.iter().enumerate() {
                     paint_prepared_decorations(
                         &row.stable.under_text_decorations,
                         self.blink_phase_visible,
@@ -706,41 +724,42 @@ impl TerminalPaintBatch {
                         self.blink_phase_visible,
                         window,
                     );
-                    if let Some(overlay) = row.cursor_text_overlay {
-                        for bounds in cursor_exclusion_masks(self.grid_bounds, overlay.bounds) {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                paint_prepared_row_content(
-                                    row,
-                                    self.line_height,
-                                    self.blink_phase_visible,
-                                    None,
-                                    window,
-                                )
-                            })?;
-                        }
-                        window.with_content_mask(
-                            Some(ContentMask {
-                                bounds: overlay.bounds,
-                            }),
-                            |window| {
-                                paint_prepared_row_content(
-                                    row,
-                                    self.line_height,
-                                    self.blink_phase_visible,
-                                    Some(overlay.color),
-                                    window,
-                                )
-                            },
-                        )?;
-                    } else {
-                        paint_prepared_row_content(
-                            row,
-                            self.line_height,
+                    let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
+                    match cursor_paint {
+                        CursorTextPaint::Unchanged => paint_prepared_decorations(
+                            &row.stable.symbols,
                             self.blink_phase_visible,
-                            None,
                             window,
-                        )?;
+                        ),
+                        CursorTextPaint::Exclude(bounds)
+                        | CursorTextPaint::Recolor { bounds, .. } => {
+                            for bounds in cursor_exclusion_masks(self.grid_bounds, bounds) {
+                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    paint_prepared_decorations(
+                                        &row.stable.symbols,
+                                        self.blink_phase_visible,
+                                        window,
+                                    );
+                                });
+                            }
+                            if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
+                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    paint_prepared_decorations(
+                                        &row.cursor_symbols,
+                                        self.blink_phase_visible,
+                                        window,
+                                    );
+                                });
+                            }
+                        }
                     }
+                    paint_prepared_row_text(
+                        row,
+                        self.line_height,
+                        self.blink_phase_visible,
+                        cursor_paint,
+                        window,
+                    )?;
                     paint_prepared_decorations(
                         &row.stable.over_text_decorations,
                         self.blink_phase_visible,
@@ -772,26 +791,20 @@ impl TerminalPaintBatch {
     }
 }
 
-fn paint_prepared_row_content(
+fn paint_prepared_row_text(
     row: &PreparedFrameRow,
     line_height: Pixels,
     blink_phase_visible: bool,
-    color_override: Option<Hsla>,
+    cursor_paint: CursorTextPaint,
     window: &mut Window,
 ) -> Result<(), PaintBatchFailure> {
-    let symbols = if color_override.is_some() {
-        &row.cursor_symbols
-    } else {
-        &row.stable.symbols
-    };
-    paint_prepared_decorations(symbols, blink_phase_visible, window);
     for text in row
         .stable
         .text
         .iter()
         .filter(|text| text_fragment_visible(text.blinking, blink_phase_visible))
     {
-        paint_terminal_text_with_color(text, line_height, color_override, window)
+        paint_terminal_text(text, line_height, cursor_paint, window)
             .map_err(|_| PaintBatchFailure::Presentation)?;
     }
     Ok(())
@@ -860,10 +873,10 @@ fn preflight_text(
     Ok(())
 }
 
-fn paint_terminal_text_with_color(
+fn paint_terminal_text(
     text: &PreparedText,
     line_height: Pixels,
-    color_override: Option<Hsla>,
+    cursor_paint: CursorTextPaint,
     window: &mut Window,
 ) -> gpui::Result<()> {
     let layout = &*text.line;
@@ -876,15 +889,62 @@ fn paint_terminal_text_with_color(
             previous_position = glyph.position;
             let origin = glyph_origin + point(px(0.0), baseline);
             if glyph.is_emoji {
-                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                match cursor_paint {
+                    CursorTextPaint::Unchanged => {
+                        window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                    }
+                    CursorTextPaint::Exclude(bounds) => window.paint_emoji_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        GlyphPaintRegion::Exclude(bounds),
+                    )?,
+                    CursorTextPaint::Recolor { bounds, color } => window.paint_emoji_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        GlyphPaintRegion::Recolor { bounds, color },
+                    )?,
+                }
             } else {
-                let color = color_override.unwrap_or_else(|| {
-                    text.paint_runs
-                        .iter()
-                        .find(|paint| glyph.index < paint.end)
-                        .map_or_else(|| rgba(0).into(), |paint| paint.color)
-                });
-                window.paint_glyph(origin, run.font_id, glyph.id, layout.font_size, color)?;
+                let color = text
+                    .paint_runs
+                    .iter()
+                    .find(|paint| glyph.index < paint.end)
+                    .map_or_else(|| rgba(0).into(), |paint| paint.color);
+                match cursor_paint {
+                    CursorTextPaint::Unchanged => window.paint_glyph(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                    )?,
+                    CursorTextPaint::Exclude(bounds) => window.paint_glyph_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                        GlyphPaintRegion::Exclude(bounds),
+                    )?,
+                    CursorTextPaint::Recolor {
+                        bounds,
+                        color: cursor_color,
+                    } => window.paint_glyph_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                        GlyphPaintRegion::Recolor {
+                            bounds,
+                            color: cursor_color,
+                        },
+                    )?,
+                }
             }
         }
     }
@@ -1477,6 +1537,7 @@ impl Element for TerminalGridElement {
         });
         let active_hyperlink_occurrence =
             hyperlink_occurrence(&self.presentation, self.active_hyperlink);
+        let mut batch_cursor_text_overlay = None;
 
         for (row_index, stable) in stable_rows.into_iter().enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
@@ -1523,6 +1584,7 @@ impl Element for TerminalGridElement {
                     ),
                 });
                 cursor_text_overlay = plan.recolor_text.then_some(CursorTextOverlay {
+                    row_index,
                     bounds: plan.bounds.intersect(&grid_bounds),
                     color: gpui_color(self.cursor_style.text_color).into(),
                 });
@@ -1543,7 +1605,7 @@ impl Element for TerminalGridElement {
                 decoration_metrics,
             );
             frame.cursor_background = cursor_background;
-            frame.cursor_text_overlay = cursor_text_overlay;
+            batch_cursor_text_overlay = batch_cursor_text_overlay.or(cursor_text_overlay);
             if cursor_text_overlay.is_some()
                 && let Some((cursor_row, symbols)) = &cursor_symbols
                 && *cursor_row == row_index
@@ -1562,6 +1624,7 @@ impl Element for TerminalGridElement {
             grid_bounds,
             line_height: self.line_height,
             rows: prepared_rows,
+            cursor_text_overlay: batch_cursor_text_overlay,
             graphics: self.graphics.paint_plan(
                 grid_bounds,
                 self.cell_width,
@@ -1580,13 +1643,18 @@ impl Element for TerminalGridElement {
                 .bounds
                 .intersect(&grid_bounds);
             row.cursor_background = None;
-            row.cursor_text_overlay = None;
             row.cursor_symbols = PreparedDecorations::default();
+            let cursor_text_overlay = candidate.cursor_text_overlay.map(|mut overlay| {
+                overlay.row_index = 0;
+                overlay
+            });
+            candidate.cursor_text_overlay = None;
             Some(std::rc::Rc::new(TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, gpui_color(self.background))),
                 grid_bounds: cursor_bounds,
                 line_height: self.line_height,
                 rows: vec![cursor_row],
+                cursor_text_overlay,
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
             }))
@@ -3248,6 +3316,31 @@ mod tests {
                 Bounds::new(point(px(20.0), px(40.0)), size(px(10.0), px(20.0))),
             ]
         );
+    }
+
+    #[test]
+    fn block_cursor_excludes_neighbor_overhang_and_recolors_only_its_row() {
+        let bounds = Bounds::new(point(px(20.0), px(20.0)), size(px(10.0), px(20.0)));
+        let color = rgba(0xffffff).into();
+        let overlay = CursorTextOverlay {
+            row_index: 1,
+            bounds,
+            color,
+        };
+
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 0),
+            CursorTextPaint::Exclude(bounds)
+        );
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 1),
+            CursorTextPaint::Recolor { bounds, color }
+        );
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 2),
+            CursorTextPaint::Exclude(bounds)
+        );
+        assert_eq!(cursor_text_paint(None, 1), CursorTextPaint::Unchanged);
     }
 
     #[test]

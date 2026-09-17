@@ -1307,6 +1307,61 @@ impl ContentMask<Pixels> {
     }
 }
 
+/// Controls how a glyph is painted where it intersects a rectangular region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GlyphPaintRegion {
+    /// Do not paint the glyph inside the region.
+    Exclude(Bounds<Pixels>),
+    /// Paint monochrome glyphs with a replacement color inside the region.
+    /// Polychrome glyphs retain their original appearance.
+    Recolor {
+        /// The region where the replacement applies.
+        bounds: Bounds<Pixels>,
+        /// The replacement color for monochrome glyphs.
+        color: Hsla,
+    },
+}
+
+impl GlyphPaintRegion {
+    fn bounds(self) -> Bounds<Pixels> {
+        match self {
+            Self::Exclude(bounds) | Self::Recolor { bounds, .. } => bounds,
+        }
+    }
+}
+
+fn content_masks_excluding_region(
+    content_mask: ContentMask<ScaledPixels>,
+    excluded_bounds: Bounds<ScaledPixels>,
+) -> SmallVec<[ContentMask<ScaledPixels>; 4]> {
+    let bounds = content_mask.bounds;
+    let excluded = excluded_bounds.intersect(&bounds);
+    let mut masks = SmallVec::new();
+    for bounds in [
+        Bounds::new(
+            bounds.origin,
+            size(excluded.left() - bounds.left(), bounds.size.height),
+        ),
+        Bounds::new(
+            point(excluded.right(), bounds.top()),
+            size(bounds.right() - excluded.right(), bounds.size.height),
+        ),
+        Bounds::new(
+            point(excluded.left(), bounds.top()),
+            size(excluded.size.width, excluded.top() - bounds.top()),
+        ),
+        Bounds::new(
+            point(excluded.left(), excluded.bottom()),
+            size(excluded.size.width, bounds.bottom() - excluded.bottom()),
+        ),
+    ] {
+        if !bounds.size.width.is_zero() && !bounds.size.height.is_zero() {
+            masks.push(ContentMask { bounds });
+        }
+    }
+    masks
+}
+
 impl Window {
     fn mark_view_dirty(&mut self, view_id: EntityId) {
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
@@ -2960,6 +3015,34 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, None)
+    }
+
+    /// Paints a monochrome glyph once, clipping or recoloring the part inside `region`.
+    ///
+    /// The glyph is rasterized and looked up in the atlas once even when the region splits it
+    /// into multiple scene primitives.
+    pub fn paint_glyph_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, Some(region))
+    }
+
+    fn paint_glyph_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: Option<GlyphPaintRegion>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
@@ -2993,15 +3076,52 @@ impl Window {
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.content_mask().scale(scale_factor);
-            self.next_frame.scene.insert_primitive(MonochromeSprite {
-                order: 0,
-                pad: 0,
-                bounds,
-                content_mask,
-                color: color.opacity(element_opacity),
-                tile,
-                transformation: TransformationMatrix::unit(),
+            let scaled_region = region.map(|region| region.bounds().scale(scale_factor));
+            let visible_region = scaled_region.map(|region| region.intersect(&content_mask.bounds));
+            let region_intersects_glyph = visible_region.is_some_and(|region| {
+                !region.size.width.is_zero()
+                    && !region.size.height.is_zero()
+                    && bounds.intersects(&region)
             });
+            if region_intersects_glyph {
+                for content_mask in content_masks_excluding_region(
+                    content_mask.clone(),
+                    scaled_region.expect("a visible region has bounds"),
+                ) {
+                    self.next_frame.scene.insert_primitive(MonochromeSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask,
+                        color: color.opacity(element_opacity),
+                        tile: tile.clone(),
+                        transformation: TransformationMatrix::unit(),
+                    });
+                }
+                if let Some(GlyphPaintRegion::Recolor { color, .. }) = region {
+                    self.next_frame.scene.insert_primitive(MonochromeSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask: ContentMask {
+                            bounds: visible_region.expect("an intersecting region is visible"),
+                        },
+                        color: color.opacity(element_opacity),
+                        tile,
+                        transformation: TransformationMatrix::unit(),
+                    });
+                }
+            } else {
+                self.next_frame.scene.insert_primitive(MonochromeSprite {
+                    order: 0,
+                    pad: 0,
+                    bounds,
+                    content_mask,
+                    color: color.opacity(element_opacity),
+                    tile,
+                    transformation: TransformationMatrix::unit(),
+                });
+            }
         }
         Ok(())
     }
@@ -3020,6 +3140,31 @@ impl Window {
         font_id: FontId,
         glyph_id: GlyphId,
         font_size: Pixels,
+    ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, None)
+    }
+
+    /// Paints an emoji glyph once, excluding or preserving the part inside `region`.
+    ///
+    /// A recolor region preserves the emoji because polychrome glyphs have no text color.
+    pub fn paint_emoji_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, Some(region))
+    }
+
+    fn paint_emoji_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: Option<GlyphPaintRegion>,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3051,17 +3196,55 @@ impl Window {
             };
             let content_mask = self.content_mask().scale(scale_factor);
             let opacity = self.element_opacity();
-
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
-                order: 0,
-                pad: 0,
-                grayscale: false,
-                bounds,
-                corner_radii: Default::default(),
-                content_mask,
-                tile,
-                opacity,
+            let scaled_region = region.map(|region| region.bounds().scale(scale_factor));
+            let visible_region = scaled_region.map(|region| region.intersect(&content_mask.bounds));
+            let region_intersects_glyph = visible_region.is_some_and(|region| {
+                !region.size.width.is_zero()
+                    && !region.size.height.is_zero()
+                    && bounds.intersects(&region)
             });
+            if region_intersects_glyph {
+                for content_mask in content_masks_excluding_region(
+                    content_mask.clone(),
+                    scaled_region.expect("a visible region has bounds"),
+                ) {
+                    self.next_frame.scene.insert_primitive(PolychromeSprite {
+                        order: 0,
+                        pad: 0,
+                        grayscale: false,
+                        bounds,
+                        corner_radii: Default::default(),
+                        content_mask,
+                        tile: tile.clone(),
+                        opacity,
+                    });
+                }
+                if matches!(region, Some(GlyphPaintRegion::Recolor { .. })) {
+                    self.next_frame.scene.insert_primitive(PolychromeSprite {
+                        order: 0,
+                        pad: 0,
+                        grayscale: false,
+                        bounds,
+                        corner_radii: Default::default(),
+                        content_mask: ContentMask {
+                            bounds: visible_region.expect("an intersecting region is visible"),
+                        },
+                        tile,
+                        opacity,
+                    });
+                }
+            } else {
+                self.next_frame.scene.insert_primitive(PolychromeSprite {
+                    order: 0,
+                    pad: 0,
+                    grayscale: false,
+                    bounds,
+                    corner_radii: Default::default(),
+                    content_mask,
+                    tile,
+                    opacity,
+                });
+            }
         }
         Ok(())
     }
