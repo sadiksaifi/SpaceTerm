@@ -67,6 +67,7 @@ const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const MIN_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(150);
+const SELECTION_AUTOSCROLL_EDGE_BUFFER: f32 = 1.0;
 
 impl From<RgbColor> for Color {
     fn from(value: RgbColor) -> Self {
@@ -2651,10 +2652,15 @@ fn selection_autoscroll_interval_for_position(
     screen_height: u32,
     cell_height: u32,
 ) -> Option<Duration> {
+    let screen_bottom = screen_height as f32;
     let overflow = if position.y < 0.0 {
         -position.y
-    } else if position.y >= screen_height as f32 {
-        position.y - screen_height as f32 + 1.0
+    } else if position.y <= SELECTION_AUTOSCROLL_EDGE_BUFFER {
+        1.0
+    } else if position.y >= screen_bottom {
+        position.y - screen_bottom + 1.0
+    } else if position.y > screen_bottom - SELECTION_AUTOSCROLL_EDGE_BUFFER {
+        1.0
     } else {
         return None;
     };
