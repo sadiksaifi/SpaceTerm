@@ -159,6 +159,40 @@ fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_pro
 }
 
 #[gpui::test]
+fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
+    cx: &mut TestAppContext,
+) {
+    let (settings, changed) = UserSettings::load(Arc::new(PreviewStorage::default()));
+    let platform = RecordingAppearancePlatform::default();
+    platform.set_system_appearance(Some(Appearance::Dark));
+    platform.set_reduced_motion(true);
+    cx.update(|cx| {
+        install(settings, changed, Rc::new(platform.clone()), cx).unwrap();
+        crate::ui::initialize_controls(cx).unwrap();
+        assert_eq!(
+            cx.global::<spaceterm_ui::ProgressTheme>(),
+            &crate::ui::progress_theme::theme(
+                &crate::ui::appearance::chrome(cx).colors,
+                spaceterm_ui::ProgressMotion::Reduced,
+            )
+        );
+    });
+
+    platform.set_reduced_motion(false);
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        assert_eq!(
+            cx.global::<spaceterm_ui::ProgressTheme>(),
+            &crate::ui::progress_theme::theme(
+                &crate::ui::appearance::chrome(cx).colors,
+                spaceterm_ui::ProgressMotion::Standard,
+            )
+        );
+    });
+}
+
+#[gpui::test]
 fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut TestAppContext) {
     let (settings, platform) = start(cx);
     let token = settings.begin_preview(0).unwrap();

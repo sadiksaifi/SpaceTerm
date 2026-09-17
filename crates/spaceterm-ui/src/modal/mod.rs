@@ -117,6 +117,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use gpui::{Global, Pixels, Rgba, SharedString, Size, px, size};
 
+pub use crate::progress::{DeterminateProgress, ProgressState, ProgressValueError};
 pub use alert::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, AlertSuppression,
     MAX_ALERT_DETAIL_CHARACTERS, MAX_ALERT_MESSAGE_CHARACTERS,
@@ -132,9 +133,8 @@ pub use dialog::{
 use policy::{ActionAxis, ModalInitialFocus};
 pub use policy::{ModalDesktopPolicy, TextDirection, install_modal_policy};
 pub use progress_dialog::{
-    DeterminateProgress, MAX_PROGRESS_DETAIL_CHARACTERS, MAX_PROGRESS_STATUS_CHARACTERS,
-    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState, ProgressValueError,
+    MAX_PROGRESS_DETAIL_CHARACTERS, MAX_PROGRESS_STATUS_CHARACTERS, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogOutcome, ProgressDialogUpdate,
 };
 pub use render::{
     ModalKeybindingProfile, ModalLayer, install_modal_keybindings,
@@ -694,8 +694,6 @@ pub struct ModalPaint {
     primary_text: Rgba,
     secondary_text: Rgba,
     divider: Rgba,
-    progress_track: Rgba,
-    progress_fill: Rgba,
     informational: Rgba,
     informational_background: Rgba,
     warning: Rgba,
@@ -717,8 +715,6 @@ impl ModalPaint {
         primary_text: Rgba,
         secondary_text: Rgba,
         divider: Rgba,
-        progress_track: Rgba,
-        progress_fill: Rgba,
         informational: Rgba,
         informational_background: Rgba,
         warning: Rgba,
@@ -733,8 +729,6 @@ impl ModalPaint {
             primary_text,
             secondary_text,
             divider,
-            progress_track,
-            progress_fill,
             informational,
             informational_background,
             warning,
@@ -765,13 +759,10 @@ pub struct ModalMetrics {
     minimum_action_width: Pixels,
     corner_radius: Pixels,
     border_width: Pixels,
-    progress_track_thickness: Pixels,
-    progress_track_radius: Pixels,
     progress_status_region_height: Pixels,
     progress_detail_region_height: Pixels,
     header_maximum_fraction: f32,
     footer_maximum_fraction: f32,
-    indeterminate_segment_fraction: f32,
     title_size: Pixels,
     body_size: Pixels,
     detail_size: Pixels,
@@ -801,13 +792,10 @@ impl ModalMetrics {
             minimum_action_width: px(72.0),
             corner_radius: px(8.0),
             border_width: px(1.0),
-            progress_track_thickness: px(8.0),
-            progress_track_radius: px(2.0),
             progress_status_region_height: px(48.0),
             progress_detail_region_height: px(36.0),
             header_maximum_fraction: 0.35,
             footer_maximum_fraction: 0.48,
-            indeterminate_segment_fraction: 0.18,
             title_size: px(15.0),
             body_size: px(13.0),
             detail_size: px(12.0),
@@ -859,18 +847,6 @@ impl ModalMetrics {
             ),
             corner_radius: bounded_metric(self.corner_radius * factor, 4.0, 16.0, 8.0),
             border_width: bounded_metric(self.border_width * factor, 1.0, 3.0, 1.0),
-            progress_track_thickness: bounded_metric(
-                self.progress_track_thickness * factor,
-                4.0,
-                20.0,
-                8.0,
-            ),
-            progress_track_radius: bounded_metric(
-                self.progress_track_radius * factor,
-                1.0,
-                8.0,
-                2.0,
-            ),
             progress_status_region_height: bounded_metric(
                 self.progress_status_region_height * factor,
                 32.0,
@@ -885,7 +861,6 @@ impl ModalMetrics {
             ),
             header_maximum_fraction: self.header_maximum_fraction,
             footer_maximum_fraction: self.footer_maximum_fraction,
-            indeterminate_segment_fraction: self.indeterminate_segment_fraction,
             title_size: bounded_metric(self.title_size * factor, 12.0, 30.0, 15.0),
             body_size: bounded_metric(self.body_size * factor, 11.0, 28.0, 13.0),
             detail_size: bounded_metric(self.detail_size * factor, 10.0, 26.0, 12.0),
@@ -939,8 +914,6 @@ impl ModalMetrics {
             minimum_action_width: self.minimum_action_width * extent_scale,
             corner_radius: self.corner_radius * spacing_scale,
             border_width: self.border_width,
-            progress_track_thickness: self.progress_track_thickness * spacing_scale,
-            progress_track_radius: self.progress_track_radius * spacing_scale,
             progress_status_region_height: crate::appearance::scale_line_box(
                 self.progress_status_region_height,
                 self.body_size,
@@ -955,7 +928,6 @@ impl ModalMetrics {
             ),
             header_maximum_fraction: self.header_maximum_fraction,
             footer_maximum_fraction: self.footer_maximum_fraction,
-            indeterminate_segment_fraction: self.indeterminate_segment_fraction,
             title_size: self.title_size * text_scale,
             body_size: self.body_size * text_scale,
             detail_size: self.detail_size * text_scale,
@@ -990,14 +962,6 @@ impl ModalMetrics {
         self.progress_height_cap
     }
 
-    pub(super) const fn progress_track_thickness(self) -> Pixels {
-        self.progress_track_thickness
-    }
-
-    pub(super) const fn progress_track_radius(self) -> Pixels {
-        self.progress_track_radius
-    }
-
     pub(super) const fn progress_status_region_height(self) -> Pixels {
         self.progress_status_region_height
     }
@@ -1012,10 +976,6 @@ impl ModalMetrics {
 
     pub(super) const fn footer_maximum_fraction(self) -> f32 {
         self.footer_maximum_fraction
-    }
-
-    pub(super) const fn indeterminate_segment_fraction(self) -> f32 {
-        self.indeterminate_segment_fraction
     }
 
     pub(super) const fn viewport_margin(self) -> Pixels {
@@ -1169,20 +1129,10 @@ mod tests {
                 metrics.alert_height_cap(),
                 metrics.dialog_height_cap(),
                 metrics.progress_height_cap(),
-                metrics.progress_track_thickness(),
-                metrics.progress_track_radius(),
                 metrics.progress_status_region_height(),
                 metrics.progress_detail_region_height(),
             ),
-            (
-                px(360.0),
-                px(520.0),
-                px(300.0),
-                px(8.0),
-                px(2.0),
-                px(48.0),
-                px(36.0),
-            )
+            (px(360.0), px(520.0), px(300.0), px(48.0), px(36.0),)
         );
     }
 
@@ -1196,8 +1146,6 @@ mod tests {
                 metrics.alert_height_cap(),
                 metrics.dialog_height_cap(),
                 metrics.progress_height_cap(),
-                metrics.progress_track_thickness(),
-                metrics.progress_track_radius(),
                 metrics.progress_status_region_height(),
                 metrics.progress_detail_region_height(),
             ),
@@ -1206,8 +1154,6 @@ mod tests {
                 px(720.0),
                 px(1040.0),
                 px(600.0),
-                px(16.0),
-                px(4.0),
                 px(96.0),
                 px(72.0),
             )

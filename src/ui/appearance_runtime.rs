@@ -25,6 +25,7 @@ pub(crate) struct AppearanceRuntime {
     pub(crate) settings: UserSettings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
+    progress_motion: spaceterm_ui::ProgressMotion,
     _tasks: Vec<Task<()>>,
     _observation: Option<Box<dyn SystemAppearanceSubscription>>,
 }
@@ -38,6 +39,7 @@ pub(crate) fn install(
 ) -> Result<(), SettingsError> {
     let fonts = capture_fonts(cx);
     let observation = platform.observe();
+    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
@@ -71,6 +73,7 @@ pub(crate) fn install(
         settings,
         platform,
         fonts,
+        progress_motion,
         _tasks: tasks,
         _observation: observation,
     });
@@ -78,9 +81,16 @@ pub(crate) fn install(
 }
 
 pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
-    let runtime = cx.global::<AppearanceRuntime>();
-    let platform = Rc::clone(&runtime.platform);
-    let candidate = runtime.settings.snapshot().candidate;
+    let (platform, candidate, fonts, previous_progress_motion) = {
+        let runtime = cx.global::<AppearanceRuntime>();
+        (
+            Rc::clone(&runtime.platform),
+            runtime.settings.snapshot().candidate,
+            runtime.fonts.clone(),
+            runtime.progress_motion,
+        )
+    };
+    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let catalog = SchemeCatalog::from_custom_schemes(&candidate.custom_schemes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
@@ -93,21 +103,23 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         .resolve(
             generation,
             &candidate.preferences,
-            SystemAppearance::from(runtime.platform.system_appearance())
-                .with_transparency(runtime.platform.supports_transparency()),
-            &runtime.fonts,
+            SystemAppearance::from(platform.system_appearance())
+                .with_transparency(platform.supports_transparency()),
+            &fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;
     let changes = cx
         .try_global::<InstalledAppearance>()
         .map(|previous| AppearanceChangeSet::between(&previous.0, &resolved));
-    if cx
-        .try_global::<InstalledAppearance>()
-        .is_some_and(|previous| {
-            previous.0.chrome == resolved.chrome
-                && previous.0.terminal == resolved.terminal
-                && previous.0.diagnostics == resolved.diagnostics
-        })
+    let progress_motion_changed = previous_progress_motion != progress_motion;
+    if !progress_motion_changed
+        && cx
+            .try_global::<InstalledAppearance>()
+            .is_some_and(|previous| {
+                previous.0.chrome == resolved.chrome
+                    && previous.0.terminal == resolved.terminal
+                    && previous.0.diagnostics == resolved.diagnostics
+            })
     {
         return Ok(());
     }
@@ -117,22 +129,40 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             || changes.chrome_metrics
             || changes.window_composition
     });
-    if chrome_changed {
+    if chrome_changed || progress_motion_changed {
         let prepared = ChromeAppearance::prepare(&resolved.chrome);
-        let controls = super::control_theme_catalog::catalog(&prepared)
+        let controls = super::control_theme_catalog::catalog(&prepared, progress_motion)
             .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
         if cx.has_global::<InstalledAppearance>() {
             spaceterm_ui::replace_control_theme_catalog(cx, controls)
                 .map_err(|_| SettingsError::Invalid)?;
         }
 
-        cx.set_global(InstalledChrome(Arc::new(prepared)));
+        if chrome_changed {
+            cx.set_global(InstalledChrome(Arc::new(prepared)));
+        }
     }
     if changes.is_none_or(|changes| changes.native_appearance) {
         platform.apply_native_appearance(resolved.chrome.appearance);
     }
+    cx.global_mut::<AppearanceRuntime>().progress_motion = progress_motion;
     cx.set_global(InstalledAppearance(Arc::new(resolved)));
     Ok(())
+}
+
+fn resolved_progress_motion(reduced: bool) -> spaceterm_ui::ProgressMotion {
+    if reduced {
+        spaceterm_ui::ProgressMotion::Reduced
+    } else {
+        spaceterm_ui::ProgressMotion::Standard
+    }
+}
+
+pub(crate) fn progress_motion(cx: &App) -> spaceterm_ui::ProgressMotion {
+    cx.try_global::<AppearanceRuntime>()
+        .map_or(spaceterm_ui::ProgressMotion::Standard, |runtime| {
+            runtime.progress_motion
+        })
 }
 
 /// Called only at startup or an explicit font reload. No frame or timer enumerates fonts.

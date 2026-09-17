@@ -19,6 +19,9 @@ mod menu;
 mod middle_truncated_text;
 mod modal;
 mod overlay_scrollbar;
+mod progress;
+#[cfg(test)]
+mod progress_tests;
 mod resize_handle;
 mod search_field;
 mod segmented_control;
@@ -84,6 +87,10 @@ pub use modal::{
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarMetrics,
     ScrollbarTheme,
+};
+pub use progress::{
+    ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing, ProgressSize,
+    ProgressSizes, ProgressTheme,
 };
 pub use resize_handle::{
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,
@@ -152,6 +159,7 @@ pub struct ControlThemeCatalog {
     typography: ControlTypography,
     button: ButtonTheme,
     toggle: ToggleTheme,
+    progress: ProgressTheme,
     scrollbar: ScrollbarTheme,
     resize_handle: ResizeHandleTheme,
     segmented_control: SegmentedControlTheme,
@@ -212,6 +220,7 @@ impl ControlThemeCatalog {
     pub fn new(
         button: ButtonTheme,
         toggle: ToggleTheme,
+        progress: ProgressTheme,
         scrollbar: ScrollbarTheme,
         resize_handle: ResizeHandleTheme,
         segmented_control: SegmentedControlTheme,
@@ -228,6 +237,7 @@ impl ControlThemeCatalog {
             typography: ControlTypography::default(),
             button,
             toggle,
+            progress,
             scrollbar,
             resize_handle,
             segmented_control,
@@ -271,6 +281,7 @@ impl ControlThemeCatalog {
     pub fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
         self.button = self.button.scaled_metrics(text_scale, spacing_scale);
         self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
+        self.progress = self.progress.scaled_metrics(text_scale, spacing_scale);
         self.scrollbar = self.scrollbar.scaled_metrics(text_scale, spacing_scale);
         self.resize_handle = self.resize_handle.scaled_metrics(text_scale, spacing_scale);
         self.segmented_control = self
@@ -337,6 +348,7 @@ pub fn replace_control_theme_catalog(
 fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.button);
     cx.set_global(catalog.toggle);
+    cx.set_global(catalog.progress);
     cx.set_global(catalog.scrollbar);
     cx.set_global(catalog.resize_handle);
     cx.set_global(catalog.segmented_control);

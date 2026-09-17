@@ -80,6 +80,14 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
     ControlThemeCatalog::new(
         button,
         toggle,
+        ProgressTheme::new(
+            ProgressPaint::new(muted, accent),
+            ProgressSizes::new(
+                ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
+                ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
+            ),
+            ProgressMotion::Standard,
+        ),
         ScrollbarTheme::new(muted, text, accent),
         ResizeHandleTheme::new(
             ResizeHandlePaint::new(muted, text, accent, accent, muted),
@@ -119,8 +127,6 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
                 text,
                 muted,
                 muted,
-                surface,
-                accent,
                 accent,
                 surface,
                 accent,
@@ -142,6 +148,7 @@ impl Render for CatalogObserver {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let _ = cx.global::<ButtonTheme>();
         let _ = cx.global::<ToggleTheme>();
+        let _ = cx.global::<ProgressTheme>();
         let _ = cx.global::<ScrollbarTheme>();
         let _ = cx.global::<ResizeHandleTheme>();
         let _ = cx.global::<SegmentedControlTheme>();
@@ -198,6 +205,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         .clone()
         .scale_metrics(1.5, 1.25)
         .generation(ControlThemeGeneration::new(2));
+    assert_ne!(replacement.progress, initial.progress);
     assert_eq!(
         cx.update(|_, cx| replace_control_theme_catalog(cx, replacement.clone())),
         Ok(ControlThemeReplacement::Applied)
@@ -208,6 +216,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
     cx.update(|_, cx| {
         assert_eq!(cx.global::<ButtonTheme>(), &replacement.button);
         assert_eq!(cx.global::<ToggleTheme>(), &replacement.toggle);
+        assert_eq!(cx.global::<ProgressTheme>(), &replacement.progress);
         assert_eq!(cx.global::<ScrollbarTheme>(), &replacement.scrollbar);
         assert_eq!(cx.global::<ResizeHandleTheme>(), &replacement.resize_handle);
         assert_eq!(

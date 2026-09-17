@@ -2400,7 +2400,10 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size
         let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
         spaceterm_ui::replace_control_theme_catalog(
             cx,
-            super::super::control_theme_catalog::catalog(&chrome),
+            super::super::control_theme_catalog::catalog(
+                &chrome,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
         )
         .unwrap();
         cx.set_global(super::super::appearance::InstalledChrome(Arc::new(chrome)));

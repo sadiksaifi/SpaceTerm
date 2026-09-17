@@ -20,7 +20,8 @@ use crate::{
     MenuSizes, MenuTheme, ModalAction, ModalActionIntent, ModalCloseReason, ModalDismissalError,
     ModalId, ModalLifecycleEvent, ModalTerminalOutcomeError, ModalUpdateError,
     ProgressCancelDecision, ProgressCancellation, ProgressCancellationCompletion, ProgressDialog,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, TextInput, TextInputEscapeBehavior,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ProgressSizes, ProgressState, ProgressTheme, TextInput, TextInputEscapeBehavior,
     TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputReturnBehavior,
     TextInputTheme, TextInputVariants, TooltipLayer, install_modal_keybindings,
     install_modal_policy, install_modal_theme, install_text_input_keybindings,
@@ -163,8 +164,6 @@ fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x505058ff),
-            rgba(0x404048ff),
-            rgba(0x55aaffff),
             rgba(0x5599ffff),
             rgba(0x5599ff22),
             rgba(0xffbb55ff),
@@ -185,8 +184,6 @@ fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x505058ff),
-            rgba(0x404048ff),
-            rgba(0x606068ff),
             rgba(0x5599ffff),
             rgba(0x5599ff22),
             rgba(0xffbb55ff),
@@ -198,8 +195,20 @@ fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme
     )
 }
 
+fn test_progress_theme() -> ProgressTheme {
+    ProgressTheme::new(
+        ProgressPaint::new(rgba(0x404048ff), rgba(0x55aaffff)),
+        ProgressSizes::new(
+            ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
+            ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
+        ),
+        ProgressMotion::Reduced,
+    )
+}
+
 fn install_test_catalogs(cx: &mut TestAppContext) {
     cx.set_global(test_button_theme());
+    cx.set_global(test_progress_theme());
     let toggle_paint = crate::TogglePaint::new(
         rgba(0x202020ff),
         rgba(0xffffffff),
@@ -1958,7 +1967,7 @@ fn short_height_footer_scroll_reaches_every_action_without_horizontal_escape(
 }
 
 #[gpui::test]
-fn determinate_thirty_five_percent_and_indeterminate_have_distinct_static_geometry(
+fn determinate_fraction_and_indeterminate_activity_preserve_modal_geometry(
     cx: &mut TestAppContext,
 ) {
     install_test_catalogs(cx);
@@ -2000,18 +2009,8 @@ fn determinate_thirty_five_percent_and_indeterminate_have_distinct_static_geomet
             .expect("progress footer should render"),
     );
     let indeterminate = cx
-        .debug_bounds("modal-progress-indeterminate")
-        .expect("indeterminate treatment should render");
-    let segments = [
-        "modal-progress-indeterminate-segment-0",
-        "modal-progress-indeterminate-segment-1",
-        "modal-progress-indeterminate-segment-2",
-        "modal-progress-indeterminate-segment-3",
-    ]
-    .map(|selector| {
-        cx.debug_bounds(selector)
-            .expect("indeterminate segment should render")
-    });
+        .debug_bounds("modal-progress-activity")
+        .expect("indeterminate activity should render");
     let handle = root
         .read_with(&cx, |root, _| root.handle.clone())
         .expect("progress handle should be retained");
@@ -2032,8 +2031,8 @@ fn determinate_thirty_five_percent_and_indeterminate_have_distinct_static_geomet
     });
     cx.run_until_parked();
     let determinate = cx
-        .debug_bounds("modal-progress-determinate")
-        .expect("determinate fill should render");
+        .debug_bounds("modal-progress-indicator")
+        .expect("determinate indicator should render");
     let expected_width = track.size.width * 0.35;
     let stable_after = (
         cx.debug_bounds("modal-surface-1")
@@ -2055,12 +2054,9 @@ fn determinate_thirty_five_percent_and_indeterminate_have_distinct_static_geomet
     assert!(
         stable_after == stable_before
             && indeterminate.size.width == track.size.width
-            && segments
-                .windows(2)
-                .all(|pair| pair[0].right() < pair[1].left())
             && (determinate.size.width - expected_width).abs() < px(1.0)
             && determinate.size.width < indeterminate.size.width,
-        "before={stable_before:?}, after={stable_after:?}, track={track:?}, indeterminate={indeterminate:?}, segments={segments:?}, determinate={determinate:?}"
+        "before={stable_before:?}, after={stable_after:?}, track={track:?}, indeterminate={indeterminate:?}, determinate={determinate:?}"
     );
 }
 

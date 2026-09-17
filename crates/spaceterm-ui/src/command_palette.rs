@@ -10,8 +10,8 @@ use gpui::{
 };
 
 use crate::{
-    ControlShadow, Icon, IconName, TextInput, TextInputEvent, TextInputTabBehavior,
-    TextInputVariant,
+    ControlShadow, Icon, IconName, ProgressRing, ProgressSize, ProgressState, TextInput,
+    TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -3059,8 +3059,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let paint = theme.paint;
         let metrics = theme.metrics;
         let content = if self.loading {
-            status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
-                .into_any_element()
+            loading_row(metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
             status_row(
                 self.no_results_text.clone(),
@@ -3434,7 +3433,7 @@ fn status_row(
     debug_selector: &'static str,
     metrics: CommandPaletteMetrics,
     paint: CommandPalettePaint,
-) -> impl IntoElement {
+) -> gpui::Div {
     div()
         .debug_selector(move || debug_selector.to_owned())
         .w_full()
@@ -3445,6 +3444,25 @@ fn status_row(
         .text_size(metrics.secondary_size)
         .text_color(paint.muted)
         .child(text.into())
+}
+
+/// Renders the status row shown while a caller's results are still arriving.
+///
+/// The label keeps the content edge the editor, the headings, the rows, and the no-results copy
+/// share, so the ring follows it at the row gap rather than pushing the words inward. The ring
+/// carries the activity and paints no words of its own, so the copy stays the row's only text.
+fn loading_row(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
+    status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
+        .gap(metrics.gap)
+        .child(
+            ProgressRing::new(
+                "command-palette-loading-progress",
+                "Loading",
+                ProgressState::Indeterminate,
+            )
+            .size(ProgressSize::Compact)
+            .debug_selector("command-palette-loading-progress"),
+        )
 }
 
 #[expect(

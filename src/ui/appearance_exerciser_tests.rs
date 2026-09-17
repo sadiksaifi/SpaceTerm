@@ -150,8 +150,11 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
         spacing_scale: 1.0 + generation as f32 / 20.0,
         ..ChromeAppearance::default()
     };
-    let controls = crate::ui::control_theme_catalog::catalog(&appearance)
-        .generation(spaceterm_ui::ControlThemeGeneration::new(generation));
+    let controls = crate::ui::control_theme_catalog::catalog(
+        &appearance,
+        spaceterm_ui::ProgressMotion::Standard,
+    )
+    .generation(spaceterm_ui::ControlThemeGeneration::new(generation));
     cx.update(|window, cx| {
         assert_eq!(
             spaceterm_ui::replace_control_theme_catalog(cx, controls),
@@ -319,10 +322,10 @@ fn open_modal_facades_should_survive_live_appearance_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     assert_modal_rendered(progress.presentation_id(), cx);
-    assert!(cx.debug_bounds("modal-progress-indeterminate").is_some());
+    assert!(cx.debug_bounds("modal-progress-activity").is_some());
     replace_appearance(4, cx);
     assert_modal_rendered(progress.presentation_id(), cx);
-    assert!(cx.debug_bounds("modal-progress-indeterminate").is_some());
+    assert!(cx.debug_bounds("modal-progress-activity").is_some());
     cx.update(|window, cx| {
         progress
             .complete(window, cx)
