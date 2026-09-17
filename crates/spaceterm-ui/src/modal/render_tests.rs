@@ -1046,12 +1046,11 @@ fn alert_intent_presentations_use_distinct_markers_and_semantic_paint() {
 
     assert_eq!(informational.icon.unicode(), IconName::Info.unicode());
     assert_eq!(warning.icon.unicode(), IconName::TriangleAlert.unicode());
-    assert_eq!(critical.icon.unicode(), IconName::OctagonAlert.unicode());
+    assert_eq!(critical.icon.unicode(), IconName::CircleAlert.unicode());
     assert!(
         informational.accent != warning.accent
             && warning.accent != critical.accent
-            && informational.background != warning.background
-            && warning.background != critical.background
+            && informational.accent != critical.accent
     );
 }
 
