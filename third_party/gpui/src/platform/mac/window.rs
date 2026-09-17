@@ -847,18 +847,14 @@ impl MacWindow {
                 }
             }
 
-            // Birth maximized windows at the visible frame while still hidden, so the
-            // zoom Window::new issues next is a zero-distance no-op: the window
-            // appears filling the screen with no expand animation, and zoom keeps
-            // its state. Note AppKit then saves the fullscreen frame as the zoom
-            // restore frame, so unzooming a pristine launch window is a no-op until
-            // the user resizes.
+            // Zoom maximized windows while still hidden, so the window appears
+            // filling the screen with no expand animation. AppKit captures the
+            // pre-zoom frame as the zoom restore frame, so the zoom must run
+            // from the restore bounds: pre-sizing to the visible frame first
+            // would make the first unzoom a no-op. Window::new skips its zoom
+            // when the backend already maximized the window.
             if maximized {
-                native_window.setFrame_display_animate_(
-                    NSScreen::visibleFrame(target_screen),
-                    YES,
-                    NO,
-                );
+                native_window.zoom_(nil);
             }
 
             if focus && show {

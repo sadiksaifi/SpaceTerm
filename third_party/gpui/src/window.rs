@@ -1001,7 +1001,13 @@ impl Window {
         if let Some(ref window_open_state) = window_bounds {
             match window_open_state {
                 WindowBounds::Fullscreen(_) => platform_window.toggle_fullscreen(),
-                WindowBounds::Maximized(_) => platform_window.zoom(),
+                // Backends that maximize during open (macOS zooms while the
+                // native window is still hidden) must not be toggled back.
+                WindowBounds::Maximized(_) => {
+                    if !platform_window.is_maximized() {
+                        platform_window.zoom()
+                    }
+                }
                 WindowBounds::Windowed(_) => {}
             }
         }

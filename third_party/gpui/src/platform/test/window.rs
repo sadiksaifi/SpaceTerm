@@ -75,7 +75,9 @@ impl TestWindow {
             moved_callback: None,
             input_handler: None,
             is_fullscreen: false,
-            is_maximized: false,
+            // Birth maximized when requested so the open-maximized path is
+            // idempotent, mirroring backends that maximize during open.
+            is_maximized: params.maximized,
         })))
     }
 
@@ -225,8 +227,9 @@ impl PlatformWindow for TestWindow {
         unimplemented!()
     }
 
-    // Mirror the toggle semantics of the macOS, Wayland, and X11 backends so
-    // product code can open maximized windows under test (SpaceTerm #314).
+    // Mirror the toggle semantics of the macOS, Wayland, and X11 backends.
+    // Test windows birth maximized when requested, so this only runs for
+    // user-initiated toggles (SpaceTerm #314).
     fn zoom(&self) {
         let mut lock = self.0.lock();
         lock.is_maximized = !lock.is_maximized;

@@ -465,8 +465,9 @@ pub(crate) fn open(
     // Open maximized so the workspace fills the screen on launch. These centered
     // bounds are the restore size after unmaximizing. GPUI zooms natively on
     // macOS, Windows, and Linux, so no platform adapter is needed. On macOS the
-    // native window is pre-sized to the visible frame so the zoom lands instantly
-    // with no expand animation.
+    // zoom runs while the native window is still hidden, so the window appears
+    // filling the screen with no expand animation and AppKit keeps these
+    // bounds as the zoom restore frame.
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
