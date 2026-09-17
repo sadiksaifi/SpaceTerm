@@ -6,7 +6,10 @@ use super::{
     text_input_theme, toggle_theme, tooltip_theme,
 };
 
-pub(super) fn catalog(appearance: &super::appearance::ChromeAppearance) -> ControlThemeCatalog {
+pub(super) fn catalog(
+    appearance: &super::appearance::ChromeAppearance,
+    progress_motion: spaceterm_ui::ProgressMotion,
+) -> ControlThemeCatalog {
     // Controls paint the window's material. Overlay rows also receive the opaque presentation,
     // which stays the reference for every contrast decision.
     let reference = &appearance.colors;
@@ -14,7 +17,7 @@ pub(super) fn catalog(appearance: &super::appearance::ChromeAppearance) -> Contr
     ControlThemeCatalog::new(
         button_theme::theme(colors),
         toggle_theme::theme(colors),
-        progress_theme::theme(colors),
+        progress_theme::theme(colors, progress_motion),
         scrollbar_theme::theme(colors),
         resize_handle_theme::theme(colors),
         segmented_control_theme::theme(colors),

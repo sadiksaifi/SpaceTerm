@@ -134,7 +134,13 @@ pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
-    spaceterm_ui::init(cx, control_theme_catalog::catalog(appearance::chrome(cx)))
+    spaceterm_ui::init(
+        cx,
+        control_theme_catalog::catalog(
+            appearance::chrome(cx),
+            appearance_runtime::progress_motion(cx),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -182,7 +188,10 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::TooltipTheme>()
                 && cx.has_global::<spaceterm_ui::ModalTheme>()
                 && *cx.global::<spaceterm_ui::ProgressTheme>()
-                    == progress_theme::theme(&appearance::chrome(cx).colors)
+                    == progress_theme::theme(
+                        &appearance::chrome(cx).colors,
+                        spaceterm_ui::ProgressMotion::Standard,
+                    )
                 && *cx.global::<spaceterm_ui::ModalTheme>()
                     == modal_theme::theme(&appearance::chrome(cx).colors)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()

@@ -19,6 +19,15 @@ const SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSInteger = 4;
 pub(crate) struct MacosAppearancePlatform;
 
 impl AppearancePlatform for MacosAppearancePlatform {
+    fn prefers_reduced_motion(&self) -> bool {
+        // SAFETY: display accessibility preferences are queried on the AppKit thread.
+        unsafe {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let reduce: objc::runtime::BOOL =
+                msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+            reduce != objc::runtime::NO
+        }
+    }
     fn supports_transparency(&self) -> bool {
         // SAFETY: display accessibility preferences are queried on the AppKit thread.
         unsafe {

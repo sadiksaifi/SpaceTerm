@@ -6,7 +6,7 @@ use spaceterm_ui::{ProgressMetrics, ProgressMotion, ProgressPaint, ProgressSizes
 
 use crate::appearance::{ChromeColors, Color};
 
-pub(super) fn theme(colors: &ChromeColors) -> ProgressTheme {
+pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTheme {
     ProgressTheme::new(
         paint(colors),
         ProgressSizes::new(
@@ -18,9 +18,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ProgressTheme {
             // beside body text rather than a graphic the surface is built around.
             ProgressMetrics::new(px(4.0), px(2.0), px(18.0), px(2.0)),
         ),
-        // Every indicator animates until the application resolves an Operating-System
-        // reduced-motion preference and installs it with the rest of the catalog.
-        ProgressMotion::Standard,
+        motion,
     )
 }
 

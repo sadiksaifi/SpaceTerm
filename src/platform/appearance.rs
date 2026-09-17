@@ -13,6 +13,10 @@ pub(crate) struct SystemAppearanceObservation {
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
+    /// Whether the user asks application motion to be reduced.
+    fn prefers_reduced_motion(&self) -> bool {
+        false
+    }
     /// Includes native support and the user's accessibility display preferences.
     fn supports_transparency(&self) -> bool {
         false
@@ -37,6 +41,7 @@ pub(crate) mod testing {
     #[derive(Clone, Default)]
     pub(crate) struct RecordingAppearancePlatform {
         fact: Rc<Cell<Option<Appearance>>>,
+        reduced_motion: Rc<Cell<bool>>,
         transparency: Rc<Cell<bool>>,
         pub(crate) backdrops: Rc<RefCell<Vec<bool>>>,
         notifications: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
@@ -46,6 +51,10 @@ pub(crate) mod testing {
     impl RecordingAppearancePlatform {
         pub(crate) fn set_transparency_supported(&self, supported: bool) {
             self.transparency.set(supported);
+            self.set_system_appearance(self.fact.get());
+        }
+        pub(crate) fn set_reduced_motion(&self, reduced: bool) {
+            self.reduced_motion.set(reduced);
             self.set_system_appearance(self.fact.get());
         }
         pub(crate) fn set_system_appearance(&self, appearance: Option<Appearance>) {
@@ -63,6 +72,9 @@ pub(crate) mod testing {
     impl SystemAppearanceSubscription for RecordingSubscription {}
 
     impl AppearancePlatform for RecordingAppearancePlatform {
+        fn prefers_reduced_motion(&self) -> bool {
+            self.reduced_motion.get()
+        }
         fn supports_transparency(&self) -> bool {
             self.transparency.get()
         }
