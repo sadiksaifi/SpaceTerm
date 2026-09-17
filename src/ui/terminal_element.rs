@@ -428,8 +428,23 @@ fn presented_cursor_style(
 struct PreparedText {
     line: Arc<ShapedLine>,
     origin: gpui::Point<Pixels>,
+    // Cached absolute origins in shaped-glyph order, shared by preflight and paint.
+    glyph_origins: Arc<[gpui::Point<Pixels>]>,
     blinking: bool,
     paint_runs: Arc<[TextPaintRun]>,
+}
+
+impl PreparedText {
+    fn positioned_glyphs(
+        &self,
+    ) -> impl Iterator<Item = (gpui::FontId, &gpui::ShapedGlyph, gpui::Point<Pixels>)> {
+        self.line
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.font_id, glyph)))
+            .zip(self.glyph_origins.iter().copied())
+            .map(|((font_id, glyph), origin)| (font_id, glyph, origin))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -814,24 +829,12 @@ fn preflight_text(
 ) -> gpui::Result<()> {
     let layout = &*text.line;
     let baseline = (line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
-    let mut glyph_origin = text.origin;
-    let mut previous_position = gpui::Point::default();
-    for run in &layout.runs {
-        for glyph in &run.glyphs {
-            glyph_origin += glyph.position - previous_position;
-            previous_position = glyph.position;
-            let origin = glyph_origin + point(px(0.0), baseline);
-            if glyph.is_emoji {
-                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
-            } else {
-                window.paint_glyph(
-                    origin,
-                    run.font_id,
-                    glyph.id,
-                    layout.font_size,
-                    rgba(0).into(),
-                )?;
-            }
+    for (font_id, glyph, glyph_origin) in text.positioned_glyphs() {
+        let origin = glyph_origin + point(px(0.0), baseline);
+        if glyph.is_emoji {
+            window.paint_emoji(origin, font_id, glyph.id, layout.font_size)?;
+        } else {
+            window.paint_glyph(origin, font_id, glyph.id, layout.font_size, rgba(0).into())?;
         }
     }
     Ok(())
@@ -845,70 +848,60 @@ fn paint_terminal_text(
 ) -> gpui::Result<()> {
     let layout = &*text.line;
     let baseline = (line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
-    let mut glyph_origin = text.origin;
-    let mut previous_position = gpui::Point::default();
-    for run in &layout.runs {
-        for glyph in &run.glyphs {
-            glyph_origin += glyph.position - previous_position;
-            previous_position = glyph.position;
-            let origin = glyph_origin + point(px(0.0), baseline);
-            if glyph.is_emoji {
-                match cursor_paint {
-                    CursorTextPaint::Unchanged => {
-                        window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
-                    }
-                    CursorTextPaint::Exclude(bounds) => window.paint_emoji_with_region(
-                        origin,
-                        run.font_id,
-                        glyph.id,
-                        layout.font_size,
-                        GlyphPaintRegion::Exclude(bounds),
-                    )?,
-                    CursorTextPaint::Recolor { bounds, color } => window.paint_emoji_with_region(
-                        origin,
-                        run.font_id,
-                        glyph.id,
-                        layout.font_size,
-                        GlyphPaintRegion::Recolor { bounds, color },
-                    )?,
+    for (font_id, glyph, glyph_origin) in text.positioned_glyphs() {
+        let origin = glyph_origin + point(px(0.0), baseline);
+        if glyph.is_emoji {
+            match cursor_paint {
+                CursorTextPaint::Unchanged => {
+                    window.paint_emoji(origin, font_id, glyph.id, layout.font_size)?;
                 }
-            } else {
-                let color = text
-                    .paint_runs
-                    .iter()
-                    .find(|paint| glyph.index < paint.end)
-                    .map_or_else(|| rgba(0).into(), |paint| paint.color);
-                match cursor_paint {
-                    CursorTextPaint::Unchanged => window.paint_glyph(
-                        origin,
-                        run.font_id,
-                        glyph.id,
-                        layout.font_size,
-                        color,
-                    )?,
-                    CursorTextPaint::Exclude(bounds) => window.paint_glyph_with_region(
-                        origin,
-                        run.font_id,
-                        glyph.id,
-                        layout.font_size,
-                        color,
-                        GlyphPaintRegion::Exclude(bounds),
-                    )?,
-                    CursorTextPaint::Recolor {
+                CursorTextPaint::Exclude(bounds) => window.paint_emoji_with_region(
+                    origin,
+                    font_id,
+                    glyph.id,
+                    layout.font_size,
+                    GlyphPaintRegion::Exclude(bounds),
+                )?,
+                CursorTextPaint::Recolor { bounds, color } => window.paint_emoji_with_region(
+                    origin,
+                    font_id,
+                    glyph.id,
+                    layout.font_size,
+                    GlyphPaintRegion::Recolor { bounds, color },
+                )?,
+            }
+        } else {
+            let color = text
+                .paint_runs
+                .iter()
+                .find(|paint| glyph.index < paint.end)
+                .map_or_else(|| rgba(0).into(), |paint| paint.color);
+            match cursor_paint {
+                CursorTextPaint::Unchanged => {
+                    window.paint_glyph(origin, font_id, glyph.id, layout.font_size, color)?
+                }
+                CursorTextPaint::Exclude(bounds) => window.paint_glyph_with_region(
+                    origin,
+                    font_id,
+                    glyph.id,
+                    layout.font_size,
+                    color,
+                    GlyphPaintRegion::Exclude(bounds),
+                )?,
+                CursorTextPaint::Recolor {
+                    bounds,
+                    color: cursor_color,
+                } => window.paint_glyph_with_region(
+                    origin,
+                    font_id,
+                    glyph.id,
+                    layout.font_size,
+                    color,
+                    GlyphPaintRegion::Recolor {
                         bounds,
                         color: cursor_color,
-                    } => window.paint_glyph_with_region(
-                        origin,
-                        run.font_id,
-                        glyph.id,
-                        layout.font_size,
-                        color,
-                        GlyphPaintRegion::Recolor {
-                            bounds,
-                            color: cursor_color,
-                        },
-                    )?,
-                }
+                    },
+                )?,
             }
         }
     }
@@ -988,7 +981,7 @@ fn row_text_shape_eq(first: &RowPaintInput, second: &RowPaintInput) -> bool {
             .all(|(first, second)| {
                 first.start == second.start
                     && first.text == second.text
-                    && first.force_cell_width == second.force_cell_width
+                    && first.simple_cells == second.simple_cells
                     && first.blinking == second.blinking
                     && first.runs.len() == second.runs.len()
                     && first
@@ -1100,8 +1093,7 @@ impl TerminalGridCache {
                 Arc::new(prepare_row_text(
                     source,
                     layout.font_size,
-                    layout.cell_width,
-                    window,
+                    window.text_system(),
                 ))
             };
             prepared_text.push(PreparedRowTextCacheEntry {
@@ -1197,25 +1189,40 @@ impl TerminalGridCache {
                     gpui_color(background),
                 ));
                 let color = gpui_color(foreground).into();
+                let line = Arc::new(window.text_system().shape_line(
+                    cluster.text.clone().into(),
+                    font_size,
+                    &[TextRun {
+                        len: cluster.text.len(),
+                        font: font.clone(),
+                        color,
+                        background_color: None,
+                        underline: Some(UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(color),
+                            wavy: false,
+                        }),
+                        strikethrough: None,
+                    }],
+                    None,
+                ));
+                let origin = point(cluster_left, row_top);
+                let mut previous = gpui::Point::default();
+                let mut position = origin;
+                let glyph_origins = line
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .map(|glyph| {
+                        position += glyph.position - previous;
+                        previous = glyph.position;
+                        position
+                    })
+                    .collect();
                 text.push(PreparedText {
-                    line: Arc::new(window.text_system().shape_line(
-                        cluster.text.clone().into(),
-                        font_size,
-                        &[TextRun {
-                            len: cluster.text.len(),
-                            font: font.clone(),
-                            color,
-                            background_color: None,
-                            underline: Some(UnderlineStyle {
-                                thickness: px(1.0),
-                                color: Some(color),
-                                wavy: false,
-                            }),
-                            strikethrough: None,
-                        }],
-                        None,
-                    )),
-                    origin: point(cluster_left, row_top),
+                    line,
+                    origin,
+                    glyph_origins,
                     blinking: false,
                     paint_runs: Arc::from([]),
                 });
@@ -1242,24 +1249,71 @@ impl TerminalGridCache {
 fn prepare_row_text(
     row: &RowPaintInput,
     font_size: Pixels,
-    cell_width: Pixels,
-    window: &mut Window,
+    text_system: &gpui::WindowTextSystem,
 ) -> PreparedRowText {
     let text = row
         .fragments
         .iter()
         .map(|fragment| PreparedShapedText {
-            line: Arc::new(window.text_system().shape_line(
+            line: Arc::new(text_system.shape_line(
                 fragment.text.clone(),
                 font_size,
                 &fragment.runs,
-                fragment.force_cell_width.then_some(cell_width),
+                None,
             )),
             start: fragment.start,
             blinking: fragment.blinking,
         })
         .collect();
     PreparedRowText { text }
+}
+
+/// Resolve each glyph from its absolute terminal column, never from a preceding
+/// fragment or glyph. Fractional fitted cell widths must use identical arithmetic
+/// even when an application redraw inserts a symbol and splits a shaping run.
+fn terminal_glyph_origins(
+    fragment: &TextFragment,
+    line: &ShapedLine,
+    grid_left: Pixels,
+    row_top: Pixels,
+    cell_width: Pixels,
+) -> Arc<[gpui::Point<Pixels>]> {
+    // Complex graphemes and wide cells already occupy their own fragment. Keep
+    // their native offsets intact, including marks before or above the base glyph.
+    if !fragment.simple_cells {
+        let origin = point(grid_left + cell_width * fragment.start as f32, row_top);
+        return line
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .map(|glyph| origin + glyph.position)
+            .collect();
+    }
+
+    // These fragments contain exactly one scalar per terminal cell. Native
+    // shaping may still produce multiple glyphs for one scalar, so map by byte
+    // index and retain offsets within each cluster rather than counting glyphs.
+    let mut cells = fragment
+        .text
+        .char_indices()
+        .map(|(index, _)| (index, None::<Pixels>))
+        .collect::<Vec<_>>();
+    line.runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| {
+            let column = cells
+                .partition_point(|(index, _)| *index <= glyph.index)
+                .saturating_sub(1);
+            let cluster_origin = *cells[column].1.get_or_insert(glyph.position.x);
+            point(
+                grid_left
+                    + cell_width * (fragment.start + column) as f32
+                    + (glyph.position.x - cluster_origin),
+                row_top + glyph.position.y,
+            )
+        })
+        .collect()
 }
 
 fn prepare_stable_row(
@@ -1274,6 +1328,13 @@ fn prepare_stable_row(
         .zip(&row.fragments)
         .map(|(text, fragment)| PreparedText {
             line: Arc::clone(&text.line),
+            glyph_origins: terminal_glyph_origins(
+                fragment,
+                &text.line,
+                key.grid_left,
+                key.row_top,
+                key.cell_width,
+            ),
             origin: point(
                 key.grid_left + key.cell_width * text.start as f32,
                 key.row_top,
@@ -1770,7 +1831,8 @@ struct TextFragment {
     text: SharedString,
     runs: Vec<TextRun>,
     paint_runs: Arc<[TextPaintRun]>,
-    force_cell_width: bool,
+    // Otherwise the fragment is one complete grapheme anchored at its head cell.
+    simple_cells: bool,
     blinking: bool,
 }
 
@@ -1833,13 +1895,13 @@ impl FragmentBuilder {
         }
     }
 
-    fn finish(self, force_cell_width: bool) -> TextFragment {
+    fn finish(self, simple_cells: bool) -> TextFragment {
         TextFragment {
             start: self.start,
             text: self.text.into(),
             runs: self.runs,
             paint_runs: Arc::from(self.paint_runs),
-            force_cell_width,
+            simple_cells,
             blinking: self.blinking,
         }
     }
@@ -2677,7 +2739,7 @@ fn prepare_row_cached(
             fragments.push(fragment.finish(true));
         }
 
-        let requires_whole_cell_shaping = !force_cell_width_for_cell(&cell.text, width_cells);
+        let requires_whole_cell_shaping = !is_simple_cell(&cell.text, width_cells);
         if requires_whole_cell_shaping {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
@@ -2733,7 +2795,7 @@ fn is_bidi_sensitive(character: char) -> bool {
     )
 }
 
-fn force_cell_width_for_cell(text: &str, width_cells: u8) -> bool {
+fn is_simple_cell(text: &str, width_cells: u8) -> bool {
     width_cells == 1 && text.chars().count() == 1 && !text.chars().any(is_bidi_sensitive)
 }
 
@@ -2949,6 +3011,11 @@ mod tests {
 
     use super::*;
     use crate::ui::terminal_ime::layout_preedit;
+
+    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+    mod macos_adapter_tests {
+        include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
+    }
 
     #[derive(Clone, Default)]
     struct PaintCapture {
@@ -4413,7 +4480,7 @@ mod tests {
         assert_eq!(input.fragments.len(), 4);
         assert_eq!(input.fragments[0].start, 0);
         assert_eq!(input.fragments[0].text.as_ref(), "界");
-        assert!(!input.fragments[0].force_cell_width);
+        assert!(!input.fragments[0].simple_cells);
         assert_eq!(input.fragments[1].start, 2);
         assert_eq!(input.fragments[1].text.as_ref(), "x");
         assert_eq!(input.fragments[2].start, 3);
@@ -4592,18 +4659,18 @@ mod tests {
             input
                 .fragments
                 .iter()
-                .all(|fragment| !fragment.force_cell_width)
+                .all(|fragment| !fragment.simple_cells)
         );
     }
 
     #[test]
-    fn width_constraints_only_apply_to_simple_narrow_cells() {
-        assert!(force_cell_width_for_cell("a", 1));
-        assert!(!force_cell_width_for_cell("界", 2));
-        assert!(!force_cell_width_for_cell("e\u{301}", 1));
-        assert!(!force_cell_width_for_cell("\u{2764}\u{fe0f}", 2));
-        assert!(!force_cell_width_for_cell("👩\u{200d}💻", 2));
-        assert!(!force_cell_width_for_cell("א", 1));
+    fn only_simple_narrow_cells_share_shaping_fragments() {
+        assert!(is_simple_cell("a", 1));
+        assert!(!is_simple_cell("界", 2));
+        assert!(!is_simple_cell("e\u{301}", 1));
+        assert!(!is_simple_cell("\u{2764}\u{fe0f}", 2));
+        assert!(!is_simple_cell("👩\u{200d}💻", 2));
+        assert!(!is_simple_cell("א", 1));
     }
 
     #[test]
@@ -4976,6 +5043,73 @@ mod tests {
     }
 
     #[gpui::test]
+    fn scope_guide_redraw_preserves_suffix_glyph_raster_positions(cx: &mut gpui::TestAppContext) {
+        cx.set_glyph_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(0), gpui::DevicePixels(-10)),
+            size(gpui::DevicePixels(6), gpui::DevicePixels(12)),
+        ));
+        let cx = cx.add_empty_window();
+        let suffix_color = Color::rgb(0x12_34_56);
+        let mut baseline = None;
+        for guide in [" ", "│", " "] {
+            let capture = PaintCapture::default();
+            let paint_capture = capture.clone();
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(1100.0), px(40.0)),
+                move |window, _| {
+                    let fonts = test_terminal_fonts(&"Menlo".into());
+                    let mut cells = vec![cell(" "); 4];
+                    cells[3] = cell(guide);
+                    cells.extend((0..120).map(|_| {
+                        let mut suffix = cell("a");
+                        suffix.foreground_source = TerminalColor::Rgb(suffix_color);
+                        suffix
+                    }));
+                    let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells)]);
+                    let mut cache = TerminalGridCache::new();
+                    let inputs =
+                        cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                    let mut layout = prepared_grid_layout(&fonts, px(14.0), px(8.41));
+                    layout.grid_bounds.size.width = px(1100.0);
+                    let stable = cache.prepare_visible_geometry(&inputs, 1, layout, window);
+                    PaintBatches {
+                        batches: vec![TerminalPaintBatch {
+                            surface: None,
+                            grid_bounds: layout.grid_bounds,
+                            line_height: layout.line_height,
+                            rows: stable.into_iter().map(PreparedFrameRow::new).collect(),
+                            cursor_text_overlay: None,
+                            graphics: GraphicsPaintPlan::default(),
+                            blink_phase_visible: true,
+                        }],
+                        capture: paint_capture,
+                    }
+                },
+            );
+            let positions = capture
+                .glyphs
+                .borrow()
+                .iter()
+                .filter_map(|glyph| {
+                    matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Monochrome { color }
+                    if color == Hsla::from(gpui_color(suffix_color)))
+                    .then_some(glyph.raster_bounds.origin)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), 120);
+            if let Some(baseline) = &baseline {
+                assert_eq!(
+                    &positions, baseline,
+                    "guide={guide:?} must not move unchanged text"
+                );
+            } else {
+                baseline = Some(positions);
+            }
+        }
+    }
+
+    #[gpui::test]
     fn cursor_motion_preserves_absolute_glyph_positions_at_fractional_cell_widths(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4998,11 +5132,7 @@ mod tests {
                 let absolute_glyph_positions = |row: &PreparedRow| {
                     row.text
                         .iter()
-                        .flat_map(|text| {
-                            text.line.runs.iter().flat_map(|run| {
-                                run.glyphs.iter().map(|glyph| text.origin + glyph.position)
-                            })
-                        })
+                        .flat_map(|text| text.glyph_origins.iter().copied())
                         .collect::<Vec<_>>()
                 };
 

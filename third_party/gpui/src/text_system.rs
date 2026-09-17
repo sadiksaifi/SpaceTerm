@@ -337,6 +337,15 @@ pub struct WindowTextSystem {
 }
 
 impl WindowTextSystem {
+    /// Creates a CoreText-backed text system for native shaping tests without
+    /// constructing a macOS application or opening a window.
+    #[cfg(all(target_os = "macos", feature = "font-kit", feature = "test-support"))]
+    pub fn macos_for_test() -> Self {
+        Self::new(Arc::new(TextSystem::new(Arc::new(
+            crate::MacTextSystem::new(),
+        ))))
+    }
+
     pub(crate) fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
             line_layout_cache: LineLayoutCache::new(text_system.platform_text_system.clone()),
