@@ -5,6 +5,16 @@
 //! here cannot drift apart when one surface changes.
 
 use gpui::SharedString;
+use spaceterm_ui::CustomIconName;
+
+/// Canonical label for the Local creation row on both surfaces.
+pub(crate) const LOCAL_WORKSPACE_LABEL: &str = "Local Workspace";
+/// Canonical label for the Remote creation row on both surfaces.
+pub(crate) const REMOTE_WORKSPACE_LABEL: &str = "Remote Workspace";
+/// Leading icon for the Local creation row on both surfaces.
+pub(crate) const LOCAL_WORKSPACE_ICON: CustomIconName = CustomIconName::RectangleStackBadgePlus;
+/// Leading icon for the Remote creation row on both surfaces.
+pub(crate) const REMOTE_WORKSPACE_ICON: CustomIconName = CustomIconName::GlobePlus;
 
 /// Trigger tooltip for the sidebar creation menu.
 ///

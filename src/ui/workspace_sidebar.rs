@@ -17,11 +17,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ButtonSize, ButtonVariant,
-    ContextMenu, CustomIconName, Icon, IconButton, IconName, Menu, MenuEntry, MenuLifecycleEvent,
-    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ResizeAxis, ResizeFinishReason,
-    ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics,
-    TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility,
-    dismiss_active_menu,
+    ContextMenu, Icon, IconButton, IconName, Menu, MenuEntry, MenuLifecycleEvent, MenuSize,
+    OverlayScrollbar, OverlayScrollbarEvent, ResizeAxis, ResizeFinishReason, ResizeHandle,
+    ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput,
+    TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility, dismiss_active_menu,
 };
 
 const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;

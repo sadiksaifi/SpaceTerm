@@ -5998,13 +5998,43 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 /// The footer plus menu mirrors the switcher's creation rows.
 ///
 /// It opens as a button-triggered menu (not a filterable combo box) with the same labels the
-/// switcher offers, so the two creation paths cannot drift apart.
+/// switcher offers, so the two creation paths cannot drift apart. Both surfaces build from the
+/// shared creation descriptors; disabled parity while Remote is unavailable is exercised by
+/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
+/// which rejects the Remote row on each surface.
 #[gpui::test]
 fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
     use crate::desktop_profile::testing_presentation;
+    use crate::ui::workspace_creation::{
+        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
+    };
     use crate::ui::{NewRemoteWorkspace, NewWorkspace};
 
+    // The shared descriptor source both surfaces build from.
+    assert_eq!(LOCAL_WORKSPACE_LABEL, "Local Workspace");
+    assert_eq!(REMOTE_WORKSPACE_LABEL, "Remote Workspace");
+    assert_eq!(
+        LOCAL_WORKSPACE_ICON,
+        spaceterm_ui::CustomIconName::RectangleStackBadgePlus
+    );
+    assert_eq!(
+        REMOTE_WORKSPACE_ICON,
+        spaceterm_ui::CustomIconName::GlobePlus
+    );
+
     let (_, _, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    for selector in [
+        "workspace-switcher-create-local",
+        "workspace-switcher-create-remote",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "missing switcher creation row: {selector}"
+        );
+    }
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     click("new-workspace-button", cx);
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
     for selector in [

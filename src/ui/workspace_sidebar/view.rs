@@ -598,23 +598,26 @@ impl WorkspaceSidebar {
 }
 /// The footer creation menu's rows mirror the Workspace switcher's creation rows: the same
 /// labels, leading icons, and trailing shortcuts, presented as a button-triggered menu.
+/// Labels and icons come from the shared creation descriptors so the two surfaces cannot drift.
 fn new_workspace_menu_entries(
     local_shortcut: impl Into<SharedString>,
     remote_shortcut: impl Into<SharedString>,
     remote_disabled: bool,
 ) -> Vec<MenuEntry<NewWorkspaceMenuCommand>> {
+    use crate::ui::workspace_creation::{
+        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
+    };
     vec![
-        MenuEntry::action("Local Workspace", NewWorkspaceMenuCommand::Local)
+        MenuEntry::action(LOCAL_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Local)
             .shortcut(local_shortcut)
             .icon(|foreground, size| {
-                Icon::custom(CustomIconName::RectangleStackBadgePlus, size, foreground)
-                    .into_any_element()
+                Icon::custom(LOCAL_WORKSPACE_ICON, size, foreground).into_any_element()
             })
             .debug_selector("new-workspace-menu-create-local"),
-        MenuEntry::action("Remote Workspace", NewWorkspaceMenuCommand::Remote)
+        MenuEntry::action(REMOTE_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Remote)
             .shortcut(remote_shortcut)
             .icon(|foreground, size| {
-                Icon::custom(CustomIconName::GlobePlus, size, foreground).into_any_element()
+                Icon::custom(REMOTE_WORKSPACE_ICON, size, foreground).into_any_element()
             })
             .disabled(remote_disabled)
             .debug_selector("new-workspace-menu-create-remote"),
