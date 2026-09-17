@@ -127,6 +127,7 @@ pub(super) struct WorkspaceSidebar {
     scrollbar: Entity<OverlayScrollbar<f32>>,
     focus: FocusHandle,
     menu: Option<WorkspaceId>,
+    new_workspace_menu_open: bool,
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
@@ -179,6 +180,7 @@ impl WorkspaceSidebar {
             scrollbar,
             focus,
             menu: None,
+            new_workspace_menu_open: false,
             rename: None,
             resize_origin: None,
             suppress_pointer_until_release: false,
@@ -282,6 +284,24 @@ impl WorkspaceSidebar {
                 self.menu = None
             }
             MenuLifecycleEvent::Closed(_) => return,
+        }
+        cx.emit(SidebarEvent::FocusChanged);
+        cx.notify();
+    }
+
+    pub(super) fn handle_new_workspace_menu_lifecycle(
+        &mut self,
+        event: MenuLifecycleEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            MenuLifecycleEvent::Opened => self.new_workspace_menu_open = true,
+            MenuLifecycleEvent::Closed(_) => {
+                if !self.new_workspace_menu_open {
+                    return;
+                }
+                self.new_workspace_menu_open = false;
+            }
         }
         cx.emit(SidebarEvent::FocusChanged);
         cx.notify();
@@ -649,8 +669,8 @@ impl WorkspaceSidebar {
     pub(super) fn is_renaming(&self) -> bool {
         self.rename.is_some()
     }
-    pub(super) fn menu_target(&self) -> Option<WorkspaceId> {
-        self.menu
+    pub(super) fn menu_open(&self) -> bool {
+        self.menu.is_some() || self.new_workspace_menu_open
     }
     pub(super) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename.take().is_some() {
@@ -672,9 +692,10 @@ impl WorkspaceSidebar {
         cx.notify();
     }
     pub(super) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let restore =
-            self.is_focused(window) || self.rename_is_focused(window) || self.menu.is_some();
-        if self.layout.visible && self.menu.take().is_some() {
+        let restore = self.is_focused(window) || self.rename_is_focused(window) || self.menu_open();
+        if self.layout.visible && self.menu_open() {
+            self.menu.take();
+            self.new_workspace_menu_open = false;
             dismiss_active_menu(window, cx);
         }
         self.cancel_rename(cx);

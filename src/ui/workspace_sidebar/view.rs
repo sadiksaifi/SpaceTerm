@@ -430,6 +430,7 @@ impl WorkspaceSidebar {
 
         let scrollbar = self.scrollbar.clone();
         let menu_sidebar = sidebar.clone();
+        let lifecycle_sidebar = sidebar.clone();
         let remote_disabled = self.remote_unavailable.is_some();
         let new_workspace_tooltip = crate::ui::workspace_creation::new_workspace_trigger_tooltip(
             self.remote_unavailable.as_deref(),
@@ -452,6 +453,17 @@ impl WorkspaceSidebar {
                 .into_any_element()
         })
         .debug_selector("new-workspace-button")
+        .on_lifecycle(move |event, cx| {
+            let sidebar = lifecycle_sidebar.clone();
+            let event = *event;
+            // Menu lifecycle delivery can occur while its Window is borrowed.
+            // Resolve ownership after that delivery, as row menus do.
+            cx.defer(move |cx| {
+                let _ = sidebar.update(cx, |sidebar, cx| {
+                    sidebar.handle_new_workspace_menu_lifecycle(event, cx);
+                });
+            });
+        })
         .on_activate(move |activation, window, cx| match *activation.action() {
             NewWorkspaceMenuCommand::Local => {
                 let _ = menu_sidebar.update(cx, |_, cx| {

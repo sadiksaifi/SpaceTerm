@@ -734,7 +734,7 @@ impl WorkspaceManager {
             window_drag: self.window_drag_status.is_active(),
             sidebar_resize: self.sidebar.read(cx).is_resizing(),
             rename: self.sidebar.read(cx).is_renaming(),
-            context_menu: self.sidebar.read(cx).menu_target().is_some(),
+            context_menu: self.sidebar.read(cx).menu_open(),
             sidebar: self.sidebar.read(cx).is_focused(window),
         })
     }
@@ -2219,7 +2219,7 @@ impl WorkspaceManager {
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         let preserve_sidebar_focus = self.sidebar.read(cx).is_focused(window)
             || self.sidebar.read(cx).rename_is_focused(window)
-            || self.sidebar.read(cx).menu_target().is_some();
+            || self.sidebar.read(cx).menu_open();
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
             self.sidebar.update(cx, |sidebar, cx| {

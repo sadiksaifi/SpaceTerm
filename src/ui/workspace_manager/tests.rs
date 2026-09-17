@@ -4254,9 +4254,7 @@ fn workspace_switcher_should_replace_an_open_workspace_context_menu(cx: &mut Tes
     redraw(cx);
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     assert!(cx.debug_bounds("combo-box-panel").is_some());
-    assert!(manager.read_with(cx, |manager, cx| {
-        manager.sidebar.read(cx).menu_target().is_none()
-    }));
+    assert!(manager.read_with(cx, |manager, cx| { !manager.sidebar.read(cx).menu_open() }));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -7137,7 +7135,7 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
         (
             manager.workspaces.active_workspace_id(),
             manager.sidebar.read(cx).is_focused(window),
-            manager.sidebar.read(cx).menu_target(),
+            manager.sidebar.read(cx).menu_open(),
             manager
                 .workspaces
                 .active_workspace()
@@ -7146,10 +7144,7 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
                 .focused_terminal_is_focused(window, cx),
         )
     });
-    assert_eq!(
-        state,
-        (WorkspaceId::new(1), false, Some(WorkspaceId::new(1)), false)
-    );
+    assert_eq!(state, (WorkspaceId::new(1), false, true, false));
     assert!(cx.debug_bounds("menu-panel-0").is_some());
 
     cx.simulate_keystrokes("escape");
@@ -7157,12 +7152,15 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
     let dismissed = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.sidebar.read(cx).menu_target(),
+            manager.sidebar.read(cx).menu_open(),
             manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
         )
     });
-    assert_eq!(dismissed, (None, true, Some(TerminalFocusBlocker::Sidebar)));
+    assert_eq!(
+        dismissed,
+        (false, true, Some(TerminalFocusBlocker::Sidebar))
+    );
 }
 
 #[gpui::test]
@@ -8536,6 +8534,38 @@ fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut Test
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-e shift-f10");
     cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+    cx.simulate_keystrokes("x");
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+    );
+}
+
+#[gpui::test]
+fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    click("new-workspace-button", cx);
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
 
     cx.simulate_keystrokes("cmd-b");
