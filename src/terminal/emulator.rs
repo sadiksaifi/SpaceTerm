@@ -1999,13 +1999,9 @@ impl TerminalEmulator {
             .selection_gesture
             .autoscroll(&self.terminal)
             .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
-        let delta = match direction {
-            Autoscroll::Up => -1,
-            Autoscroll::Down => 1,
-            Autoscroll::None => return Ok(EmulatorAction::none()),
-            _ => return Ok(EmulatorAction::none()),
-        };
-        self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+        if !matches!(direction, Autoscroll::Up | Autoscroll::Down) {
+            return Ok(EmulatorAction::none());
+        }
         let viewport = self.selection_viewport_point(position)?;
         let geometry = self.selection_geometry();
         let selection = self

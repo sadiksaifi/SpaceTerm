@@ -2599,7 +2599,10 @@ fn autoscroll_tick_moves_the_viewport_and_rejects_a_stale_generation() {
         .unwrap();
     assert!(action.screen_changed);
     let scrolled = emulator.snapshot().unwrap().unwrap();
-    assert!(scrolled.scrollbar.offset_rows < dragged.scrollbar.offset_rows);
+    assert_eq!(
+        scrolled.scrollbar.offset_rows,
+        dragged.scrollbar.offset_rows - 1
+    );
     assert!(
         emulator
             .selection_autoscroll_tick(initial.generation)
