@@ -5,9 +5,9 @@ pub(crate) use presentation::TerminalGridPresentation;
 
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    Pixels, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window, fill, outline, point,
-    px, relative, rgba, size,
+    FocusHandle, Font, GlobalElementId, GlyphPaintRegion, Hsla, InspectorElementId, IntoElement,
+    LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
+    fill, outline, point, px, relative, rgba, size,
 };
 #[cfg(test)]
 use gpui::{FontFallbacks, FontFeatures, font};
@@ -98,7 +98,6 @@ impl TerminalGridCache {
         colors: &TerminalColorsSnapshot,
         terminal_fonts: &TerminalFonts,
         find_spans: &Arc<[FindHighlightSpan]>,
-        cursor: Option<CursorPositionSnapshot>,
         metrics: TerminalGridMetrics,
     ) -> Arc<[Arc<RowPaintInput>]> {
         let style_changed = self.terminal_fonts.as_ref() != Some(terminal_fonts)
@@ -107,15 +106,12 @@ impl TerminalGridCache {
             || self.cell_width != Some(metrics.cell_width)
             || self.line_height != Some(metrics.line_height)
             || self.scale_factor_bits != Some(metrics.scale_factor.to_bits());
-        let rows_unchanged =
-            !style_changed
-                && rows.len() == self.row_inputs.len()
-                && rows.iter().enumerate().zip(&self.row_inputs).all(
-                    |((index, current), cached)| {
-                        Arc::ptr_eq(current, &cached.source)
-                            && cached.cursor_column == cursor_column_for_row(cursor, index)
-                    },
-                );
+        let rows_unchanged = !style_changed
+            && rows.len() == self.row_inputs.len()
+            && rows
+                .iter()
+                .zip(&self.row_inputs)
+                .all(|(current, cached)| Arc::ptr_eq(current, &cached.source));
         if rows_unchanged {
             return Arc::clone(&self.prepared_rows);
         }
@@ -125,20 +121,16 @@ impl TerminalGridCache {
         } else {
             std::mem::take(&mut self.row_inputs)
         };
-        let alignment = find_row_alignment(rows, &previous, |index, row, cached| {
-            cached.cursor_column == cursor_column_for_row(cursor, index)
-                && (Arc::ptr_eq(row, &cached.source) || row.as_ref() == cached.source.as_ref())
+        let alignment = find_row_alignment(rows, &previous, |_, row, cached| {
+            Arc::ptr_eq(row, &cached.source) || row.as_ref() == cached.source.as_ref()
         });
         let mut previous = previous.into_iter().map(Some).collect::<Vec<_>>();
         let mut row_inputs = Vec::with_capacity(rows.len());
         let mut prepared_rows = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().enumerate() {
-            let cursor_column = cursor_column_for_row(cursor, index);
             let prepared = if let Some(cached) =
                 take_aligned_row(&mut previous, index, alignment, |cached| {
-                    cached.cursor_column == cursor_column
-                        && (Arc::ptr_eq(row, &cached.source)
-                            || row.as_ref() == cached.source.as_ref())
+                    Arc::ptr_eq(row, &cached.source) || row.as_ref() == cached.source.as_ref()
                 }) {
                 cached.prepared
             } else {
@@ -146,7 +138,6 @@ impl TerminalGridCache {
                     row,
                     colors,
                     terminal_fonts,
-                    cursor_column,
                     index,
                     find_spans,
                 ))
@@ -154,7 +145,6 @@ impl TerminalGridCache {
             prepared_rows.push(Arc::clone(&prepared));
             row_inputs.push(PreparedRowInputCacheEntry {
                 source: Arc::clone(row),
-                cursor_column,
                 prepared,
             });
         }
@@ -173,7 +163,6 @@ impl TerminalGridCache {
 
 struct PreparedRowInputCacheEntry {
     source: RowSnapshot,
-    cursor_column: Option<usize>,
     prepared: Arc<RowPaintInput>,
 }
 
@@ -374,7 +363,6 @@ impl TerminalGridElement {
                 &screen.colors,
                 &configuration.terminal_fonts,
                 &configuration.find_spans,
-                screen.cursor.position,
                 TerminalGridMetrics {
                     cell_width: configuration.cell_width,
                     line_height: configuration.line_height,
@@ -452,7 +440,6 @@ struct TextPaintRun {
 
 struct PreparedRowText {
     text: Vec<PreparedShapedText>,
-    cursor_text: Vec<PreparedShapedText>,
 }
 
 struct PreparedShapedText {
@@ -468,8 +455,31 @@ struct PreparedRow {
     selections: Vec<PaintQuad>,
     under_text_decorations: PreparedDecorations,
     over_text_decorations: PreparedDecorations,
-    cursor_text: Vec<PreparedText>,
-    cursor_symbols: PreparedDecorations,
+}
+
+#[derive(Clone, Copy)]
+struct CursorTextOverlay {
+    row_index: usize,
+    bounds: Bounds<Pixels>,
+    color: Hsla,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CursorTextPaint {
+    Unchanged,
+    Exclude(Bounds<Pixels>),
+    Recolor { bounds: Bounds<Pixels>, color: Hsla },
+}
+
+fn cursor_text_paint(overlay: Option<CursorTextOverlay>, row_index: usize) -> CursorTextPaint {
+    match overlay {
+        None => CursorTextPaint::Unchanged,
+        Some(overlay) if overlay.row_index == row_index => CursorTextPaint::Recolor {
+            bounds: overlay.bounds,
+            color: overlay.color,
+        },
+        Some(overlay) => CursorTextPaint::Exclude(overlay.bounds),
+    }
 }
 
 #[derive(Clone)]
@@ -478,7 +488,7 @@ struct PreparedFrameRow {
     find_backgrounds: Vec<PaintQuad>,
     hyperlink_hover_decorations: PreparedDecorations,
     cursor_background: Option<PaintQuad>,
-    cursor_overlay_visible: bool,
+    cursor_symbols: PreparedDecorations,
     preedit: Option<PreparedPreeditRow>,
 }
 
@@ -542,7 +552,7 @@ impl PreparedFrameRow {
             find_backgrounds: Vec::new(),
             hyperlink_hover_decorations: PreparedDecorations::default(),
             cursor_background: None,
-            cursor_overlay_visible: false,
+            cursor_symbols: PreparedDecorations::default(),
             preedit: None,
         }
     }
@@ -582,7 +592,9 @@ pub(crate) struct PrepaintState {
 struct TerminalPaintBatch {
     surface: Option<PaintQuad>,
     grid_bounds: Bounds<Pixels>,
+    line_height: Pixels,
     rows: Vec<PreparedFrameRow>,
+    cursor_text_overlay: Option<CursorTextOverlay>,
     graphics: GraphicsPaintPlan,
     blink_phase_visible: bool,
 }
@@ -596,7 +608,6 @@ enum PaintBatchFailure {
 impl TerminalPaintBatch {
     fn preflight(
         &self,
-        line_height: Pixels,
         fault: Option<PaintPreflightFault>,
         window: &mut Window,
         _cx: &mut App,
@@ -624,16 +635,8 @@ impl TerminalPaintBatch {
                         text_fragment_visible(text.blinking, self.blink_phase_visible)
                     })
                 {
-                    preflight_text(text, line_height, window)
+                    preflight_text(text, self.line_height, window)
                         .map_err(|_| PaintBatchFailure::Presentation)?;
-                }
-                if row.cursor_overlay_visible {
-                    for text in row.stable.cursor_text.iter().filter(|text| {
-                        text_fragment_visible(text.blinking, self.blink_phase_visible)
-                    }) {
-                        preflight_text(text, line_height, window)
-                            .map_err(|_| PaintBatchFailure::Presentation)?;
-                    }
                 }
             }
             self.graphics
@@ -642,7 +645,7 @@ impl TerminalPaintBatch {
             for row in &self.rows {
                 if let Some(preedit) = &row.preedit {
                     for text in preedit.text.iter() {
-                        preflight_text(text, line_height, window)
+                        preflight_text(text, self.line_height, window)
                             .map_err(|_| PaintBatchFailure::Presentation)?;
                     }
                 }
@@ -670,15 +673,6 @@ impl TerminalPaintBatch {
                             text_fragment_visible(text.blinking, self.blink_phase_visible)
                         })
                         .chain(
-                            row.cursor_overlay_visible
-                                .then_some(&row.stable.cursor_text)
-                                .into_iter()
-                                .flat_map(|text| text.iter())
-                                .filter(|text| {
-                                    text_fragment_visible(text.blinking, self.blink_phase_visible)
-                                }),
-                        )
-                        .chain(
                             row.preedit
                                 .as_ref()
                                 .into_iter()
@@ -697,7 +691,6 @@ impl TerminalPaintBatch {
     fn submit(
         &self,
         grid_bounds: Bounds<Pixels>,
-        line_height: Pixels,
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), PaintBatchFailure> {
@@ -720,7 +713,7 @@ impl TerminalPaintBatch {
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for row in &self.rows {
+                for (row_index, row) in self.rows.iter().enumerate() {
                     paint_prepared_decorations(
                         &row.stable.under_text_decorations,
                         self.blink_phase_visible,
@@ -731,30 +724,39 @@ impl TerminalPaintBatch {
                         self.blink_phase_visible,
                         window,
                     );
-                    paint_prepared_decorations(
-                        &row.stable.symbols,
-                        self.blink_phase_visible,
-                        window,
-                    );
-                    for text in row.stable.text.iter().filter(|text| {
-                        text_fragment_visible(text.blinking, self.blink_phase_visible)
-                    }) {
-                        paint_terminal_text(text, line_height, window)
-                            .map_err(|_| PaintBatchFailure::Presentation)?;
-                    }
-                    if row.cursor_overlay_visible {
-                        paint_prepared_decorations(
-                            &row.stable.cursor_symbols,
+                    let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
+                    match cursor_paint {
+                        CursorTextPaint::Unchanged => paint_prepared_decorations(
+                            &row.stable.symbols,
                             self.blink_phase_visible,
                             window,
-                        );
-                        for text in row.stable.cursor_text.iter().filter(|text| {
-                            text_fragment_visible(text.blinking, self.blink_phase_visible)
-                        }) {
-                            paint_terminal_text(text, line_height, window)
-                                .map_err(|_| PaintBatchFailure::Presentation)?;
+                        ),
+                        CursorTextPaint::Exclude(bounds)
+                        | CursorTextPaint::Recolor { bounds, .. } => {
+                            paint_prepared_symbols_excluding_region(
+                                &row.stable.symbols,
+                                self.blink_phase_visible,
+                                bounds,
+                                window,
+                            );
+                            if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
+                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    paint_prepared_decorations(
+                                        &row.cursor_symbols,
+                                        self.blink_phase_visible,
+                                        window,
+                                    );
+                                });
+                            }
                         }
                     }
+                    paint_prepared_row_text(
+                        row,
+                        self.line_height,
+                        self.blink_phase_visible,
+                        cursor_paint,
+                        window,
+                    )?;
                     paint_prepared_decorations(
                         &row.stable.over_text_decorations,
                         self.blink_phase_visible,
@@ -772,7 +774,7 @@ impl TerminalPaintBatch {
                         }
                         for text in preedit.text.iter() {
                             text.line
-                                .paint(text.origin, line_height, window, cx)
+                                .paint(text.origin, self.line_height, window, cx)
                                 .map_err(|_| PaintBatchFailure::Presentation)?;
                         }
                         if let Some(caret) = &preedit.caret {
@@ -784,6 +786,25 @@ impl TerminalPaintBatch {
             },
         )
     }
+}
+
+fn paint_prepared_row_text(
+    row: &PreparedFrameRow,
+    line_height: Pixels,
+    blink_phase_visible: bool,
+    cursor_paint: CursorTextPaint,
+    window: &mut Window,
+) -> Result<(), PaintBatchFailure> {
+    for text in row
+        .stable
+        .text
+        .iter()
+        .filter(|text| text_fragment_visible(text.blinking, blink_phase_visible))
+    {
+        paint_terminal_text(text, line_height, cursor_paint, window)
+            .map_err(|_| PaintBatchFailure::Presentation)?;
+    }
+    Ok(())
 }
 
 fn preflight_text(
@@ -819,6 +840,7 @@ fn preflight_text(
 fn paint_terminal_text(
     text: &PreparedText,
     line_height: Pixels,
+    cursor_paint: CursorTextPaint,
     window: &mut Window,
 ) -> gpui::Result<()> {
     let layout = &*text.line;
@@ -831,14 +853,62 @@ fn paint_terminal_text(
             previous_position = glyph.position;
             let origin = glyph_origin + point(px(0.0), baseline);
             if glyph.is_emoji {
-                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                match cursor_paint {
+                    CursorTextPaint::Unchanged => {
+                        window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                    }
+                    CursorTextPaint::Exclude(bounds) => window.paint_emoji_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        GlyphPaintRegion::Exclude(bounds),
+                    )?,
+                    CursorTextPaint::Recolor { bounds, color } => window.paint_emoji_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        GlyphPaintRegion::Recolor { bounds, color },
+                    )?,
+                }
             } else {
                 let color = text
                     .paint_runs
                     .iter()
                     .find(|paint| glyph.index < paint.end)
                     .map_or_else(|| rgba(0).into(), |paint| paint.color);
-                window.paint_glyph(origin, run.font_id, glyph.id, layout.font_size, color)?;
+                match cursor_paint {
+                    CursorTextPaint::Unchanged => window.paint_glyph(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                    )?,
+                    CursorTextPaint::Exclude(bounds) => window.paint_glyph_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                        GlyphPaintRegion::Exclude(bounds),
+                    )?,
+                    CursorTextPaint::Recolor {
+                        bounds,
+                        color: cursor_color,
+                    } => window.paint_glyph_with_region(
+                        origin,
+                        run.font_id,
+                        glyph.id,
+                        layout.font_size,
+                        color,
+                        GlyphPaintRegion::Recolor {
+                            bounds,
+                            color: cursor_color,
+                        },
+                    )?,
+                }
             }
         }
     }
@@ -878,24 +948,15 @@ struct PreparedRowKey {
     line_height: Pixels,
     scale_factor_bits: u32,
     decoration_metrics: DecorationMetrics,
-    cursor: Option<PreparedCursorKey>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PreparedCursorKey {
-    column: u16,
-    width_cells: u8,
-    shape: CursorShapeSnapshot,
-    text_color: Color,
-}
-
-struct PreparedGridLayout<'a> {
+#[derive(Clone, Copy)]
+struct PreparedGridLayout {
     grid_bounds: Bounds<Pixels>,
     font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
     scale_factor: f32,
-    terminal_fonts: &'a TerminalFonts,
     decoration_metrics: DecorationMetrics,
 }
 
@@ -915,14 +976,6 @@ struct PreparedRowTextCacheEntry {
 struct PreparedRowTextKey {
     font_size: Pixels,
     cell_width: Pixels,
-    cursor: Option<PreparedCursorShapeKey>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PreparedCursorShapeKey {
-    column: u16,
-    width_cells: u8,
-    shape: CursorShapeSnapshot,
 }
 
 fn row_text_shape_eq(first: &RowPaintInput, second: &RowPaintInput) -> bool {
@@ -969,13 +1022,51 @@ fn reuse_or_prepare_row<T>(
 }
 
 impl TerminalGridCache {
+    fn prepare_frame_geometry(
+        &mut self,
+        rows: &Arc<[Arc<RowPaintInput>]>,
+        visible_rows: usize,
+        layout: PreparedGridLayout,
+        cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
+        cursor_style: CursorSnapshot,
+        window: &mut Window,
+    ) -> (Vec<Arc<PreparedRow>>, Option<(usize, PreparedDecorations)>) {
+        let stable_rows = self.prepare_visible_geometry(rows, visible_rows, layout, window);
+        let cursor_symbols = cursor
+            .filter(|_| {
+                cursor_style.visible && matches!(cursor_style.shape, CursorShapeSnapshot::Block)
+            })
+            .and_then(|cursor| {
+                let row_index = usize::from(cursor.0.row);
+                if row_index >= visible_rows {
+                    return None;
+                }
+                let row = rows.get(row_index)?;
+                let row_top = layout.grid_bounds.top() + layout.line_height * row_index as f32;
+                let row_bottom = (row_top + layout.line_height).min(layout.grid_bounds.bottom());
+                Some((
+                    row_index,
+                    prepare_cursor_symbols(
+                        row,
+                        cursor,
+                        cursor_style.text_color,
+                        row_top,
+                        row_bottom,
+                        layout.grid_bounds.left(),
+                        layout.cell_width,
+                        layout.scale_factor,
+                        &mut self.symbol_plans,
+                    ),
+                ))
+            });
+        (stable_rows, cursor_symbols)
+    }
+
     fn prepare_visible_geometry(
         &mut self,
         rows: &Arc<[Arc<RowPaintInput>]>,
         visible_rows: usize,
-        layout: PreparedGridLayout<'_>,
-        cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
-        cursor_style: CursorSnapshot,
+        layout: PreparedGridLayout,
         window: &mut Window,
     ) -> Vec<Arc<PreparedRow>> {
         let visible_rows = visible_rows.min(rows.len());
@@ -984,27 +1075,14 @@ impl TerminalGridCache {
         let previous_text = std::mem::take(&mut self.prepared_text);
         let mut prepared_text = Vec::with_capacity(visible_rows);
         let mut prepared_rows = Vec::with_capacity(visible_rows);
-        let text_key_for_row = |row_index| {
-            let cursor = cursor
-                .filter(|(position, _)| usize::from(position.row) == row_index)
-                .filter(|_| cursor_style.visible);
-            PreparedRowTextKey {
-                font_size: layout.font_size,
-                cell_width: layout.cell_width,
-                cursor: cursor.map(|(position, _)| PreparedCursorShapeKey {
-                    column: position.column,
-                    width_cells: position.width_cells,
-                    shape: cursor_style.shape,
-                }),
-            }
+        let text_key = PreparedRowTextKey {
+            font_size: layout.font_size,
+            cell_width: layout.cell_width,
         };
         let alignment = find_row_alignment(
             &rows[..visible_rows],
             &previous_text,
-            |row_index, source, cached| {
-                row_text_shape_eq(source, &cached.source)
-                    && cached.key == text_key_for_row(row_index)
-            },
+            |_, source, cached| row_text_shape_eq(source, &cached.source) && cached.key == text_key,
         );
         let mut previous_text = previous_text.into_iter().map(Some).collect::<Vec<_>>();
 
@@ -1013,16 +1091,6 @@ impl TerminalGridCache {
             let row_bottom = (layout.grid_bounds.top()
                 + layout.line_height * row_index.saturating_add(1) as f32)
                 .min(layout.grid_bounds.bottom());
-            let cursor = cursor
-                .filter(|(position, _)| usize::from(position.row) == row_index)
-                .filter(|_| cursor_style.visible);
-            let cursor_key = cursor.map(|(position, _)| PreparedCursorKey {
-                column: position.column,
-                width_cells: position.width_cells,
-                shape: cursor_style.shape,
-                text_color: cursor_style.text_color,
-            });
-            let text_key = text_key_for_row(row_index);
             let text = if let Some(cached) =
                 take_aligned_row(&mut previous_text, row_index, alignment, |cached| {
                     row_text_shape_eq(source, &cached.source) && cached.key == text_key
@@ -1031,11 +1099,8 @@ impl TerminalGridCache {
             } else {
                 Arc::new(prepare_row_text(
                     source,
-                    layout.terminal_fonts,
                     layout.font_size,
                     layout.cell_width,
-                    cursor,
-                    cursor_style,
                     window,
                 ))
             };
@@ -1055,18 +1120,10 @@ impl TerminalGridCache {
                 line_height: layout.line_height,
                 scale_factor_bits: layout.scale_factor.to_bits(),
                 decoration_metrics: layout.decoration_metrics,
-                cursor: cursor_key,
             };
             let prepared =
                 reuse_or_prepare_row(&mut self.prepared_geometry[row_index], source, key, || {
-                    prepare_stable_row(
-                        source,
-                        &text,
-                        key,
-                        cursor,
-                        cursor_style,
-                        &mut self.symbol_plans,
-                    )
+                    prepare_stable_row(source, &text, key, &mut self.symbol_plans)
                 });
             prepared_rows.push(prepared);
         }
@@ -1184,11 +1241,8 @@ impl TerminalGridCache {
 
 fn prepare_row_text(
     row: &RowPaintInput,
-    terminal_fonts: &TerminalFonts,
     font_size: Pixels,
     cell_width: Pixels,
-    cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
-    cursor_style: CursorSnapshot,
     window: &mut Window,
 ) -> PreparedRowText {
     let text = row
@@ -1205,50 +1259,13 @@ fn prepare_row_text(
             blinking: fragment.blinking,
         })
         .collect();
-    let mut cursor_text = Vec::new();
-    if let Some((position, cell)) = cursor {
-        let recolor_text = matches!(cursor_style.shape, CursorShapeSnapshot::Block);
-        let cursor_contains_symbol = row
-            .symbols
-            .iter()
-            .any(|symbol| symbol.start == usize::from(position.column));
-        if recolor_text
-            && !cursor_contains_symbol
-            && !cell.spacer_tail
-            && !cell.invisible
-            && !is_kitty_placeholder(cell)
-        {
-            cursor_text.push(PreparedShapedText {
-                line: Arc::new(
-                    window.text_system().shape_line(
-                        cell.text.clone().into(),
-                        font_size,
-                        &[TextRun {
-                            len: cell.text.len(),
-                            font: terminal_fonts.cell(cell.bold, cell.italic).clone(),
-                            color: gpui_color(cursor_style.text_color).into(),
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        }],
-                        force_cell_width_for_cell(&cell.text, position.width_cells)
-                            .then_some(cell_width),
-                    ),
-                ),
-                start: usize::from(position.column),
-                blinking: cell.blinking,
-            });
-        }
-    }
-    PreparedRowText { text, cursor_text }
+    PreparedRowText { text }
 }
 
 fn prepare_stable_row(
     row: &RowPaintInput,
     shaped: &PreparedRowText,
     key: PreparedRowKey,
-    cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
-    cursor_style: CursorSnapshot,
     symbol_plans: &mut SymbolPlanCache,
 ) -> PreparedRow {
     let text = shaped
@@ -1305,56 +1322,6 @@ fn prepare_stable_row(
         symbol_plans,
     );
 
-    let cursor_text = shaped
-        .cursor_text
-        .iter()
-        .map(|text| PreparedText {
-            line: Arc::clone(&text.line),
-            origin: point(
-                key.grid_left + key.cell_width * text.start as f32,
-                key.row_top,
-            ),
-            blinking: text.blinking,
-            paint_runs: Arc::from([TextPaintRun {
-                end: text.line.text.len(),
-                color: gpui_color(cursor_style.text_color).into(),
-            }]),
-        })
-        .collect();
-    let mut cursor_symbols = PreparedDecorations::default();
-    if let Some((position, cell)) = cursor {
-        let cursor_left = key.grid_left + key.cell_width * f32::from(position.column);
-        let plan = cursor_paint_plan(
-            true,
-            cursor_style.shape,
-            point(cursor_left, key.row_top),
-            key.cell_width,
-            key.line_height,
-            position.width_cells,
-        );
-        let recolor_text = plan.is_some_and(|plan| plan.recolor_text);
-        if recolor_text
-            && !cell.spacer_tail
-            && !cell.invisible
-            && let Some(symbol) = row
-                .symbols
-                .iter()
-                .find(|symbol| symbol.start == usize::from(position.column))
-        {
-            let mut symbol = symbol.clone();
-            symbol.color = cursor_style.text_color;
-            cursor_symbols = prepare_symbol_geometry(
-                &[symbol],
-                key.row_top,
-                key.row_bottom,
-                key.grid_left,
-                key.cell_width,
-                f32::from_bits(key.scale_factor_bits),
-                symbol_plans,
-            );
-        }
-    }
-
     PreparedRow {
         text,
         symbols,
@@ -1362,9 +1329,43 @@ fn prepare_stable_row(
         selections,
         under_text_decorations,
         over_text_decorations,
-        cursor_text,
-        cursor_symbols,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_cursor_symbols(
+    row: &RowPaintInput,
+    cursor: &(CursorPositionSnapshot, CellSnapshot),
+    text_color: Color,
+    row_top: Pixels,
+    row_bottom: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    scale_factor: f32,
+    symbol_plans: &mut SymbolPlanCache,
+) -> PreparedDecorations {
+    let (position, cell) = cursor;
+    if cell.spacer_tail || cell.invisible {
+        return PreparedDecorations::default();
+    }
+    let Some(symbol) = row
+        .symbols
+        .iter()
+        .find(|symbol| symbol.start == usize::from(position.column))
+    else {
+        return PreparedDecorations::default();
+    };
+    let mut symbol = symbol.clone();
+    symbol.color = text_color;
+    prepare_symbol_geometry(
+        &[symbol],
+        row_top,
+        row_bottom,
+        grid_left,
+        cell_width,
+        scale_factor,
+        symbol_plans,
+    )
 }
 
 fn paint_prepared_decorations(
@@ -1385,6 +1386,22 @@ fn paint_prepared_decorations(
         .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
     {
         window.paint_underline(prepared.origin, prepared.width, &prepared.style);
+    }
+}
+
+fn paint_prepared_symbols_excluding_region(
+    prepared: &PreparedDecorations,
+    blink_phase_visible: bool,
+    excluded_bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    debug_assert!(prepared.underlines.is_empty());
+    for prepared in prepared
+        .quads
+        .iter()
+        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+    {
+        window.paint_quad_excluding_region(prepared.quad.clone(), excluded_bounds);
     }
 }
 
@@ -1466,8 +1483,8 @@ impl Element for TerminalGridElement {
         let cursor = self.cursor.as_ref();
         let cursor_preparation_style = self.cursor_preparation_style;
         let terminal_fonts = self.terminal_fonts.clone();
-        let (stable_rows, preedit_rows) = self.cache.update(_cx, |cache, _| {
-            let stable_rows = cache.prepare_visible_geometry(
+        let (stable_rows, preedit_rows, cursor_symbols) = self.cache.update(_cx, |cache, _| {
+            let (stable_rows, cursor_symbols) = cache.prepare_frame_geometry(
                 &rows,
                 visible_rows,
                 PreparedGridLayout {
@@ -1476,7 +1493,6 @@ impl Element for TerminalGridElement {
                     cell_width: self.cell_width,
                     line_height: self.line_height,
                     scale_factor: self.scale_factor,
-                    terminal_fonts: &terminal_fonts,
                     decoration_metrics,
                 },
                 cursor,
@@ -1497,10 +1513,11 @@ impl Element for TerminalGridElement {
                 self.scale_factor,
                 window,
             );
-            (stable_rows, preedit_rows)
+            (stable_rows, preedit_rows, cursor_symbols)
         });
         let active_hyperlink_occurrence =
             hyperlink_occurrence(&self.presentation, self.active_hyperlink);
+        let mut batch_cursor_text_overlay = None;
 
         for (row_index, stable) in stable_rows.into_iter().enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
@@ -1520,7 +1537,7 @@ impl Element for TerminalGridElement {
                 self.cell_width,
             );
             let mut cursor_background = None;
-            let mut cursor_overlay_visible = false;
+            let mut cursor_text_overlay = None;
             if preedit_rows
                 .as_ref()
                 .and_then(|rows| rows.get(row_index))
@@ -1546,7 +1563,11 @@ impl Element for TerminalGridElement {
                         BorderStyle::default(),
                     ),
                 });
-                cursor_overlay_visible = plan.recolor_text;
+                cursor_text_overlay = plan.recolor_text.then_some(CursorTextOverlay {
+                    row_index,
+                    bounds: plan.bounds.intersect(&grid_bounds),
+                    color: gpui_color(self.cursor_style.text_color).into(),
+                });
             }
 
             let mut frame = PreparedFrameRow::new(stable);
@@ -1564,7 +1585,13 @@ impl Element for TerminalGridElement {
                 decoration_metrics,
             );
             frame.cursor_background = cursor_background;
-            frame.cursor_overlay_visible = cursor_overlay_visible;
+            batch_cursor_text_overlay = batch_cursor_text_overlay.or(cursor_text_overlay);
+            if cursor_text_overlay.is_some()
+                && let Some((cursor_row, symbols)) = &cursor_symbols
+                && *cursor_row == row_index
+            {
+                frame.cursor_symbols = symbols.clone();
+            }
             frame.preedit = preedit_rows
                 .as_ref()
                 .and_then(|rows| rows.get(row_index))
@@ -1575,7 +1602,9 @@ impl Element for TerminalGridElement {
         let mut candidate = TerminalPaintBatch {
             surface: None,
             grid_bounds,
+            line_height: self.line_height,
             rows: prepared_rows,
+            cursor_text_overlay: batch_cursor_text_overlay,
             graphics: self.graphics.paint_plan(
                 grid_bounds,
                 self.cell_width,
@@ -1588,26 +1617,24 @@ impl Element for TerminalGridElement {
             let position = self.cursor.as_ref()?.0;
             let row = candidate.rows.get_mut(usize::from(position.row))?;
             let cursor_row = row.clone();
+            let cursor_bounds = cursor_row
+                .cursor_background
+                .as_ref()?
+                .bounds
+                .intersect(&grid_bounds);
             row.cursor_background = None;
-            row.cursor_overlay_visible = false;
-            let row_bounds = Bounds::new(
-                point(
-                    grid_bounds.left(),
-                    bounds.top() + self.line_height * f32::from(position.row),
-                ),
-                size(
-                    grid_bounds.size.width,
-                    self.line_height.min(
-                        grid_bounds.bottom()
-                            - (bounds.top() + self.line_height * f32::from(position.row)),
-                    ),
-                ),
-            )
-            .intersect(&grid_bounds);
+            row.cursor_symbols = PreparedDecorations::default();
+            let cursor_text_overlay = candidate.cursor_text_overlay.map(|mut overlay| {
+                overlay.row_index = 0;
+                overlay
+            });
+            candidate.cursor_text_overlay = None;
             Some(std::rc::Rc::new(TerminalPaintBatch {
-                surface: Some(fill(row_bounds, gpui_color(self.background))),
-                grid_bounds: row_bounds,
+                surface: Some(fill(cursor_bounds, gpui_color(self.background))),
+                grid_bounds: cursor_bounds,
+                line_height: self.line_height,
                 rows: vec![cursor_row],
+                cursor_text_overlay,
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
             }))
@@ -1642,21 +1669,19 @@ impl Element for TerminalGridElement {
         }
         let mut failure = prepaint
             .candidate
-            .preflight(self.line_height, self.paint_fault.take(), window, cx)
+            .preflight(self.paint_fault.take(), window, cx)
             .err();
         if failure.is_none()
             && let Some(cursor) = &prepaint.cursor
         {
-            failure = cursor.preflight(self.line_height, None, window, cx).err();
+            failure = cursor.preflight(None, window, cx).err();
         }
         let mut submitted_generation = None;
         if failure.is_none() {
-            match prepaint.candidate.submit(
-                prepaint.candidate.grid_bounds,
-                self.line_height,
-                window,
-                cx,
-            ) {
+            match prepaint
+                .candidate
+                .submit(prepaint.candidate.grid_bounds, window, cx)
+            {
                 Ok(()) => {
                     submitted_generation = Some(self.presentation.generation);
                     if let Some(layer) = &self.cursor_layer {
@@ -1675,12 +1700,8 @@ impl Element for TerminalGridElement {
         }
         if failure.is_some()
             && let Some(fallback) = &prepaint.fallback
-            && fallback
-                .preflight(self.line_height, None, window, cx)
-                .is_ok()
-            && fallback
-                .submit(fallback.grid_bounds, self.line_height, window, cx)
-                .is_ok()
+            && fallback.preflight(None, window, cx).is_ok()
+            && fallback.submit(fallback.grid_bounds, window, cx).is_ok()
         {
             submitted_generation = self.fallback_generation;
         }
@@ -1755,7 +1776,6 @@ struct TextFragment {
 
 struct FragmentBuilder {
     start: usize,
-    cursor: bool,
     blinking: bool,
     text: String,
     runs: Vec<TextRun>,
@@ -1763,10 +1783,9 @@ struct FragmentBuilder {
 }
 
 impl FragmentBuilder {
-    fn new(start: usize, cursor: bool, blinking: bool) -> Self {
+    fn new(start: usize, blinking: bool) -> Self {
         Self {
             start,
-            cursor,
             blinking,
             text: String::new(),
             runs: Vec::new(),
@@ -2523,17 +2542,15 @@ fn prepare_row(
     row: &RowSnapshot,
     colors: &TerminalColorsSnapshot,
     font_family: &SharedString,
-    cursor_column: Option<usize>,
 ) -> RowPaintInput {
     let terminal_fonts = test_terminal_fonts(font_family);
-    prepare_row_cached(row, colors, &terminal_fonts, cursor_column, 0, &[])
+    prepare_row_cached(row, colors, &terminal_fonts, 0, &[])
 }
 
 fn prepare_row_cached(
     row: &RowSnapshot,
     colors: &TerminalColorsSnapshot,
     terminal_fonts: &TerminalFonts,
-    cursor_column: Option<usize>,
     row_index: usize,
     find_spans: &[FindHighlightSpan],
 ) -> RowPaintInput {
@@ -2547,7 +2564,6 @@ fn prepare_row_cached(
     let mut strikethroughs = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
-        let cursor = cursor_column == Some(column);
         let placeholder = is_kitty_placeholder(cell);
         let (_, background) = effective_colors(cell, colors);
         // Source identity matters even when a program's explicit RGB matches the default tint.
@@ -2655,7 +2671,7 @@ fn prepare_row_cached(
 
         if regular_fragment
             .as_ref()
-            .is_some_and(|fragment| fragment.cursor != cursor || fragment.blinking != cell.blinking)
+            .is_some_and(|fragment| fragment.blinking != cell.blinking)
             && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
@@ -2666,12 +2682,12 @@ fn prepare_row_cached(
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column, cursor, cell.blinking);
+            let mut fragment = FragmentBuilder::new(column, cell.blinking);
             fragment.push(cell, foreground, terminal_fonts);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column, cursor, cell.blinking))
+                .get_or_insert_with(|| FragmentBuilder::new(column, cell.blinking))
                 .push(cell, foreground, terminal_fonts);
         }
     }
@@ -2723,12 +2739,6 @@ fn force_cell_width_for_cell(text: &str, width_cells: u8) -> bool {
 
 fn text_fragment_visible(blinking: bool, blink_phase_visible: bool) -> bool {
     !blinking || blink_phase_visible
-}
-
-fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
-    cursor
-        .filter(|cursor| usize::from(cursor.row) == row)
-        .map(|cursor| usize::from(cursor.column))
 }
 
 fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Color, Color) {
@@ -2932,10 +2942,187 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use super::*;
     use crate::ui::terminal_ime::layout_preedit;
+
+    #[derive(Clone, Default)]
+    struct PaintCapture {
+        glyphs: Rc<RefCell<Vec<gpui::PaintedGlyphForTest>>>,
+        quads: Rc<RefCell<Vec<gpui::PaintedQuadForTest>>>,
+        quad_paint_calls: Rc<Cell<usize>>,
+    }
+
+    struct PaintBatches {
+        batches: Vec<TerminalPaintBatch>,
+        capture: PaintCapture,
+    }
+
+    impl IntoElement for PaintBatches {
+        type Element = Self;
+
+        fn into_element(self) -> Self::Element {
+            self
+        }
+    }
+
+    impl Element for PaintBatches {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, Self::RequestLayoutState) {
+            (window.request_layout(Style::default(), [], cx), ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) {
+        }
+
+        fn paint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _prepaint: &mut Self::PrepaintState,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            window.reset_paint_call_counts_for_test();
+            for batch in &self.batches {
+                batch.submit(batch.grid_bounds, window, cx).unwrap();
+            }
+            *self.capture.glyphs.borrow_mut() = window.painted_glyphs_for_test();
+            *self.capture.quads.borrow_mut() = window.painted_quads_for_test();
+            self.capture
+                .quad_paint_calls
+                .set(window.quad_paint_call_count_for_test());
+        }
+    }
+
+    fn cursor_render_batches(window: &mut Window, retained: bool) -> Vec<TerminalPaintBatch> {
+        let cell_width = px(8.375);
+        let line_height = px(14.0);
+        let grid_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+        let cursor_bounds = Bounds::new(grid_bounds.origin, size(cell_width * 3.0, line_height));
+        let mut cursor_text = cell("B");
+        cursor_text.foreground_source = TerminalColor::Rgb(Color::rgb(0x00_aa_00));
+        let mut cursor_emoji_tail = cell(" ");
+        cursor_emoji_tail.spacer_tail = true;
+        let mut overhang_text = cell("A\u{30d}\u{30d}\u{30d}\u{30d}\u{30d}\u{30d}");
+        overhang_text.foreground_source = TerminalColor::Rgb(Color::rgb(0xdd_00_00));
+        let mut overhang_emoji_tail = cell(" ");
+        overhang_emoji_tail.spacer_tail = true;
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::from([cursor_text, cell("😀"), cursor_emoji_tail]),
+            Arc::from([overhang_text, cell("😀"), overhang_emoji_tail]),
+        ]);
+        let terminal_fonts = test_terminal_fonts(&"Menlo".into());
+        let mut cache = TerminalGridCache::new();
+        let inputs = cache.prepare(
+            &rows,
+            &colors(),
+            &terminal_fonts,
+            &Arc::from([]),
+            TerminalGridMetrics {
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+            },
+        );
+        let stable_rows = cache.prepare_visible_geometry(
+            &inputs,
+            rows.len(),
+            PreparedGridLayout {
+                grid_bounds,
+                font_size: px(18.0),
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+                decoration_metrics: decoration_metrics(
+                    px(12.0),
+                    px(10.0),
+                    px(4.0),
+                    px(7.0),
+                    line_height,
+                    window.scale_factor(),
+                ),
+            },
+            window,
+        );
+        assert!(stable_rows.iter().all(|row| !row.text.is_empty()));
+        let mut rows = stable_rows
+            .into_iter()
+            .map(PreparedFrameRow::new)
+            .collect::<Vec<_>>();
+        rows[0].cursor_background = Some(fill(cursor_bounds, rgba(0x22_44_88_ff)));
+        let overlay = CursorTextOverlay {
+            row_index: 0,
+            bounds: cursor_bounds,
+            color: rgba(0xff_ff_ff_ff).into(),
+        };
+
+        if !retained {
+            return vec![TerminalPaintBatch {
+                surface: None,
+                grid_bounds,
+                line_height,
+                rows,
+                cursor_text_overlay: Some(overlay),
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            }];
+        }
+
+        let mut cursor_row = rows[0].clone();
+        rows[0].cursor_background = None;
+        cursor_row.cursor_background = Some(fill(cursor_bounds, rgba(0x22_44_88_ff)));
+        vec![
+            TerminalPaintBatch {
+                surface: None,
+                grid_bounds,
+                line_height,
+                rows,
+                cursor_text_overlay: None,
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            },
+            TerminalPaintBatch {
+                surface: Some(fill(cursor_bounds, rgba(0x0b_0b_0b_ff))),
+                grid_bounds: cursor_bounds,
+                line_height,
+                rows: vec![cursor_row],
+                cursor_text_overlay: Some(overlay),
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            },
+        ]
+    }
 
     fn colors() -> crate::terminal::TerminalColorsSnapshot {
         let mut palette = [Color::rgb(0); 256];
@@ -2986,7 +3173,7 @@ mod tests {
         }
     }
 
-    fn prepared_row_key(cursor: Option<PreparedCursorKey>) -> PreparedRowKey {
+    fn prepared_row_key() -> PreparedRowKey {
         PreparedRowKey {
             grid_left: px(0.0),
             grid_right: px(80.0),
@@ -3004,22 +3191,20 @@ mod tests {
                 px(20.0),
                 2.0,
             ),
-            cursor,
         }
     }
 
     fn prepared_grid_layout(
-        terminal_fonts: &TerminalFonts,
+        _terminal_fonts: &TerminalFonts,
         font_size: Pixels,
         cell_width: Pixels,
-    ) -> PreparedGridLayout<'_> {
+    ) -> PreparedGridLayout {
         PreparedGridLayout {
             grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(40.0))),
             font_size,
             cell_width,
             line_height: px(20.0),
             scale_factor: 2.0,
-            terminal_fonts,
             decoration_metrics: decoration_metrics(
                 px(15.0),
                 px(11.0),
@@ -3275,6 +3460,239 @@ mod tests {
     }
 
     #[test]
+    fn block_cursor_excludes_neighbor_overhang_and_recolors_only_its_row() {
+        let bounds = Bounds::new(point(px(20.0), px(20.0)), size(px(10.0), px(20.0)));
+        let color = rgba(0xffffff).into();
+        let overlay = CursorTextOverlay {
+            row_index: 1,
+            bounds,
+            color,
+        };
+
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 0),
+            CursorTextPaint::Exclude(bounds)
+        );
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 1),
+            CursorTextPaint::Recolor { bounds, color }
+        );
+        assert_eq!(
+            cursor_text_paint(Some(overlay), 2),
+            CursorTextPaint::Exclude(bounds)
+        );
+        assert_eq!(cursor_text_paint(None, 1), CursorTextPaint::Unchanged);
+    }
+
+    #[gpui::test]
+    fn direct_block_cursor_clips_real_neighbor_glyphs_and_recolors_only_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_glyph_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: cursor_render_batches(window, false),
+                capture: paint_capture,
+            },
+        );
+        let scale_factor = cx.update(|window, _| window.scale_factor());
+        let glyphs = capture.glyphs.borrow();
+        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+            .scale(scale_factor);
+        let red: Hsla = rgba(0xdd_00_00_ff).into();
+        let white: Hsla = rgba(0xff_ff_ff_ff).into();
+        let neighbor_text = glyphs
+            .iter()
+            .filter(|glyph| {
+                matches!(
+                    glyph.kind,
+                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            neighbor_text
+                .iter()
+                .any(|glyph| glyph.raster_bounds.intersects(&cursor)),
+            "the fixture must contain a real neighboring-row raster overhang: neighbor={neighbor_text:#?}; all={glyphs:#?}; cursor={cursor:?}"
+        );
+        assert!(
+            neighbor_text
+                .iter()
+                .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
+            "neighboring monochrome pixels must be excluded from the cursor"
+        );
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(
+                glyph.kind,
+                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+            ) && glyph.visible_bounds.intersects(&cursor)
+        }));
+
+        let emoji = glyphs
+            .iter()
+            .filter(|glyph| matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji))
+            .collect::<Vec<_>>();
+        let cursor_center_y = cursor.origin.y + cursor.size.height / 2.0;
+        let cursor_emoji = emoji
+            .iter()
+            .filter(|glyph| glyph.raster_bounds.origin.y < cursor_center_y)
+            .collect::<Vec<_>>();
+        let neighbor_emoji = emoji
+            .iter()
+            .filter(|glyph| glyph.raster_bounds.origin.y >= cursor_center_y)
+            .collect::<Vec<_>>();
+        assert!(
+            cursor_emoji
+                .iter()
+                .any(|glyph| glyph.visible_bounds.intersects(&cursor)),
+            "the cursor-owning row must preserve polychrome glyphs"
+        );
+        assert!(
+            neighbor_emoji
+                .iter()
+                .any(|glyph| glyph.raster_bounds.intersects(&cursor)),
+            "the fixture must contain a neighboring emoji raster overhang"
+        );
+        assert!(
+            neighbor_emoji
+                .iter()
+                .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
+            "neighboring emoji pixels must be excluded from the cursor"
+        );
+    }
+
+    #[gpui::test]
+    fn retained_block_cursor_covers_neighbor_overhang_before_repainting_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_glyph_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: cursor_render_batches(window, true),
+                capture: paint_capture,
+            },
+        );
+        let scale_factor = cx.update(|window, _| window.scale_factor());
+        let glyphs = capture.glyphs.borrow();
+        let quads = capture.quads.borrow();
+        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+            .scale(scale_factor);
+        let red: Hsla = rgba(0xdd_00_00_ff).into();
+        let white: Hsla = rgba(0xff_ff_ff_ff).into();
+        let neighbor_order = glyphs
+            .iter()
+            .filter(|glyph| {
+                matches!(
+                    glyph.kind,
+                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                ) && glyph.visible_bounds.intersects(&cursor)
+            })
+            .map(|glyph| glyph.order)
+            .max()
+            .expect("the retained base frame keeps the neighboring overhang");
+        let cover_order = quads
+            .iter()
+            .filter(|quad| quad.visible_bounds == cursor && quad.order > neighbor_order)
+            .map(|quad| quad.order)
+            .max()
+            .expect("the retained cursor layer must cover the cursor rectangle");
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(
+                glyph.kind,
+                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+            ) && glyph.visible_bounds.intersects(&cursor)
+                && glyph.order > cover_order
+        }));
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji)
+                && glyph.visible_bounds.intersects(&cursor)
+                && glyph.order > cover_order
+        }));
+    }
+
+    #[gpui::test]
+    fn direct_block_cursor_visits_each_symbol_quad_once(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(60.0)),
+            move |_, _| {
+                let stable = Arc::new(PreparedRow {
+                    text: Vec::new(),
+                    symbols: PreparedDecorations {
+                        quads: (0..3)
+                            .map(|index| PreparedQuad {
+                                quad: fill(
+                                    Bounds::new(
+                                        point(px(30.0 + index as f32 * 10.0), px(0.0)),
+                                        size(px(8.0), px(20.0)),
+                                    ),
+                                    rgba(0xff_ff_ff_ff),
+                                ),
+                                blinking: false,
+                            })
+                            .collect(),
+                        underlines: Vec::new(),
+                    },
+                    backgrounds: Vec::new(),
+                    selections: Vec::new(),
+                    under_text_decorations: PreparedDecorations::default(),
+                    over_text_decorations: PreparedDecorations::default(),
+                });
+                let empty = Arc::new(PreparedRow {
+                    text: Vec::new(),
+                    symbols: PreparedDecorations::default(),
+                    backgrounds: Vec::new(),
+                    selections: Vec::new(),
+                    under_text_decorations: PreparedDecorations::default(),
+                    over_text_decorations: PreparedDecorations::default(),
+                });
+                PaintBatches {
+                    batches: vec![TerminalPaintBatch {
+                        surface: None,
+                        grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(60.0))),
+                        line_height: px(20.0),
+                        rows: vec![
+                            PreparedFrameRow::new(stable),
+                            PreparedFrameRow::new(Arc::clone(&empty)),
+                            PreparedFrameRow::new(empty),
+                        ],
+                        cursor_text_overlay: Some(CursorTextOverlay {
+                            row_index: 1,
+                            bounds: Bounds::new(point(px(20.0), px(20.0)), size(px(8.0), px(20.0))),
+                            color: rgba(0xff_ff_ff_ff).into(),
+                        }),
+                        graphics: GraphicsPaintPlan::default(),
+                        blink_phase_visible: true,
+                    }],
+                    capture: paint_capture,
+                }
+            },
+        );
+
+        assert_eq!(capture.quad_paint_calls.get(), 3);
+    }
+
+    #[test]
     fn terminal_focus_alone_selects_negotiated_or_steady_hollow_cursor() {
         let negotiated = CursorSnapshot {
             visible: true,
@@ -3312,22 +3730,12 @@ mod tests {
     fn final_edge_selection_should_stop_at_the_real_cell_bounds() {
         let mut selected = cell("x");
         selected.selected = true;
-        let input = prepare_row(&Arc::from([selected]), &colors(), &"Menlo".into(), None);
-        let shaped = PreparedRowText {
-            text: Vec::new(),
-            cursor_text: Vec::new(),
-        };
-        let mut key = prepared_row_key(None);
+        let input = prepare_row(&Arc::from([selected]), &colors(), &"Menlo".into());
+        let shaped = PreparedRowText { text: Vec::new() };
+        let mut key = prepared_row_key();
         key.grid_right = px(10.0);
 
-        let prepared = prepare_stable_row(
-            &input,
-            &shaped,
-            key,
-            None,
-            CursorSnapshot::default(),
-            &mut SymbolPlanCache::default(),
-        );
+        let prepared = prepare_stable_row(&input, &shaped, key, &mut SymbolPlanCache::default());
 
         assert_eq!(
             prepared.selections[0].bounds,
@@ -3345,7 +3753,7 @@ mod tests {
             cell("z"),
         ]);
 
-        let prepared = prepare_row(&rows, &colors(), &"Menlo".into(), None);
+        let prepared = prepare_row(&rows, &colors(), &"Menlo".into());
 
         assert_eq!(
             prepared
@@ -3368,7 +3776,7 @@ mod tests {
         placeholder.overline = true;
         placeholder.selected = true;
 
-        let prepared = prepare_row(&Arc::from([placeholder]), &colors(), &"Menlo".into(), None);
+        let prepared = prepare_row(&Arc::from([placeholder]), &colors(), &"Menlo".into());
 
         assert_eq!(
             (
@@ -3399,7 +3807,7 @@ mod tests {
     #[test]
     fn text_runs_cover_utf8_bytes_and_coalesce_matching_styles() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("é"), cell("b")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].text.as_ref(), "aéb");
@@ -3419,7 +3827,7 @@ mod tests {
         let colors = colors();
         let family: SharedString = "JetBrains Mono".into();
         let terminal_fonts = test_terminal_fonts(&family);
-        let mut fragment = FragmentBuilder::new(0, false, false);
+        let mut fragment = FragmentBuilder::new(0, false);
         let styles = [(false, false), (true, false), (true, true), (false, true)];
         let mut expected_fonts = Vec::new();
         let mut expected_paint = Vec::new();
@@ -3461,7 +3869,7 @@ mod tests {
         let second_family: SharedString = "JetBrains Mono".into();
         let first_fonts = test_terminal_fonts(&first_family);
         let second_fonts = test_terminal_fonts(&second_family);
-        let mut fragment = FragmentBuilder::new(0, false, false);
+        let mut fragment = FragmentBuilder::new(0, false);
         fragment.push(&cell("a"), colors.foreground, &first_fonts);
         let mut empty = cell("");
         empty.bold = true;
@@ -3494,7 +3902,7 @@ mod tests {
         let family: SharedString = "Menlo".into();
         let before = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get);
 
-        let input = prepare_row(&row, &colors, &family, None);
+        let input = prepare_row(&row, &colors, &family);
 
         let prepared = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get) - before;
         assert_eq!(prepared, 4);
@@ -3507,7 +3915,7 @@ mod tests {
     fn terminal_text_runs_configure_emoji_and_system_fallbacks() {
         let row = Arc::<[CellSnapshot]>::from([cell("A")]);
 
-        let input = prepare_row(&row, &colors(), &"JetBrains Mono".into(), None);
+        let input = prepare_row(&row, &colors(), &"JetBrains Mono".into());
 
         assert_eq!(
             input.fragments[0].runs[0]
@@ -3529,7 +3937,7 @@ mod tests {
         second.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input.backgrounds,
@@ -3547,7 +3955,7 @@ mod tests {
         let mut explicit = cell("a");
         explicit.background_source = TerminalColor::Rgb(colors.background);
         let row = Arc::<[CellSnapshot]>::from([cell(" "), explicit]);
-        let input = prepare_row(&row, &colors, &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors, &"Menlo".into());
         assert_eq!(
             input.backgrounds,
             vec![BackgroundSpan {
@@ -3564,7 +3972,7 @@ mod tests {
         selected.background_source = TerminalColor::Palette(1);
         selected.selected = true;
         let row = Arc::<[CellSnapshot]>::from([selected]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
         let spans = [
             FindHighlightSpan {
                 row: 0,
@@ -3597,8 +4005,6 @@ mod tests {
             ),
             under_text_decorations: PreparedDecorations::default(),
             over_text_decorations: PreparedDecorations::default(),
-            cursor_text: Vec::new(),
-            cursor_symbols: PreparedDecorations::default(),
         });
         let mut prepared = PreparedFrameRow::new(stable);
         prepared.find_backgrounds = prepare_background_geometry(
@@ -3664,7 +4070,7 @@ mod tests {
         ]);
         let fonts = test_terminal_fonts(&"Menlo".into());
 
-        let input = prepare_row_cached(&row, &colors, &fonts, None, 0, &find_spans);
+        let input = prepare_row_cached(&row, &colors, &fonts, 0, &find_spans);
         let run_colors = input
             .fragments
             .iter()
@@ -3689,7 +4095,7 @@ mod tests {
         invisible.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let row = Arc::<[CellSnapshot]>::from([invisible]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert!(input.fragments.is_empty());
         assert_eq!(
@@ -3715,7 +4121,7 @@ mod tests {
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([decorated, tail]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input.under_text_decorations,
@@ -3840,7 +4246,7 @@ mod tests {
         decorated.strikethrough = true;
         let row = Arc::<[CellSnapshot]>::from([decorated.clone()]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.selections.len(), 1);
         assert!(
@@ -3862,7 +4268,7 @@ mod tests {
 
         decorated.invisible = true;
         let invisible = Arc::<[CellSnapshot]>::from([decorated]);
-        let invisible = prepare_row(&invisible, &colors(), &"Menlo".into(), None);
+        let invisible = prepare_row(&invisible, &colors(), &"Menlo".into());
         assert!(invisible.under_text_decorations.is_empty());
         assert!(invisible.over_text_decorations.is_empty());
         assert_eq!(invisible.selections.len(), 1);
@@ -3941,7 +4347,7 @@ mod tests {
         second.selected = true;
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input.selections,
@@ -3954,10 +4360,10 @@ mod tests {
     }
 
     #[test]
-    fn shaping_fragments_do_not_cross_cursor_boundaries() {
+    fn adjacent_narrow_cells_share_one_shaping_fragment() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("b"), cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), Some(1));
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input
@@ -3965,7 +4371,7 @@ mod tests {
                 .iter()
                 .map(|fragment| fragment.text.as_ref())
                 .collect::<Vec<_>>(),
-            vec!["a", "b", "c"]
+            vec!["abc"]
         );
     }
 
@@ -3975,7 +4381,7 @@ mod tests {
         blinking.blinking = true;
         let row = Arc::<[CellSnapshot]>::from([cell("a"), blinking, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input
@@ -4002,7 +4408,7 @@ mod tests {
         let row =
             Arc::<[CellSnapshot]>::from([cell("界"), tail, cell("x"), cell("e\u{301}"), cell("y")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.fragments.len(), 4);
         assert_eq!(input.fragments[0].start, 0);
@@ -4028,7 +4434,7 @@ mod tests {
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([box_line, variation_sequence, wide_block, tail]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input
@@ -4057,7 +4463,7 @@ mod tests {
         tail.text = " ".to_owned();
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([block, tail]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
         let mut symbol_plans = SymbolPlanCache::default();
 
         let prepared = prepare_symbol_geometry(
@@ -4082,7 +4488,7 @@ mod tests {
     #[test]
     fn symbol_prepaint_snaps_origins_to_backing_pixels() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("a"), cell("█")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
         let mut symbol_plans = SymbolPlanCache::default();
 
         let visible = prepare_symbol_geometry(
@@ -4102,7 +4508,7 @@ mod tests {
     #[test]
     fn vector_symbols_prepare_flat_cell_local_quads() {
         let row = Arc::<[CellSnapshot]>::from([cell("\u{e0b0}"), cell("\u{e0b1}")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
         let mut symbol_plans = SymbolPlanCache::default();
 
         let prepared = prepare_symbol_geometry(
@@ -4144,7 +4550,7 @@ mod tests {
     #[test]
     fn adjacent_full_block_quads_share_backing_pixel_edges() {
         let row = Arc::<[CellSnapshot]>::from([cell("█"), cell("█"), cell("█")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
         let mut symbol_plans = SymbolPlanCache::default();
 
         let prepared = prepare_symbol_geometry(
@@ -4172,7 +4578,7 @@ mod tests {
     fn right_to_left_cells_keep_terminal_cell_order() {
         let row = Arc::<[CellSnapshot]>::from([cell("א"), cell("ב"), cell("ג")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input
@@ -4213,7 +4619,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -4224,7 +4629,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -4247,7 +4651,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -4261,7 +4664,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -4351,8 +4753,6 @@ mod tests {
         assert_eq!(snapshot.graphics.placements.len(), 1);
         let position = snapshot.cursor.position.unwrap();
         assert_eq!(position.column, 1);
-        let cursor = (position, snapshot.rows[0][1].clone());
-
         let test_window = cx.add_window(|_, _| gpui::EmptyView);
         test_window
             .update(cx, |_, window, _| {
@@ -4364,19 +4764,12 @@ mod tests {
                     &snapshot.colors,
                     &terminal_fonts,
                     &Arc::from([]),
-                    snapshot.cursor.position,
                     grid_metrics(),
                 );
                 let geometry = cache.prepare_visible_geometry(
                     &rows,
                     1,
                     prepared_grid_layout(&terminal_fonts, px(14.0), px(8.0)),
-                    Some(&cursor),
-                    CursorSnapshot {
-                        visible: true,
-                        shape: CursorShapeSnapshot::Block,
-                        ..snapshot.cursor
-                    },
                     window,
                 );
 
@@ -4388,7 +4781,6 @@ mod tests {
                         .collect::<Vec<_>>(),
                     [(px(0.0), "a"), (px(16.0), "z")]
                 );
-                assert!(geometry[0].cursor_text.is_empty());
             })
             .expect("the test window should remain available");
     }
@@ -4412,15 +4804,12 @@ mod tests {
                     &colors(),
                     &terminal_fonts,
                     &Arc::from([]),
-                    None,
                     grid_metrics(),
                 );
                 let first_geometry = cache.prepare_visible_geometry(
                     &first_inputs,
                     2,
                     prepared_grid_layout(&terminal_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let first_text = Arc::clone(&cache.prepared_text[1].prepared);
@@ -4436,15 +4825,12 @@ mod tests {
                     &colors(),
                     &terminal_fonts,
                     &Arc::from([]),
-                    None,
                     grid_metrics(),
                 );
                 let moved_geometry = cache.prepare_visible_geometry(
                     &moved_inputs,
                     2,
                     prepared_grid_layout(&terminal_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
 
@@ -4476,15 +4862,12 @@ mod tests {
                     &colors(),
                     &terminal_fonts,
                     &Arc::from([]),
-                    None,
                     grid_metrics(),
                 );
                 cache.prepare_visible_geometry(
                     &inputs,
                     1,
                     prepared_grid_layout(&terminal_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let first = Arc::clone(&cache.prepared_text[0].prepared);
@@ -4493,8 +4876,6 @@ mod tests {
                     &inputs,
                     1,
                     prepared_grid_layout(&terminal_fonts, px(15.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
 
@@ -4534,14 +4915,11 @@ mod tests {
                 ]);
                 let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells.clone())]);
                 let mut cache = TerminalGridCache::new();
-                let inputs =
-                    cache.prepare(&rows, &colors, &fonts, &Arc::from([]), None, grid_metrics());
+                let inputs = cache.prepare(&rows, &colors, &fonts, &Arc::from([]), grid_metrics());
                 let original = cache.prepare_visible_geometry(
                     &inputs,
                     1,
                     prepared_grid_layout(&fonts, px(14.0), px(8.375)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 for selecting in [true, false] {
@@ -4561,14 +4939,11 @@ mod tests {
                             }])
                         };
                         let rows = Arc::<[RowSnapshot]>::from([Arc::from(changed)]);
-                        let inputs =
-                            cache.prepare(&rows, &colors, &fonts, &spans, None, grid_metrics());
+                        let inputs = cache.prepare(&rows, &colors, &fonts, &spans, grid_metrics());
                         let prepared = cache.prepare_visible_geometry(
                             &inputs,
                             1,
                             prepared_grid_layout(&fonts, px(14.0), px(8.375)),
-                            None,
-                            CursorSnapshot::default(),
                             window,
                         );
                         assert_eq!(
@@ -4601,6 +4976,103 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cursor_motion_preserves_absolute_glyph_positions_at_fractional_cell_widths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let mut cells = "abcdefghijklmnop"
+                    .chars()
+                    .map(|ch| cell(&ch.to_string()))
+                    .collect::<Vec<_>>();
+                let mut tail = cell(" ");
+                tail.spacer_tail = true;
+                cells.extend([cell("e\u{301}"), cell("界"), tail, cell("z")]);
+                let rows = Arc::<[RowSnapshot]>::from([
+                    Arc::from(cells.clone()),
+                    Arc::from(cells.clone()),
+                ]);
+                let mut cache = TerminalGridCache::new();
+                let absolute_glyph_positions = |row: &PreparedRow| {
+                    row.text
+                        .iter()
+                        .flat_map(|text| {
+                            text.line.runs.iter().flat_map(|run| {
+                                run.glyphs.iter().map(|glyph| text.origin + glyph.position)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                let inputs =
+                    cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                let (baseline, _) = cache.prepare_frame_geometry(
+                    &inputs,
+                    rows.len(),
+                    prepared_grid_layout(&fonts, px(14.0), px(8.375)),
+                    None,
+                    CursorSnapshot::default(),
+                    window,
+                );
+                let baseline_positions = baseline
+                    .iter()
+                    .map(|row| absolute_glyph_positions(row))
+                    .collect::<Vec<_>>();
+
+                for shape in [
+                    CursorShapeSnapshot::Bar,
+                    CursorShapeSnapshot::Block,
+                    CursorShapeSnapshot::Underline,
+                ] {
+                    for (row, column) in [0, 1, 0]
+                        .into_iter()
+                        .flat_map(|row| [0, 5, 15, 16, 17, 19].map(|column| (row, column)))
+                    {
+                        let position = CursorPositionSnapshot {
+                            row,
+                            column,
+                            width_cells: u8::from(column == 17) + 1,
+                        };
+                        let inputs =
+                            cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                        let cursor = (position, cells[usize::from(column)].clone());
+                        let (prepared, _) = cache.prepare_frame_geometry(
+                            &inputs,
+                            rows.len(),
+                            prepared_grid_layout(&fonts, px(14.0), px(8.375)),
+                            Some(&cursor),
+                            CursorSnapshot {
+                                visible: true,
+                                shape,
+                                ..CursorSnapshot::default()
+                            },
+                            window,
+                        );
+
+                        assert_eq!(
+                            prepared
+                                .iter()
+                                .map(|row| absolute_glyph_positions(row))
+                                .collect::<Vec<_>>(),
+                            baseline_positions,
+                            "shape={shape:?}, row={row}, column={column}"
+                        );
+                        assert!(
+                            baseline
+                                .iter()
+                                .zip(&prepared)
+                                .all(|(before, after)| { Arc::ptr_eq(before, after) }),
+                            "cursor movement must reuse every row's stable geometry"
+                        );
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn shaped_text_cache_reuses_colors_but_invalidates_prepared_fonts(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4614,20 +5086,12 @@ mod tests {
                 let no_find = Arc::from([]);
                 let mut first_colors = colors();
                 let mut cache = TerminalGridCache::new();
-                let first_inputs = cache.prepare(
-                    &rows,
-                    &first_colors,
-                    &first_fonts,
-                    &no_find,
-                    None,
-                    grid_metrics(),
-                );
+                let first_inputs =
+                    cache.prepare(&rows, &first_colors, &first_fonts, &no_find, grid_metrics());
                 let first_geometry = cache.prepare_visible_geometry(
                     &first_inputs,
                     1,
                     prepared_grid_layout(&first_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let first_line = Arc::clone(&first_geometry[0].text[0].line);
@@ -4635,20 +5099,12 @@ mod tests {
 
                 first_colors.foreground = Color::rgb(0x12_34_56);
                 Arc::make_mut(&mut first_colors.configured).foreground = first_colors.foreground;
-                let color_inputs = cache.prepare(
-                    &rows,
-                    &first_colors,
-                    &first_fonts,
-                    &no_find,
-                    None,
-                    grid_metrics(),
-                );
+                let color_inputs =
+                    cache.prepare(&rows, &first_colors, &first_fonts, &no_find, grid_metrics());
                 let color_geometry = cache.prepare_visible_geometry(
                     &color_inputs,
                     1,
                     prepared_grid_layout(&first_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let color_line = Arc::clone(&color_geometry[0].text[0].line);
@@ -4667,15 +5123,12 @@ mod tests {
                     &first_colors,
                     &first_fonts,
                     &find_spans,
-                    None,
                     grid_metrics(),
                 );
                 let find_geometry = cache.prepare_visible_geometry(
                     &find_inputs,
                     1,
                     prepared_grid_layout(&first_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let find_line = Arc::clone(&find_geometry[0].text[0].line);
@@ -4686,15 +5139,12 @@ mod tests {
                     &first_colors,
                     &second_fonts,
                     &find_spans,
-                    None,
                     grid_metrics(),
                 );
                 let font_geometry = cache.prepare_visible_geometry(
                     &font_inputs,
                     1,
                     prepared_grid_layout(&second_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
 
@@ -4725,15 +5175,12 @@ mod tests {
                     &colors(),
                     &terminal_fonts,
                     &Arc::from([]),
-                    None,
                     grid_metrics(),
                 );
                 cache.prepare_visible_geometry(
                     &inputs,
                     2,
                     prepared_grid_layout(&terminal_fonts, px(14.0), px(8.0)),
-                    None,
-                    CursorSnapshot::default(),
                     window,
                 );
 
@@ -4772,11 +5219,10 @@ mod tests {
             &Arc::from([cell("a")]),
             &colors(),
             &"Menlo".into(),
-            None,
         ));
         let builds = Cell::new(0);
         let mut cached = None;
-        let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(None), || {
+        let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(), || {
             builds.set(builds.get() + 1);
             PreparedRow {
                 text: Vec::new(),
@@ -4794,14 +5240,12 @@ mod tests {
                     underlines: Vec::new(),
                 },
                 over_text_decorations: PreparedDecorations::default(),
-                cursor_text: Vec::new(),
-                cursor_symbols: PreparedDecorations::default(),
             }
         });
         let stable_buffer = stable.under_text_decorations.quads.as_ptr();
 
         for _phase in [false, true] {
-            let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(None), || {
+            let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(), || {
                 builds.set(builds.get() + 1);
                 panic!("blink phase must not rebuild stable row geometry")
             });
@@ -4822,18 +5266,15 @@ mod tests {
             &Arc::from([cell("a")]),
             &colors(),
             &"Menlo".into(),
-            None,
         ));
         let second_source = Arc::new(prepare_row(
             &Arc::from([cell("b")]),
             &colors(),
             &"Menlo".into(),
-            None,
         ));
         let mut cached = None;
-        let first = reuse_or_prepare_row(&mut cached, &first_source, prepared_row_key(None), || ());
-        let second =
-            reuse_or_prepare_row(&mut cached, &second_source, prepared_row_key(None), || ());
+        let first = reuse_or_prepare_row(&mut cached, &first_source, prepared_row_key(), || ());
+        let second = reuse_or_prepare_row(&mut cached, &second_source, prepared_row_key(), || ());
 
         assert!(!Arc::ptr_eq(&first, &second));
     }
@@ -4844,10 +5285,9 @@ mod tests {
             &Arc::from([cell("a")]),
             &colors(),
             &"Menlo".into(),
-            None,
         ));
         let mut cached = None;
-        let first_key = prepared_row_key(None);
+        let first_key = prepared_row_key();
         let first = reuse_or_prepare_row(&mut cached, &source, first_key, || ());
         let second = reuse_or_prepare_row(
             &mut cached,
@@ -4863,135 +5303,6 @@ mod tests {
     }
 
     #[test]
-    fn shaped_geometry_cache_limits_cursor_invalidation_to_the_cursor_row() {
-        let source = Arc::new(prepare_row(
-            &Arc::from([cell("a")]),
-            &colors(),
-            &"Menlo".into(),
-            None,
-        ));
-        let cursor = PreparedCursorKey {
-            column: 0,
-            width_cells: 1,
-            shape: CursorShapeSnapshot::Block,
-            text_color: Color::rgb(0xff_ff_ff),
-        };
-        let mut cursor_row = None;
-        let mut unchanged_row = None;
-        let before = reuse_or_prepare_row(&mut cursor_row, &source, prepared_row_key(None), || ());
-        let after = reuse_or_prepare_row(
-            &mut cursor_row,
-            &source,
-            prepared_row_key(Some(cursor)),
-            || (),
-        );
-        let unchanged_before =
-            reuse_or_prepare_row(&mut unchanged_row, &source, prepared_row_key(None), || ());
-        let unchanged_after =
-            reuse_or_prepare_row(&mut unchanged_row, &source, prepared_row_key(None), || {
-                panic!("a cursor on another row must not invalidate stable geometry")
-            });
-
-        assert_eq!(
-            (
-                Arc::ptr_eq(&before, &after),
-                Arc::ptr_eq(&unchanged_before, &unchanged_after),
-            ),
-            (false, true)
-        );
-    }
-
-    #[test]
-    fn cursor_blink_phase_reuses_every_prepared_row() {
-        let rows = Arc::<[RowSnapshot]>::from([
-            Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
-            Arc::<[CellSnapshot]>::from([cell("c"), cell("d")]),
-            Arc::<[CellSnapshot]>::from([cell("e"), cell("f")]),
-        ]);
-        let cursor = CursorPositionSnapshot {
-            row: 1,
-            column: 0,
-            width_cells: 1,
-        };
-        let mut cache = TerminalGridCache::new();
-        let terminal_fonts = test_terminal_fonts(&"Menlo".into());
-        let find_spans = Arc::from([]);
-        let first = cache.prepare(
-            &rows,
-            &colors(),
-            &terminal_fonts,
-            &find_spans,
-            Some(cursor),
-            grid_metrics(),
-        );
-
-        let negotiated = CursorSnapshot {
-            position: Some(cursor),
-            visible: true,
-            blinking: true,
-            ..CursorSnapshot::default()
-        };
-        assert!(presented_cursor_style(negotiated, true, true).visible);
-        assert!(!presented_cursor_style(negotiated, true, false).visible);
-
-        let second = cache.prepare(
-            &rows,
-            &colors(),
-            &terminal_fonts,
-            &find_spans,
-            Some(cursor),
-            grid_metrics(),
-        );
-        assert!(
-            first
-                .iter()
-                .zip(second.iter())
-                .all(|(first, second)| Arc::ptr_eq(first, second))
-        );
-    }
-
-    #[test]
-    fn cursor_movement_only_invalidates_affected_prepared_rows() {
-        let rows = Arc::<[RowSnapshot]>::from([
-            Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
-            Arc::<[CellSnapshot]>::from([cell("c"), cell("d")]),
-            Arc::<[CellSnapshot]>::from([cell("e"), cell("f")]),
-        ]);
-        let mut cache = TerminalGridCache::new();
-        let terminal_fonts = test_terminal_fonts(&"Menlo".into());
-        let find_spans = Arc::from([]);
-        let first = cache.prepare(
-            &rows,
-            &colors(),
-            &terminal_fonts,
-            &find_spans,
-            Some(CursorPositionSnapshot {
-                row: 0,
-                column: 1,
-                width_cells: 1,
-            }),
-            grid_metrics(),
-        );
-
-        let second = cache.prepare(
-            &rows,
-            &colors(),
-            &terminal_fonts,
-            &find_spans,
-            Some(CursorPositionSnapshot {
-                row: 1,
-                column: 0,
-                width_cells: 1,
-            }),
-            grid_metrics(),
-        );
-
-        assert!(!Arc::ptr_eq(&first[0], &second[0]));
-        assert!(!Arc::ptr_eq(&first[1], &second[1]));
-        assert!(Arc::ptr_eq(&first[2], &second[2]));
-    }
-
-    #[test]
     fn render_cache_invalidates_rows_when_color_semantics_change() {
         let row = Arc::<[CellSnapshot]>::from([cell("a")]);
         let rows = Arc::<[RowSnapshot]>::from([row]);
@@ -5004,7 +5315,6 @@ mod tests {
             &first_colors,
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -5015,7 +5325,6 @@ mod tests {
             &changed_colors,
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -5034,7 +5343,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -5044,7 +5352,6 @@ mod tests {
             &colors(),
             &terminal_fonts,
             &find_spans,
-            None,
             grid_metrics(),
         );
 
@@ -5063,7 +5370,6 @@ mod idle_retention_tests {
         let retained = Arc::downgrade(&row);
         cache.row_inputs.push(PreparedRowInputCacheEntry {
             source: row,
-            cursor_column: None,
             prepared: Arc::new(RowPaintInput {
                 font_resolution_identity: String::new(),
                 fragments: Vec::new(),
@@ -5079,12 +5385,8 @@ mod idle_retention_tests {
             key: PreparedRowTextKey {
                 font_size: px(14.0),
                 cell_width: px(8.0),
-                cursor: None,
             },
-            prepared: Arc::new(PreparedRowText {
-                text: Vec::new(),
-                cursor_text: Vec::new(),
-            }),
+            prepared: Arc::new(PreparedRowText { text: Vec::new() }),
         });
         cache.prepared_geometry.resize_with(128, || None);
         cache.evict();

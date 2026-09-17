@@ -872,6 +872,8 @@ pub struct Window {
     pub(crate) pending_input_observers: SubscriberSet<(), AnyObserver>,
     prompt: Option<RenderablePromptHandle>,
     pub(crate) client_inset: Option<Pixels>,
+    #[cfg(any(test, feature = "test-support"))]
+    paint_quad_call_count: usize,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
 }
@@ -1263,6 +1265,8 @@ impl Window {
             prompt: None,
             client_inset: None,
             image_cache_stack: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            paint_quad_call_count: 0,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
         })
@@ -1305,6 +1309,98 @@ impl ContentMask<Pixels> {
         let bounds = self.bounds.intersect(&other.bounds);
         ContentMask { bounds }
     }
+}
+
+/// Controls how a glyph is painted where it intersects a rectangular region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GlyphPaintRegion {
+    /// Do not paint the glyph inside the region.
+    Exclude(Bounds<Pixels>),
+    /// Paint monochrome glyphs with a replacement color inside the region.
+    /// Polychrome glyphs retain their original appearance.
+    Recolor {
+        /// The region where the replacement applies.
+        bounds: Bounds<Pixels>,
+        /// The replacement color for monochrome glyphs.
+        color: Hsla,
+    },
+}
+
+/// A painted glyph kind exposed only to renderer integration tests.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PaintedGlyphKindForTest {
+    /// A monochrome glyph and its composited color.
+    Monochrome {
+        /// The color submitted to the scene.
+        color: Hsla,
+    },
+    /// A polychrome emoji glyph.
+    Emoji,
+}
+
+/// The raster and clipped bounds of one glyph scene primitive.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedGlyphForTest {
+    /// The complete raster bounds before content masking.
+    pub raster_bounds: Bounds<ScaledPixels>,
+    /// The raster bounds visible through the primitive's content mask.
+    pub visible_bounds: Bounds<ScaledPixels>,
+    /// The scene order used for compositing.
+    pub order: u32,
+    /// Whether this is a monochrome or polychrome glyph.
+    pub kind: PaintedGlyphKindForTest,
+}
+
+/// The clipped bounds and scene order of one quad primitive.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedQuadForTest {
+    /// The quad bounds visible through the primitive's content mask.
+    pub visible_bounds: Bounds<ScaledPixels>,
+    /// The scene order used for compositing.
+    pub order: u32,
+}
+
+impl GlyphPaintRegion {
+    fn bounds(self) -> Bounds<Pixels> {
+        match self {
+            Self::Exclude(bounds) | Self::Recolor { bounds, .. } => bounds,
+        }
+    }
+}
+
+fn content_masks_excluding_region(
+    content_mask: ContentMask<ScaledPixels>,
+    excluded_bounds: Bounds<ScaledPixels>,
+) -> SmallVec<[ContentMask<ScaledPixels>; 4]> {
+    let bounds = content_mask.bounds;
+    let excluded = excluded_bounds.intersect(&bounds);
+    let mut masks = SmallVec::new();
+    for bounds in [
+        Bounds::new(
+            bounds.origin,
+            size(excluded.left() - bounds.left(), bounds.size.height),
+        ),
+        Bounds::new(
+            point(excluded.right(), bounds.top()),
+            size(bounds.right() - excluded.right(), bounds.size.height),
+        ),
+        Bounds::new(
+            point(excluded.left(), bounds.top()),
+            size(excluded.size.width, excluded.top() - bounds.top()),
+        ),
+        Bounds::new(
+            point(excluded.left(), excluded.bottom()),
+            size(excluded.size.width, bounds.bottom() - excluded.bottom()),
+        ),
+    ] {
+        if !bounds.size.width.is_zero() && !bounds.size.height.is_zero() {
+            masks.push(ContentMask { bounds });
+        }
+    }
+    masks
 }
 
 impl Window {
@@ -2844,12 +2940,33 @@ impl Window {
     /// where the circular arcs meet. This will not display well when combined with dashed borders.
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
     pub fn paint_quad(&mut self, quad: PaintQuad) {
+        self.paint_quad_impl(quad, None);
+    }
+
+    /// Paints a quad once while excluding the part inside `excluded_bounds`.
+    ///
+    /// Scaling, opacity, and primitive preparation run once even when clipping splits the quad
+    /// into multiple scene primitives.
+    pub fn paint_quad_excluding_region(
+        &mut self,
+        quad: PaintQuad,
+        excluded_bounds: Bounds<Pixels>,
+    ) {
+        self.paint_quad_impl(quad, Some(excluded_bounds));
+    }
+
+    fn paint_quad_impl(&mut self, quad: PaintQuad, excluded_bounds: Option<Bounds<Pixels>>) {
         self.invalidator.debug_assert_paint();
+
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.paint_quad_call_count += 1;
+        }
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
-        self.next_frame.scene.insert_primitive(Quad {
+        let painted = Quad {
             order: 0,
             bounds: quad.bounds.scale(scale_factor),
             content_mask: content_mask.scale(scale_factor),
@@ -2858,7 +2975,23 @@ impl Window {
             corner_radii: quad.corner_radii.scale(scale_factor),
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
-        });
+        };
+        let excluded_bounds = excluded_bounds.map(|bounds| bounds.scale(scale_factor));
+        let visible_exclusion = excluded_bounds
+            .map(|bounds| bounds.intersect(&painted.content_mask.bounds))
+            .filter(|bounds| !bounds.is_empty() && painted.bounds.intersects(bounds));
+        if let Some(visible_exclusion) = visible_exclusion {
+            for content_mask in
+                content_masks_excluding_region(painted.content_mask.clone(), visible_exclusion)
+            {
+                self.next_frame.scene.insert_primitive(Quad {
+                    content_mask,
+                    ..painted.clone()
+                });
+            }
+        } else {
+            self.next_frame.scene.insert_primitive(painted);
+        }
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
@@ -2960,6 +3093,34 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, None)
+    }
+
+    /// Paints a monochrome glyph once, clipping or recoloring the part inside `region`.
+    ///
+    /// The glyph is rasterized and looked up in the atlas once even when the region splits it
+    /// into multiple scene primitives.
+    pub fn paint_glyph_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, Some(region))
+    }
+
+    fn paint_glyph_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: Option<GlyphPaintRegion>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
@@ -2993,15 +3154,52 @@ impl Window {
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.content_mask().scale(scale_factor);
-            self.next_frame.scene.insert_primitive(MonochromeSprite {
-                order: 0,
-                pad: 0,
-                bounds,
-                content_mask,
-                color: color.opacity(element_opacity),
-                tile,
-                transformation: TransformationMatrix::unit(),
+            let scaled_region = region.map(|region| region.bounds().scale(scale_factor));
+            let visible_region = scaled_region.map(|region| region.intersect(&content_mask.bounds));
+            let region_intersects_glyph = visible_region.is_some_and(|region| {
+                !region.size.width.is_zero()
+                    && !region.size.height.is_zero()
+                    && bounds.intersects(&region)
             });
+            if region_intersects_glyph {
+                for content_mask in content_masks_excluding_region(
+                    content_mask.clone(),
+                    scaled_region.expect("a visible region has bounds"),
+                ) {
+                    self.next_frame.scene.insert_primitive(MonochromeSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask,
+                        color: color.opacity(element_opacity),
+                        tile: tile.clone(),
+                        transformation: TransformationMatrix::unit(),
+                    });
+                }
+                if let Some(GlyphPaintRegion::Recolor { color, .. }) = region {
+                    self.next_frame.scene.insert_primitive(MonochromeSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask: ContentMask {
+                            bounds: visible_region.expect("an intersecting region is visible"),
+                        },
+                        color: color.opacity(element_opacity),
+                        tile,
+                        transformation: TransformationMatrix::unit(),
+                    });
+                }
+            } else {
+                self.next_frame.scene.insert_primitive(MonochromeSprite {
+                    order: 0,
+                    pad: 0,
+                    bounds,
+                    content_mask,
+                    color: color.opacity(element_opacity),
+                    tile,
+                    transformation: TransformationMatrix::unit(),
+                });
+            }
         }
         Ok(())
     }
@@ -3020,6 +3218,31 @@ impl Window {
         font_id: FontId,
         glyph_id: GlyphId,
         font_size: Pixels,
+    ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, None)
+    }
+
+    /// Paints an emoji glyph once, excluding or preserving the part inside `region`.
+    ///
+    /// A recolor region preserves the emoji because polychrome glyphs have no text color.
+    pub fn paint_emoji_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, Some(region))
+    }
+
+    fn paint_emoji_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: Option<GlyphPaintRegion>,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3051,17 +3274,55 @@ impl Window {
             };
             let content_mask = self.content_mask().scale(scale_factor);
             let opacity = self.element_opacity();
-
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
-                order: 0,
-                pad: 0,
-                grayscale: false,
-                bounds,
-                corner_radii: Default::default(),
-                content_mask,
-                tile,
-                opacity,
+            let scaled_region = region.map(|region| region.bounds().scale(scale_factor));
+            let visible_region = scaled_region.map(|region| region.intersect(&content_mask.bounds));
+            let region_intersects_glyph = visible_region.is_some_and(|region| {
+                !region.size.width.is_zero()
+                    && !region.size.height.is_zero()
+                    && bounds.intersects(&region)
             });
+            if region_intersects_glyph {
+                for content_mask in content_masks_excluding_region(
+                    content_mask.clone(),
+                    scaled_region.expect("a visible region has bounds"),
+                ) {
+                    self.next_frame.scene.insert_primitive(PolychromeSprite {
+                        order: 0,
+                        pad: 0,
+                        grayscale: false,
+                        bounds,
+                        corner_radii: Default::default(),
+                        content_mask,
+                        tile: tile.clone(),
+                        opacity,
+                    });
+                }
+                if matches!(region, Some(GlyphPaintRegion::Recolor { .. })) {
+                    self.next_frame.scene.insert_primitive(PolychromeSprite {
+                        order: 0,
+                        pad: 0,
+                        grayscale: false,
+                        bounds,
+                        corner_radii: Default::default(),
+                        content_mask: ContentMask {
+                            bounds: visible_region.expect("an intersecting region is visible"),
+                        },
+                        tile,
+                        opacity,
+                    });
+                }
+            } else {
+                self.next_frame.scene.insert_primitive(PolychromeSprite {
+                    order: 0,
+                    pad: 0,
+                    grayscale: false,
+                    bounds,
+                    corner_radii: Default::default(),
+                    content_mask,
+                    tile,
+                    opacity,
+                });
+            }
         }
         Ok(())
     }
@@ -4628,6 +4889,67 @@ impl Window {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
+    }
+
+    /// Returns glyph primitives submitted by the current test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_glyphs_for_test(&self) -> Vec<PaintedGlyphForTest> {
+        let scene = if self.next_frame.scene.len() == 0 {
+            &self.rendered_frame.scene
+        } else {
+            &self.next_frame.scene
+        };
+        scene
+            .monochrome_sprites
+            .iter()
+            .map(|glyph| PaintedGlyphForTest {
+                raster_bounds: glyph.bounds,
+                visible_bounds: glyph.bounds.intersect(&glyph.content_mask.bounds),
+                order: glyph.order,
+                kind: PaintedGlyphKindForTest::Monochrome { color: glyph.color },
+            })
+            .chain(
+                scene
+                    .polychrome_sprites
+                    .iter()
+                    .map(|glyph| PaintedGlyphForTest {
+                        raster_bounds: glyph.bounds,
+                        visible_bounds: glyph.bounds.intersect(&glyph.content_mask.bounds),
+                        order: glyph.order,
+                        kind: PaintedGlyphKindForTest::Emoji,
+                    }),
+            )
+            .collect()
+    }
+
+    /// Returns quad primitives submitted by the current test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_quads_for_test(&self) -> Vec<PaintedQuadForTest> {
+        let scene = if self.next_frame.scene.len() == 0 {
+            &self.rendered_frame.scene
+        } else {
+            &self.next_frame.scene
+        };
+        scene
+            .quads
+            .iter()
+            .map(|quad| PaintedQuadForTest {
+                visible_bounds: quad.bounds.intersect(&quad.content_mask.bounds),
+                order: quad.order,
+            })
+            .collect()
+    }
+
+    /// Resets primitive paint call counters for one integration-test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reset_paint_call_counts_for_test(&mut self) {
+        self.paint_quad_call_count = 0;
+    }
+
+    /// Returns the number of quad paint operations requested since the last reset.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn quad_paint_call_count_for_test(&self) -> usize {
+        self.paint_quad_call_count
     }
 }
 
