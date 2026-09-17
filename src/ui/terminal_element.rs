@@ -1179,10 +1179,7 @@ impl TerminalGridCache {
             if layout.caret.row == row_index {
                 let caret_left = grid_bounds.left() + cell_width * layout.caret.column as f32;
                 row.caret = Some(fill(
-                    Bounds::new(
-                        point(caret_left, row_top),
-                        size(px(1.0), row_bottom - row_top),
-                    ),
+                    Bounds::new(point(caret_left, row_top), size(px(1.0), line_height)),
                     gpui_color(caret_color),
                 ));
             }
@@ -1567,28 +1564,13 @@ impl Element for TerminalGridElement {
                 && let Some((position, _)) = &self.cursor
                 && usize::from(position.row) == row_index
             {
-                let cursor_left = grid_left + self.cell_width * f32::from(position.column);
-                let cursor_right = terminal_column_paint_right(
-                    grid_bounds,
-                    usize::from(position.column) + usize::from(position.width_cells.max(1)),
-                    viewport_columns,
+                let plan = frame_cursor_paint_plan(
+                    grid_left,
+                    row_top,
                     self.cell_width,
-                );
-                let row_bottom = terminal_row_paint_bottom(
-                    grid_bounds,
-                    row_index,
-                    viewport_rows,
                     self.line_height,
-                );
-                let cursor_cell_width =
-                    (cursor_right - cursor_left) / f32::from(position.width_cells.max(1));
-                let plan = cursor_paint_plan(
-                    true,
-                    self.cursor_style.shape,
-                    point(cursor_left, row_top),
-                    cursor_cell_width,
-                    row_bottom - row_top,
-                    position.width_cells,
+                    *position,
+                    self.cursor_style,
                 )
                 .expect("a visible cursor always produces a paint plan");
                 cursor_background = Some(match plan.paint {
@@ -2990,6 +2972,25 @@ fn cursor_paint_plan(
     })
 }
 
+fn frame_cursor_paint_plan(
+    grid_left: Pixels,
+    row_top: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    position: CursorPositionSnapshot,
+    style: CursorSnapshot,
+) -> Option<CursorPaintPlan> {
+    let cursor_left = grid_left + cell_width * f32::from(position.column);
+    cursor_paint_plan(
+        style.visible,
+        style.shape,
+        point(cursor_left, row_top),
+        cell_width,
+        line_height,
+        position.width_cells,
+    )
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -3294,6 +3295,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn final_row_cursor_should_keep_normal_cell_geometry() {
+        let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(95.0), px(45.0)));
+        let position = CursorPositionSnapshot {
+            column: 9,
+            row: 1,
+            width_cells: 1,
+        };
+        let style = CursorSnapshot {
+            visible: true,
+            shape: CursorShapeSnapshot::Bar,
+            ..CursorSnapshot::default()
+        };
+
+        let actual =
+            frame_cursor_paint_plan(grid.left(), px(20.0), px(9.0), px(20.0), position, style)
+                .unwrap();
+        let expected = cursor_paint_plan(
+            true,
+            CursorShapeSnapshot::Bar,
+            point(px(81.0), px(20.0)),
+            px(9.0),
+            px(20.0),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
