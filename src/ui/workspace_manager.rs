@@ -2654,6 +2654,9 @@ impl WorkspaceManager {
             }
             SidebarEvent::NewLocalWorkspace => self.create_local_workspace(window, cx),
             SidebarEvent::NewRemoteWorkspace => {
+                // The creation menu returns focus to its trigger on close, so return it to
+                // the terminal before the flow captures its cancel-restore target.
+                self.focus(window, cx);
                 self.present_remote_workspace_flow(String::new(), window, cx)
             }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
@@ -2950,21 +2953,32 @@ impl WorkspaceManager {
             let name = query.trim().to_owned();
             let local = ComboBoxItem::new(
                 WorkspaceSwitcherChoice::Local(name.clone()),
-                "Local Workspace",
+                super::workspace_creation::LOCAL_WORKSPACE_LABEL,
             )
             .leading_icon(move |foreground, size| {
-                Icon::custom(CustomIconName::RectangleStackBadgePlus, size, foreground)
-                    .into_any_element()
+                Icon::custom(
+                    super::workspace_creation::LOCAL_WORKSPACE_ICON,
+                    size,
+                    foreground,
+                )
+                .into_any_element()
             })
             .shortcut(new_workspace_shortcut)
             .debug_selector("workspace-switcher-create-local");
-            let mut remote =
-                ComboBoxItem::new(WorkspaceSwitcherChoice::Remote(name), "Remote Workspace")
-                    .shortcut(new_remote_workspace_shortcut)
-                    .leading_icon(move |foreground, size| {
-                        Icon::custom(CustomIconName::GlobePlus, size, foreground).into_any_element()
-                    })
-                    .debug_selector("workspace-switcher-create-remote");
+            let mut remote = ComboBoxItem::new(
+                WorkspaceSwitcherChoice::Remote(name),
+                super::workspace_creation::REMOTE_WORKSPACE_LABEL,
+            )
+            .shortcut(new_remote_workspace_shortcut)
+            .leading_icon(move |foreground, size| {
+                Icon::custom(
+                    super::workspace_creation::REMOTE_WORKSPACE_ICON,
+                    size,
+                    foreground,
+                )
+                .into_any_element()
+            })
+            .debug_selector("workspace-switcher-create-remote");
             if let Some(reason) = &remote_unavailable_reason {
                 remote = remote
                     .disabled(true)

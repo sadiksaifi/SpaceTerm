@@ -36,7 +36,7 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> MenuThe
 
     MenuTheme::new(
         paint,
-        MenuSizes::new(metrics(196.0), metrics(208.0), metrics(240.0)),
+        MenuSizes::new(metrics(196.0), metrics(208.0), metrics(200.0)),
     )
     .shadow(super::appearance::control_shadow(colors, false))
 }

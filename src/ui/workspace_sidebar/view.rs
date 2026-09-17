@@ -397,7 +397,8 @@ impl WorkspaceSidebar {
         let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let footer_icon_size = appearance.spacing(SIDEBAR_FOOTER_ICON_SIZE);
-        let shortcuts = presentation.shortcut(&crate::ui::NewWorkspace);
+        let new_local_shortcut = presentation.shortcut(&crate::ui::NewWorkspace);
+        let new_remote_shortcut = presentation.shortcut(&NewRemoteWorkspace);
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
         let mut rows = div()
@@ -428,11 +429,53 @@ impl WorkspaceSidebar {
         }
 
         let scrollbar = self.scrollbar.clone();
-        let local_sidebar = sidebar.clone();
-        let remote_tooltip = self
-            .remote_unavailable
-            .clone()
-            .unwrap_or_else(|| "New Remote Workspace".to_owned());
+        let menu_sidebar = sidebar.clone();
+        let remote_disabled = self.remote_unavailable.is_some();
+        let new_workspace_tooltip = crate::ui::workspace_creation::new_workspace_trigger_tooltip(
+            self.remote_unavailable.as_deref(),
+        );
+        let new_workspace_menu = Menu::new(
+            "new-workspace-menu",
+            "New Workspace",
+            new_workspace_menu_entries(new_local_shortcut, new_remote_shortcut, remote_disabled),
+        )
+        .size(MenuSize::Wide)
+        .placement(AnchoredPlacementConfig::new(
+            AnchoredPlacement::Top,
+            AnchoredAlignment::End,
+        ))
+        .icon_trigger(move |foreground| {
+            div()
+                .debug_selector(|| "new-workspace-icon".to_owned())
+                .flex()
+                .child(Icon::new(IconName::Plus, footer_icon_size, foreground))
+                .into_any_element()
+        })
+        .debug_selector("new-workspace-button")
+        .on_activate(move |activation, window, cx| match *activation.action() {
+            NewWorkspaceMenuCommand::Local => {
+                let _ = menu_sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::NewLocalWorkspace);
+                });
+            }
+            NewWorkspaceMenuCommand::Remote => {
+                let sidebar = menu_sidebar.clone();
+                let _ = menu_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.dismiss_editing(window, cx);
+                });
+                // The flow opens after this menu closes so it captures Terminal Input
+                // Focus (not the menu) to restore on cancel, matching the switcher's
+                // creation rows.
+                cx.defer(move |cx| {
+                    let _ = sidebar.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::NewRemoteWorkspace);
+                    });
+                });
+            }
+        });
+        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
+            .debug_selector("new-workspace-tooltip")
+            .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
         div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
@@ -475,8 +518,8 @@ impl WorkspaceSidebar {
                     .justify_between()
                     .px(appearance.spacing(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
                     // Settings stands alone at the leading end: it is application scoped, while
-                    // the two buttons opposite it both add a Workspace to this window. Putting the
-                    // pair together and the odd one out apart says which is which without a label.
+                    // the menu opposite it adds a Workspace to this window. Keeping the odd one
+                    // out apart says which is which without a label.
                     .child(
                         IconButton::new("open-settings-button", "Settings", move |foreground| {
                             div()
@@ -503,87 +546,7 @@ impl WorkspaceSidebar {
                             );
                         }),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .child(
-                                IconButton::new(
-                                    "new-remote-workspace-button",
-                                    "New Remote Workspace",
-                                    move |foreground| {
-                                        div()
-                                            .debug_selector(|| {
-                                                "new-remote-workspace-icon".to_owned()
-                                            })
-                                            .flex()
-                                            .child(Icon::custom(
-                                                CustomIconName::GlobePlus,
-                                                footer_icon_size,
-                                                foreground,
-                                            ))
-                                            .into_any_element()
-                                    },
-                                )
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::Regular)
-                                .disabled(self.remote_unavailable.is_some())
-                                .preserve_ancestor_hover()
-                                .debug_selector("new-remote-workspace-button")
-                                .tooltip(
-                                    Tooltip::new("new-remote-workspace-tooltip", remote_tooltip)
-                                        .keyboard_equivalent(
-                                            presentation.shortcut(&NewRemoteWorkspace),
-                                        )
-                                        .debug_selector("new-remote-workspace-tooltip"),
-                                )
-                                .on_activate(
-                                    move |_, window, cx| {
-                                        let _ = sidebar.update(cx, |sidebar, cx| {
-                                            sidebar.dismiss_editing(window, cx);
-                                            cx.emit(SidebarEvent::NewRemoteWorkspace);
-                                        });
-                                    },
-                                ),
-                            )
-                            .child(
-                                IconButton::new(
-                                    "new-local-workspace-button",
-                                    "New Local Workspace",
-                                    move |foreground| {
-                                        div()
-                                            .debug_selector(|| {
-                                                "new-local-workspace-icon".to_owned()
-                                            })
-                                            .flex()
-                                            .child(Icon::custom(
-                                                CustomIconName::RectangleStackBadgePlus,
-                                                footer_icon_size,
-                                                foreground,
-                                            ))
-                                            .into_any_element()
-                                    },
-                                )
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::Regular)
-                                .preserve_ancestor_hover()
-                                .debug_selector("new-local-workspace-button")
-                                .tooltip(
-                                    Tooltip::new(
-                                        "new-local-workspace-tooltip",
-                                        "New Local Workspace",
-                                    )
-                                    .debug_selector("new-local-workspace-tooltip")
-                                    .keyboard_equivalent(shortcuts),
-                                )
-                                .on_activate(move |_, _, cx| {
-                                    let _ = local_sidebar.update(cx, |_, cx| {
-                                        cx.emit(SidebarEvent::NewLocalWorkspace)
-                                    });
-                                }),
-                            ),
-                    ),
+                    .child(new_workspace_menu),
             )
             .child(scrollbar)
             .into_any_element()
@@ -633,6 +596,34 @@ impl WorkspaceSidebar {
         }
     }
 }
+/// The footer creation menu's rows mirror the Workspace switcher's creation rows: the same
+/// labels, leading icons, and trailing shortcuts, presented as a button-triggered menu.
+/// Labels and icons come from the shared creation descriptors so the two surfaces cannot drift.
+fn new_workspace_menu_entries(
+    local_shortcut: impl Into<SharedString>,
+    remote_shortcut: impl Into<SharedString>,
+    remote_disabled: bool,
+) -> Vec<MenuEntry<NewWorkspaceMenuCommand>> {
+    use crate::ui::workspace_creation::{
+        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
+    };
+    vec![
+        MenuEntry::action(LOCAL_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Local)
+            .shortcut(local_shortcut)
+            .icon(|foreground, size| {
+                Icon::custom(LOCAL_WORKSPACE_ICON, size, foreground).into_any_element()
+            })
+            .debug_selector("new-workspace-menu-create-local"),
+        MenuEntry::action(REMOTE_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Remote)
+            .shortcut(remote_shortcut)
+            .icon(|foreground, size| {
+                Icon::custom(REMOTE_WORKSPACE_ICON, size, foreground).into_any_element()
+            })
+            .disabled(remote_disabled)
+            .debug_selector("new-workspace-menu-create-remote"),
+    ]
+}
+
 fn workspace_menu_entries(
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,

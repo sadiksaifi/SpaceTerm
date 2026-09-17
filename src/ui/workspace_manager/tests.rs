@@ -131,7 +131,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     use crate::domain::CurrentDirectory;
     let (manager, records, cx) = workspace_manager(cx);
     let (completion, _, _, _) = remote_completion("deploy@staging", "~/", "/home/tester", true);
-    click("new-remote-workspace-button", cx);
+    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
     let flow = manager.read_with(cx, |manager, _| {
         manager.remote_workspace_flow.clone().unwrap()
     });
@@ -234,7 +234,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
-    click("new-remote-workspace-button", cx);
+    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
     let flow = manager.read_with(cx, |manager, _| {
         manager.remote_workspace_flow.clone().unwrap()
     });
@@ -2285,7 +2285,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
         }),
         (false, None, true)
     );
-    click("new-remote-workspace-button", cx);
+    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
     assert_eq!(create_calls.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(records.starts().len(), 1);
@@ -4438,31 +4438,21 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     assert_eq!(button.top(), list.bottom());
     assert_eq!(button.bottom(), sidebar.bottom());
     let settings = cx.debug_bounds("open-settings-button").unwrap();
-    let remote = cx.debug_bounds("new-remote-workspace-button").unwrap();
-    let local = cx.debug_bounds("new-local-workspace-button").unwrap();
-    assert!(remote.left() < local.left());
-    assert_eq!(remote.center().y, local.center().y);
-    assert!(remote.left() >= button.left());
-    assert!(local.right() <= button.right());
-    // Settings is application scoped and the pair opposite it both add a Workspace, so the odd one
-    // out stands alone at the leading end and the pair sits together at the other.
+    let create = cx.debug_bounds("new-workspace-button").unwrap();
+    assert_eq!(settings.center().y, create.center().y);
+    assert!(create.right() <= button.right());
+    // Settings is application scoped and the menu opposite it adds a Workspace, so the odd one
+    // out stands alone at the leading end and the creation menu sits at the other.
     assert!(settings.left() >= button.left());
-    assert!(settings.right() < remote.left());
-    assert_eq!(settings.center().y, remote.center().y);
+    assert!(settings.right() < create.left());
     assert!(
-        settings.right() - button.left() < remote.left() - settings.right(),
-        "settings should stand apart from the creation pair, got {settings:?} beside {remote:?}"
+        settings.right() - button.left() < create.left() - settings.right(),
+        "settings should stand apart from the creation menu, got {settings:?} beside {create:?}"
     );
-    assert_eq!(
-        local.left() - remote.right(),
-        px(0.0),
-        "the creation pair should have no gap, got {remote:?} and {local:?}"
-    );
-    // All three footer glyphs share one visual extent while their buttons keep the same hit target.
+    // Both footer glyphs share one visual extent while their buttons keep the same hit target.
     for (icon_selector, target) in [
         ("open-settings-icon", settings),
-        ("new-remote-workspace-icon", remote),
-        ("new-local-workspace-icon", local),
+        ("new-workspace-icon", create),
     ] {
         let icon = cx.debug_bounds(icon_selector).unwrap();
         assert_eq!(icon.size, gpui::size(px(15.0), px(15.0)));
@@ -4530,6 +4520,11 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_mouse_move(position, None, Modifiers::none());
     cx.simulate_click(position, Modifiers::none());
     cx.run_until_parked();
+}
+
+fn click_new_workspace_menu(entry: &'static str, cx: &mut VisualTestContext) {
+    click("new-workspace-button", cx);
+    click(entry, cx);
 }
 
 fn press_return(cx: &mut VisualTestContext) {
@@ -6000,10 +5995,69 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
     assert_eq!(panel.top(), chooser.bottom() + px(4.0));
 }
 
+/// The footer plus menu mirrors the switcher's creation rows.
+///
+/// It opens as a button-triggered menu (not a filterable combo box) with the same labels the
+/// switcher offers, so the two creation paths cannot drift apart. Both surfaces build from the
+/// shared creation descriptors; disabled parity while Remote is unavailable is exercised by
+/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
+/// which rejects the Remote row on each surface.
+#[gpui::test]
+fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
+    use crate::desktop_profile::testing_presentation;
+    use crate::ui::workspace_creation::{
+        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
+    };
+    use crate::ui::{NewRemoteWorkspace, NewWorkspace};
+
+    // The shared descriptor source both surfaces build from.
+    assert_eq!(LOCAL_WORKSPACE_LABEL, "Local Workspace");
+    assert_eq!(REMOTE_WORKSPACE_LABEL, "Remote Workspace");
+    assert_eq!(
+        LOCAL_WORKSPACE_ICON,
+        spaceterm_ui::CustomIconName::RectangleStackBadgePlus
+    );
+    assert_eq!(
+        REMOTE_WORKSPACE_ICON,
+        spaceterm_ui::CustomIconName::GlobePlus
+    );
+
+    let (_, _, cx) = workspace_manager(cx);
+    open_workspace_switcher_for_creation(cx);
+    for selector in [
+        "workspace-switcher-create-local",
+        "workspace-switcher-create-remote",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "missing switcher creation row: {selector}"
+        );
+    }
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    click("new-workspace-button", cx);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    for selector in [
+        "new-workspace-menu-create-local",
+        "new-workspace-menu-create-remote",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "missing creation row: {selector}"
+        );
+    }
+    let presentation = cx.update(|_, _| testing_presentation());
+    assert_eq!(presentation.shortcut(&NewWorkspace), "Primary+N");
+    assert_eq!(
+        presentation.shortcut(&NewRemoteWorkspace),
+        "Primary+Shift+N"
+    );
+}
+
 #[gpui::test]
 fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    click("new-local-workspace-button", cx);
+    click_new_workspace_menu("new-workspace-menu-create-local", cx);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
         2
@@ -7891,7 +7945,7 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
-    click("new-remote-workspace-button", cx);
+    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
     let flow = manager.read_with(cx, |manager, _| {
         manager.remote_workspace_flow.clone().unwrap()
     });
@@ -8314,11 +8368,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
     cx.run_until_parked();
     for (button, tooltip) in [
         ("toggle-sidebar-button", "toggle-sidebar-tooltip"),
-        (
-            "new-remote-workspace-button",
-            "new-remote-workspace-tooltip",
-        ),
-        ("new-local-workspace-button", "new-local-workspace-tooltip"),
+        ("new-workspace-button", "new-workspace-tooltip"),
         ("workspace-switcher", "workspace-switcher-tooltip"),
     ] {
         let center = cx.debug_bounds(button).unwrap().center();
