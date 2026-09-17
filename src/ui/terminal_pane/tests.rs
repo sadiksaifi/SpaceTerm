@@ -4737,15 +4737,16 @@ fn pane_title_should_remove_control_characters() {
 }
 
 #[test]
-fn maps_rendered_positions_to_reported_terminal_geometry() {
+fn maps_rendered_positions_to_fitted_terminal_geometry() {
     let bounds = Bounds::new(
         gpui::point(px(10.0), px(20.0)),
         gpui::size(px(75.0), px(45.0)),
     );
-    let geometry = TerminalGeometry::from_grid(
-        CellGridSize::new(10, 2),
+    let geometry = TerminalGeometry::from_viewport(
+        LogicalSize::new(75.0, 45.0),
         LogicalCellSize::new(7.5, 20.0),
         BackingScale::ONE,
+        CellGridSize::new(2, 2),
     );
 
     let position =
@@ -4766,7 +4767,7 @@ fn maps_rendered_positions_to_reported_terminal_geometry() {
                 ))
                 .row,
         ),
-        (SurfacePosition { x: 37.5, y: 39.0 }, 1)
+        (SurfacePosition { x: 37.5, y: 44.0 }, 1)
     );
     assert!(bottom_remainder.y < geometry.backing_grid_size().height as f32);
     let right_remainder =
@@ -4783,7 +4784,30 @@ fn maps_rendered_positions_to_reported_terminal_geometry() {
     );
     assert_eq!(
         terminal_surface_position(bounds, gpui::point(px(2.5), px(64.0)), geometry, true),
-        Some(SurfacePosition { x: -7.5, y: 39.0 })
+        Some(SurfacePosition { x: -7.5, y: 44.0 })
+    );
+}
+
+#[test]
+fn pixels_beyond_an_unfitted_grid_should_not_become_terminal_input() {
+    let bounds = Bounds::new(
+        gpui::point(px(10.0), px(20.0)),
+        gpui::size(px(75.0), px(45.0)),
+    );
+    let geometry = TerminalGeometry::from_grid(
+        CellGridSize::new(10, 2),
+        LogicalCellSize::new(7.5, 20.0),
+        BackingScale::ONE,
+    );
+    let bottom = gpui::point(px(47.5), px(64.0));
+
+    assert_eq!(
+        terminal_surface_position(bounds, bottom, geometry, false),
+        None
+    );
+    assert_eq!(
+        terminal_surface_position(bounds, bottom, geometry, true),
+        Some(SurfacePosition { x: 37.5, y: 44.0 })
     );
 }
 

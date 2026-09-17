@@ -1533,12 +1533,20 @@ impl TerminalPane {
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
         let size = self.last_geometry?.grid();
+        let cell = self.presented_cell_size();
         ScrollMetrics::for_rows(
             0.0,
-            f32::from(size.rows) * self.line_height,
+            f32::from(size.rows) * cell.height,
             self.screen.scrollbar.total_rows,
             self.screen.scrollbar.visible_rows,
             self.screen.scrollbar.offset_rows,
+        )
+    }
+
+    fn presented_cell_size(&self) -> LogicalCellSize {
+        self.last_geometry.map_or_else(
+            || LogicalCellSize::new(f32::from(self.cell_width), self.line_height),
+            TerminalGeometry::logical_cell_size,
         )
     }
 
@@ -1903,6 +1911,7 @@ impl TerminalPane {
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
         let notifications = self.pending_accessibility_notifications.take();
+        let cell = self.presented_cell_size();
         let selection_sender = self
             .terminal_session
             .session
@@ -1919,8 +1928,8 @@ impl TerminalPane {
                     window,
                     model: self.accessibility.as_ref(),
                     bounds: self.grid_bounds,
-                    cell_width: self.cell_width,
-                    line_height: px(self.line_height),
+                    cell_width: px(cell.width),
+                    line_height: px(cell.height),
                     font: &self.appearance.terminal.typography.regular,
                     font_size: px(self.font_size),
                     focused,
@@ -2590,10 +2599,11 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
+        let cell = self.presented_cell_size();
         let delta = match event.delta {
             ScrollDelta::Pixels(delta) => point(
-                f32::from(delta.x) / f32::from(self.cell_width),
-                f32::from(delta.y) / self.line_height,
+                f32::from(delta.x) / cell.width,
+                f32::from(delta.y) / cell.height,
             ),
             ScrollDelta::Lines(delta) => point(delta.x, delta.y),
         };
@@ -3516,6 +3526,7 @@ impl EntityInputHandler for TerminalPane {
         if let Some(marked_text) = self.ime.marked_text() {
             let position = self.screen.cursor.position?;
             let columns = self.screen.rows.first()?.len();
+            let cell = self.presented_cell_size();
             let layout = layout_preedit(
                 marked_text,
                 usize::from(position.row),
@@ -3525,17 +3536,18 @@ impl EntityInputHandler for TerminalPane {
             );
             return Some(ime_candidate_bounds(
                 element_bounds,
-                self.cell_width,
-                px(self.line_height),
+                px(cell.width),
+                px(cell.height),
                 layout.caret,
             ));
         }
         let grid = self.grid_bounds?;
+        let cell = self.presented_cell_size();
         let geometry = AccessibilityGeometry::new(
             f32::from(grid.origin.x),
             f32::from(grid.origin.y),
-            f32::from(self.cell_width),
-            self.line_height,
+            cell.width,
+            cell.height,
         )?;
         let (x, y, width, height) = self.accessibility.bounds_for_range(range_utf16, geometry)?;
         Some(Bounds::new(
@@ -3554,11 +3566,12 @@ impl EntityInputHandler for TerminalPane {
             return Some(self.ime.selected_range().end);
         }
         let grid = self.grid_bounds?;
+        let cell = self.presented_cell_size();
         let geometry = AccessibilityGeometry::new(
             f32::from(grid.origin.x),
             f32::from(grid.origin.y),
-            f32::from(self.cell_width),
-            self.line_height,
+            cell.width,
+            cell.height,
         )?;
         self.accessibility
             .index_for_point(f32::from(point.x), f32::from(point.y), geometry)
@@ -3755,6 +3768,19 @@ impl Render for TerminalPane {
             diagnostics_available,
             last_valid_frame_preserved,
         );
+        let grid_size = self.last_geometry.map_or_else(
+            || {
+                CellGridSize::new(
+                    display_screen.rows.first().map_or(MIN_COLS, |row| {
+                        u16::try_from(row.len()).unwrap_or(u16::MAX).max(MIN_COLS)
+                    }),
+                    u16::try_from(display_screen.rows.len())
+                        .unwrap_or(u16::MAX)
+                        .max(MIN_ROWS),
+                )
+            },
+            TerminalGeometry::grid,
+        );
         let terminal_grid = self.grid_presentation.render(
             &display_screen,
             display_render_cache,
@@ -3766,6 +3792,7 @@ impl Render for TerminalPane {
                 font_size: px(self.font_size),
                 line_height: px(self.line_height),
                 cell_width: self.cell_width,
+                grid_size,
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
@@ -4334,17 +4361,15 @@ fn terminal_surface_position(
 
     let local_x = f32::from(position.x - bounds.origin.x);
     let local_y = f32::from(position.y - bounds.origin.y);
-    let mut backing = geometry.to_backing_position(LogicalPosition::new(local_x, local_y));
+    let backing = geometry.to_backing_position(LogicalPosition::new(local_x, local_y));
     let backing_grid = geometry.backing_grid_size();
-    if position.x >= bounds.left() && position.x < bounds.right() {
-        backing.x = backing
-            .x
-            .clamp(0.0, backing_grid.width.saturating_sub(1) as f32);
-    }
-    if position.y >= bounds.top() && position.y < bounds.bottom() {
-        backing.y = backing
-            .y
-            .clamp(0.0, backing_grid.height.saturating_sub(1) as f32);
+    if !allow_outside
+        && (backing.x < 0.0
+            || backing.y < 0.0
+            || backing.x >= backing_grid.width as f32
+            || backing.y >= backing_grid.height as f32)
+    {
+        return None;
     }
     Some(SurfacePosition {
         x: backing.x,
