@@ -2568,10 +2568,10 @@ fn fitted_surface_bottom_edge_keeps_selection_autoscroll_active() {
 }
 
 #[test]
-fn autoscroll_tick_moves_the_viewport_and_rejects_a_stale_generation() {
+fn autoscroll_ticks_move_one_row_across_presentations_until_release() {
     let mut emulator = emulator(8, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
-    let initial = emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    _ = emulator.snapshot().unwrap().unwrap();
     let press = current_pointer(
         &emulator,
         pointer(
@@ -2594,23 +2594,28 @@ fn autoscroll_tick_moves_the_viewport_and_rejects_a_stale_generation() {
         Some(Duration::from_millis(100))
     );
 
-    let action = emulator
-        .selection_autoscroll_tick(dragged.generation)
-        .unwrap();
-    assert!(action.screen_changed);
-    let scrolled = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(
-        scrolled.scrollbar.offset_rows,
-        dragged.scrollbar.offset_rows - 1
+    for rows in 1..=3 {
+        let action = emulator.selection_autoscroll_tick().unwrap();
+        assert!(action.screen_changed);
+        let scrolled = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(
+            scrolled.scrollbar.offset_rows,
+            dragged.scrollbar.offset_rows - rows
+        );
+    }
+    let release = current_pointer(
+        &emulator,
+        pointer(
+            PointerPhase::Release,
+            Some(PointerButton::Left),
+            1.0,
+            -41.0,
+            false,
+        ),
     );
-    assert!(
-        emulator
-            .selection_autoscroll_tick(initial.generation)
-            .unwrap()
-            .bytes
-            .is_empty()
-    );
+    assert!(emulator.pointer(release).unwrap().selection_completed);
     assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
+    assert!(!emulator.selection_autoscroll_tick().unwrap().screen_changed);
 }
 
 #[test]

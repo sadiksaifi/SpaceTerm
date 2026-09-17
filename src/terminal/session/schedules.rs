@@ -121,13 +121,9 @@ impl WorkerSchedules {
             .mark_presented(now, complete);
     }
 
-    pub(super) fn update_selection_autoscroll(
-        &mut self,
-        now: Instant,
-        interval: Option<Duration>,
-        generation: PresentationGeneration,
-    ) {
-        self.selection_autoscroll.update(now, interval, generation);
+    pub(super) fn update_selection_autoscroll(&mut self, now: Instant, interval: Option<Duration>) {
+        self.selection_autoscroll
+            .update(now, interval.filter(|_| self.presentation.presentable));
     }
 
     pub(super) fn update_hidden_input(
@@ -264,8 +260,8 @@ impl WorkerSchedules {
     }
 
     pub(super) fn take_due(&mut self, now: Instant) -> Option<Command> {
-        if let Some(generation) = self.selection_autoscroll.take_due(now) {
-            return Some(Command::SelectionAutoscrollTick(generation));
+        if self.selection_autoscroll.take_due(now) {
+            return Some(Command::SelectionAutoscrollTick);
         }
         if self.paste_confirmations.expire(now) {
             return Some(Command::PasteConfirmationExpired);
@@ -396,21 +392,17 @@ mod tests {
     #[test]
     fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
         let epoch = Instant::now();
-        let generation = PresentationGeneration::default();
         let mut schedule = SelectionAutoscrollSchedule::default();
 
-        schedule.update(epoch, Some(Duration::from_millis(100)), generation);
+        schedule.update(epoch, Some(Duration::from_millis(100)));
 
-        assert_eq!(schedule.take_due(epoch + Duration::from_millis(99)), None);
-        assert_eq!(
-            schedule.take_due(epoch + Duration::from_millis(100)),
-            Some(generation)
-        );
-        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+        assert!(!schedule.take_due(epoch + Duration::from_millis(99)));
+        assert!(schedule.take_due(epoch + Duration::from_millis(100)));
+        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
 
-        schedule.update(epoch, Some(Duration::from_millis(25)), generation);
-        schedule.update(epoch, None, generation);
-        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+        schedule.update(epoch, Some(Duration::from_millis(25)));
+        schedule.update(epoch, None);
+        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
     }
 
     #[test]
@@ -419,18 +411,14 @@ mod tests {
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
         schedules.update_hidden_input(now, Ok(false));
         let due = now + Duration::from_secs(30);
-        schedules.update_selection_autoscroll(
-            now,
-            Some(Duration::from_secs(30)),
-            PresentationGeneration::default(),
-        );
+        schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
             .unwrap();
         assert_eq!(schedules.deadline(Some(now)), Some(now));
         assert!(matches!(
             schedules.take_due(due),
-            Some(Command::SelectionAutoscrollTick(_))
+            Some(Command::SelectionAutoscrollTick)
         ));
         assert!(matches!(
             schedules.take_due(due),
@@ -539,18 +527,14 @@ mod tests {
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
         schedules.update_hidden_input(start, Ok(false));
         schedules.update_accessibility(true);
-        schedules.update_selection_autoscroll(
-            start,
-            Some(Duration::from_millis(20)),
-            PresentationGeneration::default(),
-        );
+        schedules.update_selection_autoscroll(start, Some(Duration::from_millis(20)));
 
         schedules.set_presentable(false, start);
 
         assert!(!schedules.accessibility_pending());
         assert!(!matches!(
             schedules.take_due(start + Duration::from_millis(20)),
-            Some(Command::SelectionAutoscrollTick(_))
+            Some(Command::SelectionAutoscrollTick)
         ));
     }
 
@@ -906,18 +890,11 @@ impl HiddenInputSchedule {
 #[derive(Default)]
 struct SelectionAutoscrollSchedule {
     deadline: Option<Instant>,
-    generation: PresentationGeneration,
 }
 
 impl SelectionAutoscrollSchedule {
-    fn update(
-        &mut self,
-        now: Instant,
-        interval: Option<Duration>,
-        generation: PresentationGeneration,
-    ) {
+    fn update(&mut self, now: Instant, interval: Option<Duration>) {
         self.deadline = interval.map(|interval| now + interval);
-        self.generation = generation;
     }
 
     fn deadline(&self) -> Option<Instant> {
@@ -928,12 +905,12 @@ impl SelectionAutoscrollSchedule {
         self.deadline = None;
     }
 
-    fn take_due(&mut self, now: Instant) -> Option<PresentationGeneration> {
+    fn take_due(&mut self, now: Instant) -> bool {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.deadline = None;
-            Some(self.generation)
+            true
         } else {
-            None
+            false
         }
     }
 }

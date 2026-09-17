@@ -1955,6 +1955,21 @@ impl TerminalEmulator {
             .map_err(|error| format!("failed to apply terminal selection release: {error}"))
     }
 
+    pub(crate) fn cancel_selection_drag(&mut self) {
+        if matches!(
+            self.active_pointer,
+            Some(ActivePointer {
+                route: PointerRoute::Selection,
+                ..
+            })
+        ) {
+            self.selection_gesture.reset(&self.terminal);
+            self.active_pointer = None;
+            self.selection_drag_position = None;
+            self.pointer_mapping_invalidated = false;
+        }
+    }
+
     pub(crate) fn selection_autoscroll_interval(&self) -> Result<Option<Duration>, String> {
         if !matches!(
             self.active_pointer,
@@ -1982,16 +1997,9 @@ impl TerminalEmulator {
         ))
     }
 
-    pub(crate) fn selection_autoscroll_tick(
-        &mut self,
-        generation: PresentationGeneration,
-    ) -> Result<EmulatorAction, String> {
-        if generation != self.presentation_generation {
-            self.selection_gesture.reset(&self.terminal);
-            self.active_pointer = None;
-            self.selection_drag_position = None;
-            return Ok(EmulatorAction::none());
-        }
+    pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, String> {
+        // The worker owns this gesture; publishing a new snapshot does not end the drag.
+        // libghostty-vt validates the tracked content anchor before scrolling.
         let Some(position) = self.selection_drag_position else {
             return Ok(EmulatorAction::none());
         };
