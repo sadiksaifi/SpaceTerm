@@ -1273,8 +1273,8 @@ impl TerminalWorker {
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
                 self.schedules.set_presentable(presentable, now);
-                if !presentable {
-                    self.emulator.cancel_selection_drag();
+                if !presentable && !self.cancel_pointer_drag() {
+                    return false;
                 }
                 if !presentable && !self.publish_metadata_changed() {
                     false
@@ -1618,12 +1618,19 @@ impl TerminalWorker {
         }
     }
 
-    fn process_focus(&mut self, focused: bool) -> bool {
-        if !focused {
-            self.emulator.cancel_selection_drag();
-            if !self.refresh_selection_autoscroll() {
-                return false;
+    fn cancel_pointer_drag(&mut self) -> bool {
+        match self.emulator.cancel_pointer_drag() {
+            Ok(action) => self.apply_emulator_action(action) && self.refresh_selection_autoscroll(),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
             }
+        }
+    }
+
+    fn process_focus(&mut self, focused: bool) -> bool {
+        if !focused && !self.cancel_pointer_drag() {
+            return false;
         }
         if !self.hidden_input_transition() {
             return false;

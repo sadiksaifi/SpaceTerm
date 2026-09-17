@@ -745,6 +745,8 @@ struct ActivePointer {
     button: PointerButton,
     route: PointerRoute,
     generation: PresentationGeneration,
+    position: SurfacePosition,
+    modifiers: InputModifiers,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1688,6 +1690,8 @@ impl TerminalEmulator {
             button,
             route,
             generation: input.generation,
+            position: input.position,
+            modifiers: input.modifiers,
         });
 
         match route {
@@ -1717,6 +1721,10 @@ impl TerminalEmulator {
     }
 
     fn pointer_motion(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+        if let Some(active) = self.active_pointer.as_mut() {
+            active.position = input.position;
+            active.modifiers = input.modifiers;
+        }
         match self.active_pointer {
             Some(ActivePointer {
                 button,
@@ -1953,19 +1961,27 @@ impl TerminalEmulator {
             .map_err(|error| format!("failed to apply terminal selection release: {error}"))
     }
 
-    pub(crate) fn cancel_selection_drag(&mut self) {
-        if matches!(
-            self.active_pointer,
-            Some(ActivePointer {
-                route: PointerRoute::Selection,
-                ..
-            })
-        ) {
-            self.selection_gesture.reset(&self.terminal);
-            self.active_pointer = None;
-            self.selection_drag_position = None;
-            self.pointer_mapping_invalidated = false;
+    pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, String> {
+        let Some(active) = self.active_pointer.take() else {
+            return Ok(EmulatorAction::none());
+        };
+        self.selection_gesture.reset(&self.terminal);
+        self.selection_drag_position = None;
+        self.pointer_mapping_invalidated = false;
+
+        if matches!(active.route, PointerRoute::Application) {
+            let mut bytes = Vec::new();
+            self.encode_mouse_event(
+                MouseAction::Release,
+                Some(mouse_button(active.button)),
+                active.position,
+                active.modifiers,
+                false,
+                &mut bytes,
+            )?;
+            return Ok(EmulatorAction::bytes(bytes));
         }
+        Ok(EmulatorAction::none())
     }
 
     pub(crate) fn selection_autoscroll_interval(&self) -> Result<Option<Duration>, String> {

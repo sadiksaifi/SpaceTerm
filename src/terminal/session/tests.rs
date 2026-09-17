@@ -3520,6 +3520,96 @@ fn stopped_session_returns_an_error_for_selection_requests() {
 }
 
 #[test]
+fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press() {
+    for hidden in [false, true] {
+        for (button, code) in [
+            (PointerButton::Left, 0),
+            (PointerButton::Middle, 1),
+            (PointerButton::Right, 2),
+        ] {
+            let records = ScriptedPtyRecords::default();
+            let (_command_tx, commands) = mpsc::channel();
+            let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+            let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+            let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+            let mut worker = TerminalWorker {
+                metadata_state: SessionMetadataState::default(),
+                native_pty: direct_native_pty(records.clone()),
+                emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+                commands,
+                reader_events,
+                events,
+                accessibility,
+                pending_command: None,
+                terminal_input_focused: true,
+                focus_reporting_enabled: true,
+                held_keys: HeldKeys::default(),
+                schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+                osc52_filter: Osc52Filter::default(),
+            };
+            worker.emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+            let pointer = |phase, position, modifiers, generation| {
+                Command::Pointer(PointerInput {
+                    generation,
+                    phase,
+                    button: (phase != PointerPhase::Motion).then_some(button),
+                    position,
+                    modifiers,
+                    shift_selection: ShiftSelectionPolicy::default(),
+                })
+            };
+            assert!(worker.process_command(pointer(
+                PointerPhase::Press,
+                SurfacePosition { x: 1.0, y: 1.0 },
+                InputModifiers::default(),
+                worker.emulator.presentation_generation(),
+            )));
+            assert!(worker.process_command(pointer(
+                PointerPhase::Motion,
+                SurfacePosition { x: 17.0, y: 41.0 },
+                InputModifiers {
+                    control: true,
+                    ..InputModifiers::default()
+                },
+                worker.emulator.presentation_generation(),
+            )));
+            let mut expected = format!("\x1b[<{code};1;1M\x1b[<{};3;3M", code + 48);
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+
+            // Both lifecycle paths must release at the last position before focus-out.
+            let release = format!("\x1b[<{};3;3m", code + 16);
+            if hidden {
+                assert!(worker.process_command(Command::SetPresentable(false)));
+                assert_eq!(
+                    records.snapshot().written,
+                    format!("{expected}{release}").as_bytes()
+                );
+            }
+            assert!(worker.process_command(Command::Focus(false)));
+            expected.push_str(&release);
+            expected.push_str("\x1b[O");
+            assert_eq!(records.snapshot().written, expected.as_bytes(), "{hidden}");
+
+            // Repeated cancellation must not send another release.
+            assert!(worker.process_command(Command::SetPresentable(false)));
+            assert!(worker.process_command(Command::Focus(false)));
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+            assert!(worker.process_command(Command::SetPresentable(true)));
+            assert!(worker.process_command(Command::Focus(true)));
+            assert!(worker.process_command(pointer(
+                PointerPhase::Press,
+                SurfacePosition { x: 1.0, y: 1.0 },
+                InputModifiers::default(),
+                worker.emulator.presentation_generation(),
+            )));
+            expected.push_str(&format!("\x1b[I\x1b[<{code};1;1M"));
+            assert_eq!(records.snapshot().written, expected.as_bytes());
+            worker.finish();
+        }
+    }
+}
+
+#[test]
 fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
     for stop in ["release", "focus", "hidden", "resize"] {
         let (_command_tx, commands) = mpsc::channel();
