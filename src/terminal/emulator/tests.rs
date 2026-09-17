@@ -2625,6 +2625,52 @@ fn autoscroll_ticks_move_one_row_across_presentations_until_release() {
 }
 
 #[test]
+fn autoscroll_resolves_the_selection_column_against_the_newly_visible_row() {
+    for (old_edge, new_edge) in [("界old", "abnew"), ("abold", "界new")] {
+        let mut ticked = emulator(10, 2);
+        let mut dragged = emulator(10, 2);
+        for emulator in [&mut ticked, &mut dragged] {
+            emulator.feed(format!("head\r\n{new_edge}\r\n{old_edge}\r\nanchor").as_bytes());
+            _ = emulator.snapshot().unwrap().unwrap();
+            let press = current_pointer(
+                emulator,
+                pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    41.0,
+                    21.0,
+                    false,
+                ),
+            );
+            _ = emulator.pointer(press).unwrap();
+            let drag = current_pointer(
+                emulator,
+                pointer(PointerPhase::Motion, None, 11.0, -1.0, false),
+            );
+            _ = emulator.pointer(drag).unwrap();
+        }
+        let before = dragged.snapshot().unwrap().unwrap();
+        _ = dragged.scroll_to(before.scrollbar.offset_rows - 1);
+        let drag = current_pointer(
+            &dragged,
+            pointer(PointerPhase::Motion, None, 11.0, -1.0, false),
+        );
+        _ = dragged.pointer(drag).unwrap();
+        _ = ticked.selection_autoscroll_tick().unwrap();
+        assert_eq!(
+            ticked.selection_text().unwrap(),
+            dragged.selection_text().unwrap(),
+            "old edge={old_edge}, new edge={new_edge}"
+        );
+        assert_eq!(
+            ticked.snapshot().unwrap().unwrap().rows,
+            dragged.snapshot().unwrap().unwrap().rows,
+            "painted selection must match the copied range"
+        );
+    }
+}
+
+#[test]
 fn scrollback_wheel_changes_visible_rows() {
     let mut emulator = emulator(10, 2);
     let _ = emulator.snapshot().unwrap();

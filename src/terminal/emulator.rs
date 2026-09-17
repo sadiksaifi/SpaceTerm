@@ -2004,7 +2004,15 @@ impl TerminalEmulator {
         if !matches!(direction, Autoscroll::Up | Autoscroll::Down) {
             return Ok(EmulatorAction::none());
         }
-        let viewport = self.selection_viewport_point(position)?;
+        // The gesture resolves this coordinate after scrolling. Inspecting the old
+        // row here can shift the endpoint when it contains a wide-cell spacer.
+        let cell = self
+            .geometry
+            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
+        let viewport = PointCoordinate {
+            x: cell.col,
+            y: u32::from(cell.row),
+        };
         let geometry = self.selection_geometry();
         let selection = self
             .selection_autoscroll_tick
@@ -2343,7 +2351,8 @@ impl TerminalEmulator {
 
                 if rebuild_row {
                     let selection = row.selection()?;
-                    let mut rendered_cells = Vec::with_capacity(usize::from(cols));
+                    let mut rendered_cells: Vec<CellSnapshot> =
+                        Vec::with_capacity(usize::from(cols));
                     let mut hyperlink_uri = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut hyperlink_userdata = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut column_index = 0_u16;
@@ -2362,6 +2371,15 @@ impl TerminalEmulator {
                             _ => style.bg_color.into(),
                         };
                         let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
+                        let mut selected = selection.is_some_and(|range| {
+                            column_index >= range.start_x && column_index <= range.end_x
+                        });
+                        if spacer_tail && let Some(head) = rendered_cells.last_mut() {
+                            // Copying includes the complete wide character even when a
+                            // gesture endpoint falls on its spacer. Paint the same range.
+                            selected |= head.selected;
+                            head.selected = selected;
+                        }
                         let text = if spacer_tail {
                             " ".to_owned()
                         } else {
@@ -2430,9 +2448,7 @@ impl TerminalEmulator {
                             underline_source: style.underline_color.into(),
                             strikethrough: style.strikethrough,
                             overline: style.overline,
-                            selected: selection.is_some_and(|range| {
-                                column_index >= range.start_x && column_index <= range.end_x
-                            }),
+                            selected,
                             spacer_tail,
                             semantic_content: raw_cell.semantic_content()?.into(),
                             hyperlink,
