@@ -238,7 +238,6 @@ pub(crate) struct TerminalGridElement {
     foreground: Color,
     rows: Arc<[Arc<RowPaintInput>]>,
     cache: Entity<TerminalGridCache>,
-    columns: usize,
     font_size: Pixels,
     line_height: Pixels,
     cell_width: Pixels,
@@ -385,7 +384,6 @@ impl TerminalGridElement {
             },
             rows,
             cache,
-            columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size: configuration.font_size,
             line_height: configuration.line_height,
             cell_width: configuration.cell_width,
@@ -887,6 +885,7 @@ struct PreparedCursorKey {
 
 struct PreparedGridLayout<'a> {
     grid_bounds: Bounds<Pixels>,
+    rows: usize,
     columns: usize,
     font_size: Pixels,
     cell_width: Pixels,
@@ -1012,7 +1011,7 @@ impl TerminalGridCache {
             let paint_bottom = terminal_row_paint_bottom(
                 layout.grid_bounds,
                 row_index,
-                visible_rows,
+                layout.rows,
                 layout.line_height,
             );
             let cursor = cursor
@@ -1084,6 +1083,7 @@ impl TerminalGridCache {
         &mut self,
         layout: Option<&PreeditLayout>,
         visible_rows: usize,
+        viewport_rows: usize,
         grid_bounds: Bounds<Pixels>,
         columns: usize,
         font: &Font,
@@ -1127,7 +1127,7 @@ impl TerminalGridCache {
         for (row_index, row) in rows.iter_mut().enumerate() {
             let row_top = grid_bounds.top() + line_height * row_index as f32;
             let row_bottom =
-                terminal_row_paint_bottom(grid_bounds, row_index, visible_rows, line_height);
+                terminal_row_paint_bottom(grid_bounds, row_index, viewport_rows, line_height);
             let clusters = layout
                 .clusters
                 .iter()
@@ -1467,9 +1467,9 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-        let visible_rows = ((f32::from(bounds.size.height) / f32::from(self.line_height)).ceil()
-            as usize)
-            .min(self.rows.len());
+        let viewport_rows = terminal_viewport_cell_count(bounds.size.height, self.line_height);
+        let viewport_columns = terminal_viewport_cell_count(bounds.size.width, self.cell_width);
+        let visible_rows = viewport_rows.min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
         let grid_bounds = bounds;
         let grid_left = grid_bounds.left();
@@ -1500,7 +1500,8 @@ impl Element for TerminalGridElement {
                 visible_rows,
                 PreparedGridLayout {
                     grid_bounds,
-                    columns: self.columns,
+                    rows: viewport_rows,
+                    columns: viewport_columns,
                     font_size: self.font_size,
                     cell_width: self.cell_width,
                     line_height: self.line_height,
@@ -1515,8 +1516,9 @@ impl Element for TerminalGridElement {
             let preedit_rows = cache.prepare_preedit(
                 self.preedit.as_ref(),
                 visible_rows,
+                viewport_rows,
                 grid_bounds,
-                self.columns,
+                viewport_columns,
                 &terminal_fonts.regular,
                 self.font_size,
                 self.cell_width,
@@ -1547,12 +1549,12 @@ impl Element for TerminalGridElement {
                         terminal_row_paint_bottom(
                             grid_bounds,
                             row_index,
-                            visible_rows,
+                            viewport_rows,
                             self.line_height,
                         ) - row_top,
                     ),
                 ),
-                self.columns,
+                viewport_columns,
                 self.cell_width,
             );
             let mut cursor_background = None;
@@ -1569,13 +1571,13 @@ impl Element for TerminalGridElement {
                 let cursor_right = terminal_column_paint_right(
                     grid_bounds,
                     usize::from(position.column) + usize::from(position.width_cells.max(1)),
-                    self.columns,
+                    viewport_columns,
                     self.cell_width,
                 );
                 let row_bottom = terminal_row_paint_bottom(
                     grid_bounds,
                     row_index,
-                    visible_rows,
+                    viewport_rows,
                     self.line_height,
                 );
                 let cursor_cell_width =
@@ -1651,7 +1653,7 @@ impl Element for TerminalGridElement {
                     terminal_row_paint_bottom(
                         grid_bounds,
                         usize::from(position.row),
-                        visible_rows,
+                        viewport_rows,
                         self.line_height,
                     ) - (bounds.top() + self.line_height * f32::from(position.row)),
                 ),
@@ -1789,6 +1791,15 @@ fn terminal_row_paint_bottom(
         (grid_bounds.top() + line_height * row_index.saturating_add(1) as f32)
             .min(grid_bounds.bottom())
     }
+}
+
+fn terminal_viewport_cell_count(available: Pixels, cell: Pixels) -> usize {
+    let available = f32::from(available);
+    let cell = f32::from(cell);
+    if !available.is_finite() || !cell.is_finite() || cell <= 0.0 {
+        return 1;
+    }
+    (available.max(cell) / cell).floor().max(1.0) as usize
 }
 
 fn terminal_column_paint_right(
@@ -3070,6 +3081,7 @@ mod tests {
     ) -> PreparedGridLayout<'_> {
         PreparedGridLayout {
             grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(40.0))),
+            rows: 2,
             columns: 10,
             font_size,
             cell_width,
@@ -3345,6 +3357,37 @@ mod tests {
                 terminal_row_paint_bottom(inner, 1, 2, px(20.0)),
             ),
             (px(40.0), px(65.0))
+        );
+    }
+
+    #[test]
+    fn lagging_snapshot_only_absorbs_remainders_at_the_viewport_edge() {
+        let expanded = Bounds::new(point(px(0.0), px(0.0)), size(px(105.0), px(205.0)));
+        let expanded_rows = terminal_viewport_cell_count(expanded.size.height, px(20.0));
+        let expanded_columns = terminal_viewport_cell_count(expanded.size.width, px(10.0));
+
+        assert_eq!((expanded_rows, expanded_columns), (10, 10));
+        assert_eq!(
+            terminal_row_paint_bottom(expanded, 1, expanded_rows, px(20.0)),
+            px(40.0)
+        );
+        assert_eq!(
+            terminal_column_paint_right(expanded, 2, expanded_columns, px(10.0)),
+            px(20.0)
+        );
+
+        let shrunk = Bounds::new(point(px(0.0), px(0.0)), size(px(25.0), px(45.0)));
+        let shrunk_rows = terminal_viewport_cell_count(shrunk.size.height, px(20.0));
+        let shrunk_columns = terminal_viewport_cell_count(shrunk.size.width, px(10.0));
+
+        assert_eq!((shrunk_rows, shrunk_columns), (2, 2));
+        assert_eq!(
+            terminal_row_paint_bottom(shrunk, 1, shrunk_rows, px(20.0)),
+            shrunk.bottom()
+        );
+        assert_eq!(
+            terminal_column_paint_right(shrunk, 10, shrunk_columns, px(10.0)),
+            shrunk.right()
         );
     }
 
