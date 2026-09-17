@@ -319,10 +319,10 @@ fn open_modal_facades_should_survive_live_appearance_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     assert_modal_rendered(progress.presentation_id(), cx);
-    assert!(cx.debug_bounds("modal-progress-indeterminate").is_some());
+    assert!(cx.debug_bounds("modal-progress-activity").is_some());
     replace_appearance(4, cx);
     assert_modal_rendered(progress.presentation_id(), cx);
-    assert!(cx.debug_bounds("modal-progress-indeterminate").is_some());
+    assert!(cx.debug_bounds("modal-progress-activity").is_some());
     cx.update(|window, cx| {
         progress
             .complete(window, cx)

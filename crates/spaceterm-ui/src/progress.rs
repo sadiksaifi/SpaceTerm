@@ -11,6 +11,10 @@
 //! leading to trailing on the bar, clockwise from twelve o'clock on the ring. Indeterminate work
 //! is activity rather than extent: the bar fills end to end and animates its shade along its
 //! length, and the ring becomes a small spinner with no track behind it.
+//!
+//! Both indicators paint in the application's installed colors. A ring may instead inherit the
+//! semantic foreground of the surface it is embedded in, for a slot whose contrast the embedder
+//! has already resolved against the one background under it.
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -244,6 +248,14 @@ const SPINNER_TRAIL_STROKES: usize = 6;
 /// One trail stroke's opacity, which accumulates toward the leading end.
 const SPINNER_TRAIL_OPACITY: f32 = 0.3;
 
+/// An inherited ring's determinate track, as a share of the inherited color's own opacity.
+///
+/// An inherited ring has one color to work from, so the extent still to come is that same color
+/// held well back rather than a second color introduced here. Holding it back this far keeps the
+/// circle behind the accent arc at a small diameter instead of competing with it, while leaving
+/// enough of the circle visible that a low extent still reads as progress along a track.
+const INHERITED_TRACK_OPACITY: f32 = 0.28;
+
 /// A horizontal progress bar for determinate and indeterminate work.
 ///
 /// The bar fills the width it is given and keeps the thin thickness its installed size supplies,
@@ -463,12 +475,16 @@ fn shaded(paint: Rgba, opacity: f32) -> Rgba {
 /// Indeterminate activity is a spinner instead: one tapered trail revolving with no track behind
 /// it, held still with its leading end at twelve o'clock under reduced motion. Prefer the ring for
 /// background work and for rows too constrained for a bar.
+///
+/// The ring paints in the installed progress colors unless the embedding surface claims that
+/// decision with [`ProgressRing::inherited`].
 #[derive(IntoElement)]
 pub struct ProgressRing {
     id: ElementId,
     name: SharedString,
     state: ProgressState,
     size: ProgressSize,
+    inherited: bool,
     debug_selector: Option<SharedString>,
 }
 
@@ -487,6 +503,7 @@ impl ProgressRing {
             name: name.into(),
             state,
             size: ProgressSize::default(),
+            inherited: false,
             debug_selector: None,
         }
     }
@@ -494,6 +511,20 @@ impl ProgressRing {
     /// Selects one installed geometry.
     pub fn size(mut self, size: ProgressSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Paints the ring in the semantic foreground of the surface around it, and derives its
+    /// determinate track from that same color.
+    ///
+    /// Use this where the embedding surface rather than the application catalog owns the contrast
+    /// decision: a status slot whose foreground is already resolved against the one background it
+    /// rests on, which an installed accent cannot know. The caller still hands the ring no color.
+    /// The ring reads the text color in effect where it paints, so it follows that surface's
+    /// active, inactive, and hovered paints on its own, and it carries no more outcome meaning
+    /// than a themed ring does.
+    pub fn inherited(mut self) -> Self {
+        self.inherited = true;
         self
     }
 
@@ -509,6 +540,11 @@ impl RenderOnce for ProgressRing {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = *cx.global::<ProgressTheme>();
         let metrics = theme.sizes.metrics(self.size);
+        let paint = if self.inherited {
+            RingPaint::Inherited
+        } else {
+            RingPaint::Installed(theme.paint)
+        };
         let selector = self
             .debug_selector
             .unwrap_or_else(|| SharedString::from(self.id.to_string()));
@@ -531,13 +567,63 @@ impl RenderOnce for ProgressRing {
                 |ring| {
                     ring.child(ring_arc(
                         metrics.ring_thickness,
-                        theme.paint.track,
+                        paint,
+                        RingRole::Track,
                         0.0,
                         1.0,
                     ))
                 },
             )
-            .child(ring_figure(&self.id, &selector, self.state, metrics, theme))
+            .child(ring_figure(
+                &self.id,
+                &selector,
+                self.state,
+                metrics,
+                paint,
+                theme.motion,
+            ))
+    }
+}
+
+/// Where a ring's two colors come from.
+#[derive(Clone, Copy)]
+enum RingPaint {
+    /// The application's installed progress paint.
+    Installed(ProgressPaint),
+    /// The semantic foreground of the surface the ring paints on.
+    Inherited,
+}
+
+impl RingPaint {
+    /// Resolves both colors inside the paint pass.
+    ///
+    /// An inherited ring can resolve nothing while it is being built: the surrounding text style
+    /// only covers it once its ancestors are painting, so the color is read here and nowhere
+    /// earlier.
+    fn resolve(self, window: &Window) -> ProgressPaint {
+        match self {
+            Self::Installed(paint) => paint,
+            Self::Inherited => {
+                let indicator = Rgba::from(window.text_style().color);
+                ProgressPaint::new(shaded(indicator, INHERITED_TRACK_OPACITY), indicator)
+            }
+        }
+    }
+}
+
+/// Which of a ring's two colors one arc is stroked in.
+#[derive(Clone, Copy)]
+enum RingRole {
+    Track,
+    Indicator,
+}
+
+impl RingRole {
+    const fn color(self, paint: ProgressPaint) -> Rgba {
+        match self {
+            Self::Track => paint.track,
+            Self::Indicator => paint.indicator,
+        }
     }
 }
 
@@ -547,23 +633,29 @@ fn ring_figure(
     selector: &SharedString,
     state: ProgressState,
     metrics: ProgressMetrics,
-    theme: ProgressTheme,
+    paint: RingPaint,
+    motion: ProgressMotion,
 ) -> AnyElement {
     let thickness = metrics.ring_thickness;
-    let indicator = theme.paint.indicator;
     match state {
         ProgressState::Determinate(progress) => {
             let indicator_selector = selector.clone();
             ring_overlay(metrics)
                 .debug_selector(move || format!("{indicator_selector}-indicator"))
-                .child(ring_arc(thickness, indicator, 0.0, progress.value()))
+                .child(ring_arc(
+                    thickness,
+                    paint,
+                    RingRole::Indicator,
+                    0.0,
+                    progress.value(),
+                ))
                 .into_any_element()
         }
         ProgressState::Indeterminate => {
             let activity_selector = selector.clone();
             let activity = ring_overlay(metrics)
                 .debug_selector(move || format!("{activity_selector}-activity"));
-            match theme.motion {
+            match motion {
                 ProgressMotion::Reduced => {
                     let reduced_selector = selector.clone();
                     activity
@@ -572,7 +664,7 @@ fn ring_figure(
                                 .debug_selector(move || {
                                     format!("{reduced_selector}-reduced-motion")
                                 })
-                                .child(spinner_trail(thickness, indicator, 0.0)),
+                                .child(spinner_trail(thickness, paint, 0.0)),
                         )
                         .into_any_element()
                 }
@@ -583,7 +675,7 @@ fn ring_figure(
                         move |spinner, delta| {
                             // The trail keeps its length and its taper and revolves at one steady
                             // rate, so the spinner never reads as a value climbing to full.
-                            spinner.child(spinner_trail(thickness, indicator, delta))
+                            spinner.child(spinner_trail(thickness, paint, delta))
                         },
                     )
                     .into_any_element(),
@@ -609,10 +701,19 @@ fn ring_overlay(metrics: ProgressMetrics) -> gpui::Div {
 ///
 /// Turns run clockwise from twelve o'clock: zero begins at the top of the ring and one is a
 /// complete revolution.
-fn ring_arc(thickness: Pixels, paint: Rgba, start: f32, sweep: f32) -> impl IntoElement {
+fn ring_arc(
+    thickness: Pixels,
+    paint: RingPaint,
+    role: RingRole,
+    start: f32,
+    sweep: f32,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| paint_ring_arc(bounds, thickness, paint, start, sweep, window),
+        move |bounds, _, window, _| {
+            let color = role.color(paint.resolve(window));
+            paint_ring_arc(bounds, thickness, color, start, sweep, window);
+        },
     )
     .absolute()
     .top_0()
@@ -622,10 +723,13 @@ fn ring_arc(thickness: Pixels, paint: Rgba, start: f32, sweep: f32) -> impl Into
 }
 
 /// Draws the spinner's tapered trail with its leading end at one point of the revolution.
-fn spinner_trail(thickness: Pixels, paint: Rgba, head: f32) -> impl IntoElement {
+fn spinner_trail(thickness: Pixels, paint: RingPaint, head: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| paint_spinner_trail(bounds, thickness, paint, head, window),
+        move |bounds, _, window, _| {
+            let indicator = paint.resolve(window).indicator;
+            paint_spinner_trail(bounds, thickness, indicator, head, window);
+        },
     )
     .absolute()
     .top_0()

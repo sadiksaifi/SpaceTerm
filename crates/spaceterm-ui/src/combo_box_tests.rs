@@ -562,8 +562,6 @@ fn install_modal_test_support(cx: &mut TestAppContext) {
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
                     rgba(0x505058ff),
-                    rgba(0x404048ff),
-                    rgba(0x55aaffff),
                     rgba(0x5599ffff),
                     rgba(0x5599ff22),
                     rgba(0xffbb55ff),

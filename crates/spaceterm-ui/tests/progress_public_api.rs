@@ -20,6 +20,7 @@ const _: fn() = || {
         ProgressState::Indeterminate,
     )
     .size(ProgressSize::Regular)
+    .inherited()
     .debug_selector("public-progress-ring");
 
     let compact = ProgressMetrics::new(px(3.0), px(2.0), px(20.0), px(2.0));

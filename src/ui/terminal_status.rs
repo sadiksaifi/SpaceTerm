@@ -1,20 +1,26 @@
 //! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph slot carries the status: a reported percentage becomes a ring, other work
-//! states use distinct shapes and semantic colors, and attention blinks the mark in the warning
-//! color. Each state is typed from sanitized Terminal Metadata and never from the title text: a
-//! loader a program draws in its own cells or title is not something host chrome can see or
-//! restate.
+//! here once. The glyph slot carries the status: reported work takes the reusable progress ring,
+//! as an extent when a percentage is known and as a spinner when it is not, other work states use
+//! distinct shapes and semantic colors, and attention blinks the mark in the warning color. Each
+//! state is typed from sanitized Terminal Metadata and never from the title text: a loader a
+//! program draws in its own cells or title is not something host chrome can see or restate.
+//!
+//! The ring inherits its color rather than taking the installed progress accent, because the
+//! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
+//! and a Pane Caption's surface can be colored by the program running in it.
 
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    LayoutId, PathBuilder, Pixels, Point, Rgba, Task, Window, canvas, div, point, px,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
+    Pixels, Rgba, Task, Window, div,
 };
-use spaceterm_ui::{Icon, IconName};
+use spaceterm_ui::{
+    DeterminateProgress, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
+};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 
@@ -25,12 +31,17 @@ const BLINK_STEP: Duration = Duration::from_millis(500);
 /// Blinking draws the eye when attention arrives. Resting afterwards keeps an unread Tab in the
 /// background from repainting its window for as long as it stays unread.
 const BLINKS: u32 = 4;
-/// How far the ring's stroke sits inside the glyph's square, as a share of its size.
-const PROGRESS_STROKE_SHARE: f32 = 0.14;
-/// The resting ring behind a reported percentage, as a share of the foreground's opacity.
-const PROGRESS_TRACK_OPACITY: f32 = 0.28;
-/// The smallest full-opacity arc, so zero and low progress retain a readable status mark.
-const MINIMUM_PROGRESS_SWEEP: f32 = 18.0;
+/// The smallest share of the ring a reported percentage sweeps.
+///
+/// A Session has one glyph slot, so a report at the bottom of its range still has to leave a mark
+/// that reads as work rather than an empty circle. A twentieth of the circle is the least that
+/// does at this diameter. The floor is this constrained slot's own legibility rule and not the
+/// control's: the reusable ring paints exactly the extent it is handed.
+const MINIMUM_PROGRESS_SWEEP: f64 = 0.05;
+/// Names the Session's reported work for the progress control.
+///
+/// The ring never paints this, and it stays content-free: nothing a program reported reaches it.
+const PROGRESS_NAME: &str = "terminal progress";
 
 /// How many characters the first word of a title can hold and still be a glyph rather than a word.
 const MAXIMUM_GLYPH_CHARS: usize = 2;
@@ -289,8 +300,8 @@ impl StatusGlyph {
     ///
     /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
     /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors,
-    /// with reported percentages drawn as rings. Attention blinks the mark in the attention color
-    /// and then leaves it in that color.
+    /// with reported work drawn as the reusable ring, which inherits the status color resolved
+    /// here. Attention blinks the mark in the attention color and then leaves it in that color.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -312,10 +323,19 @@ impl StatusGlyph {
             .flex()
             .items_center()
             .justify_center();
+        let mark = Mark {
+            icon,
+            reported,
+            size,
+            progress,
+            colors,
+            // The ring's clock hangs off this Session's own glyph identity, so one spinner never
+            // shares its revolution with another Session's.
+            id: ElementId::NamedChild(Box::new(id.clone()), "progress".into()),
+            selector: format!("{selector_prefix}-progress"),
+        };
         if !attention {
-            return glyph
-                .child(status_mark(icon, reported, size, progress, false, colors))
-                .into_any_element();
+            return glyph.child(mark.render(false)).into_any_element();
         }
         let selector = format!("{selector_prefix}-attention");
         glyph
@@ -328,14 +348,7 @@ impl StatusGlyph {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(status_mark(
-                        icon,
-                        reported.clone(),
-                        size,
-                        progress,
-                        blinked,
-                        colors,
-                    ))
+                    .child(mark.render(blinked))
                     .into_any_element()
             }))
             .into_any_element()
@@ -379,46 +392,73 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     }
 }
 
-/// The mark for `progress`: a percentage ring, a distinct semantic shape, the program's reported
-/// glyph, or the Session's own glyph, all within the same slot.
-fn status_mark(
+/// Everything the glyph's one slot draws, apart from the blink phase.
+///
+/// The blink rebuilds the mark twice a second, so what survives a blink is held here and only the
+/// phase is passed in.
+struct Mark {
     icon: IconName,
+    /// The glyph the program reported for itself, which takes the place of `icon`.
     reported: Option<gpui::SharedString>,
     size: Pixels,
     progress: TerminalProgress,
-    blinked: bool,
     colors: StatusColors,
-) -> AnyElement {
-    let (tint, opacity) = treatment(progress, blinked);
-    let mark = match (status_shape(progress), reported) {
-        // A reported percentage says more than any glyph, so the ring takes the slot.
-        (StatusShape::ProgressRing(percent), _) => progress_ring(percent, size).into_any_element(),
-        (StatusShape::Indeterminate, _) => {
-            Icon::inherited(IconName::LoaderCircle, size).into_any_element()
-        }
-        (StatusShape::Error, _) => {
-            Icon::inherited(IconName::TriangleAlert, size).into_any_element()
-        }
-        (StatusShape::Paused, _) => Icon::inherited(IconName::Pause, size).into_any_element(),
-        (StatusShape::Glyph, Some(glyph)) => reported_glyph(&glyph, size),
-        (StatusShape::Glyph, None) => Icon::inherited(icon, size).into_any_element(),
-    };
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .opacity(opacity)
-        .when_some(tint.color(colors), |mark, color| mark.text_color(color))
-        .child(mark)
-        .into_any_element()
+    /// Keys the progress ring's own animation, so a spinner survives across frames.
+    id: ElementId,
+    /// Names the progress ring's parts as `{selector}-track`, `-indicator`, and `-activity`.
+    selector: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl Mark {
+    /// The mark for this status: a progress ring, a distinct semantic shape, the program's
+    /// reported glyph, or the Session's own glyph, all within the same slot.
+    fn render(self, blinked: bool) -> AnyElement {
+        let Self {
+            icon,
+            reported,
+            size,
+            progress,
+            colors,
+            id,
+            selector,
+        } = self;
+        let (tint, opacity) = treatment(progress, blinked);
+        let mark = match (status_shape(progress), reported) {
+            // Reported work says more than any glyph, so the ring takes the slot.
+            (StatusShape::Progress(state), _) => ProgressRing::new(id, PROGRESS_NAME, state)
+                // The ring keeps the compact geometry and centers in the slot rather than
+                // stretching to it, which settles it on the same visual weight as the drawn icons
+                // it shares the slot with.
+                .size(ProgressSize::Compact)
+                // The status color below is resolved for this exact Pane Caption or Tab surface,
+                // which the installed progress accent cannot know, so the ring takes it instead.
+                .inherited()
+                .debug_selector(selector)
+                .into_any_element(),
+            (StatusShape::Error, _) => {
+                Icon::inherited(IconName::TriangleAlert, size).into_any_element()
+            }
+            (StatusShape::Paused, _) => Icon::inherited(IconName::Pause, size).into_any_element(),
+            (StatusShape::Glyph, Some(glyph)) => reported_glyph(&glyph, size),
+            (StatusShape::Glyph, None) => Icon::inherited(icon, size).into_any_element(),
+        };
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(opacity)
+            .when_some(tint.color(colors), |mark, color| mark.text_color(color))
+            .child(mark)
+            .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum StatusShape {
     Glyph,
-    ProgressRing(u8),
-    Indeterminate,
+    /// Reported work, with or without a known completion, drawn by the reusable ring.
+    Progress(ProgressState),
     Error,
     Paused,
 }
@@ -426,31 +466,19 @@ enum StatusShape {
 fn status_shape(progress: TerminalProgress) -> StatusShape {
     match progress {
         TerminalProgress::None => StatusShape::Glyph,
-        TerminalProgress::Normal(percent) => StatusShape::ProgressRing(percent),
-        TerminalProgress::Indeterminate => StatusShape::Indeterminate,
+        TerminalProgress::Normal(percent) => StatusShape::Progress(ProgressState::Determinate(
+            DeterminateProgress::new(progress_sweep(percent))
+                .expect("a reported percentage is a finite share of the ring"),
+        )),
+        TerminalProgress::Indeterminate => StatusShape::Progress(ProgressState::Indeterminate),
         TerminalProgress::Error => StatusShape::Error,
         TerminalProgress::Paused => StatusShape::Paused,
     }
 }
 
-fn progress_ring(percent: u8, size: Pixels) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, (), window, _| {
-            let color = window.text_style().color;
-            let track = Hsla {
-                a: color.a * PROGRESS_TRACK_OPACITY,
-                ..color
-            };
-            paint_arc(bounds, 0.0, 360.0, track, window);
-            paint_arc(bounds, 0.0, progress_sweep(percent), color, window);
-        },
-    )
-    .size(size)
-}
-
-fn progress_sweep(percent: u8) -> f32 {
-    (f32::from(percent) * 3.6).max(MINIMUM_PROGRESS_SWEEP)
+/// The share of the ring a reported percentage sweeps, held above this slot's readable minimum.
+fn progress_sweep(percent: u8) -> f64 {
+    (f64::from(percent) / 100.0).max(MINIMUM_PROGRESS_SWEEP)
 }
 
 /// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
@@ -571,38 +599,6 @@ impl Element for Stepped {
         cx: &mut App,
     ) {
         child.paint(window, cx);
-    }
-}
-
-/// Strokes the arc from `start` to `end`, in degrees clockwise from the top of `bounds`.
-fn paint_arc(bounds: Bounds<Pixels>, start: f32, end: f32, color: Hsla, window: &mut Window) {
-    let sweep = (end - start).clamp(0.0, 360.0);
-    if sweep <= 0.0 || color.a <= 0.0 {
-        return;
-    }
-    let side = f32::from(bounds.size.width.min(bounds.size.height));
-    let stroke = side * PROGRESS_STROKE_SHARE;
-    let radius = (side - stroke) / 2.0;
-    let center = bounds.center();
-    let at = |degrees: f32| -> Point<Pixels> {
-        let radians = degrees.to_radians();
-        point(
-            center.x + px(radius * radians.sin()),
-            center.y - px(radius * radians.cos()),
-        )
-    };
-    let radii = point(px(radius), px(radius));
-    let mut path = PathBuilder::stroke(px(stroke));
-    path.move_to(at(start));
-    // An arc cannot end where it starts, so a full ring is drawn as two halves.
-    if sweep >= 360.0 {
-        path.arc_to(radii, px(0.0), false, true, at(start + 180.0));
-        path.arc_to(radii, px(0.0), false, true, at(start));
-    } else {
-        path.arc_to(radii, px(0.0), sweep > 180.0, true, at(start + sweep));
-    }
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
     }
 }
 
@@ -757,10 +753,26 @@ mod tests {
         let surface = colors.tab_active_background;
         let status = colors.status(surface);
 
-        assert!(progress_sweep(0) > 0.0);
+        assert_eq!(progress_sweep(0), MINIMUM_PROGRESS_SWEEP);
+        assert_eq!(progress_sweep(4), MINIMUM_PROGRESS_SWEEP);
+        assert_eq!(progress_sweep(100), 1.0);
         for foreground in [status.busy, status.attention] {
             assert!(foreground.contrast_ratio(surface) >= MINIMUM_STATUS_CONTRAST);
         }
+    }
+
+    #[test]
+    fn normal_and_indeterminate_work_use_the_reusable_progress_states() {
+        let StatusShape::Progress(ProgressState::Determinate(normal)) =
+            status_shape(TerminalProgress::Normal(42))
+        else {
+            panic!("normal work should use determinate progress");
+        };
+        assert!((normal.value() - 0.42).abs() < f32::EPSILON);
+        assert_eq!(
+            status_shape(TerminalProgress::Indeterminate),
+            StatusShape::Progress(ProgressState::Indeterminate)
+        );
     }
 
     #[test]

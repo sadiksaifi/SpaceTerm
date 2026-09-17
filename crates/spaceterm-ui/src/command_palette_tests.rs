@@ -323,6 +323,14 @@ type PaletteWindow<'a> = (
 );
 
 fn install_control_themes(cx: &mut TestAppContext) {
+    cx.set_global(crate::ProgressTheme::new(
+        crate::ProgressPaint::new(rgba(0x404048ff), rgba(0x55aaffff)),
+        crate::ProgressSizes::new(
+            crate::ProgressMetrics::new(px(3.0), px(1.5), px(12.0), px(1.5)),
+            crate::ProgressMetrics::new(px(4.0), px(2.0), px(18.0), px(2.0)),
+        ),
+        crate::ProgressMotion::Reduced,
+    ));
     let variant = crate::button::ButtonVariantStyle::new(
         crate::button::ButtonPaint::new(rgba(0x00000000), rgba(0xcdcdcdff), rgba(0x00000000)),
         crate::button::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000)),
@@ -1718,6 +1726,12 @@ fn loading_state_should_not_activate_a_hidden_stale_selection(cx: &mut TestAppCo
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
     palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("command-palette-loading-progress-activity")
+            .is_some()
+    );
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2297,8 +2311,6 @@ fn modal_palette_window(
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
                     rgba(0x505058ff),
-                    rgba(0x404048ff),
-                    rgba(0x55aaffff),
                     rgba(0x5599ffff),
                     rgba(0x5599ff22),
                     rgba(0xffbb55ff),

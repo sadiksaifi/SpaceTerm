@@ -20,7 +20,7 @@ use super::{
     policy::{ActionArrangement, DefaultActionPresentation, is_safe_cancel, select_action_axis},
 };
 use crate::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, Icon, IconName,
+    Button, ButtonRole, ButtonSize, ButtonVariant, Icon, IconName, ProgressBar, ProgressSize,
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -28,8 +28,6 @@ use crate::{
 };
 
 const MODAL_KEY_CONTEXT: &str = "SpaceTermModal";
-const INDETERMINATE_SEGMENT_COUNT: usize = 4;
-
 actions!(
     spaceterm_modal,
     [
@@ -285,6 +283,7 @@ fn render_overlay(
         body_focus_anchors,
         metrics,
         paint,
+        policy.text_direction(),
         window,
         cx,
     );
@@ -562,6 +561,7 @@ fn render_body(
     body_focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
     paint: ModalPaint,
+    direction: TextDirection,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -713,9 +713,18 @@ fn render_body(
                         .overflow_y_scroll()
                         .text_size(metrics.body_size)
                         .whitespace_normal()
-                        .child(status),
+                        .child(status.clone()),
                 )
-                .child(render_progress(progress_state, metrics, paint))
+                .child(
+                    ProgressBar::new(
+                        ("modal-progress", snapshot.presentation.value()),
+                        status,
+                        progress_state.unwrap_or(ProgressState::Indeterminate),
+                    )
+                    .size(ProgressSize::Regular)
+                    .right_to_left(direction == TextDirection::RightToLeft)
+                    .debug_selector("modal-progress"),
+                )
                 .child(
                     div()
                         .id(("modal-progress-detail", snapshot.presentation.value()))
@@ -1203,52 +1212,6 @@ impl ModalSuppressionInteraction {
         *self = Self::Idle;
         true
     }
-}
-
-fn render_progress(
-    state: Option<ProgressState>,
-    metrics: ModalMetrics,
-    paint: ModalPaint,
-) -> AnyElement {
-    let fill = match state.unwrap_or(ProgressState::Indeterminate) {
-        ProgressState::Determinate(value) => div()
-            .debug_selector(|| "modal-progress-determinate".to_owned())
-            .h_full()
-            .w(relative(value.value()))
-            .bg(paint.progress_fill),
-        ProgressState::Indeterminate => {
-            let mut segments = div()
-                .debug_selector(|| "modal-progress-indeterminate".to_owned())
-                .h_full()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between();
-            for index in 0..INDETERMINATE_SEGMENT_COUNT {
-                segments = segments.child(
-                    div()
-                        .debug_selector(move || {
-                            format!("modal-progress-indeterminate-segment-{index}")
-                        })
-                        .h_full()
-                        .w(relative(metrics.indeterminate_segment_fraction()))
-                        .bg(paint.progress_fill),
-                );
-            }
-            segments
-        }
-    };
-    div()
-        .debug_selector(|| "modal-progress-track".to_owned())
-        .w_full()
-        .h(metrics.progress_track_thickness())
-        .flex_shrink_0()
-        .overflow_hidden()
-        .rounded(metrics.progress_track_radius())
-        .bg(paint.progress_track)
-        .child(fill)
-        .into_any_element()
 }
 
 #[expect(

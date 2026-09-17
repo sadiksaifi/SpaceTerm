@@ -127,8 +127,6 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
                 text,
                 muted,
                 muted,
-                surface,
-                accent,
                 accent,
                 surface,
                 accent,
