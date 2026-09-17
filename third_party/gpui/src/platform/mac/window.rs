@@ -579,6 +579,7 @@ impl MacWindow {
             is_minimizable,
             focus,
             show,
+            maximized,
             display_id,
             window_min_size,
             tabbing_identifier,
@@ -846,17 +847,33 @@ impl MacWindow {
                 }
             }
 
+            // Birth maximized windows at the visible frame while still hidden, so the
+            // zoom Window::new issues next is a zero-distance no-op: the window
+            // appears filling the screen with no expand animation, and zoom keeps
+            // its state. Note AppKit then saves the fullscreen frame as the zoom
+            // restore frame, so unzooming a pristine launch window is a no-op until
+            // the user resizes.
+            if maximized {
+                native_window.setFrame_display_animate_(
+                    NSScreen::visibleFrame(target_screen),
+                    YES,
+                    NO,
+                );
+            }
+
             if focus && show {
                 native_window.makeKeyAndOrderFront_(nil);
             } else if show {
                 native_window.orderFront_(nil);
             }
 
-            // Set the initial position of the window to the specified origin.
-            // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
-            // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
-            //  is different from the primary screen.
-            NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
+            if !maximized {
+                // Set the initial position of the window to the specified origin.
+                // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
+                // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
+                //  is different from the primary screen.
+                NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
+            }
             window.0.lock().move_traffic_light();
 
             pool.drain();

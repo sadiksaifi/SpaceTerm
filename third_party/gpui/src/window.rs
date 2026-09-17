@@ -964,6 +964,7 @@ impl Window {
                 is_minimizable,
                 focus,
                 show,
+                maximized: matches!(window_bounds, Some(WindowBounds::Maximized(_))),
                 display_id,
                 window_min_size,
                 #[cfg(target_os = "macos")]
