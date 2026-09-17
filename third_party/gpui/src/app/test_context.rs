@@ -1,9 +1,9 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
-    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
-    Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
+    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DevicePixels, DrawPhase,
+    Drawable, Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
     WindowHandle, WindowOptions,
 };
@@ -284,6 +284,11 @@ impl TestAppContext {
     /// returns the TextSystem
     pub fn text_system(&self) -> &Arc<TextSystem> {
         &self.text_system
+    }
+
+    /// Configures deterministic nonempty raster bounds for glyph paint tests.
+    pub fn set_glyph_raster_bounds(&self, bounds: Bounds<DevicePixels>) {
+        self.test_platform.text_system.set_raster_bounds(bounds);
     }
 
     /// Simulates writing to the platform clipboard

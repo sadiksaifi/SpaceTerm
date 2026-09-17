@@ -35,7 +35,7 @@ pub(crate) struct TestPlatform {
     pub(crate) prompts: RefCell<TestPrompts>,
     screen_capture_sources: RefCell<Vec<TestScreenCaptureSource>>,
     pub opened_url: RefCell<Option<String>>,
-    pub text_system: Arc<dyn PlatformTextSystem>,
+    pub text_system: Arc<NoopTextSystem>,
     #[cfg(target_os = "windows")]
     bitmap_factory: std::mem::ManuallyDrop<IWICImagingFactory>,
     weak: Weak<Self>,
@@ -102,7 +102,7 @@ impl TestPlatform {
             )
         };
 
-        let text_system = Arc::new(NoopTextSystem);
+        let text_system = Arc::new(NoopTextSystem::new());
 
         Rc::new_cyclic(|weak| TestPlatform {
             background_executor: executor,

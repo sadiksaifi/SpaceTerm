@@ -48,6 +48,7 @@ use async_task::Runnable;
 use futures::channel::oneshot;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame};
+use parking_lot::RwLock;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use schemars::JsonSchema;
 use seahash::SeaHasher;
@@ -591,12 +592,21 @@ pub(crate) trait PlatformTextSystem: Send + Sync {
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
 }
 
-pub(crate) struct NoopTextSystem;
+pub(crate) struct NoopTextSystem {
+    raster_bounds: RwLock<Option<Bounds<DevicePixels>>>,
+}
 
 impl NoopTextSystem {
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self
+        Self {
+            raster_bounds: RwLock::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_raster_bounds(&self, bounds: Bounds<DevicePixels>) {
+        *self.raster_bounds.write() = Some(bounds);
     }
 }
 
@@ -652,7 +662,7 @@ impl PlatformTextSystem for NoopTextSystem {
     }
 
     fn glyph_raster_bounds(&self, _params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        Ok(Default::default())
+        Ok((*self.raster_bounds.read()).unwrap_or_default())
     }
 
     fn rasterize_glyph(

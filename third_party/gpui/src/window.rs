@@ -1322,6 +1322,43 @@ pub enum GlyphPaintRegion {
     },
 }
 
+/// A painted glyph kind exposed only to renderer integration tests.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PaintedGlyphKindForTest {
+    /// A monochrome glyph and its composited color.
+    Monochrome {
+        /// The color submitted to the scene.
+        color: Hsla,
+    },
+    /// A polychrome emoji glyph.
+    Emoji,
+}
+
+/// The raster and clipped bounds of one glyph scene primitive.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedGlyphForTest {
+    /// The complete raster bounds before content masking.
+    pub raster_bounds: Bounds<ScaledPixels>,
+    /// The raster bounds visible through the primitive's content mask.
+    pub visible_bounds: Bounds<ScaledPixels>,
+    /// The scene order used for compositing.
+    pub order: u32,
+    /// Whether this is a monochrome or polychrome glyph.
+    pub kind: PaintedGlyphKindForTest,
+}
+
+/// The clipped bounds and scene order of one quad primitive.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedQuadForTest {
+    /// The quad bounds visible through the primitive's content mask.
+    pub visible_bounds: Bounds<ScaledPixels>,
+    /// The scene order used for compositing.
+    pub order: u32,
+}
+
 impl GlyphPaintRegion {
     fn bounds(self) -> Bounds<Pixels> {
         match self {
@@ -4811,6 +4848,55 @@ impl Window {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
+    }
+
+    /// Returns glyph primitives submitted by the current test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_glyphs_for_test(&self) -> Vec<PaintedGlyphForTest> {
+        let scene = if self.next_frame.scene.len() == 0 {
+            &self.rendered_frame.scene
+        } else {
+            &self.next_frame.scene
+        };
+        scene
+            .monochrome_sprites
+            .iter()
+            .map(|glyph| PaintedGlyphForTest {
+                raster_bounds: glyph.bounds,
+                visible_bounds: glyph.bounds.intersect(&glyph.content_mask.bounds),
+                order: glyph.order,
+                kind: PaintedGlyphKindForTest::Monochrome { color: glyph.color },
+            })
+            .chain(
+                scene
+                    .polychrome_sprites
+                    .iter()
+                    .map(|glyph| PaintedGlyphForTest {
+                        raster_bounds: glyph.bounds,
+                        visible_bounds: glyph.bounds.intersect(&glyph.content_mask.bounds),
+                        order: glyph.order,
+                        kind: PaintedGlyphKindForTest::Emoji,
+                    }),
+            )
+            .collect()
+    }
+
+    /// Returns quad primitives submitted by the current test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_quads_for_test(&self) -> Vec<PaintedQuadForTest> {
+        let scene = if self.next_frame.scene.len() == 0 {
+            &self.rendered_frame.scene
+        } else {
+            &self.next_frame.scene
+        };
+        scene
+            .quads
+            .iter()
+            .map(|quad| PaintedQuadForTest {
+                visible_bounds: quad.bounds.intersect(&quad.content_mask.bounds),
+                order: quad.order,
+            })
+            .collect()
     }
 }
 

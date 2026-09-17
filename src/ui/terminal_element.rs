@@ -2962,10 +2962,182 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use super::*;
     use crate::ui::terminal_ime::layout_preedit;
+
+    #[derive(Clone, Default)]
+    struct PaintCapture {
+        glyphs: Rc<RefCell<Vec<gpui::PaintedGlyphForTest>>>,
+        quads: Rc<RefCell<Vec<gpui::PaintedQuadForTest>>>,
+    }
+
+    struct PaintBatches {
+        batches: Vec<TerminalPaintBatch>,
+        capture: PaintCapture,
+    }
+
+    impl IntoElement for PaintBatches {
+        type Element = Self;
+
+        fn into_element(self) -> Self::Element {
+            self
+        }
+    }
+
+    impl Element for PaintBatches {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, Self::RequestLayoutState) {
+            (window.request_layout(Style::default(), [], cx), ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) {
+        }
+
+        fn paint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _prepaint: &mut Self::PrepaintState,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            for batch in &self.batches {
+                batch.submit(batch.grid_bounds, window, cx).unwrap();
+            }
+            *self.capture.glyphs.borrow_mut() = window.painted_glyphs_for_test();
+            *self.capture.quads.borrow_mut() = window.painted_quads_for_test();
+        }
+    }
+
+    fn cursor_render_batches(window: &mut Window, retained: bool) -> Vec<TerminalPaintBatch> {
+        let cell_width = px(8.375);
+        let line_height = px(14.0);
+        let grid_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+        let cursor_bounds = Bounds::new(grid_bounds.origin, size(cell_width * 3.0, line_height));
+        let mut cursor_text = cell("B");
+        cursor_text.foreground_source = TerminalColor::Rgb(Color::rgb(0x00_aa_00));
+        let mut cursor_emoji_tail = cell(" ");
+        cursor_emoji_tail.spacer_tail = true;
+        let mut overhang_text = cell("A\u{30d}\u{30d}\u{30d}\u{30d}\u{30d}\u{30d}");
+        overhang_text.foreground_source = TerminalColor::Rgb(Color::rgb(0xdd_00_00));
+        let mut overhang_emoji_tail = cell(" ");
+        overhang_emoji_tail.spacer_tail = true;
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::from([cursor_text, cell("😀"), cursor_emoji_tail]),
+            Arc::from([overhang_text, cell("😀"), overhang_emoji_tail]),
+        ]);
+        let terminal_fonts = test_terminal_fonts(&"Menlo".into());
+        let mut cache = TerminalGridCache::new();
+        let inputs = cache.prepare(
+            &rows,
+            &colors(),
+            &terminal_fonts,
+            &Arc::from([]),
+            TerminalGridMetrics {
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+            },
+        );
+        let stable_rows = cache.prepare_visible_geometry(
+            &inputs,
+            rows.len(),
+            PreparedGridLayout {
+                grid_bounds,
+                font_size: px(18.0),
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+                decoration_metrics: decoration_metrics(
+                    px(12.0),
+                    px(10.0),
+                    px(4.0),
+                    px(7.0),
+                    line_height,
+                    window.scale_factor(),
+                ),
+            },
+            window,
+        );
+        assert!(stable_rows.iter().all(|row| !row.text.is_empty()));
+        let mut rows = stable_rows
+            .into_iter()
+            .map(PreparedFrameRow::new)
+            .collect::<Vec<_>>();
+        rows[0].cursor_background = Some(fill(cursor_bounds, rgba(0x22_44_88_ff)));
+        let overlay = CursorTextOverlay {
+            row_index: 0,
+            bounds: cursor_bounds,
+            color: rgba(0xff_ff_ff_ff).into(),
+        };
+
+        if !retained {
+            return vec![TerminalPaintBatch {
+                surface: None,
+                grid_bounds,
+                line_height,
+                rows,
+                cursor_text_overlay: Some(overlay),
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            }];
+        }
+
+        let mut cursor_row = rows[0].clone();
+        rows[0].cursor_background = None;
+        cursor_row.cursor_background = Some(fill(cursor_bounds, rgba(0x22_44_88_ff)));
+        vec![
+            TerminalPaintBatch {
+                surface: None,
+                grid_bounds,
+                line_height,
+                rows,
+                cursor_text_overlay: None,
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            },
+            TerminalPaintBatch {
+                surface: Some(fill(cursor_bounds, rgba(0x0b_0b_0b_ff))),
+                grid_bounds: cursor_bounds,
+                line_height,
+                rows: vec![cursor_row],
+                cursor_text_overlay: Some(overlay),
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+            },
+        ]
+    }
 
     fn colors() -> crate::terminal::TerminalColorsSnapshot {
         let mut palette = [Color::rgb(0); 256];
@@ -3341,6 +3513,149 @@ mod tests {
             CursorTextPaint::Exclude(bounds)
         );
         assert_eq!(cursor_text_paint(None, 1), CursorTextPaint::Unchanged);
+    }
+
+    #[gpui::test]
+    fn direct_block_cursor_clips_real_neighbor_glyphs_and_recolors_only_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_glyph_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: cursor_render_batches(window, false),
+                capture: paint_capture,
+            },
+        );
+        let scale_factor = cx.update(|window, _| window.scale_factor());
+        let glyphs = capture.glyphs.borrow();
+        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+            .scale(scale_factor);
+        let red: Hsla = rgba(0xdd_00_00_ff).into();
+        let white: Hsla = rgba(0xff_ff_ff_ff).into();
+        let neighbor_text = glyphs
+            .iter()
+            .filter(|glyph| {
+                matches!(
+                    glyph.kind,
+                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            neighbor_text
+                .iter()
+                .any(|glyph| glyph.raster_bounds.intersects(&cursor)),
+            "the fixture must contain a real neighboring-row raster overhang: neighbor={neighbor_text:#?}; all={glyphs:#?}; cursor={cursor:?}"
+        );
+        assert!(
+            neighbor_text
+                .iter()
+                .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
+            "neighboring monochrome pixels must be excluded from the cursor"
+        );
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(
+                glyph.kind,
+                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+            ) && glyph.visible_bounds.intersects(&cursor)
+        }));
+
+        let emoji = glyphs
+            .iter()
+            .filter(|glyph| matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji))
+            .collect::<Vec<_>>();
+        let cursor_center_y = cursor.origin.y + cursor.size.height / 2.0;
+        let cursor_emoji = emoji
+            .iter()
+            .filter(|glyph| glyph.raster_bounds.origin.y < cursor_center_y)
+            .collect::<Vec<_>>();
+        let neighbor_emoji = emoji
+            .iter()
+            .filter(|glyph| glyph.raster_bounds.origin.y >= cursor_center_y)
+            .collect::<Vec<_>>();
+        assert!(
+            cursor_emoji
+                .iter()
+                .any(|glyph| glyph.visible_bounds.intersects(&cursor)),
+            "the cursor-owning row must preserve polychrome glyphs"
+        );
+        assert!(
+            neighbor_emoji
+                .iter()
+                .any(|glyph| glyph.raster_bounds.intersects(&cursor)),
+            "the fixture must contain a neighboring emoji raster overhang"
+        );
+        assert!(
+            neighbor_emoji
+                .iter()
+                .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
+            "neighboring emoji pixels must be excluded from the cursor"
+        );
+    }
+
+    #[gpui::test]
+    fn retained_block_cursor_covers_neighbor_overhang_before_repainting_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_glyph_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        let paint_capture = capture.clone();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: cursor_render_batches(window, true),
+                capture: paint_capture,
+            },
+        );
+        let scale_factor = cx.update(|window, _| window.scale_factor());
+        let glyphs = capture.glyphs.borrow();
+        let quads = capture.quads.borrow();
+        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+            .scale(scale_factor);
+        let red: Hsla = rgba(0xdd_00_00_ff).into();
+        let white: Hsla = rgba(0xff_ff_ff_ff).into();
+        let neighbor_order = glyphs
+            .iter()
+            .filter(|glyph| {
+                matches!(
+                    glyph.kind,
+                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                ) && glyph.visible_bounds.intersects(&cursor)
+            })
+            .map(|glyph| glyph.order)
+            .max()
+            .expect("the retained base frame keeps the neighboring overhang");
+        let cover_order = quads
+            .iter()
+            .filter(|quad| quad.visible_bounds == cursor && quad.order > neighbor_order)
+            .map(|quad| quad.order)
+            .max()
+            .expect("the retained cursor layer must cover the cursor rectangle");
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(
+                glyph.kind,
+                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+            ) && glyph.visible_bounds.intersects(&cursor)
+                && glyph.order > cover_order
+        }));
+        assert!(glyphs.iter().any(|glyph| {
+            matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji)
+                && glyph.visible_bounds.intersects(&cursor)
+                && glyph.order > cover_order
+        }));
     }
 
     #[test]
