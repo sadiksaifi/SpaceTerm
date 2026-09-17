@@ -1094,6 +1094,9 @@ impl TerminalPane {
             self.advance_native_service_focus_epoch();
             if !focused {
                 self.key_input_adapter.reset();
+                self.pressed_button = None;
+                self.pressed_link = None;
+                self.selection_copy_pending = false;
             }
             if focused {
                 self.pending_accessibility_notifications
@@ -2463,6 +2466,29 @@ impl TerminalPane {
             });
         }
         cx.stop_propagation();
+    }
+
+    pub(super) fn capture_pointer_drag(pane: &Entity<Self>, window: &mut Window) {
+        let motion_pane = pane.downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase.capture() {
+                let _ = motion_pane.update(cx, |pane, cx| {
+                    if pane.pressed_button.is_some() || pane.pressed_link.is_some() {
+                        pane.on_mouse_move(event, window, cx);
+                    }
+                });
+            }
+        });
+        let release_pane = pane.downgrade();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase.capture() {
+                let _ = release_pane.update(cx, |pane, cx| {
+                    if pane.pressed_button.is_some() || pane.pressed_link.is_some() {
+                        pane.on_mouse_up(event, window, cx);
+                    }
+                });
+            }
+        });
     }
 
     fn on_mouse_move(

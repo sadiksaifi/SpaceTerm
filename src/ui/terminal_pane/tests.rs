@@ -3375,6 +3375,50 @@ fn copy_action_requests_semantic_selection_and_writes_plain_text_pasteboard(
 }
 
 #[gpui::test]
+fn selection_drag_delivers_motion_and_release_outside_the_pane(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let bounds = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap());
+    for y in [bounds.top() - px(40.0), bounds.bottom() + px(40.0)] {
+        let outside = point(bounds.center().x, y);
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
+        let before = records.commands().len();
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::none());
+        let motions = records
+            .commands()
+            .into_iter()
+            .skip(before)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Pointer(input) if input.phase == PointerPhase::Motion => {
+                    Some(input)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            motions.len(),
+            1,
+            "an owned drag must receive outside movement exactly once"
+        );
+        let expected = pane.read_with(cx, |pane, _| pane.surface_position(outside, true).unwrap());
+        assert_eq!(motions[0].position, expected);
+        let before = records.commands().len();
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+        assert!(records.commands().into_iter().skip(before).any(|call| {
+            matches!(call.command, RecordedSessionCommand::PointerAndCopySelection(input) if input.phase == PointerPhase::Release && input.position == expected)
+        }));
+        let after_release = records.commands().len();
+        cx.simulate_mouse_move(outside, None, Modifiers::none());
+        assert!(
+            records
+                .commands()
+                .into_iter()
+                .skip(after_release)
+                .all(|call| { !matches!(call.command, RecordedSessionCommand::Pointer(_)) })
+        );
+    }
+}
+
+#[gpui::test]
 fn completed_local_selection_copies_to_the_pasteboard_after_release(cx: &mut TestAppContext) {
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,

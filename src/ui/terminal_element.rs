@@ -1702,6 +1702,7 @@ impl Element for TerminalGridElement {
         let Some(pane) = self.input.upgrade() else {
             return;
         };
+        TerminalPane::capture_pointer_drag(&pane, window);
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, pane.clone()),
