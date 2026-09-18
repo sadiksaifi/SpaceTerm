@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -57,12 +58,21 @@ fn match_directory_picker_rows(
     parsed: &ParsedDirectoryPath,
     entries: &[DirectoryPickerDirectoryEntry],
 ) -> Vec<DirectoryPickerRowMatch> {
-    fuzzy_filter(entries, &parsed.leaf_filter, |entry| {
+    let mut ordered = entries.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        let folded = left.name().to_lowercase().cmp(&right.name().to_lowercase());
+        if folded == Ordering::Equal {
+            left.name().cmp(right.name())
+        } else {
+            folded
+        }
+    });
+    fuzzy_filter(&ordered, &parsed.leaf_filter, |entry| {
         FuzzyTarget::new(entry.name())
     })
     .into_iter()
     .map(|matched| DirectoryPickerRowMatch {
-        entry: entries[matched.item_index()].clone(),
+        entry: ordered[matched.item_index()].clone(),
         matched_indices: matched.field_highlight_indices(0),
     })
     .collect()
@@ -1399,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_picker_rows_fuzzy_match_and_preserve_tied_source_order() {
+    fn directory_picker_rows_fuzzy_match_and_preserve_deterministic_name_order_for_ties() {
         let parsed =
             parse_directory_path(LocalPathSemantics::Posix, "~/Projects/sp", &home()).unwrap();
         let entries = [
@@ -1424,7 +1434,7 @@ mod tests {
             rows.iter()
                 .map(DirectoryPickerDirectoryEntry::name)
                 .collect::<Vec<_>>(),
-            vec!["spaceTerm", "Spatial", "SpaceTerm"]
+            vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
 
@@ -1447,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_picker_empty_leaf_preserves_listing_order() {
+    fn directory_picker_empty_leaf_preserves_deterministic_name_order() {
         let parsed =
             parse_directory_path(LocalPathSemantics::Posix, "~/Projects/", &home()).unwrap();
         let entries = [
@@ -1460,7 +1470,7 @@ mod tests {
                 .iter()
                 .map(DirectoryPickerDirectoryEntry::name)
                 .collect::<Vec<_>>(),
-            vec!["Zulu", "Alpha"]
+            vec!["Alpha", "Zulu"]
         );
     }
 

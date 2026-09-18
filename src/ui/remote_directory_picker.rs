@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{cmp::Ordering, fmt, sync::Arc};
 
 use gpui::prelude::*;
 use gpui::{Action, App};
@@ -257,10 +257,18 @@ fn match_remote_workspace_rows(
     entries: &[RemoteDirectoryRow],
 ) -> Vec<RemoteDirectoryRowMatch> {
     let reveal_hidden = parsed.reveals_hidden_directories();
-    let visible = entries
+    let mut visible = entries
         .iter()
         .filter(|entry| reveal_hidden || !entry.name.starts_with('.'))
         .collect::<Vec<_>>();
+    visible.sort_by(|left, right| {
+        let folded = left.name.to_lowercase().cmp(&right.name.to_lowercase());
+        if folded == Ordering::Equal {
+            left.name.cmp(&right.name)
+        } else {
+            folded
+        }
+    });
     fuzzy_filter(&visible, &parsed.leaf_filter, |entry| {
         FuzzyTarget::new(entry.name())
     })
@@ -1479,7 +1487,7 @@ mod tests {
 
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.row_names()),
-            vec!["Projects", "alpha"]
+            vec!["alpha", "Projects"]
         );
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
@@ -1488,7 +1496,7 @@ mod tests {
 
         assert_eq!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
-            "~/Projects/"
+            "~/alpha/"
         );
         assert!(picker.read_with(cx, |picker, _| picker.is_open()));
     }
@@ -2067,13 +2075,13 @@ mod tests {
     }
 
     #[test]
-    fn rows_should_fuzzy_match_and_preserve_tied_source_order() {
+    fn rows_should_fuzzy_match_and_preserve_deterministic_name_order_for_ties() {
         let parsed = parse_remote_directory("~/Projects/sp").unwrap();
         let entries = remote_rows(["spaceTerm", "Spatial", "SpaceTerm", "tools"]);
 
         assert_eq!(
             row_names(filter_remote_workspace_rows(&parsed, &entries)),
-            vec!["spaceTerm", "Spatial", "SpaceTerm"]
+            vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
 
@@ -2089,13 +2097,13 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_leaf_should_preserve_remote_listing_order() {
+    fn an_empty_leaf_should_preserve_deterministic_name_order() {
         let parsed = parse_remote_directory("~/Projects/").unwrap();
         let entries = remote_rows(["Zulu", "Alpha"]);
 
         assert_eq!(
             row_names(filter_remote_workspace_rows(&parsed, &entries)),
-            vec!["Zulu", "Alpha"]
+            vec!["Alpha", "Zulu"]
         );
     }
 

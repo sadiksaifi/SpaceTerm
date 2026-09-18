@@ -369,15 +369,7 @@ impl SettingsWindow {
                 }
                 if matches!(event, TextInputEvent::ValueChanged(_)) {
                     settings.query = SharedString::from(search.read(cx).value().to_owned());
-                    settings.revealed = settings.applicable_matching_rows().first().copied();
-                    // Each section is its own view, so a query that the visible one cannot answer
-                    // moves to the first section that can.
-                    if settings.rows_for(settings.active_section).is_empty()
-                        && let Some(section) = settings.section_for_query()
-                    {
-                        settings.active_section = section;
-                        settings.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-                    }
+                    settings.synchronize_search_results();
                     cx.notify();
                 }
             },
@@ -517,13 +509,6 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The first section answering the current query, so search never lands on an empty view.
-    fn section_for_query(&self) -> Option<SettingsSectionId> {
-        self.applicable_matching_rows()
-            .first()
-            .map(|row| row.descriptor().section)
-    }
-
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
         self.applicable_matching_rows()
             .into_iter()
@@ -536,6 +521,25 @@ impl SettingsWindow {
             .into_iter()
             .filter(|row| self.row_applies(*row))
             .collect()
+    }
+
+    fn synchronize_search_results(&mut self) {
+        let matching = self.applicable_matching_rows();
+        self.revealed = if self.query.trim().is_empty() {
+            None
+        } else {
+            matching.first().copied()
+        };
+        // Each section is its own view, so a query that the visible one cannot answer moves to the
+        // first section that can.
+        if !matching
+            .iter()
+            .any(|row| row.descriptor().section == self.active_section)
+            && let Some(row) = matching.first()
+        {
+            self.active_section = row.descriptor().section;
+            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        }
     }
 
     /// Both scheme engines use the shared mode while retaining their own light and dark slots.
@@ -879,7 +883,7 @@ impl SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = self.applicable_matching_rows();
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -1378,6 +1382,7 @@ impl SettingsWindow {
 
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
         self.edit(move |draft| draft.preferences.mode = mode, cx);
+        self.synchronize_search_results();
     }
 
     fn render_scheme_picker(
