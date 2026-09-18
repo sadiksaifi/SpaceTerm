@@ -2042,7 +2042,7 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 }
 
 #[gpui::test]
-fn titlebar_button_and_command_k_should_each_block_terminal_input(cx: &mut TestAppContext) {
+fn titlebar_button_and_command_shift_k_should_each_block_terminal_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     click("workspace-switcher", cx);
     assert_eq!(

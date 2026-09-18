@@ -121,6 +121,8 @@ alt-cmd-left	Some(Identifier("TerminalPane"))	terminal::FocusPaneLeft
 alt-cmd-right	Some(Identifier("TerminalPane"))	terminal::FocusPaneRight
 alt-cmd-up	Some(Identifier("TerminalPane"))	terminal::FocusPaneUp
 alt-cmd-down	Some(Identifier("TerminalPane"))	terminal::FocusPaneDown
+cmd-[	Some(Identifier("TerminalPane"))	terminal::FocusPreviousPane
+cmd-]	Some(Identifier("TerminalPane"))	terminal::FocusNextPane
 cmd-shift-enter	Some(Identifier("TerminalPane"))	terminal::TogglePaneZoom
 cmd-1	Some(Identifier("TerminalPane"))	terminal::ActivateTab1
 cmd-2	Some(Identifier("TerminalPane"))	terminal::ActivateTab2

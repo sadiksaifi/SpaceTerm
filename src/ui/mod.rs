@@ -89,6 +89,8 @@ actions!(
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
+        FocusPreviousPane,
+        FocusNextPane,
         TogglePaneZoom,
         CreateTab,
         ActivateTab1,

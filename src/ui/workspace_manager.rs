@@ -38,10 +38,10 @@ use super::{
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewRemoteWorkspace, NewWorkspace,
-    OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace,
-    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
+    NewRemoteWorkspace, NewWorkspace, OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown,
+    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -3247,6 +3247,8 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneRight>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneUp>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneDown>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPreviousPane>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FocusNextPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<TogglePaneZoom>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<OpenTerminalFind>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))

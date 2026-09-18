@@ -68,6 +68,8 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-alt-right", FocusPaneRight, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-up", FocusPaneUp, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-down", FocusPaneDown, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-[", FocusPreviousPane, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-]", FocusNextPane, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new(
             "cmd-shift-enter",
             TogglePaneZoom,
