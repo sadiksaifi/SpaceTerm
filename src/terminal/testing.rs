@@ -134,6 +134,7 @@ impl RecordedSessionStart {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecordedSessionCommand {
     Key(KeyInput),
+    ClearScreenAndScrollback,
     Focus(bool),
     Resize(TerminalGeometry),
     Pointer(PointerInput),
@@ -486,6 +487,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn key(&self, input: KeyInput) {
         self.record(RecordedSessionCommand::Key(input));
+    }
+
+    fn clear_screen_and_scrollback(&self) {
+        self.record(RecordedSessionCommand::ClearScreenAndScrollback);
     }
 
     fn focus(&self, focused: bool) {

@@ -365,6 +365,7 @@ pub(crate) trait TerminalSessionHandle {
     }
 
     fn key(&self, input: KeyInput);
+    fn clear_screen_and_scrollback(&self);
     fn focus(&self, focused: bool);
     fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
@@ -502,6 +503,14 @@ impl TerminalSessionHandle for TerminalSession {
             && commands.send(Command::Key(input)).is_err()
         {
             eprintln!("terminal key input was dropped because the worker has stopped");
+        }
+    }
+
+    fn clear_screen_and_scrollback(&self) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::ClearScreenAndScrollback).is_err()
+        {
+            eprintln!("terminal clear was dropped because the worker has stopped");
         }
     }
 
@@ -724,6 +733,7 @@ struct ReaderEventBatch {
 
 enum Command {
     Key(KeyInput),
+    ClearScreenAndScrollback,
     Focus(bool),
     Resize,
     Pointer(PointerInput),
@@ -784,6 +794,7 @@ impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::Key(..) => "Key",
+            Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
             Self::Focus(..) => "Focus",
             Self::Resize => "Resize",
             Self::Pointer(..) => "Pointer",
@@ -1121,6 +1132,10 @@ impl TerminalWorker {
     fn process_command(&mut self, command: Command) -> bool {
         match command {
             Command::Key(input) => self.process_key(input),
+            Command::ClearScreenAndScrollback => {
+                let action = self.emulator.clear_screen_and_scrollback();
+                self.apply_emulator_action(action)
+            }
             Command::Focus(focused) => self.process_focus(focused),
             Command::ReaderReady => self.process_reader_events(),
             Command::Resize => {

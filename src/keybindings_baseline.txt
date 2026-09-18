@@ -90,7 +90,7 @@ escape	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::Cancel
 tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusNext
 shift-tab	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::FocusPrevious
 ctrl-cmd-space	Some(Identifier("SpaceTermTextInput"))	spaceterm_text_input::ShowCharacterPalette
-cmd-k	None	terminal::SwitchWorkspace
+cmd-shift-k	None	terminal::SwitchWorkspace
 cmd-n	None	terminal::NewWorkspace
 cmd-shift-n	None	terminal::NewRemoteWorkspace
 cmd-t	None	terminal::CreateTab
@@ -114,15 +114,12 @@ cmd-=	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd-+	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd--	Some(Identifier("TerminalPane"))	terminal::DecreaseTerminalFontSize
 cmd-0	Some(Identifier("TerminalPane"))	terminal::ResetTerminalFontSize
+cmd-k	Some(Identifier("TerminalPane"))	terminal::ClearTerminalScreenAndScrollback
 cmd-d	Some(Identifier("TerminalPane"))	terminal::SplitRight
 cmd-shift-d	Some(Identifier("TerminalPane"))	terminal::SplitDown
-cmd-shift-h	Some(Identifier("TerminalPane"))	terminal::FocusPaneLeft
 alt-cmd-left	Some(Identifier("TerminalPane"))	terminal::FocusPaneLeft
-cmd-shift-l	Some(Identifier("TerminalPane"))	terminal::FocusPaneRight
 alt-cmd-right	Some(Identifier("TerminalPane"))	terminal::FocusPaneRight
-cmd-shift-k	Some(Identifier("TerminalPane"))	terminal::FocusPaneUp
 alt-cmd-up	Some(Identifier("TerminalPane"))	terminal::FocusPaneUp
-cmd-shift-j	Some(Identifier("TerminalPane"))	terminal::FocusPaneDown
 alt-cmd-down	Some(Identifier("TerminalPane"))	terminal::FocusPaneDown
 cmd-shift-enter	Some(Identifier("TerminalPane"))	terminal::TogglePaneZoom
 cmd-1	Some(Identifier("TerminalPane"))	terminal::ActivateTab1

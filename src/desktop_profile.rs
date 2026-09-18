@@ -240,7 +240,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             ActionShortcut::new(crate::ui::ActivateWorkspace7, "Ctrl+7"),
             ActionShortcut::new(crate::ui::ActivateWorkspace8, "Ctrl+8"),
             ActionShortcut::new(crate::ui::ActivateWorkspace9, "Ctrl+9"),
-            ActionShortcut::new(SwitchWorkspace, "Primary+K"),
+            ActionShortcut::new(SwitchWorkspace, "Primary+Shift+K"),
             ActionShortcut::new(crate::ui::ToggleSidebar, "Primary+B"),
             ActionShortcut::new(NewWorkspace, "Primary+N"),
             ActionShortcut::new(crate::ui::NewRemoteWorkspace, "Primary+Shift+N"),

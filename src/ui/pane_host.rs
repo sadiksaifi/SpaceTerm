@@ -3998,7 +3998,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_shift_vim_shortcuts_should_focus_panes_in_each_direction(cx: &mut TestAppContext) {
+    fn command_shift_vim_shortcuts_should_not_move_pane_focus(cx: &mut TestAppContext) {
         let (host, cx) = four_pane_host(cx);
 
         let focused_panes = focused_panes_after_shortcuts(
@@ -4010,9 +4010,9 @@ mod tests {
         assert_eq!(
             focused_panes,
             [
-                PaneId::new(2),
-                PaneId::new(4),
-                PaneId::new(3),
+                PaneId::new(1),
+                PaneId::new(1),
+                PaneId::new(1),
                 PaneId::new(1),
             ]
         );

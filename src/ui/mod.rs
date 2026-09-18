@@ -82,6 +82,7 @@ actions!(
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
+        ClearTerminalScreenAndScrollback,
         SplitRight,
         SplitDown,
         FocusPaneLeft,
@@ -277,7 +278,7 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-k", SwitchWorkspace.name()),
+            ("cmd-shift-k", SwitchWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
             ("cmd-shift-n", NewRemoteWorkspace.name()),
             ("cmd-t", CreateTab.name()),

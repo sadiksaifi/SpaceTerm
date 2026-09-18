@@ -2767,6 +2767,23 @@ fn erase_saved_lines_clears_scrollback_without_discarding_the_visible_screen() {
 }
 
 #[test]
+fn clear_screen_and_scrollback_returns_to_an_empty_visible_screen() {
+    let mut emulator = emulator(10, 2);
+    emulator.feed(b"one\r\ntwo\r\nthree");
+    let before = emulator.snapshot().unwrap().unwrap();
+    assert!(before.scrollbar.total_rows > before.scrollbar.visible_rows);
+
+    let action = emulator.clear_screen_and_scrollback();
+    let cleared = emulator.snapshot().unwrap().unwrap();
+
+    assert!(action.screen_changed);
+    assert!((0..cleared.rows.len()).all(|row| row_text(&cleared, row).trim().is_empty()));
+    assert_eq!(cleared.scrollbar.total_rows, cleared.scrollbar.visible_rows);
+    assert_eq!(cleared.cursor.position.unwrap().row, 0);
+    assert_eq!(cleared.cursor.position.unwrap().column, 0);
+}
+
+#[test]
 fn terminal_reset_returns_to_a_clean_primary_screen() {
     let mut emulator = emulator(10, 2);
     emulator.feed(b"primary\r\nscroll\r\nback\x1b[?1049halternate");

@@ -1251,6 +1251,11 @@ impl TerminalEmulator {
         }
     }
 
+    pub(crate) fn clear_screen_and_scrollback(&mut self) -> EmulatorAction {
+        self.feed(b"\x1b[2J\x1b[H\x1b[3J");
+        EmulatorAction::screen_changed()
+    }
+
     pub(crate) fn graphics_animation_deadline(&self) -> Option<Instant> {
         self.graphics_animation_deadline
     }

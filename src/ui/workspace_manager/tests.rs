@@ -1399,7 +1399,7 @@ fn open_directory_picker(manager: &Entity<WorkspaceManager>, cx: &mut VisualTest
 }
 
 fn open_workspace_switcher(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_keystrokes("cmd-shift-k");
     cx.run_until_parked();
 }
 
@@ -4108,7 +4108,7 @@ fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         baseline.0
     );
 
-    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_keystrokes("cmd-shift-k");
     let focus_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
