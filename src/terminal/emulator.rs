@@ -1252,8 +1252,16 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn clear_screen_and_scrollback(&mut self) -> EmulatorAction {
-        self.feed(b"\x1b[2J\x1b[H\x1b[3J");
-        EmulatorAction::screen_changed()
+        let redraw_prompt = self.terminal.clear_screen(true);
+        EmulatorAction {
+            bytes: if redraw_prompt {
+                vec![0x0c]
+            } else {
+                Vec::new()
+            },
+            screen_changed: true,
+            selection_completed: false,
+        }
     }
 
     pub(crate) fn graphics_animation_deadline(&self) -> Option<Instant> {

@@ -2769,7 +2769,7 @@ fn erase_saved_lines_clears_scrollback_without_discarding_the_visible_screen() {
 #[test]
 fn clear_screen_and_scrollback_returns_to_an_empty_visible_screen() {
     let mut emulator = emulator(10, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree");
+    emulator.feed(b"one\r\ntwo\r\n\x1b]133;A\x07prompt");
     let before = emulator.snapshot().unwrap().unwrap();
     assert!(before.scrollbar.total_rows > before.scrollbar.visible_rows);
 
@@ -2777,10 +2777,23 @@ fn clear_screen_and_scrollback_returns_to_an_empty_visible_screen() {
     let cleared = emulator.snapshot().unwrap().unwrap();
 
     assert!(action.screen_changed);
+    assert_eq!(action.bytes, vec![0x0c]);
     assert!((0..cleared.rows.len()).all(|row| row_text(&cleared, row).trim().is_empty()));
     assert_eq!(cleared.scrollbar.total_rows, cleared.scrollbar.visible_rows);
-    assert_eq!(cleared.cursor.position.unwrap().row, 0);
-    assert_eq!(cleared.cursor.position.unwrap().column, 0);
+}
+
+#[test]
+fn clear_screen_and_scrollback_preserves_an_in_flight_escape_sequence() {
+    let mut emulator = emulator(12, 2);
+    emulator.feed(b"\x1b]2;split");
+
+    let action = emulator.clear_screen_and_scrollback();
+    emulator.feed(b" title\x07");
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+
+    assert!(action.screen_changed);
+    assert!(action.bytes.is_empty());
+    assert_eq!(snapshot.title.as_ref(), "split title");
 }
 
 #[test]

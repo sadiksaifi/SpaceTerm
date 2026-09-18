@@ -309,6 +309,14 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         unsafe { ffi::ghostty_terminal_vt_write(self.inner.as_raw(), data.as_ptr(), data.len()) }
     }
 
+    /// Clear the primary screen and, optionally, its scrollback.
+    ///
+    /// The alternate screen is left unchanged. Returns whether the caller
+    /// should send a form feed to the PTY so the shell redraws its prompt.
+    pub fn clear_screen(&mut self, history: bool) -> bool {
+        unsafe { ffi::ghostty_terminal_clear_screen(self.inner.as_raw(), history) }
+    }
+
     /// Resize the terminal to the given dimensions.
     ///
     /// Changes the number of columns and rows in the terminal. The primary
