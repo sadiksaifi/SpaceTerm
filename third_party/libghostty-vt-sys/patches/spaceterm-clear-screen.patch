@@ -1,7 +1,7 @@
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 --- a/include/ghostty/vt/terminal.h
 +++ b/include/ghostty/vt/terminal.h
-@@ -1990,6 +1990,24 @@ GHOSTTY_API GhosttyResult ghostty_terminal_new(const GhosttyAllocator* allocator,
+@@ -1990,6 +1990,25 @@ GHOSTTY_API GhosttyResult ghostty_terminal_new(const GhosttyAllocator* allocator,
   */
  GHOSTTY_API void ghostty_terminal_free(GhosttyTerminal terminal);
  
@@ -10,9 +10,10 @@ diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 + *
 + * The alternate screen is left unchanged. On the primary screen this clears
 + * the selection and, when requested, scrollback. If the cursor is at a shell
-+ * prompt, the visible screen is cleared and the function returns true so the
-+ * caller can send a form feed to request a prompt redraw. Otherwise only rows
-+ * above the cursor are cleared and the function returns false.
++ * prompt, the visible screen is preserved and the function returns true so the
++ * caller can ask the shell to clear and redraw it without a blank intermediate
++ * frame. Otherwise only rows above the cursor are cleared and the function
++ * returns false.
 + *
 + * @param terminal The terminal handle (NULL returns false)
 + * @param history Whether to clear retained scrollback
@@ -51,7 +52,7 @@ diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 --- a/src/terminal/c/terminal.zig
 +++ b/src/terminal/c/terminal.zig
-@@ -1533,6 +1533,39 @@ pub fn resize(
+@@ -1533,6 +1533,37 @@ pub fn resize(
      return .success;
  }
  
@@ -83,8 +84,6 @@ diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 +        return false;
 +    }
 +
-+    t.eraseDisplay(.complete, false);
-+    if (history) t.eraseDisplay(.scrollback, false);
 +    return true;
 +}
 +

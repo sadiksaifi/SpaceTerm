@@ -2767,7 +2767,7 @@ fn erase_saved_lines_clears_scrollback_without_discarding_the_visible_screen() {
 }
 
 #[test]
-fn clear_screen_and_scrollback_returns_to_an_empty_visible_screen() {
+fn clear_screen_and_scrollback_preserves_prompt_until_the_shell_redraws() {
     let mut emulator = emulator(10, 2);
     emulator.feed(b"one\r\ntwo\r\n\x1b]133;A\x07prompt");
     let before = emulator.snapshot().unwrap().unwrap();
@@ -2778,7 +2778,7 @@ fn clear_screen_and_scrollback_returns_to_an_empty_visible_screen() {
 
     assert!(action.screen_changed);
     assert_eq!(action.bytes, vec![0x0c]);
-    assert!((0..cleared.rows.len()).all(|row| row_text(&cleared, row).trim().is_empty()));
+    assert!((0..cleared.rows.len()).any(|row| row_text(&cleared, row).contains("prompt")));
     assert_eq!(cleared.scrollbar.total_rows, cleared.scrollbar.visible_rows);
 }
 

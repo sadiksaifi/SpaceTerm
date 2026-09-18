@@ -3488,7 +3488,7 @@ unsafe extern "C" {
     pub fn ghostty_terminal_free(terminal: Terminal);
 }
 unsafe extern "C" {
-    #[doc = " Clear the primary screen without passing bytes through the VT parser.\n\n The alternate screen is left unchanged. On the primary screen this clears\n the selection and, when requested, scrollback. If the cursor is at a shell\n prompt, the visible screen is cleared and the function returns true so the\n caller can send a form feed to request a prompt redraw. Otherwise only rows\n above the cursor are cleared and the function returns false.\n\n"]
+    #[doc = " Clear the primary screen without passing bytes through the VT parser.\n\n The alternate screen is left unchanged. On the primary screen this clears\n the selection and, when requested, scrollback. If the cursor is at a shell\n prompt, the visible screen is preserved and the function returns true so the\n caller can ask the shell to clear and redraw it without a blank intermediate\n frame. Otherwise only rows above the cursor are cleared and the function\n returns false.\n\n"]
     pub fn ghostty_terminal_clear_screen(terminal: Terminal, history: bool) -> bool;
 }
 unsafe extern "C" {

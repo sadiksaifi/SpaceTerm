@@ -309,10 +309,11 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         unsafe { ffi::ghostty_terminal_vt_write(self.inner.as_raw(), data.as_ptr(), data.len()) }
     }
 
-    /// Clear the primary screen and, optionally, its scrollback.
+    /// Prepare to clear the primary screen and, optionally, its scrollback.
     ///
-    /// The alternate screen is left unchanged. Returns whether the caller
-    /// should send a form feed to the PTY so the shell redraws its prompt.
+    /// The alternate screen is left unchanged. At a shell prompt the visible
+    /// screen stays intact until the caller sends the returned form-feed request
+    /// to the PTY, allowing the shell to clear and redraw its prompt atomically.
     pub fn clear_screen(&mut self, history: bool) -> bool {
         unsafe { ffi::ghostty_terminal_clear_screen(self.inner.as_raw(), history) }
     }
