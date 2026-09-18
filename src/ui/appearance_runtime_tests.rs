@@ -483,21 +483,20 @@ fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
     });
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
     let mut owner = WindowTrafficLightOwner::workspace();
-    assert_eq!(owner.applied, None);
-    let first = test_window
-        .update(cx, |_, window, cx| {
-            owner.apply(window, cx);
-            owner.applied
-        })
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
         .unwrap();
-    assert_eq!(owner.applied, first);
-    assert!(
-        first.is_some(),
-        "the test geometry supplies a workspace anchor"
+    assert_eq!(
+        cx.traffic_light_position_updates(test_window.into()),
+        vec![point(px(15.5), px(14.0))]
     );
+
     // A repeat apply with unchanged chrome records the same row without native work.
     test_window
         .update(cx, |_, window, cx| owner.apply(window, cx))
         .unwrap();
-    assert_eq!(owner.applied, first);
+    assert_eq!(
+        cx.traffic_light_position_updates(test_window.into()),
+        vec![point(px(15.5), px(14.0))]
+    );
 }

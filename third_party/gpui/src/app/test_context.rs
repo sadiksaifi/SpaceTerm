@@ -336,6 +336,18 @@ impl TestAppContext {
         self.test_window(window_handle).simulate_resize(size);
     }
 
+    /// Returns the native traffic-light positions requested for a test window.
+    pub fn traffic_light_position_updates(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Vec<Point<Pixels>> {
+        self.test_window(window_handle)
+            .0
+            .lock()
+            .traffic_light_position_updates
+            .clone()
+    }
+
     /// Causes the given sources to be returned if the application queries for screen
     /// capture sources.
     pub fn set_screen_capture_sources(&self, sources: Vec<TestScreenCaptureSource>) {
