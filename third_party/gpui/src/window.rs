@@ -1901,8 +1901,8 @@ impl Window {
 
     /// Moves the native macOS traffic lights without reopening the window.
     ///
-    /// Other platforms ignore the position. A `None` position leaves placement to the host default.
-    pub fn set_traffic_light_position(&self, position: Option<Point<Pixels>>) {
+    /// Other platforms ignore the position.
+    pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
         self.platform_window.set_traffic_light_position(position);
     }
 

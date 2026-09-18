@@ -274,7 +274,7 @@ pub(crate) enum TrafficLightChrome {
 /// applies with an unchanged position cost no native work.
 pub(crate) struct WindowTrafficLightOwner {
     role: TrafficLightChrome,
-    applied: Option<Option<gpui::Point<gpui::Pixels>>>,
+    applied: Option<gpui::Point<gpui::Pixels>>,
 }
 
 impl WindowTrafficLightOwner {
@@ -311,7 +311,9 @@ impl WindowTrafficLightOwner {
     }
 
     pub(crate) fn apply(&mut self, window: &gpui::Window, cx: &App) {
-        let desired = self.desired_position(cx);
+        let Some(desired) = self.desired_position(cx) else {
+            return;
+        };
         if self.applied != Some(desired) {
             window.set_traffic_light_position(desired);
             self.applied = Some(desired);
