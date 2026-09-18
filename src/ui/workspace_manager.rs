@@ -789,6 +789,20 @@ impl WorkspaceManager {
         if window_modal_is_open(window, cx) {
             return;
         }
+        if self.transient.picker.read(cx).is_open() {
+            let dismissed = self
+                .transient
+                .picker
+                .update(cx, |picker, cx| picker.dismiss(window, cx));
+            if !dismissed {
+                return;
+            }
+            self.transient.pin_target = None;
+        }
+        if let Some(picker) = self.remote_pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+            self.transient.pin_target = None;
+        }
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.dismiss_editing(window, cx);
         });

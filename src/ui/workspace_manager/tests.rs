@@ -4084,7 +4084,9 @@ fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
+fn directory_picker_should_block_mutating_parent_shortcuts_but_yield_to_switcher(
+    cx: &mut TestAppContext,
+) {
     let (manager, records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     open_directory_picker(&manager, cx);
@@ -4108,26 +4110,6 @@ fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         baseline.0
     );
 
-    cx.simulate_keystrokes("cmd-shift-k");
-    let focus_state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            window_combo_box_is_open(window, cx),
-            manager
-                .transient
-                .picker
-                .read(cx)
-                .path_input_is_focused(window, cx),
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx),
-        )
-    });
-    assert_eq!(focus_state, (false, true, false));
-
     cx.simulate_keystrokes("cmd-t");
     cx.simulate_keystrokes("cmd-w");
     let hierarchy = manager.read_with(cx, |manager, cx| {
@@ -4143,6 +4125,22 @@ fn directory_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut T
         )
     });
     assert_eq!(hierarchy, baseline);
+
+    cx.simulate_keystrokes("cmd-shift-k");
+    let switcher_state = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            manager.transient.picker.read(cx).is_open(),
+            window_combo_box_is_open(window, cx),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+        )
+    });
+    assert_eq!(switcher_state, (false, true, false));
 }
 
 #[gpui::test]

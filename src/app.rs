@@ -27,7 +27,7 @@ use crate::terminal::{
 };
 use crate::ui::{
     NativeRemoteWorkspaceFlowBackendFactory, NewWorkspace, RemoteWorkspaceSshRuntime,
-    WorkspaceManager,
+    SwitchWorkspace, WorkspaceManager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -143,6 +143,7 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
+    cx.on_action(switch_workspace_from_secondary_window);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
@@ -153,6 +154,23 @@ pub(crate) fn init(
         eprintln!("failed to install the application menu: {error}");
     }
     Ok(())
+}
+
+fn switch_workspace_from_secondary_window(_: &SwitchWorkspace, cx: &mut App) {
+    let Some(workspace) = workspace_windows(cx).into_iter().next() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        if workspace
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                window.dispatch_action(Box::new(SwitchWorkspace), cx);
+            })
+            .is_err()
+        {
+            eprintln!("failed to open the Workspace Switcher from a secondary window");
+        }
+    });
 }
 
 fn install_application_menu_actions(
@@ -1237,6 +1255,34 @@ mod runtime_tests {
             settings_cx.window_title().as_deref(),
             Some("Settings"),
             "transparent client chrome must retain the native window identity"
+        );
+    }
+
+    #[gpui::test]
+    fn switch_workspace_action_should_open_the_switcher_from_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+
+        cx.update(|cx| cx.dispatch_action(&crate::ui::SwitchWorkspace));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| {
+                workspace
+                    .update(cx, |_, window, cx| {
+                        (
+                            window.is_window_active(),
+                            spaceterm_ui::window_combo_box_is_open(window, cx),
+                        )
+                    })
+                    .unwrap()
+            }),
+            (true, true)
         );
     }
 

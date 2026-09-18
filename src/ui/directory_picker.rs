@@ -19,8 +19,8 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    NewWorkspace, OpenTerminalFind, SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus,
+    NewWorkspace, OpenTerminalFind, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
 };
 use crate::domain::ValidatedLocalDirectory;
 use crate::platform::local_filesystem::picker::{
@@ -885,7 +885,6 @@ impl Render for DirectoryPicker {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
                     .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
-                    .capture_action(block_parent_action::<SwitchWorkspace>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)
