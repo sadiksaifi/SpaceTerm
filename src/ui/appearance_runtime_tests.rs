@@ -335,3 +335,169 @@ fn chrome_palette_and_typography_preview_preserve_native_classification_and_term
     cx.update(|cx| assert_eq!(current(cx).chrome, before.chrome));
     assert_eq!(platform.applied.borrow().len(), native_calls);
 }
+
+/// Comfortable density grows the titlebar, so each window's native traffic lights must move down
+/// by half the height delta to stay centered with Tabs and headings.
+#[gpui::test]
+fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut TestAppContext) {
+    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+    use gpui::{point, px};
+
+    let _ = start(cx);
+    cx.update(|cx| {
+        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+        ));
+    });
+
+    for (role, owner, compact_height) in [
+        ("workspace", WindowTrafficLightOwner::workspace(), px(42.0)),
+        ("settings", WindowTrafficLightOwner::settings(), px(36.0)),
+    ] {
+        // Compact density rests exactly on the host anchor.
+        cx.update(|cx| {
+            cx.set_global(InstalledChrome(std::sync::Arc::new(
+                crate::ui::appearance::ChromeAppearance {
+                    text_scale: 1.0,
+                    spacing_scale: 1.0,
+                    ..crate::ui::appearance::ChromeAppearance::default()
+                },
+            )));
+        });
+        let compact = cx.update(|cx| owner.desired_position(cx));
+        assert_eq!(
+            compact,
+            if role == "workspace" {
+                Some(point(px(15.5), px(14.0)))
+            } else {
+                Some(point(px(12.0), px(11.0)))
+            },
+            "{role} compact traffic lights should rest on the host anchor"
+        );
+
+        // Comfortable density moves the row down by half of the height growth.
+        cx.update(|cx| {
+            cx.set_global(InstalledChrome(std::sync::Arc::new(
+                crate::ui::appearance::ChromeAppearance {
+                    text_scale: 1.0,
+                    spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                        crate::appearance::ChromeDensity::Comfortable,
+                    ),
+                    ..crate::ui::appearance::ChromeAppearance::default()
+                },
+            )));
+        });
+        let (comfortable, comfortable_height): (Option<gpui::Point<gpui::Pixels>>, gpui::Pixels) =
+            cx.update(|cx| {
+                let appearance = crate::ui::appearance::chrome(cx);
+                let height = match role {
+                    "workspace" => {
+                        crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                            .top_chrome_height(appearance.top_height())
+                    }
+                    _ => appearance.top_height(),
+                };
+                (owner.desired_position(cx), height)
+            });
+        assert!(
+            comfortable_height > compact_height,
+            "{role} comfortable chrome should grow, got {comfortable_height:?} from {compact_height:?}"
+        );
+        let expected_shift = (f32::from(comfortable_height) - f32::from(compact_height)) / 2.0;
+        assert!(
+            expected_shift > 0.0,
+            "{role} comfortable chrome should grow"
+        );
+        let (compact_point, comfortable_point) = (
+            compact.expect("compact anchor"),
+            comfortable.expect("comfortable position"),
+        );
+        assert_eq!(
+            comfortable_point.x, compact_point.x,
+            "{role} growth must not drift sideways"
+        );
+        assert!(
+            (f32::from(comfortable_point.y) - f32::from(compact_point.y) - expected_shift).abs()
+                < 0.001,
+            "{role} traffic lights should move by half the height delta, got {compact_point:?} to {comfortable_point:?} for {compact_height:?} to {comfortable_height:?}"
+        );
+    }
+}
+
+/// The workspace anchor carries the frame's top space while the settings anchor does not, so the
+/// two windows keep distinct rows at every density.
+#[gpui::test]
+fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut TestAppContext) {
+    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+    use gpui::{point, px};
+
+    let _ = start(cx);
+    cx.update(|cx| {
+        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+        ));
+        cx.set_global(InstalledChrome(std::sync::Arc::new(
+            crate::ui::appearance::ChromeAppearance {
+                text_scale: 1.0,
+                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                    crate::appearance::ChromeDensity::Comfortable,
+                ),
+                ..crate::ui::appearance::ChromeAppearance::default()
+            },
+        )));
+    });
+    let (workspace, settings) = cx.update(|cx| {
+        (
+            WindowTrafficLightOwner::workspace().desired_position(cx),
+            WindowTrafficLightOwner::settings().desired_position(cx),
+        )
+    });
+    let (workspace, settings) = (
+        workspace.expect("workspace anchor"),
+        settings.expect("settings anchor"),
+    );
+    assert_ne!(
+        workspace, settings,
+        "the two windows must not share one traffic-light row"
+    );
+    assert!(
+        workspace.y > settings.y,
+        "workspace chrome carries the frame's top space, got {workspace:?} and {settings:?}"
+    );
+}
+
+/// Re-applying an unchanged density costs no native work; the owner records the applied row.
+#[gpui::test]
+fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
+    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+    use gpui::{point, px};
+
+    let _ = start(cx);
+    cx.update(|cx| {
+        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+        ));
+    });
+    let test_window = cx.add_window(|_, _| gpui::EmptyView);
+    let mut owner = WindowTrafficLightOwner::workspace();
+    assert_eq!(owner.applied, None);
+    let first = test_window
+        .update(cx, |_, window, cx| {
+            owner.apply(window, cx);
+            owner.applied
+        })
+        .unwrap();
+    assert_eq!(owner.applied, first);
+    assert!(
+        first.is_some(),
+        "the test geometry supplies a workspace anchor"
+    );
+    // A repeat apply with unchanged chrome records the same row without native work.
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
+        .unwrap();
+    assert_eq!(owner.applied, first);
+}

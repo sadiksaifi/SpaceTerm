@@ -8,6 +8,8 @@ use std::{rc::Rc, sync::Arc};
 
 use gpui::{App, Global, Task, font, px};
 
+use crate::platform::window_frame::WindowFrameGeometry;
+
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass,
     ResolvedAppearance, SchemeCatalog, SystemAppearance,
@@ -252,6 +254,69 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
                     .expect("built-in appearance is valid"),
             )
         })
+}
+
+/// Which client titlebar height anchors one window's native traffic lights.
+///
+/// Workspace chrome absorbs the frame's top space while Settings chrome does not, so each
+/// window keeps its own anchor against the same host geometry facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrafficLightChrome {
+    Workspace,
+    Settings,
+}
+
+/// Owns one Operating-System Window's native traffic-light position across density changes.
+///
+/// The native position is fixed at window open while Comfortable density grows the titlebar,
+/// so stored buttons would otherwise ride high above centered Tabs and headings. Re-applying
+/// the geometry-anchored position keeps their center aligned with the taller chrome. Repeat
+/// applies with an unchanged position cost no native work.
+pub(crate) struct WindowTrafficLightOwner {
+    role: TrafficLightChrome,
+    applied: Option<Option<gpui::Point<gpui::Pixels>>>,
+}
+
+impl WindowTrafficLightOwner {
+    pub(crate) fn workspace() -> Self {
+        Self {
+            role: TrafficLightChrome::Workspace,
+            applied: None,
+        }
+    }
+
+    pub(crate) fn settings() -> Self {
+        Self {
+            role: TrafficLightChrome::Settings,
+            applied: None,
+        }
+    }
+
+    pub(crate) fn desired_position(&self, cx: &App) -> Option<gpui::Point<gpui::Pixels>> {
+        let appearance = super::appearance::chrome(cx);
+        let geometry = cx
+            .try_global::<WindowFrameGeometry>()
+            .copied()
+            .unwrap_or_default();
+        match self.role {
+            TrafficLightChrome::Workspace => {
+                let height = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height());
+                geometry.workspace_traffic_light_position(height)
+            }
+            TrafficLightChrome::Settings => {
+                geometry.settings_traffic_light_position(appearance.top_height())
+            }
+        }
+    }
+
+    pub(crate) fn apply(&mut self, window: &gpui::Window, cx: &App) {
+        let desired = self.desired_position(cx);
+        if self.applied != Some(desired) {
+            window.set_traffic_light_position(desired);
+            self.applied = Some(desired);
+        }
+    }
 }
 
 /// Owns native backdrop effects for one Operating-System Window. The application native

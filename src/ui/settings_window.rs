@@ -277,6 +277,7 @@ fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
 
 pub(crate) struct SettingsWindow {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
+    window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     editor: SettingsEditor,
     close_after_save: Option<CloseIntent>,
     search: Entity<TextInput>,
@@ -320,6 +321,9 @@ impl SettingsWindow {
         window.set_window_title("Settings");
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
         window_appearance.apply(window, cx);
+        let mut window_traffic_lights =
+            super::appearance_runtime::WindowTrafficLightOwner::settings();
+        window_traffic_lights.apply(window, cx);
         let settings = cx
             .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
             .settings
@@ -394,6 +398,7 @@ impl SettingsWindow {
             window,
             |settings, window, cx| {
                 settings.window_appearance.apply(window, cx);
+                settings.window_traffic_lights.apply(window, cx);
                 settings.editor.synchronize();
                 cx.notify();
             },
@@ -416,6 +421,7 @@ impl SettingsWindow {
         .detach();
         Self {
             window_appearance,
+            window_traffic_lights,
             editor,
             close_after_save: None,
             search,
