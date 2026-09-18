@@ -145,7 +145,8 @@ struct HostPickerRow {
     subtitle: String,
     managed: bool,
     synthetic: bool,
-    matched_indices: Vec<usize>,
+    label_matched_indices: Vec<usize>,
+    subtitle_matched_indices: Vec<usize>,
 }
 
 impl fmt::Debug for HostPickerRow {
@@ -170,7 +171,8 @@ impl HostPickerRow {
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
-            .matched_indices(self.matched_indices)
+            .matched_indices(self.label_matched_indices)
+            .matched_description_indices(self.subtitle_matched_indices)
             .leading_icon(|foreground, size| {
                 Icon::new(IconName::Server, size, foreground).into_any_element()
             })
@@ -193,14 +195,19 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
             .cmp(&right.alias().as_str().to_lowercase())
             .then_with(|| left.alias().as_str().cmp(right.alias().as_str()))
     });
-    let mut rows = fuzzy_filter(&hosts, query, |host| {
-        FuzzyTarget::new(host.alias().as_str())
+    let configured_rows = hosts
+        .iter()
+        .filter_map(|host| configured_host_row(host))
+        .collect::<Vec<_>>();
+    let mut rows = fuzzy_filter(&configured_rows, query, |row| {
+        FuzzyTarget::new(&row.label).field(&row.subtitle)
     })
     .into_iter()
-    .filter_map(|matched| {
-        let mut row = configured_host_row(&hosts[matched.item_index()])?;
-        row.matched_indices = matched.field_highlight_indices(0);
-        Some(row)
+    .map(|matched| {
+        let mut row = configured_rows[matched.item_index()].clone();
+        row.label_matched_indices = matched.field_highlight_indices(0);
+        row.subtitle_matched_indices = matched.field_highlight_indices(1);
+        row
     })
     .collect::<Vec<_>>();
 
@@ -226,14 +233,15 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                 subtitle: format!("Connect as {user} through {}", alias.as_str()),
                 managed: false,
                 synthetic: true,
-                matched_indices: (0..query.chars().count()).collect(),
+                label_matched_indices: (0..query.chars().count()).collect(),
+                subtitle_matched_indices: Vec::new(),
             },
         );
     }
     rows
 }
 
-fn configured_host_row(host: &&DiscoveredSshHost) -> Option<HostPickerRow> {
+fn configured_host_row(host: &DiscoveredSshHost) -> Option<HostPickerRow> {
     let destination = SshDestination::new(host.alias().as_str().to_owned()).ok()?;
     Some(HostPickerRow {
         id: SshHostPickerItemId::Configured(host.alias().clone()),
@@ -244,7 +252,8 @@ fn configured_host_row(host: &&DiscoveredSshHost) -> Option<HostPickerRow> {
             .provenance()
             .is_some_and(|provenance| provenance.source() == HostConfigSource::Managed),
         synthetic: false,
-        matched_indices: Vec::new(),
+        label_matched_indices: Vec::new(),
+        subtitle_matched_indices: Vec::new(),
     })
 }
 
@@ -646,7 +655,8 @@ mod tests {
             subtitle: "/sensitive/config".to_owned(),
             managed: false,
             synthetic: false,
-            matched_indices: Vec::new(),
+            label_matched_indices: Vec::new(),
+            subtitle_matched_indices: Vec::new(),
         };
         let event = SshHostPickerEvent::SelectDestination(destination);
 
@@ -861,6 +871,26 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.label()).collect::<Vec<_>>(),
             vec!["work"]
+        );
+    }
+
+    #[test]
+    fn configured_destination_subtitles_should_be_searchable() {
+        let rows = host_rows_for_query(
+            &host_discovery(
+                "Host work\n  HostName build.example\n  User deploy\n  Port 2222\n",
+                "Host personal\n  HostName personal.example\n",
+            ),
+            "build.example",
+        );
+
+        assert_eq!(
+            rows.iter().map(|row| row.label()).collect::<Vec<_>>(),
+            vec!["work"]
+        );
+        assert_eq!(
+            rows[0].subtitle_matched_indices,
+            (7..20).collect::<Vec<_>>()
         );
     }
 

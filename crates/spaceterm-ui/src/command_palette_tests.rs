@@ -888,6 +888,20 @@ fn caller_matching_should_present_every_item_in_caller_order() {
     );
 }
 
+#[test]
+fn caller_matching_should_render_supplied_description_indices() {
+    let items = vec![
+        CommandPaletteItem::new(1, "work")
+            .description("deploy@build.example:2222")
+            .matched_description_indices(7..20),
+    ];
+
+    let matches =
+        match_command_palette_items(&items, "build.example", CommandPaletteMatching::Caller);
+
+    assert_eq!(matches[0].description_highlights, vec![7..20]);
+}
+
 #[gpui::test]
 fn caller_matching_should_survive_a_query_that_matches_nothing(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);

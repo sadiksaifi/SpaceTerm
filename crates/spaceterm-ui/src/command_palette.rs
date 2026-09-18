@@ -706,6 +706,7 @@ pub struct CommandPaletteItem<I> {
     section: Option<SharedString>,
     keywords: Vec<SharedString>,
     matched_indices: Vec<usize>,
+    matched_description_indices: Vec<usize>,
     disabled: bool,
     leading_icon: Option<RowIconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
@@ -742,6 +743,7 @@ impl<I> CommandPaletteItem<I> {
             section: None,
             keywords: Vec::new(),
             matched_indices: Vec::new(),
+            matched_description_indices: Vec::new(),
             disabled: false,
             leading_icon: None,
             trailing: None,
@@ -773,6 +775,12 @@ impl<I> CommandPaletteItem<I> {
     /// Supplies matched label character indices for caller-filtered results.
     pub fn matched_indices(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
         self.matched_indices = indices.into_iter().collect();
+        self
+    }
+
+    /// Supplies matched description character indices for caller-filtered results.
+    pub fn matched_description_indices(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
+        self.matched_description_indices = indices.into_iter().collect();
         self
     }
 
@@ -847,7 +855,9 @@ fn match_command_palette_items<I>(
                 item_index,
                 score: 0,
                 label_highlights: highlight_ranges(&item.label, &item.matched_indices),
-                description_highlights: Vec::new(),
+                description_highlights: item.description.as_ref().map_or_else(Vec::new, |text| {
+                    highlight_ranges(text, &item.matched_description_indices)
+                }),
             })
             .collect();
     }
