@@ -2723,6 +2723,15 @@ mod tests {
     }
 
     #[test]
+    fn filtering_should_report_unicode_description_highlights() {
+        let items = vec![ComboBoxItem::new(1, "Workspace").description("/project/Ångström")];
+
+        let matches = match_items(&items, "ång");
+
+        assert_eq!(matches[0].1.description, vec![9..13]);
+    }
+
+    #[test]
     fn filtering_should_require_every_token_across_semantic_fields() {
         let items = vec![
             ComboBoxItem::new(1, "This Mac")

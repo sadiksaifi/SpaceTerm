@@ -369,7 +369,7 @@ impl SettingsWindow {
                 }
                 if matches!(event, TextInputEvent::ValueChanged(_)) {
                     settings.query = SharedString::from(search.read(cx).value().to_owned());
-                    settings.revealed = catalog::matching_rows(&settings.query).first().copied();
+                    settings.revealed = settings.applicable_matching_rows().first().copied();
                     // Each section is its own view, so a query that the visible one cannot answer
                     // moves to the first section that can.
                     if settings.rows_for(settings.active_section).is_empty()
@@ -519,16 +519,21 @@ impl SettingsWindow {
 
     /// The first section answering the current query, so search never lands on an empty view.
     fn section_for_query(&self) -> Option<SettingsSectionId> {
-        catalog::matching_rows(&self.query)
-            .into_iter()
-            .find(|row| self.row_applies(*row))
+        self.applicable_matching_rows()
+            .first()
             .map(|row| row.descriptor().section)
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        catalog::matching_rows(&self.query)
+        self.applicable_matching_rows()
             .into_iter()
             .filter(|row| row.descriptor().section == section)
+            .collect()
+    }
+
+    fn applicable_matching_rows(&self) -> Vec<SettingsRowId> {
+        catalog::matching_rows(&self.query)
+            .into_iter()
             .filter(|row| self.row_applies(*row))
             .collect()
     }

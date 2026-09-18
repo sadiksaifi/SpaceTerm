@@ -823,6 +823,23 @@ fn search_reveals_the_first_match(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_reveals_the_first_match_available_in_auto_mode(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_appearance_mode(AppearanceMode::Auto, cx)
+        });
+    });
+
+    set_query(&window, "Interface", cx);
+
+    assert_eq!(
+        window.read_with(cx, |window, _| window.revealed),
+        Some(SettingsRowId::ChromeLightScheme)
+    );
+}
+
+#[gpui::test]
 fn an_unmatched_query_reports_that_nothing_matched(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 

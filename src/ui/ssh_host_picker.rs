@@ -433,7 +433,11 @@ impl SshHostPicker {
                 cx.notify();
             }
             CommandPaletteEvent::QueryChanged(query) => {
+                let query_changed = self.retained_query != query.text();
                 self.retained_query = query.text().to_owned();
+                if query_changed {
+                    self.retained_selection = None;
+                }
                 self.rebuild_rows(cx);
             }
             CommandPaletteEvent::Activated(activation) => {
@@ -1293,6 +1297,32 @@ mod tests {
                     SshHostAlias::new("staging".to_owned()).unwrap()
                 )),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn query_change_should_select_the_new_first_fuzzy_result(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host projects\nHost remote-operation\n",
+            "",
+        )]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            selected_item(&picker, cx),
+            Some(SshHostPickerItemId::Configured(
+                SshHostAlias::new("remote-operation".to_owned()).unwrap()
+            ))
+        );
+
+        set_query(&picker, "ro", cx);
+
+        assert_eq!(
+            selected_item(&picker, cx),
+            Some(SshHostPickerItemId::Configured(
+                SshHostAlias::new("projects".to_owned()).unwrap()
+            ))
         );
     }
 
