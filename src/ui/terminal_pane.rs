@@ -24,8 +24,8 @@ use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, Termin
 use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
-    CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
-    DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
+    CancelUnsafePaste, ClearTerminalScreenAndScrollback, CloseTerminalFind, ConfirmUnsafePaste,
+    CopySelection, DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
     OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
     TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
@@ -2317,6 +2317,18 @@ impl TerminalPane {
         self.set_font_size(self.appearance.terminal.typography.cell_size, window, cx);
     }
 
+    fn clear_screen_and_scrollback(
+        &mut self,
+        _: &ClearTerminalScreenAndScrollback,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = &self.terminal_session.session {
+            session.clear_screen_and_scrollback();
+            self.clear_attention(cx);
+        }
+    }
+
     fn set_font_size(&mut self, font_size: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_delta = font_size - self.appearance.terminal.typography.cell_size;
         let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
@@ -3943,6 +3955,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
+            .on_action(cx.listener(Self::clear_screen_and_scrollback))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))

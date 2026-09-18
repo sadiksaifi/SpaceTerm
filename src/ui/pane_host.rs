@@ -11,9 +11,10 @@ use thiserror::Error;
 
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
 use super::{
-    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, PaneOrigin,
-    PreparedRemotePaneRestart, RemoteChildLaunchUnavailable, RemotePaneLifecycleError, SplitDown,
-    SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
+    ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
+    RemotePaneLifecycleError, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane,
+    TerminalPaneEvent, TogglePaneZoom,
 };
 
 #[derive(Debug, Error)]
@@ -903,6 +904,15 @@ impl PaneHost {
         let Some(pane_id) = self.terminal_tab.focus_pane_in_direction(direction) else {
             return;
         };
+        self.finish_keyboard_focus_change(pane_id, window, cx);
+    }
+
+    fn finish_keyboard_focus_change(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
             tab_id: self.terminal_tab.id(),
@@ -1407,6 +1417,30 @@ impl PaneHost {
         self.focus_pane_in_direction(FocusDirection::Down, window, cx);
     }
 
+    fn on_focus_previous_pane(
+        &mut self,
+        _: &FocusPreviousPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.terminal_tab.focus_previous_pane() else {
+            return;
+        };
+        self.finish_keyboard_focus_change(pane_id, window, cx);
+    }
+
+    fn on_focus_next_pane(
+        &mut self,
+        _: &FocusNextPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.terminal_tab.focus_next_pane() else {
+            return;
+        };
+        self.finish_keyboard_focus_change(pane_id, window, cx);
+    }
+
     fn on_toggle_zoom(&mut self, _: &TogglePaneZoom, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_zoom(window, cx);
     }
@@ -1716,6 +1750,8 @@ impl Render for PaneHost {
             .on_action(cx.listener(Self::on_focus_pane_right))
             .on_action(cx.listener(Self::on_focus_pane_up))
             .on_action(cx.listener(Self::on_focus_pane_down))
+            .on_action(cx.listener(Self::on_focus_previous_pane))
+            .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
             .child(content)
@@ -3998,7 +4034,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_shift_vim_shortcuts_should_focus_panes_in_each_direction(cx: &mut TestAppContext) {
+    fn command_shift_vim_shortcuts_should_not_move_pane_focus(cx: &mut TestAppContext) {
         let (host, cx) = four_pane_host(cx);
 
         let focused_panes = focused_panes_after_shortcuts(
@@ -4010,9 +4046,9 @@ mod tests {
         assert_eq!(
             focused_panes,
             [
-                PaneId::new(2),
-                PaneId::new(4),
-                PaneId::new(3),
+                PaneId::new(1),
+                PaneId::new(1),
+                PaneId::new(1),
                 PaneId::new(1),
             ]
         );
@@ -4043,6 +4079,33 @@ mod tests {
                 PaneId::new(3),
                 PaneId::new(1),
             ]
+        );
+    }
+
+    #[gpui::test]
+    fn command_bracket_shortcuts_should_cycle_panes_in_recency_order(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+
+        let previous =
+            focused_panes_after_shortcuts(&host, cx, ["cmd-[", "cmd-[", "cmd-[", "cmd-["]);
+        let next = focused_panes_after_shortcuts(&host, cx, ["cmd-]", "cmd-]", "cmd-]", "cmd-]"]);
+
+        assert_eq!(
+            (previous, next),
+            (
+                [
+                    PaneId::new(4),
+                    PaneId::new(3),
+                    PaneId::new(2),
+                    PaneId::new(1),
+                ],
+                [
+                    PaneId::new(2),
+                    PaneId::new(3),
+                    PaneId::new(4),
+                    PaneId::new(1),
+                ],
+            )
         );
     }
 

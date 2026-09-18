@@ -18,8 +18,9 @@ use super::{
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewWorkspace, OpenTerminalFind,
-    SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
+    NewWorkspace, OpenTerminalFind, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
 };
 use crate::domain::ValidatedLocalDirectory;
 use crate::platform::local_filesystem::picker::{
@@ -884,7 +885,6 @@ impl Render for DirectoryPicker {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
                     .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
-                    .capture_action(block_parent_action::<SwitchWorkspace>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)
@@ -916,6 +916,8 @@ impl Render for DirectoryPicker {
                     .capture_action(block_parent_action::<FocusPaneRight>)
                     .capture_action(block_parent_action::<FocusPaneUp>)
                     .capture_action(block_parent_action::<FocusPaneDown>)
+                    .capture_action(block_parent_action::<FocusPreviousPane>)
+                    .capture_action(block_parent_action::<FocusNextPane>)
                     .capture_action(block_parent_action::<TogglePaneZoom>)
                     .capture_action(block_parent_action::<OpenTerminalFind>)
                     .capture_action(block_parent_action::<FindNext>)

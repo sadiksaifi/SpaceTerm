@@ -178,11 +178,17 @@ pub(crate) enum PaneNodeRef<'a> {
     },
 }
 
+enum FocusHistoryStep {
+    Previous,
+    Next,
+}
+
 pub(crate) struct TerminalTab<T> {
     id: TabId,
     root: PaneNode,
     terminals: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
+    focus_history: Vec<PaneId>,
     root_pane_id: PaneId,
     zoom_state: ZoomState,
     minimum_pane_size: PaneSize,
@@ -205,6 +211,7 @@ impl<T> TerminalTab<T> {
                 create_initial_terminal(initial_pane_id),
             )]),
             focused_pane_id: initial_pane_id,
+            focus_history: vec![initial_pane_id],
             root_pane_id: initial_pane_id,
             zoom_state: ZoomState::Restored,
             minimum_pane_size,
@@ -276,7 +283,40 @@ impl<T> TerminalTab<T> {
         Some(pane_id)
     }
 
+    pub(crate) fn focus_previous_pane(&mut self) -> Option<PaneId> {
+        self.focus_pane_in_history(FocusHistoryStep::Previous)
+    }
+
+    pub(crate) fn focus_next_pane(&mut self) -> Option<PaneId> {
+        self.focus_pane_in_history(FocusHistoryStep::Next)
+    }
+
+    fn focus_pane_in_history(&mut self, step: FocusHistoryStep) -> Option<PaneId> {
+        if self.focus_history.len() <= 1 {
+            return None;
+        }
+        let current = self
+            .focus_history
+            .iter()
+            .position(|pane_id| *pane_id == self.focused_pane_id)?;
+        let next = match step {
+            FocusHistoryStep::Previous => current
+                .checked_sub(1)
+                .unwrap_or(self.focus_history.len() - 1),
+            FocusHistoryStep::Next => (current + 1) % self.focus_history.len(),
+        };
+        let pane_id = self.focus_history[next];
+        self.apply_focused_pane(pane_id);
+        Some(pane_id)
+    }
+
     fn set_focused_pane(&mut self, pane_id: PaneId) {
+        self.focus_history.retain(|candidate| *candidate != pane_id);
+        self.focus_history.push(pane_id);
+        self.apply_focused_pane(pane_id);
+    }
+
+    fn apply_focused_pane(&mut self, pane_id: PaneId) {
         self.focused_pane_id = pane_id;
         if matches!(self.zoom_state, ZoomState::Zoomed(_)) {
             self.zoom_state = ZoomState::Zoomed(pane_id);
@@ -338,8 +378,9 @@ impl<T> TerminalTab<T> {
         if self.root_pane_id == pane_id {
             self.root_pane_id = self.root.first_pane_id();
         }
+        self.focus_history.retain(|candidate| *candidate != pane_id);
         if self.focused_pane_id == pane_id {
-            self.focused_pane_id = removal.focus_fallback;
+            self.set_focused_pane(removal.focus_fallback);
         }
         if self.pane_count() == 1 || self.zoom_state == ZoomState::Zoomed(pane_id) {
             self.zoom_state = ZoomState::Restored;
@@ -435,8 +476,8 @@ impl<T> TerminalTab<T> {
     fn commit_split(&mut self, root: PaneNode, pane_id: PaneId, terminal: T) {
         self.root = root;
         self.terminals.insert(pane_id, terminal);
-        self.focused_pane_id = pane_id;
         self.zoom_state = ZoomState::Restored;
+        self.set_focused_pane(pane_id);
     }
 }
 
@@ -1201,6 +1242,54 @@ mod tests {
         assert_eq!(
             (focused_pane, tab.zoom_state()),
             (Some(PaneId::new(2)), ZoomState::Zoomed(PaneId::new(2)))
+        );
+    }
+
+    #[test]
+    fn pane_focus_history_should_cycle_in_order_of_use() {
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(2)).unwrap();
+        tab.focus_pane(PaneId::new(1)).unwrap();
+
+        let previous = (0..4)
+            .map(|_| tab.focus_previous_pane().unwrap())
+            .collect::<Vec<_>>();
+        let next = (0..4)
+            .map(|_| tab.focus_next_pane().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (previous, next),
+            (
+                vec![
+                    PaneId::new(2),
+                    PaneId::new(4),
+                    PaneId::new(3),
+                    PaneId::new(1),
+                ],
+                vec![
+                    PaneId::new(3),
+                    PaneId::new(4),
+                    PaneId::new(2),
+                    PaneId::new(1),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_should_prune_it_from_focus_history() {
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(1)).unwrap();
+        tab.close_pane(PaneId::new(4)).unwrap();
+
+        let focused_panes = (0..3)
+            .map(|_| tab.focus_previous_pane().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            focused_panes,
+            vec![PaneId::new(3), PaneId::new(2), PaneId::new(1)]
         );
     }
 

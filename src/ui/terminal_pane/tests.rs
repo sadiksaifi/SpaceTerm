@@ -2057,6 +2057,18 @@ fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
     assert_eq!((before, after), (18.0, 19.0));
 }
 
+#[gpui::test]
+fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+
+    cx.simulate_keystrokes("cmd-k");
+
+    assert!(records.commands().iter().any(|call| matches!(
+        call.command,
+        RecordedSessionCommand::ClearScreenAndScrollback
+    )));
+}
+
 fn publish_terminal_preferences(
     preferences: crate::appearance::AppearancePreferences,
     cx: &mut App,

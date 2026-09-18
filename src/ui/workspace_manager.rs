@@ -38,10 +38,10 @@ use super::{
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewRemoteWorkspace, NewWorkspace,
-    OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace,
-    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
+    NewRemoteWorkspace, NewWorkspace, OpenTerminalFind, RemoteChildLaunchUnavailable, SplitDown,
+    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -788,6 +788,20 @@ impl WorkspaceManager {
     fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window_modal_is_open(window, cx) {
             return;
+        }
+        if self.transient.picker.read(cx).is_open() {
+            let dismissed = self
+                .transient
+                .picker
+                .update(cx, |picker, cx| picker.dismiss(window, cx));
+            if !dismissed {
+                return;
+            }
+            self.transient.pin_target = None;
+        }
+        if let Some(picker) = self.remote_pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+            self.transient.pin_target = None;
         }
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.dismiss_editing(window, cx);
@@ -3247,6 +3261,8 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneRight>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneUp>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneDown>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPreviousPane>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FocusNextPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<TogglePaneZoom>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<OpenTerminalFind>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))

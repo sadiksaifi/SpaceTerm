@@ -5,7 +5,7 @@ use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
 pub(crate) fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
-        KeyBinding::new("cmd-k", SwitchWorkspace, None),
+        KeyBinding::new("cmd-shift-k", SwitchWorkspace, None),
         KeyBinding::new("cmd-n", NewWorkspace, None),
         KeyBinding::new("cmd-shift-n", NewRemoteWorkspace, None),
         KeyBinding::new("cmd-t", CreateTab, None),
@@ -57,16 +57,19 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
             Some(TERMINAL_KEY_CONTEXT),
         ),
         KeyBinding::new("cmd-0", ResetTerminalFontSize, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
+            "cmd-k",
+            ClearTerminalScreenAndScrollback,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
         KeyBinding::new("cmd-d", SplitRight, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-d", SplitDown, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-h", FocusPaneLeft, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-left", FocusPaneLeft, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-l", FocusPaneRight, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-right", FocusPaneRight, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-k", FocusPaneUp, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-up", FocusPaneUp, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-j", FocusPaneDown, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-down", FocusPaneDown, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-[", FocusPreviousPane, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-]", FocusNextPane, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new(
             "cmd-shift-enter",
             TogglePaneZoom,
