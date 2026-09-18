@@ -2068,6 +2068,38 @@ fn stable_selection_should_survive_query_and_item_refresh(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn caller_ranked_item_refresh_should_select_the_new_first_result(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_matching(CommandPaletteMatching::Caller, cx);
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Repos"),
+                CommandPaletteItem::new(2, "Projects"),
+            ],
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    palette.update(cx, |palette, cx| {
+        palette.set_query("ro", cx);
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(2, "Projects").matched_indices([1, 2]),
+                CommandPaletteItem::new(1, "Repos").matched_indices([0, 3]),
+            ],
+            cx,
+        );
+    });
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(2)
+    );
+}
+
+#[gpui::test]
 fn stale_generation_results_should_be_ignored(cx: &mut TestAppContext) {
     let (_, palette, _, _, cx) = palette_window(cx);
     let first = palette.update(cx, |palette, cx| palette.refresh(cx));

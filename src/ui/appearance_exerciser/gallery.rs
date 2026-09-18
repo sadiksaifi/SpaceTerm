@@ -153,7 +153,7 @@ impl Gallery {
             .collect();
         let palette = cx.new(|cx| {
             CommandPalette::new(
-                "Match labels and descriptions",
+                "Match labels",
                 vec![
                     CommandPaletteItem::new(1, "Open Workspace")
                         .description("Open a local folder")
@@ -592,7 +592,7 @@ impl Render for Gallery {
                 .child(
                     Button::new(
                         "gallery-open-palette",
-                        "Open palette: icons, descriptions, matches",
+                        "Open palette: icons, secondary text, label matches",
                     )
                     .on_activate(move |_, window, cx| {
                         palette.update(cx, |palette, cx| {

@@ -1491,6 +1491,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn directory_picker_selects_the_first_result_after_fuzzy_ranking_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let projects = home().join("Projects");
+        let repos = home().join("Repos");
+        let filesystem = Arc::new(ScriptedDirectoryPickerFilesystem::new(
+            [home(), projects.clone(), repos.clone()],
+            [],
+        ));
+        filesystem.set_listed_entries([
+            DirectoryPickerDirectoryEntry::new("Projects".to_owned(), projects.clone()),
+            DirectoryPickerDirectoryEntry::new("Repos".to_owned(), repos),
+        ]);
+        let (picker, cx) = directory_picker(filesystem, cx);
+
+        set_input(&picker, "~/r", cx);
+        set_input(&picker, "~/ro", cx);
+
+        assert_eq!(row_names(&picker, cx), vec!["Projects", "Repos"]);
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| {
+                picker.palette.read(cx).selected_item_id().cloned()
+            }),
+            Some(projects)
+        );
+    }
+
+    #[gpui::test]
     fn directory_picker_omits_unrepresentable_sibling_before_navigation_and_validation(
         cx: &mut TestAppContext,
     ) {

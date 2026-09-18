@@ -2070,8 +2070,14 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.selected.as_ref()
     }
 
-    /// Replaces items immediately and preserves selection by stable identity when possible.
+    /// Replaces items immediately.
+    ///
+    /// Semantic matching preserves selection by stable identity. Caller-ranked results treat the
+    /// supplied order as authoritative and select the preferred item or first enabled item.
     pub fn set_items(&mut self, items: Vec<CommandPaletteItem<I>>, cx: &mut gpui::Context<Self>) {
+        if self.matching == CommandPaletteMatching::Caller {
+            self.selected = None;
+        }
         self.items = unique_items(items).into();
         self.loading = false;
         self.recompute_matches();

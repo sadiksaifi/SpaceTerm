@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use fuzzy_matcher::FuzzyMatcher as _;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use unicode_casefold::UnicodeCaseFold as _;
 
 /// The searchable text for one fuzzy-filter candidate.
 ///
@@ -98,14 +99,14 @@ pub fn fuzzy_filter<T>(
             .collect();
     }
 
-    let normalized_query = normalize_case(query).0;
+    let normalized_query = fold_case(query).0;
     let matcher = SkimMatcherV2::default();
     let mut matches = items
         .iter()
         .enumerate()
         .filter_map(|(item_index, item)| {
             let target = target(item);
-            let (normalized_target, source_indices) = normalize_case(&target.text);
+            let (normalized_target, source_indices) = fold_case(&target.text);
             let (score, normalized_indices) =
                 matcher.fuzzy_indices(&normalized_target, &normalized_query)?;
             let mut highlight_indices = normalized_indices
@@ -159,11 +160,11 @@ pub fn highlight_ranges(text: &str, indices: &[usize]) -> Vec<Range<usize>> {
     ranges
 }
 
-fn normalize_case(text: &str) -> (String, Vec<usize>) {
+fn fold_case(text: &str) -> (String, Vec<usize>) {
     let mut normalized = String::new();
     let mut source_indices = Vec::new();
     for (source_index, character) in text.chars().enumerate() {
-        for normalized_character in character.to_lowercase() {
+        for normalized_character in character.case_fold() {
             normalized.push(normalized_character);
             source_indices.push(source_index);
         }
@@ -206,6 +207,27 @@ mod tests {
         let matches = fuzzy_filter(&items, "ång", |item| FuzzyTarget::new(item));
 
         assert_eq!(matches[0].field_highlight_indices(0), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn unicode_case_folding_matches_contextual_sigma() {
+        let items = ["ΟΣ"];
+
+        let matches = fuzzy_filter(&items, "ος", |item| FuzzyTarget::new(item));
+
+        assert_eq!(matches[0].field_highlight_indices(0), vec![0, 1]);
+    }
+
+    #[test]
+    fn unicode_case_folding_matches_expanding_characters() {
+        let items = ["Straße"];
+
+        let matches = fuzzy_filter(&items, "STRASSE", |item| FuzzyTarget::new(item));
+
+        assert_eq!(
+            matches[0].field_highlight_indices(0),
+            vec![0, 1, 2, 3, 4, 5]
+        );
     }
 
     #[test]
