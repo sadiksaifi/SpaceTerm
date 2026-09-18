@@ -77,7 +77,7 @@ One named group of Settings presented as one navigation entry and one content re
 One labeled Setting control within a Settings Section.
 
 **Settings Search**:
-Literal search over Settings Row labels and keywords that reveals a matching Settings Row.
+Fuzzy search over Settings Row labels and keywords that reveals a matching Settings Row.
 
 **Appearance Mode**:
 The application-scoped Light, Dark, or Auto choice governing which Color Scheme slot applies to

@@ -754,7 +754,7 @@ impl WorkspaceManager {
                         WorkspaceLocation::Remote { .. } => IconName::Globe,
                     }
                 };
-                let (path, directory_identity) = directory_labels(
+                let (path, _) = directory_labels(
                     workspace.location(),
                     workspace.local_display_directory(),
                     workspace.remote_display_directory(),
@@ -764,7 +764,7 @@ impl WorkspaceManager {
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
                     workspace.name().to_owned(),
                 )
-                .keywords([path, directory_identity])
+                .description(path)
                 .leading_icon(move |foreground, size| {
                     div()
                         .when(active, |icon| {

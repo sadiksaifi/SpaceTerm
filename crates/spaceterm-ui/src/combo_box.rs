@@ -6,16 +6,16 @@
 //! relationships for ordinary elements, so this Module retains those facts without claiming native
 //! assistive-technology publication.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
     FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, WeakFocusHandle,
-    Window, WindowId, actions, anchored, canvas, deferred, div, list, prelude::FluentBuilder as _,
-    px, size,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, WeakEntity,
+    WeakFocusHandle, Window, WindowId, actions, anchored, canvas, deferred, div, list,
+    prelude::FluentBuilder as _, px, size,
 };
 
 use crate::{
@@ -24,6 +24,7 @@ use crate::{
     anchored_placement::{
         AnchoredPlacementConfig, AnchoredTextDirection, constrain_anchored_size, place_anchored,
     },
+    fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     tooltip::{Tooltip, TooltipTargetVisibility},
 };
 
@@ -1109,6 +1110,19 @@ struct PointerPress<I> {
     generation: u64,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ComboBoxHighlights {
+    label: Vec<Range<usize>>,
+    description: Vec<Range<usize>>,
+}
+
+#[derive(Clone, Copy)]
+struct ComboBoxRowState {
+    selected: bool,
+    provisional: bool,
+    hovered: bool,
+}
+
 struct ComboBoxState<I: Clone + Eq + 'static> {
     accessibility_name: SharedString,
     selected: Option<I>,
@@ -1119,6 +1133,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     fallback: Option<ComboBoxFallback<I>>,
     ordinary_match_count: usize,
     matches: Rc<[usize]>,
+    match_highlights: Rc<[ComboBoxHighlights]>,
     provisional: Option<I>,
     hovered_row: Option<I>,
     query: String,
@@ -1258,6 +1273,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             fallback: None,
             ordinary_match_count: 0,
             matches: Vec::new().into(),
+            match_highlights: Vec::new().into(),
             provisional: None,
             hovered_row: None,
             query: String::new(),
@@ -1376,20 +1392,31 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
 
     fn recompute_matches(&mut self, reset_fallback_selection: bool) -> bool {
         let mut presented = self.items.to_vec();
-        let mut matches = filter_items(&self.items, &self.query);
+        let item_matches = match_items(&self.items, &self.query);
+        let mut matches = item_matches
+            .iter()
+            .map(|(item_index, _)| *item_index)
+            .collect::<Vec<_>>();
+        let mut match_highlights = item_matches
+            .into_iter()
+            .map(|(_, highlights)| highlights)
+            .collect::<Vec<_>>();
         self.ordinary_match_count = matches.len();
         if let Some(fallback) = &self.fallback {
             for item in fallback.items(&self.query, self.ordinary_match_count) {
                 if !presented.iter().any(|existing| existing.id == item.id) {
                     matches.push(presented.len());
+                    match_highlights.push(ComboBoxHighlights::default());
                     presented.push(item);
                 }
             }
         }
         let changed = !same_model(&self.presented_items, &presented)
-            || self.matches.as_ref() != matches.as_slice();
+            || self.matches.as_ref() != matches.as_slice()
+            || self.match_highlights.as_ref() != match_highlights.as_slice();
         self.presented_items = presented.into();
         self.matches = matches.into();
+        self.match_highlights = match_highlights.into();
         if reset_fallback_selection && self.ordinary_match_count > 0 {
             self.provisional = None;
         }
@@ -2031,36 +2058,38 @@ fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> b
         })
 }
 
-fn filter_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<usize> {
-    let tokens: Vec<String> = query
-        .split_whitespace()
-        .map(|token| token.to_lowercase())
-        .collect();
-    items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            let label = item.label.to_lowercase();
-            let description = item
-                .description
-                .as_ref()
-                .map_or("", AsRef::as_ref)
-                .to_lowercase();
-            let keywords: Vec<String> = item
-                .keywords
-                .iter()
-                .map(|keyword| keyword.to_lowercase())
-                .collect();
-            tokens
-                .iter()
-                .all(|token| {
-                    label.contains(token)
-                        || description.contains(token)
-                        || keywords.iter().any(|keyword| keyword.contains(token))
-                })
-                .then_some(index)
-        })
-        .collect()
+fn match_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<(usize, ComboBoxHighlights)> {
+    fuzzy_filter(items, query, |item| {
+        let target = FuzzyTarget::new(item.label.as_ref());
+        let target = if let Some(description) = &item.description {
+            target.field(description.as_ref())
+        } else {
+            target
+        };
+        item.keywords
+            .iter()
+            .fold(target, |target, keyword| target.field(keyword.as_ref()))
+    })
+    .into_iter()
+    .map(|matched| {
+        let item_index = matched.item_index();
+        let item = &items[item_index];
+        let description_field = usize::from(item.description.is_some());
+        let description = item.description.as_ref().map_or_else(Vec::new, |text| {
+            highlight_ranges(
+                text.as_ref(),
+                &matched.field_highlight_indices(description_field),
+            )
+        });
+        (
+            item_index,
+            ComboBoxHighlights {
+                label: highlight_ranges(item.label.as_ref(), &matched.field_highlight_indices(0)),
+                description,
+            },
+        )
+    })
+    .collect()
 }
 
 fn render_overlay<I: Clone + Eq + 'static>(
@@ -2144,6 +2173,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
 
     let input = state.read(cx).input.clone();
     let matches = Rc::clone(&state.read(cx).matches);
+    let match_highlights = Rc::clone(&state.read(cx).match_highlights);
     let items = Rc::clone(&state.read(cx).presented_items);
     let selected = state.read(cx).selected.clone();
     let provisional = state.read(cx).provisional.clone();
@@ -2196,13 +2226,17 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 .get(position)
                 .and_then(|index| items.get(*index))
                 .map(|item| {
+                    let highlights = match_highlights.get(position).cloned().unwrap_or_default();
                     render_row(
                         row_owner.clone(),
                         position,
                         item,
-                        selected.as_ref() == Some(&item.id),
-                        provisional.as_ref() == Some(&item.id),
-                        hovered_row.as_ref() == Some(&item.id),
+                        &highlights,
+                        ComboBoxRowState {
+                            selected: selected.as_ref() == Some(&item.id),
+                            provisional: provisional.as_ref() == Some(&item.id),
+                            hovered: hovered_row.as_ref() == Some(&item.id),
+                        },
                         theme,
                     )
                 })
@@ -2358,11 +2392,15 @@ fn render_row<I: Clone + Eq + 'static>(
     state: WeakEntity<ComboBoxState<I>>,
     position: usize,
     item: &ComboBoxItem<I>,
-    selected: bool,
-    provisional: bool,
-    hovered: bool,
+    highlights: &ComboBoxHighlights,
+    state_paint: ComboBoxRowState,
     theme: ComboBoxTheme,
 ) -> AnyElement {
+    let ComboBoxRowState {
+        selected,
+        provisional,
+        hovered,
+    } = state_paint;
     let row_paint = resolve_row_paint(theme.paint.rows, !item.disabled, provisional, hovered);
     let foreground = if item.disabled {
         theme.paint.disabled
@@ -2383,6 +2421,7 @@ fn render_row<I: Clone + Eq + 'static>(
     let foreground = row_paint.map_or(foreground, |paint| paint.foreground);
     let secondary = row_paint.map_or(secondary, |paint| paint.secondary);
     let icon_foreground = row_paint.map_or(foreground, |paint| paint.icon);
+    let matched = row_paint.map_or(foreground, |paint| paint.matched);
     let id = item.id.clone();
     let logical_name = item.label.clone();
     let debug_selector = item.debug_selector.clone();
@@ -2449,29 +2488,31 @@ fn render_row<I: Clone + Eq + 'static>(
                 icon_foreground,
             ));
     }
-    row = row.child(leading).child(
-        div()
-            .min_w_0()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .child(
-                div()
-                    .truncate()
-                    .text_size(theme.metrics.label_size)
-                    .child(item.label.clone()),
-            )
-            .when_some(item.description.clone(), |text, description| {
-                text.child(
-                    div()
-                        .truncate()
-                        .text_size(theme.metrics.secondary_size)
-                        .text_color(secondary)
-                        .child(description),
-                )
-            }),
-    );
+    row =
+        row.child(leading).child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .child(div().truncate().text_size(theme.metrics.label_size).child(
+                    highlighted_text(item.label.clone(), &highlights.label, matched),
+                ))
+                .when_some(item.description.clone(), |text, description| {
+                    text.child(
+                        div()
+                            .truncate()
+                            .text_size(theme.metrics.secondary_size)
+                            .text_color(secondary)
+                            .child(highlighted_text(
+                                description,
+                                &highlights.description,
+                                matched,
+                            )),
+                    )
+                }),
+        );
     if let Some(accessory) = item.trailing.clone() {
         let text = match accessory {
             ComboBoxAccessory::Text(text)
@@ -2584,6 +2625,17 @@ fn render_row<I: Clone + Eq + 'static>(
     row.into_any_element()
 }
 
+fn highlighted_text(text: SharedString, ranges: &[Range<usize>], highlight: Rgba) -> AnyElement {
+    StyledText::new(text)
+        .with_highlights(
+            ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, highlight.into())),
+        )
+        .into_any_element()
+}
+
 fn resolve_row_paint(
     rows: Option<crate::ListRowPaints>,
     enabled: bool,
@@ -2664,7 +2716,19 @@ mod tests {
             ComboBoxItem::new(2, "Remote over SSH"),
         ];
 
-        assert_eq!(filter_items(&items, "ång"), vec![0]);
+        let matches = match_items(&items, "ång");
+
+        assert_eq!(matches[0].0, 0);
+        assert_eq!(matches[0].1.label, vec![0..4]);
+    }
+
+    #[test]
+    fn filtering_should_report_unicode_description_highlights() {
+        let items = vec![ComboBoxItem::new(1, "Workspace").description("/project/Ångström")];
+
+        let matches = match_items(&items, "ång");
+
+        assert_eq!(matches[0].1.description, vec![9..13]);
     }
 
     #[test]
@@ -2675,7 +2739,30 @@ mod tests {
                 .keywords(["workspace"]),
         ];
 
-        assert_eq!(filter_items(&items, "mac home workspace"), vec![0]);
+        assert_eq!(match_items(&items, "mac home workspace")[0].0, 0);
+    }
+
+    #[test]
+    fn filtering_should_rank_contiguous_matches() {
+        let items = vec![
+            ComboBoxItem::new(1, "random"),
+            ComboBoxItem::new(2, "projects"),
+        ];
+
+        assert_eq!(match_items(&items, "ro")[0].0, 1);
+    }
+
+    #[test]
+    fn filtering_should_preserve_item_order_for_an_empty_query() {
+        let items = vec![ComboBoxItem::new(1, "Third"), ComboBoxItem::new(2, "First")];
+
+        assert_eq!(
+            match_items(&items, "")
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]

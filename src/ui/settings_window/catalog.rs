@@ -4,6 +4,8 @@
 //! is not listed here cannot be found by Settings Search, so the suite asserts that every
 //! [`SettingsRowId`] appears exactly once.
 
+use spaceterm_ui::{FuzzyTarget, fuzzy_filter};
+
 use crate::appearance::{Appearance, ResetTarget};
 
 /// One named group of Settings presented as one navigation entry and one content region.
@@ -175,25 +177,36 @@ pub(super) struct SettingsRowDescriptor {
     pub(super) selector: &'static str,
 }
 
-impl SettingsRowDescriptor {
-    /// Whether this row answers `query`, which the caller has already lowercased and trimmed.
-    fn matches(&self, query: &str) -> bool {
-        self.label.to_ascii_lowercase().contains(query)
-            || self.section.title().to_ascii_lowercase().contains(query)
-            || self.group.to_ascii_lowercase().contains(query)
-            || self
-                .keywords
-                .iter()
-                .any(|keyword| keyword.contains(query) || query.contains(keyword))
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SettingsRowMatch {
+    pub(super) id: SettingsRowId,
+    pub(super) score: i64,
+    pub(super) matched_indices: Vec<usize>,
+}
+
+pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
+    fuzzy_filter(ROWS, query, |descriptor| {
+        descriptor
+            .keywords
+            .iter()
+            .fold(FuzzyTarget::new(descriptor.label), |target, keyword| {
+                target.field(keyword)
+            })
+    })
+    .into_iter()
+    .map(|matched| SettingsRowMatch {
+        id: ROWS[matched.item_index()].id,
+        score: matched.score(),
+        matched_indices: matched.field_highlight_indices(0),
+    })
+    .collect()
 }
 
 /// Returns the rows answering `query`, or every row when the query is empty.
 pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
-    let query = query.trim().to_ascii_lowercase();
-    ROWS.iter()
-        .filter(|descriptor| query.is_empty() || descriptor.matches(&query))
-        .map(|descriptor| descriptor.id)
+    matching_row_matches(query)
+        .into_iter()
+        .map(|matched| matched.id)
         .collect()
 }
 
@@ -440,6 +453,8 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "speech",
             "record",
             "permission",
+            "permissions",
+            "privacy",
             "authorization",
             "allow",
             "denied",
@@ -608,29 +623,44 @@ mod tests {
             "privacy",
             "permissions",
         ] {
+            let matches = matching_rows(query);
             assert_eq!(
-                matching_rows(query),
-                vec![SettingsRowId::MicrophoneAccess],
-                "{query:?} should reach only microphone access"
+                matches.first(),
+                Some(&SettingsRowId::MicrophoneAccess),
+                "{query:?} should rank microphone access first"
             );
         }
     }
 
     #[test]
-    fn a_section_query_matches_that_sections_rows() {
+    fn a_section_name_is_not_an_implicit_search_target() {
         let matches = matching_rows("terminal");
 
-        assert!(matches.contains(&SettingsRowId::TerminalItalic));
-        assert!(!matches.contains(&SettingsRowId::ChromeDensity));
+        assert!(!matches.contains(&SettingsRowId::TerminalBaseSize));
     }
 
-    /// A group title is a heading a person can read on the page, so searching it reaches its rows.
     #[test]
-    fn a_group_query_matches_that_groups_rows() {
-        let matches = matching_rows("rendering");
+    fn a_group_title_is_not_an_implicit_search_target() {
+        assert!(matching_rows("rendering").is_empty());
+    }
 
-        assert!(matches.contains(&SettingsRowId::TerminalBoldAsBright));
-        assert!(!matches.contains(&SettingsRowId::TerminalBaseSize));
+    #[test]
+    fn label_matches_report_character_indices() {
+        let matched = matching_row_matches("line");
+
+        assert_eq!(matched[0].id, SettingsRowId::TerminalLineHeight);
+        assert_eq!(matched[0].matched_indices, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn non_empty_matches_are_ranked_by_descending_score() {
+        let matched = matching_row_matches("font");
+
+        assert!(
+            matched
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score)
+        );
     }
 
     #[test]

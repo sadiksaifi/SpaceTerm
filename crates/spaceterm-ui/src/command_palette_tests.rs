@@ -197,11 +197,11 @@ fn fallback_provider_should_preserve_exact_query_in_typed_identity() {
 }
 
 #[test]
-fn matcher_should_search_description_and_keywords() {
+fn matcher_should_search_labels_and_keywords() {
     let items = items();
 
     assert_eq!(
-        match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic)[0]
+        match_command_palette_items(&items, "workspace", CommandPaletteMatching::Semantic)[0]
             .item_index,
         0
     );
@@ -888,6 +888,20 @@ fn caller_matching_should_present_every_item_in_caller_order() {
     );
 }
 
+#[test]
+fn caller_matching_should_render_supplied_description_indices() {
+    let items = vec![
+        CommandPaletteItem::new(1, "work")
+            .description("deploy@build.example:2222")
+            .matched_description_indices(7..20),
+    ];
+
+    let matches =
+        match_command_palette_items(&items, "build.example", CommandPaletteMatching::Caller);
+
+    assert_eq!(matches[0].description_highlights, vec![7..20]);
+}
+
 #[gpui::test]
 fn caller_matching_should_survive_a_query_that_matches_nothing(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
@@ -1443,13 +1457,12 @@ fn scored_queries_should_preserve_contiguous_section_order() {
 }
 
 #[test]
-fn description_matches_should_report_their_own_highlight_ranges() {
+fn descriptions_should_not_expand_the_palette_search_target() {
     let items = vec![CommandPaletteItem::new(1, "Open").description("Choose a directory")];
     let matches =
         match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic);
 
-    assert!(matches[0].label_highlights.is_empty());
-    assert_eq!(matches[0].description_highlights, vec![9..18]);
+    assert!(matches.is_empty());
 }
 
 #[gpui::test]
@@ -2065,6 +2078,38 @@ fn stable_selection_should_survive_query_and_item_refresh(cx: &mut TestAppContex
     assert_eq!(
         palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
         Some(3)
+    );
+}
+
+#[gpui::test]
+fn caller_ranked_item_refresh_should_select_the_new_first_result(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_matching(CommandPaletteMatching::Caller, cx);
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Repos"),
+                CommandPaletteItem::new(2, "Projects"),
+            ],
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    palette.update(cx, |palette, cx| {
+        palette.set_query("ro", cx);
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(2, "Projects").matched_indices([1, 2]),
+                CommandPaletteItem::new(1, "Repos").matched_indices([0, 3]),
+            ],
+            cx,
+        );
+    });
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(2)
     );
 }
 

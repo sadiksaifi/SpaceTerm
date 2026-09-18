@@ -6,8 +6,9 @@ use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus, Icon,
-    IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus,
+    FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
+    fuzzy_filter,
 };
 
 use super::{
@@ -235,19 +236,32 @@ impl RemoteDirectoryRow {
     }
 }
 
+#[cfg(test)]
 pub(super) fn filter_remote_workspace_rows(
     parsed: &ParsedRemoteDirectory,
     entries: &[RemoteDirectoryRow],
 ) -> Vec<RemoteDirectoryRow> {
-    let folded_filter = parsed.leaf_filter.to_lowercase();
+    match_remote_workspace_rows(parsed, entries)
+        .into_iter()
+        .map(|matched| matched.row)
+        .collect()
+}
+
+struct RemoteDirectoryRowMatch {
+    row: RemoteDirectoryRow,
+    matched_indices: Vec<usize>,
+}
+
+fn match_remote_workspace_rows(
+    parsed: &ParsedRemoteDirectory,
+    entries: &[RemoteDirectoryRow],
+) -> Vec<RemoteDirectoryRowMatch> {
     let reveal_hidden = parsed.reveals_hidden_directories();
-    let mut rows = entries
+    let mut visible = entries
         .iter()
         .filter(|entry| reveal_hidden || !entry.name.starts_with('.'))
-        .filter(|entry| entry.name.to_lowercase().starts_with(&folded_filter))
-        .cloned()
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
+    visible.sort_by(|left, right| {
         let folded = left.name.to_lowercase().cmp(&right.name.to_lowercase());
         if folded == Ordering::Equal {
             left.name.cmp(&right.name)
@@ -255,7 +269,15 @@ pub(super) fn filter_remote_workspace_rows(
             folded
         }
     });
-    rows
+    fuzzy_filter(&visible, &parsed.leaf_filter, |entry| {
+        FuzzyTarget::new(entry.name())
+    })
+    .into_iter()
+    .map(|matched| RemoteDirectoryRowMatch {
+        row: visible[matched.item_index()].clone(),
+        matched_indices: matched.field_highlight_indices(0),
+    })
+    .collect()
 }
 
 pub(super) fn descend_remote_workspace_query(
@@ -742,24 +764,24 @@ impl RemoteDirectoryPicker {
         if snapshot.directory != *parsed.enumeration_directory() {
             return;
         }
-        self.rows = filter_remote_workspace_rows(parsed, snapshot.listing.rows());
+        let matches = match_remote_workspace_rows(parsed, snapshot.listing.rows());
+        self.rows = matches.iter().map(|matched| matched.row.clone()).collect();
         let directory = snapshot.directory.clone();
         let operation_generation = self.operation_generation;
         let truncated = self.listing_truncated;
-        let items = self
-            .rows
-            .iter()
-            .cloned()
+        let items = matches
+            .into_iter()
             .enumerate()
-            .map(|(index, row)| {
+            .map(|(index, matched)| {
                 remote_directory_palette_item(
                     RemoteDirectoryPickerItemId {
-                        row,
+                        row: matched.row,
                         directory: directory.clone(),
                         operation_generation,
                     },
                     truncated && index == 0,
                 )
+                .matched_indices(matched.matched_indices)
             })
             .collect();
         self.palette
@@ -2053,13 +2075,35 @@ mod tests {
     }
 
     #[test]
-    fn rows_should_filter_case_insensitive_prefixes_and_sort_deterministically() {
+    fn rows_should_fuzzy_match_and_preserve_deterministic_name_order_for_ties() {
         let parsed = parse_remote_directory("~/Projects/sp").unwrap();
         let entries = remote_rows(["spaceTerm", "Spatial", "SpaceTerm", "tools"]);
 
         assert_eq!(
             row_names(filter_remote_workspace_rows(&parsed, &entries)),
             vec!["SpaceTerm", "spaceTerm", "Spatial"]
+        );
+    }
+
+    #[test]
+    fn rows_should_rank_contiguous_matches_and_report_indices() {
+        let parsed = parse_remote_directory("~/Projects/ro").unwrap();
+        let entries = remote_rows(["random", "projects"]);
+
+        let matches = match_remote_workspace_rows(&parsed, &entries);
+
+        assert_eq!(matches[0].row.name(), "projects");
+        assert_eq!(matches[0].matched_indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn an_empty_leaf_should_preserve_deterministic_name_order() {
+        let parsed = parse_remote_directory("~/Projects/").unwrap();
+        let entries = remote_rows(["Zulu", "Alpha"]);
+
+        assert_eq!(
+            row_names(filter_remote_workspace_rows(&parsed, &entries)),
+            vec!["Alpha", "Zulu"]
         );
     }
 

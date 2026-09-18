@@ -7907,6 +7907,116 @@ fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remot
 }
 
 #[gpui::test]
+fn workspace_switcher_should_use_displayed_directory_as_its_searchable_description(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "Alpha".to_owned())
+            .unwrap();
+        manager
+            .workspaces
+            .update_automatic_directory(
+                WorkspaceId::new(1),
+                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
+                    "/project/Ångström",
+                )),
+            )
+            .unwrap();
+    });
+
+    let item = manager.read_with(cx, |manager, cx| {
+        manager.workspace_switcher_items(cx).remove(0)
+    });
+
+    assert_eq!(item.label(), "Alpha");
+    assert_eq!(item.description_text(), Some("/project/Ångström"));
+}
+
+#[gpui::test]
+fn workspace_switcher_should_search_the_displayed_directory(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "Alpha".to_owned())
+            .unwrap();
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "Beta".to_owned())
+            .unwrap();
+        manager
+            .workspaces
+            .update_automatic_directory(
+                WorkspaceId::new(1),
+                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
+                    "/project/Ångström",
+                )),
+            )
+            .unwrap();
+    });
+    open_workspace_switcher(cx);
+
+    cx.simulate_input("project");
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
+    let switcher = manager.read_with(cx, |manager, _| manager.workspace_switcher.clone());
+    assert!(!cx.update(|window, cx| switcher.accept_matching(
+        |choice| {
+            matches!(
+                choice,
+                WorkspaceSwitcherChoice::Workspace(id) if *id == WorkspaceId::new(2)
+            )
+        },
+        window,
+        cx,
+    )));
+    assert!(cx.update(|window, cx| switcher.accept_matching(
+        |choice| {
+            matches!(
+                choice,
+                WorkspaceSwitcherChoice::Workspace(id) if *id == WorkspaceId::new(1)
+            )
+        },
+        window,
+        cx,
+    )));
+}
+
+#[gpui::test]
+fn workspace_switcher_should_preserve_empty_order_and_show_fuzzy_ranking(cx: &mut TestAppContext) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), "remote operation".to_owned())
+            .unwrap();
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "projects".to_owned())
+            .unwrap();
+    });
+    open_workspace_switcher(cx);
+    let first = cx.debug_bounds("workspace-switcher-result-1").unwrap();
+    let second = cx.debug_bounds("workspace-switcher-result-2").unwrap();
+    assert!(first.top() < second.top());
+
+    cx.simulate_input("ro");
+    cx.run_until_parked();
+
+    let first = cx.debug_bounds("workspace-switcher-result-1").unwrap();
+    let second = cx.debug_bounds("workspace-switcher-result-2").unwrap();
+    assert!(second.top() < first.top());
+}
+
+#[gpui::test]
 fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_queries(
     cx: &mut TestAppContext,
 ) {

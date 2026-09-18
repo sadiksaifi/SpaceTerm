@@ -9,7 +9,8 @@ use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName, MenuEntry,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon, IconName, MenuEntry,
+    fuzzy_filter,
 };
 
 use crate::domain::SshDestination;
@@ -144,6 +145,8 @@ struct HostPickerRow {
     subtitle: String,
     managed: bool,
     synthetic: bool,
+    label_matched_indices: Vec<usize>,
+    subtitle_matched_indices: Vec<usize>,
 }
 
 impl fmt::Debug for HostPickerRow {
@@ -168,6 +171,8 @@ impl HostPickerRow {
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
+            .matched_indices(self.label_matched_indices)
+            .matched_description_indices(self.subtitle_matched_indices)
             .leading_icon(|foreground, size| {
                 Icon::new(IconName::Server, size, foreground).into_any_element()
             })
@@ -190,19 +195,21 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
             .cmp(&right.alias().as_str().to_lowercase())
             .then_with(|| left.alias().as_str().cmp(right.alias().as_str()))
     });
-    let folded_query = query.to_lowercase();
-    let mut rows = hosts
+    let configured_rows = hosts
         .iter()
-        .filter(|host| {
-            query.is_empty()
-                || host
-                    .alias()
-                    .as_str()
-                    .to_lowercase()
-                    .starts_with(&folded_query)
-        })
-        .filter_map(configured_host_row)
+        .filter_map(|host| configured_host_row(host))
         .collect::<Vec<_>>();
+    let mut rows = fuzzy_filter(&configured_rows, query, |row| {
+        FuzzyTarget::new(&row.label).field(&row.subtitle)
+    })
+    .into_iter()
+    .map(|matched| {
+        let mut row = configured_rows[matched.item_index()].clone();
+        row.label_matched_indices = matched.field_highlight_indices(0);
+        row.subtitle_matched_indices = matched.field_highlight_indices(1);
+        row
+    })
+    .collect::<Vec<_>>();
 
     let aliases = hosts
         .iter()
@@ -226,13 +233,15 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                 subtitle: format!("Connect as {user} through {}", alias.as_str()),
                 managed: false,
                 synthetic: true,
+                label_matched_indices: (0..query.chars().count()).collect(),
+                subtitle_matched_indices: Vec::new(),
             },
         );
     }
     rows
 }
 
-fn configured_host_row(host: &&DiscoveredSshHost) -> Option<HostPickerRow> {
+fn configured_host_row(host: &DiscoveredSshHost) -> Option<HostPickerRow> {
     let destination = SshDestination::new(host.alias().as_str().to_owned()).ok()?;
     Some(HostPickerRow {
         id: SshHostPickerItemId::Configured(host.alias().clone()),
@@ -243,6 +252,8 @@ fn configured_host_row(host: &&DiscoveredSshHost) -> Option<HostPickerRow> {
             .provenance()
             .is_some_and(|provenance| provenance.source() == HostConfigSource::Managed),
         synthetic: false,
+        label_matched_indices: Vec::new(),
+        subtitle_matched_indices: Vec::new(),
     })
 }
 
@@ -422,7 +433,11 @@ impl SshHostPicker {
                 cx.notify();
             }
             CommandPaletteEvent::QueryChanged(query) => {
+                let query_changed = self.retained_query != query.text();
                 self.retained_query = query.text().to_owned();
+                if query_changed {
+                    self.retained_selection = None;
+                }
                 self.rebuild_rows(cx);
             }
             CommandPaletteEvent::Activated(activation) => {
@@ -644,6 +659,8 @@ mod tests {
             subtitle: "/sensitive/config".to_owned(),
             managed: false,
             synthetic: false,
+            label_matched_indices: Vec::new(),
+            subtitle_matched_indices: Vec::new(),
         };
         let event = SshHostPickerEvent::SelectDestination(destination);
 
@@ -858,6 +875,26 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.label()).collect::<Vec<_>>(),
             vec!["work"]
+        );
+    }
+
+    #[test]
+    fn configured_destination_subtitles_should_be_searchable() {
+        let rows = host_rows_for_query(
+            &host_discovery(
+                "Host work\n  HostName build.example\n  User deploy\n  Port 2222\n",
+                "Host personal\n  HostName personal.example\n",
+            ),
+            "build.example",
+        );
+
+        assert_eq!(
+            rows.iter().map(|row| row.label()).collect::<Vec<_>>(),
+            vec!["work"]
+        );
+        assert_eq!(
+            rows[0].subtitle_matched_indices,
+            (7..20).collect::<Vec<_>>()
         );
     }
 
@@ -1260,6 +1297,32 @@ mod tests {
                     SshHostAlias::new("staging".to_owned()).unwrap()
                 )),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn query_change_should_select_the_new_first_fuzzy_result(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host projects\nHost remote-operation\n",
+            "",
+        )]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            selected_item(&picker, cx),
+            Some(SshHostPickerItemId::Configured(
+                SshHostAlias::new("remote-operation".to_owned()).unwrap()
+            ))
+        );
+
+        set_query(&picker, "ro", cx);
+
+        assert_eq!(
+            selected_item(&picker, cx),
+            Some(SshHostPickerItemId::Configured(
+                SshHostAlias::new("projects".to_owned()).unwrap()
+            ))
         );
     }
 
