@@ -13,6 +13,7 @@ use crate::{
     ControlShadow, Icon, IconName, ProgressRing, ProgressSize, ProgressState, TextInput,
     TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
+    fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
 };
@@ -623,11 +624,9 @@ pub enum CommandPaletteMatching {
     /// The palette filters and ranks items with its own static semantic matcher.
     #[default]
     Semantic,
-    /// The caller supplies exactly the items to present, already filtered and ordered.
-    ///
-    /// The palette presents every item in caller order and highlights nothing, because the query
-    /// is not a substring of the labels it produces. Callers whose query is an address rather than
-    /// a search term, such as a filesystem path, select this.
+    /// The caller supplies exactly the items to present, already filtered, ordered, and carrying
+    /// any matched label indices. Callers whose query is an address rather than a search term,
+    /// such as a filesystem path, select this.
     Caller,
 }
 
@@ -706,6 +705,7 @@ pub struct CommandPaletteItem<I> {
     description: Option<SharedString>,
     section: Option<SharedString>,
     keywords: Vec<SharedString>,
+    matched_indices: Vec<usize>,
     disabled: bool,
     leading_icon: Option<RowIconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
@@ -741,6 +741,7 @@ impl<I> CommandPaletteItem<I> {
             description: None,
             section: None,
             keywords: Vec::new(),
+            matched_indices: Vec::new(),
             disabled: false,
             leading_icon: None,
             trailing: None,
@@ -766,6 +767,12 @@ impl<I> CommandPaletteItem<I> {
     /// Replaces the non-presentational search keywords.
     pub fn keywords(mut self, values: impl IntoIterator<Item = impl Into<SharedString>>) -> Self {
         self.keywords = values.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Supplies matched label character indices for caller-filtered results.
+    pub fn matched_indices(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
+        self.matched_indices = indices.into_iter().collect();
         self
     }
 
@@ -832,22 +839,14 @@ fn match_command_palette_items<I>(
     query: &str,
     matching: CommandPaletteMatching,
 ) -> Vec<CommandPaletteMatch> {
-    let tokens: Vec<Vec<char>> = match matching {
-        CommandPaletteMatching::Caller => Vec::new(),
-        CommandPaletteMatching::Semantic => query
-            .split_whitespace()
-            .map(lowercase_chars)
-            .filter(|token| !token.is_empty())
-            .collect(),
-    };
-    if tokens.is_empty() {
+    if matching == CommandPaletteMatching::Caller {
         return items
             .iter()
             .enumerate()
-            .map(|(item_index, _)| CommandPaletteMatch {
+            .map(|(item_index, item)| CommandPaletteMatch {
                 item_index,
                 score: 0,
-                label_highlights: Vec::new(),
+                label_highlights: highlight_ranges(&item.label, &item.matched_indices),
                 description_highlights: Vec::new(),
             })
             .collect();
@@ -858,20 +857,27 @@ fn match_command_palette_items<I>(
         section_groups[item_index] = section_groups[item_index - 1]
             + usize::from(items[item_index].section != items[item_index - 1].section);
     }
-    let mut matches = items
-        .iter()
-        .enumerate()
-        .filter_map(|(item_index, item)| {
-            match_item(item, &tokens).map(|(score, label_highlights, description_highlights)| {
-                CommandPaletteMatch {
-                    item_index,
-                    score,
-                    label_highlights,
-                    description_highlights,
-                }
+    let mut matches = fuzzy_filter(items, query, |item| {
+        item.keywords
+            .iter()
+            .fold(FuzzyTarget::new(item.label.as_ref()), |target, keyword| {
+                target.field(keyword.as_ref())
             })
-        })
-        .collect::<Vec<_>>();
+    })
+    .into_iter()
+    .map(|matched| {
+        let item_index = matched.item_index();
+        CommandPaletteMatch {
+            item_index,
+            score: matched.score(),
+            label_highlights: highlight_ranges(
+                items[item_index].label.as_ref(),
+                &matched.field_highlight_indices(0),
+            ),
+            description_highlights: Vec::new(),
+        }
+    })
+    .collect::<Vec<_>>();
     matches.sort_by(|left, right| {
         section_groups[left.item_index]
             .cmp(&section_groups[right.item_index])
@@ -879,157 +885,6 @@ fn match_command_palette_items<I>(
             .then_with(|| left.item_index.cmp(&right.item_index))
     });
     matches
-}
-
-fn lowercase_chars(text: &str) -> Vec<char> {
-    text.chars().flat_map(char::to_lowercase).collect()
-}
-
-#[derive(Clone)]
-struct SearchUnit {
-    character: char,
-    source: Range<usize>,
-}
-
-fn search_units(text: &str) -> Vec<SearchUnit> {
-    let mut units = Vec::new();
-    for (start, character) in text.char_indices() {
-        let source = start..start + character.len_utf8();
-        units.extend(character.to_lowercase().map(|character| SearchUnit {
-            character,
-            source: source.clone(),
-        }));
-    }
-    units
-}
-
-type ItemMatch = (i64, Vec<Range<usize>>, Vec<Range<usize>>);
-
-fn match_item<I>(item: &CommandPaletteItem<I>, tokens: &[Vec<char>]) -> Option<ItemMatch> {
-    let label_units = search_units(item.label.as_ref());
-    let description_units = item.description.as_ref().map(|text| search_units(text));
-    let keyword_units: Vec<_> = item
-        .keywords
-        .iter()
-        .map(|keyword| search_units(keyword))
-        .collect();
-    let mut score = 0;
-    let mut label_highlights = Vec::new();
-    let mut description_highlights = Vec::new();
-
-    for token in tokens {
-        let mut best =
-            fuzzy_match(&label_units, token).map(|matched| (matched.score + 20_000, 0, matched));
-        if let Some(units) = &description_units
-            && let Some(matched) = fuzzy_match(units, token)
-        {
-            let candidate = (matched.score + 400, 1, matched);
-            if best.as_ref().is_none_or(|current| candidate.0 > current.0) {
-                best = Some(candidate);
-            }
-        }
-        for units in &keyword_units {
-            if let Some(matched) = fuzzy_match(units, token) {
-                let candidate = (matched.score + 200, 2, matched);
-                if best.as_ref().is_none_or(|current| candidate.0 > current.0) {
-                    best = Some(candidate);
-                }
-            }
-        }
-        let (token_score, field, matched) = best?;
-        score += token_score;
-        match field {
-            0 => label_highlights.extend(matched.ranges),
-            1 => description_highlights.extend(matched.ranges),
-            _ => {}
-        }
-    }
-
-    Some((
-        score,
-        merge_ranges(label_highlights),
-        merge_ranges(description_highlights),
-    ))
-}
-
-struct FuzzyMatch {
-    score: i64,
-    ranges: Vec<Range<usize>>,
-}
-
-fn fuzzy_match(target: &[SearchUnit], query: &[char]) -> Option<FuzzyMatch> {
-    if query.is_empty() {
-        return Some(FuzzyMatch {
-            score: 0,
-            ranges: Vec::new(),
-        });
-    }
-    let mut best: Option<(i64, Vec<usize>)> = None;
-    for start in target
-        .iter()
-        .enumerate()
-        .filter_map(|(index, unit)| (unit.character == query[0]).then_some(index))
-    {
-        let mut indexes = vec![start];
-        let mut cursor = start + 1;
-        let mut complete = true;
-        for query_character in &query[1..] {
-            let Some(relative) = target[cursor..]
-                .iter()
-                .position(|unit| unit.character == *query_character)
-            else {
-                complete = false;
-                break;
-            };
-            cursor += relative;
-            indexes.push(cursor);
-            cursor += 1;
-        }
-        if !complete {
-            continue;
-        }
-        let end = indexes.last().copied().unwrap_or(start);
-        let gaps = end + 1 - start - indexes.len();
-        let contiguous_pairs = indexes
-            .windows(2)
-            .filter(|pair| pair[1] == pair[0] + 1)
-            .count();
-        let whole = indexes.len() == target.len() && start == 0;
-        let prefix = start == 0;
-        let rank = 1_000
-            + i64::from(whole) * 8_000
-            + i64::from(prefix) * 3_000
-            + contiguous_pairs as i64 * 80
-            - gaps as i64 * 25
-            - start as i64 * 4;
-        if best.as_ref().is_none_or(|current| rank > current.0) {
-            best = Some((rank, indexes));
-        }
-    }
-    let (score, indexes) = best?;
-    let ranges = indexes
-        .into_iter()
-        .filter_map(|index| target.get(index).map(|unit| unit.source.clone()))
-        .collect();
-    Some(FuzzyMatch {
-        score,
-        ranges: merge_ranges(ranges),
-    })
-}
-
-fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
-    ranges.sort_by_key(|range| (range.start, range.end));
-    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        if let Some(previous) = merged.last_mut()
-            && range.start <= previous.end
-        {
-            previous.end = previous.end.max(range.end);
-            continue;
-        }
-        merged.push(range);
-    }
-    merged
 }
 
 /// Application-owned command-palette paint values.

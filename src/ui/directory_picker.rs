@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -8,8 +7,8 @@ use gpui::{Action, App, Context, Entity, EventEmitter, Render, SharedString, Win
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName,
-    MenuEntry, ModalAction, ModalActionRole, ModalId,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon,
+    IconName, MenuEntry, ModalAction, ModalActionRole, ModalId, fuzzy_filter,
 };
 
 use super::{
@@ -36,30 +35,37 @@ const DIRECTORY_SELECTION_ACTION: &str = "directory-picker-directory-selection";
 const RETRY_ACTION: &str = "directory-picker-retry";
 const SYSTEM_SETTINGS_ACTION: &str = "directory-picker-open-system-settings";
 
-/// Returns the directories the typed leaf selects, in stable presentation order.
-///
-/// The picker owns this filter because its query is a path rather than a search term: only a
-/// case-insensitive prefix of the final segment matches, and no parent entry is produced. Moving
-/// up a level is editing the path.
+#[derive(Clone, Eq, PartialEq)]
+struct DirectoryPickerRowMatch {
+    entry: DirectoryPickerDirectoryEntry,
+    matched_indices: Vec<usize>,
+}
+
+/// Returns the directories the typed leaf selects, in fuzzy-ranked presentation order.
+#[cfg(test)]
 pub(super) fn filter_directory_picker_rows(
     parsed: &ParsedDirectoryPath,
     entries: &[DirectoryPickerDirectoryEntry],
 ) -> Vec<DirectoryPickerDirectoryEntry> {
-    let folded_filter = parsed.leaf_filter.to_lowercase();
-    let mut directories = entries
-        .iter()
-        .filter(|entry| entry.name().to_lowercase().starts_with(&folded_filter))
-        .cloned()
-        .collect::<Vec<_>>();
-    directories.sort_by(|left, right| {
-        let folded = left.name().to_lowercase().cmp(&right.name().to_lowercase());
-        if folded == Ordering::Equal {
-            left.name().cmp(right.name())
-        } else {
-            folded
-        }
-    });
-    directories
+    match_directory_picker_rows(parsed, entries)
+        .into_iter()
+        .map(|matched| matched.entry)
+        .collect()
+}
+
+fn match_directory_picker_rows(
+    parsed: &ParsedDirectoryPath,
+    entries: &[DirectoryPickerDirectoryEntry],
+) -> Vec<DirectoryPickerRowMatch> {
+    fuzzy_filter(entries, &parsed.leaf_filter, |entry| {
+        FuzzyTarget::new(entry.name())
+    })
+    .into_iter()
+    .map(|matched| DirectoryPickerRowMatch {
+        entry: entries[matched.item_index()].clone(),
+        matched_indices: matched.field_highlight_indices(0),
+    })
+    .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -496,12 +502,17 @@ impl DirectoryPicker {
         {
             return;
         }
-        self.rows = filter_directory_picker_rows(parsed, &snapshot.entries);
-        let items = self
-            .rows
+        let matches = match_directory_picker_rows(parsed, &snapshot.entries);
+        self.rows = matches
             .iter()
-            .cloned()
-            .map(|entry| directory_palette_item(self.paths, entry))
+            .map(|matched| matched.entry.clone())
+            .collect();
+        let items = matches
+            .into_iter()
+            .map(|matched| {
+                directory_palette_item(self.paths, matched.entry)
+                    .matched_indices(matched.matched_indices)
+            })
             .collect();
         self.palette
             .update(cx, |palette, cx| palette.set_items(items, cx));
@@ -1388,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_picker_rows_filter_case_insensitive_prefixes_and_sort_deterministically() {
+    fn directory_picker_rows_fuzzy_match_and_preserve_tied_source_order() {
         let parsed =
             parse_directory_path(LocalPathSemantics::Posix, "~/Projects/sp", &home()).unwrap();
         let entries = [
@@ -1413,7 +1424,43 @@ mod tests {
             rows.iter()
                 .map(DirectoryPickerDirectoryEntry::name)
                 .collect::<Vec<_>>(),
-            vec!["SpaceTerm", "spaceTerm", "Spatial"]
+            vec!["spaceTerm", "Spatial", "SpaceTerm"]
+        );
+    }
+
+    #[test]
+    fn directory_picker_rows_rank_contiguous_matches_and_report_indices() {
+        let parsed =
+            parse_directory_path(LocalPathSemantics::Posix, "~/Projects/ro", &home()).unwrap();
+        let entries = [
+            DirectoryPickerDirectoryEntry::new("random".to_owned(), home().join("Projects/random")),
+            DirectoryPickerDirectoryEntry::new(
+                "projects".to_owned(),
+                home().join("Projects/projects"),
+            ),
+        ];
+
+        let matches = match_directory_picker_rows(&parsed, &entries);
+
+        assert_eq!(matches[0].entry.name(), "projects");
+        assert_eq!(matches[0].matched_indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn directory_picker_empty_leaf_preserves_listing_order() {
+        let parsed =
+            parse_directory_path(LocalPathSemantics::Posix, "~/Projects/", &home()).unwrap();
+        let entries = [
+            DirectoryPickerDirectoryEntry::new("Zulu".to_owned(), home().join("Projects/Zulu")),
+            DirectoryPickerDirectoryEntry::new("Alpha".to_owned(), home().join("Projects/Alpha")),
+        ];
+
+        assert_eq!(
+            filter_directory_picker_rows(&parsed, &entries)
+                .iter()
+                .map(DirectoryPickerDirectoryEntry::name)
+                .collect::<Vec<_>>(),
+            vec!["Zulu", "Alpha"]
         );
     }
 

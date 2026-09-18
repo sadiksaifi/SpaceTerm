@@ -197,11 +197,11 @@ fn fallback_provider_should_preserve_exact_query_in_typed_identity() {
 }
 
 #[test]
-fn matcher_should_search_description_and_keywords() {
+fn matcher_should_search_labels_and_keywords() {
     let items = items();
 
     assert_eq!(
-        match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic)[0]
+        match_command_palette_items(&items, "workspace", CommandPaletteMatching::Semantic)[0]
             .item_index,
         0
     );
@@ -1443,13 +1443,12 @@ fn scored_queries_should_preserve_contiguous_section_order() {
 }
 
 #[test]
-fn description_matches_should_report_their_own_highlight_ranges() {
+fn descriptions_should_not_expand_the_palette_search_target() {
     let items = vec![CommandPaletteItem::new(1, "Open").description("Choose a directory")];
     let matches =
         match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic);
 
-    assert!(matches[0].label_highlights.is_empty());
-    assert_eq!(matches[0].description_highlights, vec![9..18]);
+    assert!(matches.is_empty());
 }
 
 #[gpui::test]

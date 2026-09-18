@@ -519,16 +519,16 @@ impl SettingsWindow {
 
     /// The first section answering the current query, so search never lands on an empty view.
     fn section_for_query(&self) -> Option<SettingsSectionId> {
-        SettingsSectionId::ALL
+        catalog::matching_rows(&self.query)
             .into_iter()
-            .find(|section| !self.rows_for(*section).is_empty())
+            .find(|row| self.row_applies(*row))
+            .map(|row| row.descriptor().section)
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        let matching = catalog::matching_rows(&self.query);
-        ROWS.iter()
-            .filter(|row| row.section == section && matching.contains(&row.id))
-            .map(|row| row.id)
+        catalog::matching_rows(&self.query)
+            .into_iter()
+            .filter(|row| row.descriptor().section == section)
             .filter(|row| self.row_applies(*row))
             .collect()
     }
@@ -1215,6 +1215,14 @@ impl SettingsWindow {
     ) -> AnyElement {
         let descriptor = row.descriptor();
         let highlighted = !self.query.is_empty() && self.revealed == Some(row);
+        let matched_indices = if self.query.trim().is_empty() {
+            Vec::new()
+        } else {
+            catalog::matching_row_matches(&self.query)
+                .into_iter()
+                .find(|matched| matched.id == row)
+                .map_or_else(Vec::new, |matched| matched.matched_indices)
+        };
         // App-owned copy inside a full-width row shares the row's surface. Reusable controls
         // retain their own complete paints through the installed control catalog.
         let mut highlighted_appearance;
@@ -1231,6 +1239,7 @@ impl SettingsWindow {
         let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
             .layout(row_layout(row))
             .reset(self.row_reset(row, cx))
+            .matched_indices(matched_indices)
             .highlighted(highlighted);
         if let Some(description) = self.row_description(row) {
             rendered = rendered.description(description);

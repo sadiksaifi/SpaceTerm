@@ -13,6 +13,7 @@ mod combo_box;
 mod combo_box_tests;
 mod command_palette;
 mod field_frame;
+mod fuzzy;
 mod icon;
 mod list_row;
 mod menu;
@@ -58,6 +59,7 @@ pub use command_palette::{
     install_command_palette_keybindings,
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
+pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{

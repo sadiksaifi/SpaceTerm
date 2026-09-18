@@ -9,7 +9,8 @@ use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, Icon, IconName, MenuEntry,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon, IconName, MenuEntry,
+    fuzzy_filter,
 };
 
 use crate::domain::SshDestination;
@@ -144,6 +145,7 @@ struct HostPickerRow {
     subtitle: String,
     managed: bool,
     synthetic: bool,
+    matched_indices: Vec<usize>,
 }
 
 impl fmt::Debug for HostPickerRow {
@@ -168,6 +170,7 @@ impl HostPickerRow {
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
+            .matched_indices(self.matched_indices)
             .leading_icon(|foreground, size| {
                 Icon::new(IconName::Server, size, foreground).into_any_element()
             })
@@ -190,19 +193,16 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
             .cmp(&right.alias().as_str().to_lowercase())
             .then_with(|| left.alias().as_str().cmp(right.alias().as_str()))
     });
-    let folded_query = query.to_lowercase();
-    let mut rows = hosts
-        .iter()
-        .filter(|host| {
-            query.is_empty()
-                || host
-                    .alias()
-                    .as_str()
-                    .to_lowercase()
-                    .starts_with(&folded_query)
-        })
-        .filter_map(configured_host_row)
-        .collect::<Vec<_>>();
+    let mut rows = fuzzy_filter(&hosts, query, |host| {
+        FuzzyTarget::new(host.alias().as_str())
+    })
+    .into_iter()
+    .filter_map(|matched| {
+        let mut row = configured_host_row(&hosts[matched.item_index()])?;
+        row.matched_indices = matched.field_highlight_indices(0);
+        Some(row)
+    })
+    .collect::<Vec<_>>();
 
     let aliases = hosts
         .iter()
@@ -226,6 +226,7 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                 subtitle: format!("Connect as {user} through {}", alias.as_str()),
                 managed: false,
                 synthetic: true,
+                matched_indices: (0..query.chars().count()).collect(),
             },
         );
     }
@@ -243,6 +244,7 @@ fn configured_host_row(host: &&DiscoveredSshHost) -> Option<HostPickerRow> {
             .provenance()
             .is_some_and(|provenance| provenance.source() == HostConfigSource::Managed),
         synthetic: false,
+        matched_indices: Vec::new(),
     })
 }
 
@@ -644,6 +646,7 @@ mod tests {
             subtitle: "/sensitive/config".to_owned(),
             managed: false,
             synthetic: false,
+            matched_indices: Vec::new(),
         };
         let event = SshHostPickerEvent::SelectDestination(destination);
 

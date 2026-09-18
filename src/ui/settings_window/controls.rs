@@ -7,9 +7,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Rgba, SharedString, Window, div, px, rgba};
+use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px, rgba};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonTheme, ButtonVariant, Icon, IconButton, IconName, Tooltip,
+    highlight_ranges,
 };
 
 #[cfg(test)]
@@ -214,6 +215,7 @@ pub(super) struct SettingsRow {
     control: AnyElement,
     reset: Option<AnyElement>,
     highlighted: bool,
+    matched_indices: Vec<usize>,
     layout: SettingsRowLayout,
 }
 
@@ -230,6 +232,7 @@ impl SettingsRow {
             control: control.into_any_element(),
             reset: None,
             highlighted: false,
+            matched_indices: Vec::new(),
             layout: SettingsRowLayout::Beside,
         }
     }
@@ -254,6 +257,11 @@ impl SettingsRow {
         self
     }
 
+    pub(super) fn matched_indices(mut self, indices: Vec<usize>) -> Self {
+        self.matched_indices = indices;
+        self
+    }
+
     /// Chooses where the label sits. Content that needs the whole row takes the label above it.
     pub(super) fn layout(mut self, layout: SettingsRowLayout) -> Self {
         self.layout = layout;
@@ -274,6 +282,11 @@ impl SettingsRow {
             )
         } else {
             (appearance.colors.text, appearance.colors.text_muted)
+        };
+        let matched = if self.highlighted {
+            appearance.colors.row_selected_match
+        } else {
+            appearance.colors.row_match
         };
         let label_selector = format!("{selector}-label");
         let reset_slot_selector = format!("{selector}-reset-slot");
@@ -312,6 +325,7 @@ impl SettingsRow {
             .map_or(px(0.0), |width| {
                 width.max(label_width + appearance.spacing(RESET_GAP) + reset_slot_width(cx))
             });
+        let label_ranges = highlight_ranges(self.label, &self.matched_indices);
         let label = (!full).then(|| {
             div()
                 .flex()
@@ -340,7 +354,7 @@ impl SettingsRow {
                                 .text_size(appearance.text_size(text::BODY))
                                 .text_color(gpui_color(foreground))
                                 .whitespace_normal()
-                                .child(self.label),
+                                .child(highlighted_label(self.label, &label_ranges, matched)),
                         )
                         .child(
                             div()
@@ -397,6 +411,21 @@ impl SettingsRow {
             .child(primary)
             .children(trailing_caption)
     }
+}
+
+fn highlighted_label(
+    label: &'static str,
+    ranges: &[std::ops::Range<usize>],
+    matched: Color,
+) -> AnyElement {
+    StyledText::new(label)
+        .with_highlights(
+            ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, gpui_color(matched).into())),
+        )
+        .into_any_element()
 }
 
 /// The active section's large title with its explanation directly beneath it.
