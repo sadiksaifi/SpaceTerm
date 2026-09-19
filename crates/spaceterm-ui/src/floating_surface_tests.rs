@@ -1,9 +1,14 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Element, ElementId, Entity, Fill, GlobalElementId,
-    InspectorElementId, LayoutId, Pixels, Render, TestAppContext, Window, div, px, rgba,
+    AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, Fill, GlobalElementId,
+    InspectorElementId, LayoutId, Pixels, Render, StyleRefinement, TestAppContext, Window, div, px,
+    rgba,
 };
 
 use crate::*;
@@ -212,6 +217,134 @@ impl Render for HostFixture {
             )
             .child(self.after.clone())
     }
+}
+
+struct CachedDebugBoundsChild {
+    renders: Rc<Cell<usize>>,
+}
+
+impl Render for CachedDebugBoundsChild {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "cached-debug-bounds-child".to_owned())
+                    .w(px(40.0))
+                    .h(px(30.0)),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "duplicate-debug-bounds".to_owned())
+                    .w(px(10.0))
+                    .h(px(10.0)),
+            )
+    }
+}
+
+struct UncachedDebugBoundsSibling {
+    width: Pixels,
+}
+
+impl Render for UncachedDebugBoundsSibling {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .debug_selector(|| "duplicate-debug-bounds".to_owned())
+            .w(self.width)
+            .h(px(20.0))
+    }
+}
+
+struct CachedDebugBoundsRoot {
+    child: Entity<CachedDebugBoundsChild>,
+    sibling: Entity<UncachedDebugBoundsSibling>,
+    show_child: bool,
+}
+
+impl Render for CachedDebugBoundsRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .when(self.show_child, |root| {
+                root.child(AnyView::from(self.child.clone()).cached(StyleRefinement {
+                    size: gpui::SizeRefinement {
+                        width: Some(px(40.0).into()),
+                        height: Some(px(40.0).into()),
+                    },
+                    ..StyleRefinement::default()
+                }))
+            })
+            .child(self.sibling.clone())
+    }
+}
+
+#[gpui::test]
+fn cached_view_debug_bounds_should_survive_reused_paint_and_clear_after_unmount(
+    cx: &mut TestAppContext,
+) {
+    let renders = Rc::new(Cell::new(0));
+    let child_renders = Rc::clone(&renders);
+    let (root, cx) = cx.add_window_view(move |_, cx| CachedDebugBoundsRoot {
+        child: cx.new(|_| CachedDebugBoundsChild {
+            renders: child_renders,
+        }),
+        sibling: cx.new(|_| UncachedDebugBoundsSibling { width: px(20.0) }),
+        show_child: true,
+    });
+    cx.run_until_parked();
+
+    let initial = cx
+        .debug_bounds("cached-debug-bounds-child")
+        .expect("the cached child should publish its initial bounds");
+    assert_eq!(renders.get(), 1);
+
+    for sibling_width in [px(30.0), px(40.0)] {
+        let sibling = root.read_with(cx, |root, _| root.sibling.clone());
+        sibling.update(cx, |sibling, cx| {
+            sibling.width = sibling_width;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.debug_bounds("cached-debug-bounds-child"),
+            Some(initial),
+            "reusing cached paint must replay the visible child's selector bounds"
+        );
+        assert_eq!(
+            renders.get(),
+            1,
+            "the child paint must actually stay cached"
+        );
+        assert_eq!(
+            cx.debug_bounds("duplicate-debug-bounds")
+                .expect("the later uncached sibling should win the duplicate selector")
+                .size
+                .width,
+            sibling_width,
+            "cached replay must preserve last-painted duplicate selector lookup"
+        );
+    }
+
+    root.update(cx, |root, cx| {
+        root.show_child = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("cached-debug-bounds-child").is_none(),
+        "unmounting a cached child must remove its selector bounds"
+    );
+    assert_eq!(
+        cx.debug_bounds("duplicate-debug-bounds")
+            .expect("the remaining uncached sibling should retain its selector")
+            .size
+            .width,
+        px(40.0)
+    );
 }
 
 #[gpui::test]
