@@ -56,6 +56,16 @@ cat > "$measurement_bin/du" <<'EOF'
 if [ "${FAIL_DU_ALWAYS:-0}" = 1 ]; then
     exit 1
 fi
+if [ "${FAIL_DU_AFTER_FIRST:-0}" = 1 ]; then
+    if [ -e "$DU_FIRST_SUCCESS_SENTINEL" ]; then
+        while [ ! -s "$ACTIVE_CHILD_PID_FILE" ]; do
+            sleep 0.01
+        done
+        exit 1
+    fi
+    : > "$DU_FIRST_SUCCESS_SENTINEL"
+    exec "$REAL_DU" "$@"
+fi
 if [ ! -e "$TRANSIENT_DU_SENTINEL" ]; then
     : > "$TRANSIENT_DU_SENTINEL"
     exit 1
@@ -81,6 +91,29 @@ PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_ALWAYS=1 \
 status=$?
 set -e
 test "$status" -eq 2
+
+target=$temp_root/active-measurement-failure/target
+active_child_pid_file=$temp_root/active-measurement-failure-child
+first_success_sentinel=$temp_root/measurement-succeeded-once
+prepare_owned_target "$target"
+set +e
+# shellcheck disable=SC2016
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_AFTER_FIRST=1 \
+    DU_FIRST_SUCCESS_SENTINEL="$first_success_sentinel" \
+    ACTIVE_CHILD_PID_FILE="$active_child_pid_file" \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'printf "%s\n" "$$" > "$1"; sleep 30' \
+    sh "$active_child_pid_file" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 2
+test -s "$active_child_pid_file"
+active_child_pid=$(cat "$active_child_pid_file")
+if kill -0 "$active_child_pid" 2>/dev/null; then
+    kill -TERM "-$active_child_pid" 2>/dev/null || true
+    echo "guarded command survived artifact measurement failure" >&2
+    exit 1
+fi
 
 target=$temp_root/dash/target
 prepare_owned_target "$target"

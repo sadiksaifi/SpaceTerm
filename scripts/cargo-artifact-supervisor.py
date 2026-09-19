@@ -23,6 +23,10 @@ FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 OWNER_FILE = ".spaceterm-cargo-target-owner"
 
 
+class ArtifactMeasurementError(Exception):
+    """The Cargo target size could not be measured reliably."""
+
+
 class Supervisor:
     def __init__(self, repo_dir: Path, target_dir: Path, budget_kib: int) -> None:
         self.repo_dir = repo_dir.resolve()
@@ -158,7 +162,17 @@ class Supervisor:
                 time.sleep(POLL_INTERVAL_SECONDS)
 
         print("error: could not measure Cargo artifact usage", file=sys.stderr)
-        raise SystemExit(2)
+        raise ArtifactMeasurementError
+
+    def stop_after_measurement_failure(self) -> int:
+        termination_verified = self.terminate_active_group()
+        signal_status = self.received_signal
+        self._clear_active()
+        if signal_status is not None:
+            return 128 + signal_status
+        if not termination_verified:
+            print("warning: guarded command termination could not be verified", file=sys.stderr)
+        return 2
 
     def target_is_verified(self) -> bool:
         try:
@@ -243,7 +257,11 @@ class Supervisor:
     def run(self, command: list[str]) -> int:
         if not self.ensure_target_owned():
             return 2
-        if self.target_size_kib() > self.budget_kib:
+        try:
+            target_is_over_budget = self.target_size_kib() > self.budget_kib
+        except ArtifactMeasurementError:
+            return 2
+        if target_is_over_budget:
             print(
                 "Cargo target exceeds its disk budget from a previous command; cleaning it.",
                 file=sys.stderr,
@@ -282,7 +300,11 @@ class Supervisor:
 
             now = time.monotonic()
             if now >= next_measurement:
-                if self.target_size_kib() > self.budget_kib:
+                try:
+                    target_is_over_budget = self.target_size_kib() > self.budget_kib
+                except ArtifactMeasurementError:
+                    return self.stop_after_measurement_failure()
+                if target_is_over_budget:
                     budget_breached = True
                     termination_verified = self.terminate_active_group()
                     break
@@ -306,8 +328,11 @@ class Supervisor:
             return 128 + signal_status
 
         # Catch commands that cross the limit and finish between measurements.
-        if not budget_breached and self.target_size_kib() > self.budget_kib:
-            budget_breached = True
+        if not budget_breached:
+            try:
+                budget_breached = self.target_size_kib() > self.budget_kib
+            except ArtifactMeasurementError:
+                return 2
 
         if budget_breached:
             if termination_verified:
