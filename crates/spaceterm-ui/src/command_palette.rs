@@ -5,13 +5,13 @@ use gpui::{
     EventEmitter, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Render, Rgba, ScrollWheelEvent, SharedString,
-    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
-    canvas, div, list, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, WeakFocusHandle,
+    Window, WindowId, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
-    ControlShadow, Icon, IconName, ProgressRing, ProgressSize, ProgressState, TextInput,
-    TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    FloatingRole, FloatingShell, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
+    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
@@ -19,6 +19,8 @@ use crate::{
 };
 
 const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
+/// The palette is the window's focal search surface.
+const COMMAND_PALETTE_ROLE: FloatingRole = FloatingRole::Command;
 
 /// Every footer control shares one size so their labels sit on one baseline and one inset.
 const FOOTER_CONTROL_SIZE: ButtonSize = ButtonSize::Small;
@@ -898,12 +900,12 @@ fn match_command_palette_items<I>(
 }
 
 /// Application-owned command-palette paint values.
+///
+/// The panel's material, edge, internal rules, corners, and elevation belong to the shared command
+/// surface. This catalog carries the palette's own content and row states.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CommandPalettePaint {
     rows: Option<crate::ListRowPaints>,
-    background: Rgba,
-    border: Rgba,
-    separator: Rgba,
     foreground: Rgba,
     muted: Rgba,
     disabled: Rgba,
@@ -922,15 +924,9 @@ pub struct CommandPalettePaint {
 impl CommandPalettePaint {
     /// Creates the core paint catalog.
     ///
-    /// Separator, hover, section, and footer colors default to the closest core value so a caller
-    /// only overrides what its theme distinguishes.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the bounded paint catalog is clearer than nested untyped color groups"
-    )]
+    /// Hover, section, and footer colors default to the closest core value so a caller only
+    /// overrides what its theme distinguishes.
     pub fn new(
-        background: Rgba,
-        border: Rgba,
         foreground: Rgba,
         muted: Rgba,
         disabled: Rgba,
@@ -940,9 +936,6 @@ impl CommandPalettePaint {
     ) -> Self {
         Self {
             rows: None,
-            background,
-            border,
-            separator: border,
             foreground,
             muted,
             disabled,
@@ -966,49 +959,49 @@ impl CommandPalettePaint {
     }
 
     /// Resolves the same complete row state consumed by the production renderer.
-    pub fn row_paint(self, disabled: bool, selected: bool, pointer: bool) -> crate::ListRowPaint {
+    ///
+    /// Keyboard selection and pointer hover are independent facts about one row. Pointer hover in
+    /// this control also moves the selection, so the row under the pointer is normally both, and
+    /// the combined state is the one a reader actually sees.
+    pub fn row_paint(self, disabled: bool, selected: bool, hovered: bool) -> crate::ListRowPaint {
         if let Some(rows) = self.rows {
-            return rows.resolve(!disabled, selected && !pointer, selected && pointer);
+            return rows.resolve(!disabled, selected, hovered);
         }
         let foreground = if disabled {
             self.disabled
+        } else if hovered {
+            self.hover_foreground
         } else if selected {
-            if pointer {
-                self.hover_foreground
-            } else {
-                self.selected_foreground
-            }
+            self.selected_foreground
         } else {
             self.foreground
         };
         crate::ListRowPaint::new(
-            if selected {
-                if pointer {
-                    self.hover_background
-                } else {
-                    self.selected_background
-                }
+            if hovered {
+                self.hover_background
+            } else if selected {
+                self.selected_background
             } else {
                 gpui::rgba(0)
             },
             foreground,
             if disabled {
                 self.disabled
-            } else if selected {
+            } else if selected || hovered {
                 foreground
             } else {
                 self.muted
             },
             if disabled {
                 self.disabled_icon_foreground
-            } else if selected {
+            } else if selected || hovered {
                 foreground
             } else {
                 self.icon_foreground
             },
             if disabled {
                 self.disabled
-            } else if selected {
+            } else if selected || hovered {
                 foreground
             } else {
                 self.match_foreground
@@ -1021,12 +1014,6 @@ impl CommandPalettePaint {
     pub fn icons(mut self, normal: Rgba, disabled: Rgba) -> Self {
         self.icon_foreground = normal;
         self.disabled_icon_foreground = disabled;
-        self
-    }
-
-    /// Sets the hairline color used under the editor, above the footer, and between sections.
-    pub fn separator(mut self, color: Rgba) -> Self {
-        self.separator = color;
         self
     }
 
@@ -1057,6 +1044,9 @@ impl CommandPalettePaint {
 }
 
 /// Native desktop dimensions for the command-palette panel.
+///
+/// The panel's corner radius, content inset, and hairline are resolved by the shared command
+/// surface and cached here for the geometry this family computes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CommandPaletteMetrics {
     panel_width: Pixels,
@@ -1071,7 +1061,7 @@ pub struct CommandPaletteMetrics {
     section_height: Pixels,
     separator_height: Pixels,
     footer_height: Pixels,
-    footer_padding: Option<Pixels>,
+    footer_control_padding: Option<Pixels>,
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
@@ -1090,12 +1080,13 @@ pub struct CommandPaletteMetrics {
 impl CommandPaletteMetrics {
     /// Creates compact native defaults around a panel width and row height.
     pub fn new(panel_width: Pixels, row_height: Pixels) -> Self {
+        let shell = crate::FloatingSurfaceTheme::default().shell(COMMAND_PALETTE_ROLE);
         Self {
             panel_width,
             maximum_height: px(480.0),
             top_offset: px(52.0),
             viewport_margin: px(16.0),
-            panel_padding: px(4.0),
+            panel_padding: shell.content_inset(),
             input_height: px(42.0),
             row_height,
             single_line_row_height: row_height,
@@ -1103,12 +1094,12 @@ impl CommandPaletteMetrics {
             section_height: px(22.0),
             separator_height: px(9.0),
             footer_height: px(30.0),
-            footer_padding: None,
+            footer_control_padding: None,
             horizontal_padding: px(12.0),
             leading_width: px(18.0),
             gap: px(10.0),
-            corner_radius: px(8.0),
-            border_width: px(1.0),
+            corner_radius: shell.corner_radius(),
+            border_width: shell.hairline(),
             input_size: px(14.0),
             label_size: px(13.0),
             secondary_size: px(11.0),
@@ -1120,14 +1111,13 @@ impl CommandPaletteMetrics {
         }
     }
 
-    /// Sets the footer's horizontal padding, overriding the panel's content inset.
+    /// Sets the horizontal padding already carried by the footer's controls.
     ///
-    /// Footer controls are text with their own padding, so their boxes sitting on the content
-    /// edges puts their labels inside those edges. A caller that wants the labels to line up with
-    /// the editor and the rows sets a smaller footer padding. Defaults to the content inset, which
-    /// aligns the control boxes instead.
-    pub fn footer_padding(mut self, padding: Pixels) -> Self {
-        self.footer_padding = Some(padding);
+    /// This padding is subtracted from the shared content inset so the controls' labels align
+    /// with the editor and row content as the floating shell changes size. Without this value,
+    /// the control boxes align with the content edges.
+    pub fn footer_control_padding(mut self, padding: Pixels) -> Self {
+        self.footer_control_padding = Some(padding.max(px(0.0)));
         self
     }
 
@@ -1154,9 +1144,8 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets panel padding and the editor height.
-    pub fn panel_spacing(mut self, padding: Pixels, input_height: Pixels) -> Self {
-        self.panel_padding = padding;
+    /// Sets the editor height.
+    pub fn editor_height(mut self, input_height: Pixels) -> Self {
         self.input_height = input_height;
         self
     }
@@ -1190,13 +1179,6 @@ impl CommandPaletteMetrics {
     /// Sets the hint and actions footer height.
     pub fn footer_height(mut self, height: Pixels) -> Self {
         self.footer_height = height;
-        self
-    }
-
-    /// Sets panel corner radius and stable border width.
-    pub fn panel_shape(mut self, corner_radius: Pixels, border_width: Pixels) -> Self {
-        self.corner_radius = corner_radius;
-        self.border_width = border_width;
         self
     }
 
@@ -1237,7 +1219,7 @@ impl CommandPaletteMetrics {
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
             top_offset: crate::appearance::scale_metric(self.top_offset, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            panel_padding: self.panel_padding,
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
                 self.line_height,
@@ -1270,8 +1252,8 @@ impl CommandPaletteMetrics {
                 text_scale,
                 spacing_scale,
             ),
-            footer_padding: self
-                .footer_padding
+            footer_control_padding: self
+                .footer_control_padding
                 .map(|value| crate::appearance::scale_metric(value, spacing_scale)),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
@@ -1280,7 +1262,7 @@ impl CommandPaletteMetrics {
             leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
                 .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            corner_radius: self.corner_radius,
             border_width: self.border_width,
             input_size: crate::appearance::scale_metric(self.input_size, text_scale),
             label_size: crate::appearance::scale_metric(self.label_size, text_scale),
@@ -1305,8 +1287,7 @@ impl CommandPaletteMetrics {
     }
 
     fn footer_inset(&self) -> Pixels {
-        self.footer_padding
-            .unwrap_or_else(|| self.content_leading_inset())
+        (self.content_leading_inset() - self.footer_control_padding.unwrap_or(px(0.0))).max(px(0.0))
     }
 
     /// Returns the concentric radius for an inset row inside the outer panel.
@@ -1316,11 +1297,15 @@ impl CommandPaletteMetrics {
 }
 
 /// Application-owned presentation installed once for every command palette.
+///
+/// The panel's surface treatment belongs to the shared command-surface role, which carries a
+/// stronger elevation than an anchored popup because the palette takes the window rather than
+/// hanging from a control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CommandPaletteTheme {
     paint: CommandPalettePaint,
     metrics: CommandPaletteMetrics,
-    shadow: ControlShadow,
+    shell: FloatingShell,
 }
 
 impl CommandPaletteTheme {
@@ -1329,14 +1314,8 @@ impl CommandPaletteTheme {
         Self {
             paint,
             metrics,
-            shadow: ControlShadow::large_default(),
+            shell: crate::FloatingSurfaceTheme::default().shell(COMMAND_PALETTE_ROLE),
         }
-    }
-
-    /// Sets the semantic elevation used by the command-palette panel.
-    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
-        self.shadow = shadow;
-        self
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -1348,6 +1327,17 @@ impl CommandPaletteTheme {
 }
 
 impl Global for CommandPaletteTheme {}
+
+/// Resolves the installed palette theme against the shared command surface.
+fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
+    let mut theme = *cx.global::<CommandPaletteTheme>();
+    let shell = crate::floating_surface::shell(COMMAND_PALETTE_ROLE, cx);
+    theme.metrics.corner_radius = shell.corner_radius();
+    theme.metrics.panel_padding = shell.content_inset();
+    theme.metrics.border_width = shell.hairline();
+    theme.shell = shell;
+    theme
+}
 
 /// A reusable entity-backed command palette with typed semantic items.
 ///
@@ -1390,6 +1380,8 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     pointer_press: Option<I>,
     pointer_suppressed: bool,
     hover_suppressed: bool,
+    /// The row the pointer is actually over, which is normally also the selected row.
+    hovered_row: Option<I>,
     pointer_anchor: gpui::Point<Pixels>,
     list: ListState,
     list_row_heights: Option<[Pixels; 4]>,
@@ -1745,6 +1737,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             pointer_press: None,
             pointer_suppressed: false,
             hover_suppressed: false,
+            hovered_row: None,
             pointer_anchor: gpui::point(px(0.0), px(0.0)),
             list,
             list_row_heights: None,
@@ -1971,6 +1964,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.pointer_press = None;
         self.pointer_suppressed = true;
         self.hover_suppressed = true;
+        self.hovered_row = None;
         self.pointer_anchor = window.mouse_position();
         self.selected = None;
         if !self.query.is_empty() {
@@ -2305,7 +2299,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if enabled.is_empty() {
             return;
         }
-        let metrics = cx.global::<CommandPaletteTheme>().metrics;
+        let metrics = command_palette_theme(cx).metrics;
         let next = self.presented_results.page_target(
             self.selected_match_position(),
             &enabled,
@@ -2382,6 +2376,21 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.hover_suppressed = true;
             cx.notify();
         }
+    }
+
+    /// Records the row the pointer entered or left, independently of keyboard selection.
+    fn set_hovered_row(&mut self, id: &I, hovered: bool, cx: &mut gpui::Context<Self>) {
+        if hovered {
+            if self.hovered_row.as_ref() == Some(id) {
+                return;
+            }
+            self.hovered_row = Some(id.clone());
+        } else if self.hovered_row.as_ref() == Some(id) {
+            self.hovered_row = None;
+        } else {
+            return;
+        }
+        cx.notify();
     }
 
     fn suppress_hover_for_scroll(
@@ -2574,6 +2583,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.pointer_press = None;
         self.pointer_suppressed = true;
         self.hover_suppressed = true;
+        self.hovered_row = None;
         self.pointer_anchor = window.mouse_position();
         self.input.read(cx).focus_handle().focus(window);
         cx.notify();
@@ -2643,6 +2653,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.pointer_press = None;
         self.pointer_suppressed = false;
         self.hover_suppressed = false;
+        self.hovered_row = None;
         self.scrollbar
             .update(cx, |scrollbar, cx| scrollbar.reset(cx));
         let restore_focus = self.restore_focus.take();
@@ -2700,7 +2711,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         {
             return div().into_any_element();
         }
-        let theme = *cx.global::<CommandPaletteTheme>();
+        let theme = command_palette_theme(cx);
         let metrics = theme.metrics;
         let font = crate::control_typography(cx).regular().clone();
         if std::mem::take(&mut self.scrollbar_reveal_pending) {
@@ -2843,15 +2854,17 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.focus_previous_control(window, cx);
             }));
 
-        // The palette is not itself deferred: GPUI collects deferred draws once per frame, so a
-        // deferred palette could not host its own deferred footer menu. Its owner renders it last,
-        // and the anchored full-window layer keeps it above the surrounding chrome.
-        anchored()
-            .anchor(Corner::TopLeft)
-            .position(gpui::point(px(0.0), px(0.0)))
-            .snap_to_window()
-            .child(overlay)
-            .into_any_element()
+        // A command surface always hosts a potential footer menu, and GPUI collects deferred draws
+        // once per frame, so the palette draws normally and lets that menu defer above it. Its
+        // owner renders it last, and the anchored full-window layer keeps it above the chrome.
+        crate::floating_surface::present(
+            theme.shell.layer(true),
+            anchored()
+                .anchor(Corner::TopLeft)
+                .position(gpui::point(px(0.0), px(0.0)))
+                .snap_to_window()
+                .child(overlay),
+        )
     }
 }
 
@@ -2943,21 +2956,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.render_results(list_height, theme, cx)
         };
 
-        div()
+        let panel = div()
             .debug_selector(|| "command-palette-panel".to_owned())
             .w(width)
             .h(height)
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .rounded(metrics.corner_radius)
-            .shadow(theme.shadow.layers())
-            .border(metrics.border_width)
-            .border_color(paint.border)
-            .bg(paint.background)
             .block_mouse_except_scroll()
             .child(self.render_editor(theme, cx))
-            .child(separator_line(metrics, paint))
+            .child(separator_line(theme))
             .child(
                 div()
                     .flex_1()
@@ -2967,10 +2974,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             )
             .when(self.has_footer(), |panel| {
                 panel
-                    .child(separator_line(metrics, paint))
+                    .child(separator_line(theme))
                     .child(self.render_footer(width, theme, cx))
-            })
-            .into_any_element()
+            });
+        theme.shell.mount(panel).into_any_element()
     }
 
     /// Renders the borderless search line and its trailing controls as one continuous surface.
@@ -3024,7 +3031,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let matches = Rc::clone(&self.matches);
         let presented_results = Rc::clone(&self.presented_results);
         let selected = self.selected.clone();
+        // Keyboard navigation and wheel scrolling park the pointer, so a stationary pointer does
+        // not keep claiming the row it happens to rest over.
         let hover_suppressed = self.pointer_suppressed || self.hover_suppressed;
+        let hovered = self.hovered_row.clone().filter(|_| !hover_suppressed);
         let leading_reserved = self.leading_reserved;
         let palette = cx.entity().downgrade();
         div()
@@ -3056,7 +3066,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         &matched.label_highlights,
                                         &matched.description_highlights,
                                         selected.as_ref() == Some(&item.id),
-                                        hover_suppressed,
+                                        hovered.as_ref() == Some(&item.id),
                                         leading_reserved,
                                         row_height,
                                         theme,
@@ -3203,12 +3213,12 @@ fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
     metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width * 3.0 + footer_height
 }
 
-fn separator_line(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
+fn separator_line(theme: CommandPaletteTheme) -> impl IntoElement {
     div()
         .w_full()
-        .h(metrics.border_width)
+        .h(theme.shell.hairline())
         .flex_shrink_0()
-        .bg(paint.separator)
+        .bg(theme.shell.divider())
 }
 
 fn render_hint(
@@ -3294,8 +3304,8 @@ fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl Into
         .child(
             div()
                 .w_full()
-                .h(metrics.border_width)
-                .bg(theme.paint.separator),
+                .h(theme.shell.hairline())
+                .bg(theme.shell.divider()),
         )
 }
 
@@ -3347,14 +3357,14 @@ fn render_row<I: Clone + Eq + 'static>(
     label_highlights: &[Range<usize>],
     description_highlights: &[Range<usize>],
     selected: bool,
-    hover_suppressed: bool,
+    hovered: bool,
     leading_reserved: bool,
     height: Pixels,
     theme: CommandPaletteTheme,
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
-    let row_paint = paint.row_paint(item.disabled, selected, !hover_suppressed);
+    let row_paint = paint.row_paint(item.disabled, selected, hovered);
     let foreground = row_paint.foreground;
     let secondary = row_paint.secondary;
     let match_foreground = row_paint.matched;
@@ -3376,11 +3386,18 @@ fn render_row<I: Clone + Eq + 'static>(
         .text_color(foreground)
         .cursor_default()
         .bg(row_paint.background)
-        .border(metrics.border_width)
+        .border(theme.shell.hairline())
         .border_color(row_paint.border)
         .when(!item.disabled, |row| {
             let id = id.clone();
-            row.on_mouse_move(move |event, _, cx| {
+            let entered_id = id.clone();
+            let entered_palette = hover_palette.clone();
+            row.on_hover(move |hovered, _, cx| {
+                let _ = entered_palette.update(cx, |palette, cx| {
+                    palette.set_hovered_row(&entered_id, *hovered, cx);
+                });
+            })
+            .on_mouse_move(move |event, _, cx| {
                 let _ = hover_palette.update(cx, |palette, cx| {
                     palette.pointer_hover(&id, event.position, cx)
                 });

@@ -38,8 +38,8 @@ use spaceterm_ui::{
     ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
     OverlayScrollbarEvent, ScrollMetrics, SearchField, SegmentedControl, SegmentedOption,
     SegmentedSize, Switch, TextInput, TextInputEscapeBehavior, TextInputEvent,
-    TextInputReturnBehavior, TextInputVariant, ToggleSize, TooltipLayer, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse,
+    TextInputReturnBehavior, TextInputVariant, ToggleSize, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse,
 };
 
 use crate::appearance::{
@@ -701,7 +701,7 @@ impl Render for SettingsWindow {
                     .child(self.render_detail(&appearance, window, cx)),
             )
             .child(self.render_footer(&appearance, cx));
-        ModalLayer::new(TooltipLayer::new(content))
+        ModalLayer::new(content)
     }
 }
 
@@ -1260,7 +1260,7 @@ impl SettingsWindow {
             .reset(self.row_reset(row, cx))
             .matched_indices(matched_indices)
             .highlighted(highlighted);
-        if let Some(description) = self.row_description(row) {
+        if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
         rendered.render(appearance, window, cx).into_any_element()
@@ -2272,13 +2272,37 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 impl SettingsWindow {
     /// One line of guidance for the rows that warrant it.
     ///
-    /// Microphone access explains its current status, so the guidance follows the system.
-    fn row_description(&self, row: SettingsRowId) -> Option<&'static str> {
+    /// Guidance follows effective appearance and system access without changing retained choices.
+    fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
-            SettingsRowId::Transparency => Some("0 is opaque. 1 is maximum transparency."),
-            SettingsRowId::BackgroundBlur => {
-                Some("Soften the desktop behind transparent backgrounds.")
+            SettingsRowId::Transparency | SettingsRowId::BackgroundBlur => {
+                let zero_transparency =
+                    self.editor.document().preferences.background.transparency == 0.0;
+                let forced_opaque = !zero_transparency
+                    && super::appearance_runtime::current(cx)
+                        .chrome
+                        .composition
+                        .effective
+                        == crate::appearance::WindowBackgroundAppearance::Opaque;
+                Some(match row {
+                    SettingsRowId::Transparency if zero_transparency => {
+                        "The window is opaque at 0. Increase this value to show the desktop behind it."
+                    }
+                    SettingsRowId::Transparency if forced_opaque => {
+                        "System support or accessibility settings currently keep the window opaque. Your transparency choice is kept."
+                    }
+                    SettingsRowId::Transparency => {
+                        "Show the desktop behind the window. 0 is opaque; 1 is maximum transparency."
+                    }
+                    _ if zero_transparency => {
+                        "Blur affects the desktop behind the window. Increase Transparency above 0 to see it."
+                    }
+                    _ if forced_opaque => {
+                        "Desktop blur is unavailable while system support or accessibility settings keep the window opaque. Your blur choice is kept."
+                    }
+                    _ => "Soften the desktop behind the window.",
+                })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::MicrophoneAccess => {

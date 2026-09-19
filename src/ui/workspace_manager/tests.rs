@@ -6535,7 +6535,9 @@ fn collapsed_remote_switcher_should_show_the_name_without_a_workspace_icon(
 }
 
 #[gpui::test]
-fn collapsed_chrome_should_measure_the_installed_switcher_border(cx: &mut TestAppContext) {
+fn collapsed_chrome_should_keep_the_shared_switcher_border_after_theme_replacement(
+    cx: &mut TestAppContext,
+) {
     use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
     let (manager, _, cx) = workspace_manager(cx);
@@ -6553,16 +6555,16 @@ fn collapsed_chrome_should_measure_the_installed_switcher_border(cx: &mut TestAp
         let color = gpui::rgb(0x222222);
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
-                color, color, color, color, color, color, color, color, color, color, color,
+                color, color, color, color, color, color, color, color, color,
             ),
-            ComboBoxMetrics::new(px(240.0), px(40.0)).shape(px(7.0), px(3.0)),
+            ComboBoxMetrics::new(px(240.0), px(40.0)).trigger_shape(px(7.0)),
         ));
         window.refresh();
     });
     redraw(cx);
 
     let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
-    assert_eq!(chrome.size.width, original_chrome.size.width + px(4.0));
+    assert_eq!(chrome.size.width, original_chrome.size.width);
     assert_eq!(
         cx.debug_bounds("workspace-chip-label").unwrap().size.width,
         original_label.size.width

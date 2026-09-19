@@ -140,6 +140,169 @@ struct ModalReplacementRoot {
     reentries: usize,
 }
 
+struct DialogComboBody {
+    handle: ComboBoxHandle<u8>,
+    accepted: Rc<Cell<Option<u8>>>,
+}
+
+impl Render for DialogComboBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        let accepted = Rc::clone(&self.accepted);
+        ComboBox::new("dialog-combo", "Dialog choice", None, "Choose", items())
+            .handle(self.handle.clone())
+            .debug_selector("dialog-combo-trigger")
+            .on_accept(move |event, _, _| accepted.set(Some(*event.item_id())))
+    }
+}
+
+struct DialogComboRoot {
+    underlay: ComboBoxHandle<u8>,
+    predecessor: FocusHandle,
+}
+
+impl Render for DialogComboRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        crate::ModalLayer::new(
+            div()
+                .size_full()
+                .child(div().track_focus(&self.predecessor))
+                .child(
+                    ComboBox::new("underlay-combo", "Underlay", None, "Choose", items())
+                        .handle(self.underlay.clone())
+                        .on_accept(|_, _, _| {}),
+                ),
+        )
+    }
+}
+
+#[gpui::test]
+fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
+    cx: &mut TestAppContext,
+) {
+    install_themes(cx);
+    install_modal_test_support(cx);
+    let accepted = Rc::new(Cell::new(None));
+    let handle = ComboBoxHandle::default();
+    let (root, cx) = cx.add_window_view(|_, cx| DialogComboRoot {
+        underlay: ComboBoxHandle::default(),
+        predecessor: cx.focus_handle(),
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.read(cx).predecessor.focus(window);
+    });
+    cx.run_until_parked();
+    let dialog = cx.update(|window, cx| {
+        root.update(cx, |_, cx| {
+            let body = cx.new(|_| DialogComboBody {
+                handle: handle.clone(),
+                accepted: Rc::clone(&accepted),
+            });
+            crate::Dialog::new(
+                crate::ModalId::new("combo-dialog"),
+                "Dialog choice",
+                "Choose an option",
+                vec![crate::ModalAction::new(
+                    (),
+                    "Cancel",
+                    crate::ModalActionRole::Cancel,
+                    "combo-dialog-cancel",
+                )],
+                crate::DialogInitialFocus::Action(()),
+            )
+            .body(body)
+            .present(
+                window,
+                cx,
+                |_, _, _| crate::DialogCloseDecision::Allow,
+                |_, _| {},
+            )
+            .expect("Dialog should present")
+        })
+    });
+    cx.run_until_parked();
+    let underlay = root.read_with(cx, |root, _| root.underlay.clone());
+    assert!(!cx.update(|window, cx| underlay.open(window, cx)));
+    let trigger = cx
+        .debug_bounds("dialog-combo-trigger")
+        .expect("Dialog trigger should render")
+        .center();
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("combo-box-panel").is_some(),
+        "Dialog child should open its popup"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(accepted.get(), Some(1));
+    assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
+
+    assert!(cx.update(|window, cx| handle.open(window, cx)));
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(accepted.get(), Some(3));
+
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
+
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.simulate_input("local");
+    cx.run_until_parked();
+    let input = cx
+        .debug_bounds("combo-box-input")
+        .expect("Popup input should render")
+        .center();
+    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    let replacement = cx.update(|window, cx| {
+        let replacement = root.update(cx, |_, cx| {
+            crate::Alert::new(
+                crate::ModalId::new("combo-successor"),
+                "Successor",
+                "Successor",
+                "Replacement",
+                vec![crate::ModalAction::new(
+                    (),
+                    "OK",
+                    crate::ModalActionRole::Affirmative,
+                    "combo-successor-ok",
+                )],
+            )
+            .replace_active(window, cx, |_, _| {}, |_, _| {})
+            .expect("Replacement should present")
+        });
+        assert!(
+            !handle.open(window, cx),
+            "Retired trigger must not acquire the successor before its first frame"
+        );
+        replacement
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| dialog.dismiss(window, cx).is_err()));
+    cx.update(|window, cx| {
+        replacement
+            .dismiss(window, cx)
+            .expect("Successor should dismiss")
+    });
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| root.read(cx).predecessor.is_focused(window)));
+    assert!(
+        !cx.update(|window, cx| handle.open(window, cx)),
+        "Retired body handle must not reopen"
+    );
+}
+
 struct ReentrantComboReplacementRoot {
     prior_focus: FocusHandle,
     events: Rc<RefCell<Vec<(u8, ComboBoxLifecycleEvent)>>>,
@@ -452,10 +615,15 @@ fn items() -> Vec<ComboBoxItem<u8>> {
 }
 
 fn install_themes(cx: &mut TestAppContext) {
+    let surface =
+        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
+    cx.set_global(crate::FloatingSurfaceTheme::new(
+        crate::FloatingSurfacePaints::new(surface, surface),
+        rgba(0x00000048).into(),
+        rgba(0x00000099),
+    ));
     cx.set_global(ComboBoxTheme::new(
         ComboBoxPaint::new(
-            rgba(0x141415ff),
-            rgba(0x252530ff),
             rgba(0xcdcdcdff),
             rgba(0x878787ff),
             rgba(0x606079ff),
@@ -481,15 +649,12 @@ fn install_themes(cx: &mut TestAppContext) {
         TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
     ));
     let menu_paint = MenuPaint::new(
-        rgba(0x141415ff),
-        rgba(0x252530ff),
         rgba(0xcdcdcdff),
         rgba(0x878787ff),
         rgba(0x606079ff),
         rgba(0x252530ff),
         rgba(0xffffffff),
         rgba(0xd8647eff),
-        rgba(0x252530ff),
     );
     let menu_metrics = MenuMetrics::new(px(160.0), px(26.0));
     cx.set_global(MenuTheme::new(
@@ -498,8 +663,6 @@ fn install_themes(cx: &mut TestAppContext) {
     ));
     cx.set_global(CommandPaletteTheme::new(
         CommandPalettePaint::new(
-            rgba(0x141415ff),
-            rgba(0x252530ff),
             rgba(0xcdcdcdff),
             rgba(0x878787ff),
             rgba(0x606079ff),
@@ -556,12 +719,8 @@ fn install_modal_test_support(cx: &mut TestAppContext) {
             cx,
             crate::ModalTheme::new(
                 crate::ModalPaint::new(
-                    rgba(0x00000099),
-                    rgba(0x202024ff),
-                    rgba(0x606068ff),
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
-                    rgba(0x505058ff),
                     rgba(0x5599ffff),
                     rgba(0x5599ff22),
                     rgba(0xffbb55ff),
@@ -648,13 +807,7 @@ type IconTriggerWindow<'a> = (
 fn icon_trigger_window(cx: &mut TestAppContext, disabled: bool) -> IconTriggerWindow<'_> {
     install_themes(cx);
     cx.set_global(crate::TooltipTheme::new(
-        crate::TooltipPaint::new(
-            rgba(0x141415ff),
-            rgba(0x252530ff),
-            rgba(0xcdcdcdff),
-            rgba(0x878787ff),
-            rgba(0x878787ff),
-        ),
+        crate::TooltipPaint::new(rgba(0xcdcdcdff), rgba(0x878787ff), rgba(0x878787ff)),
         crate::TooltipMetrics::new(px(240.0)),
     ));
     cx.update(crate::tooltip::init);
@@ -2170,7 +2323,7 @@ fn combo_box_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
-                black, black, white, white, white, black, white, black, black, black, black,
+                white, white, white, black, white, black, black, black, black,
             )
             .hover_background(white)
             .hover_foreground(black),
@@ -2189,7 +2342,7 @@ fn combo_box_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
-                black, black, white, white, white, black, white, black, black, black, black,
+                white, white, white, black, white, black, black, black, black,
             )
             .hover_background(white)
             .hover_foreground(green),
@@ -2240,7 +2393,7 @@ fn combo_box_hover_should_follow_replaced_rows_under_a_stationary_pointer(cx: &m
     cx.update(|window, cx| {
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
-                black, black, white, white, white, black, white, black, black, black, black,
+                white, white, white, black, white, black, black, black, black,
             )
             .hover_background(white)
             .hover_foreground(black),
@@ -2284,10 +2437,8 @@ fn trigger_icons_should_use_live_icon_colors_instead_of_text_colors(cx: &mut Tes
     let text = rgba(0x11_22_33_ff);
     let icon = rgba(0x44_aa_88_ff);
     let disabled_icon = rgba(0x66_55_aa_ff);
-    let paint = ComboBoxPaint::new(
-        text, text, text, text, text, text, text, text, text, text, text,
-    )
-    .trigger_icon_colors(icon, disabled_icon);
+    let paint = ComboBoxPaint::new(text, text, text, text, text, text, text, text, text)
+        .trigger_icon_colors(icon, disabled_icon);
     cx.update(|window, cx| {
         cx.set_global(ComboBoxTheme::new(
             paint,

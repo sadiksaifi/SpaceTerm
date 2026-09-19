@@ -10,14 +10,14 @@ pub(super) fn theme(colors: &ChromeColors) -> ModalTheme {
     )
 }
 
+/// The modal's own meaning: two registers of text and three semantic intents.
+///
+/// The scrim, the surface material, its edge, and its internal rules are resolved once for every
+/// floating surface in the window and are not authored again here.
 fn paint(colors: &ChromeColors) -> ModalPaint {
     ModalPaint::new(
-        gpui_color(colors.modal_scrim),
-        gpui_color(colors.elevated_surface_background),
-        gpui_color(colors.border),
         gpui_color(colors.text),
         gpui_color(colors.text_muted),
-        gpui_color(colors.border_variant),
         gpui_color(colors.info),
         gpui_color(colors.info_background),
         gpui_color(colors.warning),
@@ -35,11 +35,15 @@ fn gpui_color(color: Color) -> Rgba {
 mod tests {
     use super::*;
     #[test]
-    fn modal_paint_consumes_the_canonical_scrim_token_directly() {
+    fn floating_surface_consumes_the_canonical_scrim_token_directly() {
         let colors = ChromeColors {
             modal_scrim: Color::rgba(0x12345678),
             ..ChromeColors::default()
         };
-        assert_ne!(paint(&colors), paint(&ChromeColors::default()));
+        let appearance = crate::ui::appearance::ChromeAppearance {
+            colors,
+            ..crate::ui::appearance::ChromeAppearance::default()
+        };
+        assert_eq!(appearance.floating_surfaces().scrim(), rgba(0x12345678));
     }
 }

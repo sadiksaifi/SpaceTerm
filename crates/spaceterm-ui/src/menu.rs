@@ -10,7 +10,7 @@ use gpui::{
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, RenderOnce,
     Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _, Styled as _, Task,
-    WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, deferred, div, point,
+    WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div, point,
     prelude::FluentBuilder as _, px, size,
 };
 
@@ -19,13 +19,14 @@ pub use crate::anchored_placement::{
     AnchoredPlacementConfig as MenuPlacementConfig,
 };
 use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
-use crate::{ControlShadow, Icon, IconName};
+use crate::{FloatingRole, FloatingShell, Icon, IconName};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
 const SUBMENU_OPEN_DELAY: Duration = Duration::from_millis(100);
 const SUBMENU_CLOSE_GRACE: Duration = Duration::from_millis(150);
-const OVERLAY_PRIORITY: usize = 1;
+/// Menus, context menus, pickers, and their submenus are anchored popups.
+const MENU_ROLE: FloatingRole = FloatingRole::Popover;
 
 actions!(
     spaceterm_menu,
@@ -205,24 +206,29 @@ impl<T> PickerChange<T> {
 }
 
 /// Standard bounded menu widths.
+///
+/// The three widths are strictly increasing: a Wide menu is wider than a Regular one, which is
+/// wider than a Small one.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MenuSize {
-    /// Narrow menus, conventionally 208 logical pixels.
+    /// Narrow menus, conventionally 200 logical pixels.
     Small,
-    /// Regular menus, conventionally 220 logical pixels.
+    /// Regular menus, conventionally 224 logical pixels.
     #[default]
     Regular,
-    /// Wide menus, conventionally 248 logical pixels.
+    /// Wide menus, conventionally 264 logical pixels.
     Wide,
 }
 
 /// Bounded paint values shared by menus, context menus, and pickers.
+///
+/// The panel's material, edge, internal separator, corners, and elevation belong to the shared
+/// floating surface. This catalog carries only what a menu itself states: its content, its row
+/// states, and the trigger that opens it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuPaint {
     rows: Option<crate::ListRowPaints>,
     destructive_rows: Option<crate::ListRowPaints>,
-    background: Rgba,
-    border: Rgba,
     foreground: Rgba,
     muted: Rgba,
     disabled: Rgba,
@@ -231,7 +237,6 @@ pub struct MenuPaint {
     hover_foreground: Rgba,
     selected_foreground: Rgba,
     destructive: Rgba,
-    separator: Rgba,
     trigger_background: Rgba,
     trigger_hover_background: Rgba,
     trigger_border: Rgba,
@@ -239,27 +244,18 @@ pub struct MenuPaint {
 }
 
 impl MenuPaint {
-    /// Creates menu paint. Trigger paint initially reuses the menu surface and border.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the bounded paint catalog is clearer than nested untyped color groups"
-    )]
+    /// Creates menu paint. A trigger initially states nothing of its own beyond its selection.
     pub fn new(
-        background: Rgba,
-        border: Rgba,
         foreground: Rgba,
         muted: Rgba,
         disabled: Rgba,
         selected_background: Rgba,
         selected_foreground: Rgba,
         destructive: Rgba,
-        separator: Rgba,
     ) -> Self {
         Self {
             rows: None,
             destructive_rows: None,
-            background,
-            border,
             foreground,
             muted,
             disabled,
@@ -268,10 +264,9 @@ impl MenuPaint {
             hover_foreground: selected_foreground,
             selected_foreground,
             destructive,
-            separator,
-            trigger_background: background,
+            trigger_background: gpui::rgba(0),
             trigger_hover_background: selected_background,
-            trigger_border: border,
+            trigger_border: gpui::rgba(0),
             focus_border: selected_background,
         }
     }
@@ -316,6 +311,10 @@ impl MenuPaint {
 }
 
 /// Metrics for one standard menu density.
+///
+/// The panel's corner radius, content inset, and hairline are resolved by the shared floating
+/// surface and cached here for the geometry this family computes. Only `trigger_corner_radius`
+/// belongs to the menu, because a trigger rests on the window rather than floating over it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuMetrics {
     panel_width: Pixels,
@@ -326,6 +325,7 @@ pub struct MenuMetrics {
     horizontal_padding: Pixels,
     indicator_width: Pixels,
     gap: Pixels,
+    trigger_corner_radius: Pixels,
     corner_radius: Pixels,
     border_width: Pixels,
     font_size: Pixels,
@@ -339,6 +339,7 @@ pub struct MenuMetrics {
 impl MenuMetrics {
     /// Creates metrics with compact desktop defaults around the supplied panel width and row height.
     pub fn new(panel_width: Pixels, row_height: Pixels) -> Self {
+        let shell = crate::FloatingSurfaceTheme::default().shell(MENU_ROLE);
         Self {
             panel_width,
             row_height,
@@ -348,11 +349,12 @@ impl MenuMetrics {
             horizontal_padding: px(8.0),
             indicator_width: px(14.0),
             gap: px(6.0),
-            corner_radius: px(6.0),
-            border_width: px(1.0),
+            trigger_corner_radius: px(6.0),
+            corner_radius: shell.corner_radius(),
+            border_width: shell.hairline(),
             font_size: px(12.0),
             shortcut_font_size: px(11.0),
-            panel_padding: px(4.0),
+            panel_padding: shell.content_inset(),
             submenu_gap: px(2.0),
             icon_size: px(12.0),
             separator_thickness: px(1.0),
@@ -383,15 +385,9 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets panel and trigger corner radius.
-    pub fn corner_radius(mut self, radius: Pixels) -> Self {
-        self.corner_radius = radius;
-        self
-    }
-
-    /// Sets stable panel and trigger border width.
-    pub fn border_width(mut self, width: Pixels) -> Self {
-        self.border_width = width;
+    /// Sets the corner radius of the trigger that opens the menu.
+    pub fn trigger_corner_radius(mut self, radius: Pixels) -> Self {
+        self.trigger_corner_radius = radius;
         self
     }
 
@@ -402,10 +398,9 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets vertical panel padding and the horizontal submenu gap.
-    pub fn panel_spacing(mut self, padding: Pixels, submenu_gap: Pixels) -> Self {
-        self.panel_padding = padding;
-        self.submenu_gap = submenu_gap;
+    /// Sets the horizontal gap between a panel and the submenu it opens.
+    pub fn submenu_gap(mut self, gap: Pixels) -> Self {
+        self.submenu_gap = gap;
         self
     }
 
@@ -448,14 +443,18 @@ impl MenuMetrics {
             indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale)
                 .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            trigger_corner_radius: crate::appearance::scale_metric(
+                self.trigger_corner_radius,
+                spacing_scale,
+            ),
+            corner_radius: self.corner_radius,
             border_width: self.border_width,
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
             shortcut_font_size: crate::appearance::scale_metric(
                 self.shortcut_font_size,
                 text_scale,
             ),
-            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            panel_padding: self.panel_padding,
             submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
             icon_size,
             separator_thickness: self.separator_thickness,
@@ -499,27 +498,19 @@ impl MenuSizes {
 }
 
 /// Application-owned menu colors and bounded metrics.
+///
+/// Panel material, edge, separator, corners, and elevation come from the shared floating surface,
+/// so every anchored popup in the window reads as one family.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuTheme {
     paint: MenuPaint,
     sizes: MenuSizes,
-    shadow: ControlShadow,
 }
 
 impl MenuTheme {
     /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
-        Self {
-            paint,
-            sizes,
-            shadow: ControlShadow::medium_default(),
-        }
-    }
-
-    /// Sets the semantic elevation used by every menu panel.
-    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
-        self.shadow = shadow;
-        self
+        Self { paint, sizes }
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -529,22 +520,38 @@ impl MenuTheme {
         }
     }
 
-    fn resolve(self, size: MenuSize) -> MenuStyle {
+    fn resolve(self, size: MenuSize, shell: FloatingShell) -> MenuStyle {
+        let mut metrics = self.sizes.resolve(size);
+        metrics.corner_radius = shell.corner_radius();
+        metrics.panel_padding = shell.content_inset();
+        metrics.border_width = shell.hairline();
         MenuStyle {
             paint: self.paint,
-            metrics: self.sizes.resolve(size),
-            shadow: self.shadow,
+            metrics,
+            shell,
         }
     }
 }
 
 impl Global for MenuTheme {}
 
+fn menu_trigger_paint(cx: &App) -> MenuPaint {
+    crate::floating_surface::hosted_menu_theme(cx)
+        .unwrap_or_else(|| cx.global::<MenuTheme>())
+        .paint
+}
+
+/// Resolves the installed menu theme against the shared anchored-popup surface.
+fn menu_style(size: MenuSize, cx: &App) -> MenuStyle {
+    cx.global::<MenuTheme>()
+        .resolve(size, crate::floating_surface::shell(MENU_ROLE, cx))
+}
+
 #[derive(Clone, Copy)]
 struct MenuStyle {
     paint: MenuPaint,
     metrics: MenuMetrics,
-    shadow: ControlShadow,
+    shell: FloatingShell,
 }
 
 type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
@@ -879,9 +886,10 @@ impl<A: Clone + 'static> Menu<A> {
 
 impl<A: Clone + 'static> RenderOnce for Menu<A> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = cx.global::<MenuTheme>().resolve(self.core.size);
+        let style = menu_style(self.core.size, cx);
         let enabled = self.core.is_enabled();
-        let (foreground, disclosure_foreground) = trigger_foregrounds(style.paint, enabled);
+        let (foreground, disclosure_foreground) =
+            trigger_foregrounds(menu_trigger_paint(cx), enabled);
         let content = div()
             .flex()
             .items_center()
@@ -1139,9 +1147,10 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
                 },
             ) as Rc<dyn Fn(&MenuActivation<T>, &mut Window, &mut App)>
         });
-        let style = cx.global::<MenuTheme>().resolve(self.core.size);
+        let style = menu_style(self.core.size, cx);
         let enabled = self.core.is_enabled();
-        let (foreground, disclosure_foreground) = trigger_foregrounds(style.paint, enabled);
+        let (foreground, disclosure_foreground) =
+            trigger_foregrounds(menu_trigger_paint(cx), enabled);
         let content = div()
             .flex()
             .items_center()
@@ -1274,7 +1283,7 @@ impl<A> MenuControl<A> {
 
 impl<A: Clone + 'static> MenuControl<A> {
     fn render(self, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
-        let style = cx.global::<MenuTheme>().resolve(self.size);
+        let style = menu_style(self.size, cx);
         let font = crate::control_typography(cx).regular().clone();
         let enabled = self.is_enabled();
         let handler = self.on_activate;
@@ -1470,7 +1479,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             });
 
         if self.kind != TriggerKind::Context {
-            let paint = style.paint;
+            let paint = menu_trigger_paint(cx);
             trigger = trigger
                 .flex()
                 .items_center()
@@ -1486,7 +1495,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                         .min_w(style.metrics.panel_width)
                         .px(style.metrics.horizontal_padding)
                 })
-                .rounded(style.metrics.corner_radius)
+                .rounded(style.metrics.trigger_corner_radius)
                 .border(style.metrics.border_width)
                 .border_color(if focused {
                     paint.focus_border
@@ -1931,12 +1940,9 @@ impl MenuState {
                     Rgba::default(),
                     Rgba::default(),
                     Rgba::default(),
-                    Rgba::default(),
-                    Rgba::default(),
-                    Rgba::default(),
                 ),
                 metrics: MenuMetrics::new(px(0.0), px(0.0)),
-                shadow: ControlShadow::none(),
+                shell: crate::FloatingSurfaceTheme::default().shell(MENU_ROLE),
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
@@ -2857,15 +2863,16 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             }
         });
 
-    deferred(
+    // A menu is the innermost anchored popup: it opens from triggers inside other floating
+    // surfaces and never hosts one, so it always reaches the deferred popup layer.
+    crate::floating_surface::present(
+        MENU_ROLE.layer(false),
         anchored()
             .anchor(Corner::TopLeft)
             .position(point(px(0.0), px(0.0)))
             .snap_to_window()
             .child(overlay),
     )
-    .with_priority(OVERLAY_PRIORITY)
-    .into_any_element()
 }
 
 #[expect(
@@ -2893,12 +2900,6 @@ fn render_panel(
         .top(bounds.top())
         .w(bounds.size.width)
         .h(bounds.size.height)
-        .overflow_hidden()
-        .rounded(style.metrics.corner_radius)
-        .shadow(style.shadow.layers())
-        .border(style.metrics.border_width)
-        .border_color(style.paint.border)
-        .bg(style.paint.background)
         .text_size(style.metrics.font_size)
         .block_mouse_except_scroll()
         .cursor_default();
@@ -2925,7 +2926,7 @@ fn render_panel(
                             div()
                                 .h(style.metrics.separator_thickness)
                                 .w_full()
-                                .bg(style.paint.separator),
+                                .bg(style.shell.divider()),
                         ),
                 );
             }
@@ -3000,7 +3001,7 @@ fn render_panel(
             }
         }
     }
-    panel.child(content).into_any_element()
+    style.shell.mount(panel.child(content)).into_any_element()
 }
 
 #[expect(
@@ -3334,18 +3335,26 @@ mod tests {
 
     fn test_theme() -> MenuTheme {
         let paint = MenuPaint::new(
-            rgba(0x202020ff),
-            rgba(0x404040ff),
             rgba(0xffffffff),
             rgba(0xaaaaaaff),
             rgba(0x777777ff),
             rgba(0x336699ff),
             rgba(0xffffffff),
             rgba(0xff5555ff),
-            rgba(0x555555ff),
         );
         let metrics = MenuMetrics::new(px(160.0), px(28.0));
         MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
+    }
+
+    fn test_shell() -> crate::FloatingShell {
+        let surface =
+            crate::FloatingSurfacePaint::new(rgba(0x202020ff), rgba(0x404040ff), rgba(0x555555ff));
+        crate::FloatingSurfaceTheme::new(
+            crate::FloatingSurfacePaints::new(surface, surface),
+            rgba(0x00000048).into(),
+            rgba(0x00000099),
+        )
+        .shell(crate::FloatingRole::Popover)
     }
 
     fn row_paint(seed: u32) -> crate::ListRowPaint {
@@ -3589,14 +3598,26 @@ mod tests {
         let theme = MenuTheme::new(paint, sizes);
 
         assert_eq!(
-            theme.resolve(MenuSize::Small).metrics.panel_width,
+            theme
+                .resolve(MenuSize::Small, test_shell())
+                .metrics
+                .panel_width,
             px(208.0)
         );
         assert_eq!(
-            theme.resolve(MenuSize::Regular).metrics.panel_width,
+            theme
+                .resolve(MenuSize::Regular, test_shell())
+                .metrics
+                .panel_width,
             px(220.0)
         );
-        assert_eq!(theme.resolve(MenuSize::Wide).metrics.panel_width, px(248.0));
+        assert_eq!(
+            theme
+                .resolve(MenuSize::Wide, test_shell())
+                .metrics
+                .panel_width,
+            px(248.0)
+        );
     }
 
     #[test]
@@ -3655,12 +3676,15 @@ mod tests {
 
     #[test]
     fn row_and_separator_geometry_should_follow_the_panel_content_grid() {
-        let metrics = MenuMetrics::new(px(196.0), px(26.0))
+        let base = MenuMetrics::new(px(196.0), px(26.0))
             .horizontal_padding(px(6.0))
             .indicator_width(px(16.0))
             .gap(px(6.0))
-            .corner_radius(px(8.0))
-            .panel_spacing(px(3.0), px(2.0));
+            .submenu_gap(px(2.0));
+        let shell = test_shell();
+        let metrics = MenuTheme::new(test_theme().paint, MenuSizes::new(base, base, base))
+            .resolve(MenuSize::Regular, shell)
+            .metrics;
 
         let entries = vec![
             inert("New Window", false),
@@ -3671,10 +3695,16 @@ mod tests {
             inert("Close Workspace", false),
         ];
 
-        assert_eq!(row_corner_radius(metrics), px(5.0));
-        assert_eq!(content_leading_inset(metrics), px(31.0));
-        assert_eq!(metrics.panel_padding, px(3.0));
-        assert_eq!(panel_size(&entries, metrics), size(px(196.0), px(95.0)));
+        assert_eq!(row_corner_radius(metrics), shell.nested_radius());
+        assert_eq!(
+            content_leading_inset(metrics),
+            shell.content_inset() + px(28.0)
+        );
+        assert_eq!(metrics.panel_padding, shell.content_inset());
+        assert_eq!(
+            panel_size(&entries, metrics),
+            size(px(196.0), px(89.0) + shell.content_inset() * 2.0)
+        );
     }
 
     #[test]
@@ -3856,7 +3886,10 @@ mod tests {
     #[gpui::test]
     fn custom_row_icon_should_follow_the_resolved_live_menu_metric(cx: &mut TestAppContext) {
         let (_root, _events, cx) = menu_window(cx);
-        let default_size = test_theme().resolve(MenuSize::Regular).metrics.icon_size;
+        let default_size = test_theme()
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics
+            .icon_size;
         let trigger = cx.debug_bounds("menu-trigger").expect("menu trigger");
         cx.simulate_click(trigger.center(), Modifiers::none());
         cx.run_until_parked();
@@ -3865,7 +3898,10 @@ mod tests {
             .expect("the default custom row icon was not rendered");
 
         let theme = test_theme().scaled_metrics(2.0, 1.25);
-        let expected_size = theme.resolve(MenuSize::Regular).metrics.icon_size;
+        let expected_size = theme
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics
+            .icon_size;
         cx.update(|window, cx| {
             cx.set_global(theme);
             window.refresh();
@@ -4634,7 +4670,7 @@ mod tests {
         lifecycle: Option<MenuLifecycleHandler>,
         cx: &mut VisualTestContext,
     ) {
-        let style = test_theme().resolve(MenuSize::Regular);
+        let style = test_theme().resolve(MenuSize::Regular, test_shell());
         cx.update(|window, app| {
             state.update(app, |state, cx| {
                 state.trigger_bounds = Some(Bounds::new(
@@ -4728,7 +4764,7 @@ mod tests {
     fn context_entries_should_freeze_after_the_opening_target_snapshot(cx: &mut TestAppContext) {
         let (root, cx) = state_harness(cx);
         let state = root.read_with(cx, |root, _| root.first.clone());
-        let style = test_theme().resolve(MenuSize::Regular);
+        let style = test_theme().resolve(MenuSize::Regular, test_shell());
         cx.update(|window, app| {
             state.update(app, |state, cx| {
                 state.trigger_bounds = Some(Bounds::new(
@@ -4793,7 +4829,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let first_events = events.clone();
         let second_events = events.clone();
-        let style = test_theme().resolve(MenuSize::Regular);
+        let style = test_theme().resolve(MenuSize::Regular, test_shell());
         cx.update(|window, app| {
             first.update(app, |state, _| {
                 state.trigger_bounds = Some(Bounds::new(
@@ -4852,7 +4888,7 @@ mod tests {
         let weak_state = state.downgrade();
         let events = Rc::new(RefCell::new(Vec::new()));
         let lifecycle_events = events.clone();
-        let style = test_theme().resolve(MenuSize::Regular);
+        let style = test_theme().resolve(MenuSize::Regular, test_shell());
         cx.update(|window, app| {
             state.update(app, |state, _| {
                 state.trigger_bounds = Some(Bounds::new(

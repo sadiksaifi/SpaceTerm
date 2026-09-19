@@ -118,6 +118,7 @@ use std::{error::Error, fmt, time::Duration};
 use gpui::{Global, Pixels, Rgba, SharedString, Size, px, size};
 
 pub use crate::progress::{DeterminateProgress, ProgressState, ProgressValueError};
+use crate::{FloatingRole, FloatingShell};
 pub use alert::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, AlertSuppression,
     MAX_ALERT_DETAIL_CHARACTERS, MAX_ALERT_MESSAGE_CHARACTERS,
@@ -163,6 +164,19 @@ pub(crate) fn focused_modal_parent(
 
 pub(crate) fn focus_allows_transient_resume(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::focus_allows_transient_resume(window, cx)
+}
+
+pub(crate) fn modal_parent_for_focus(
+    focus: &gpui::FocusHandle,
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> Option<ModalParentToken> {
+    core::modal_parent_for_focus(focus, window, cx)
+}
+
+pub(crate) fn window_has_owned_popup(window: &gpui::Window, cx: &gpui::App) -> bool {
+    crate::menu::window_menu_is_owned_by_current_modal(window, cx)
+        || crate::combo_box::window_combo_box_is_owned_by_current_modal(window, cx)
 }
 
 #[cfg(test)]
@@ -685,15 +699,16 @@ pub fn window_modal_is_open(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::window_modal_is_open(window, cx)
 }
 
-/// Application-owned colors for the shared modal renderer.
+/// Application-owned text and intent colors for the shared modal renderer.
+///
+/// The scrim, the surface material, its edge, and its internal rules belong to the shared
+/// window-modal role, so an Alert, a Dialog, and a Progress Dialog are one object at one elevation.
+/// What a modal authors for itself is the meaning it carries: two registers of text and three
+/// semantic intents.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalPaint {
-    scrim: Rgba,
-    surface: Rgba,
-    border: Rgba,
     primary_text: Rgba,
     secondary_text: Rgba,
-    divider: Rgba,
     informational: Rgba,
     informational_background: Rgba,
     warning: Rgba,
@@ -709,12 +724,8 @@ impl ModalPaint {
         reason = "the bounded catalog requires every shared semantic paint"
     )]
     pub fn new(
-        scrim: Rgba,
-        surface: Rgba,
-        border: Rgba,
         primary_text: Rgba,
         secondary_text: Rgba,
-        divider: Rgba,
         informational: Rgba,
         informational_background: Rgba,
         warning: Rgba,
@@ -723,12 +734,8 @@ impl ModalPaint {
         critical_background: Rgba,
     ) -> Self {
         Self {
-            scrim,
-            surface,
-            border,
             primary_text,
             secondary_text,
-            divider,
             informational,
             informational_background,
             warning,
@@ -740,6 +747,10 @@ impl ModalPaint {
 }
 
 /// Bounded dimensions for the compact shared modal renderer.
+///
+/// Surface corner geometry, hairline weight, and elevation belong to the shared window-modal role.
+/// These metrics carry what the modal families decide for themselves: the three Dialog widths, the
+/// height each kind may reach, and the spacing that sets body content and the action area.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalMetrics {
     compact_width: Pixels,
@@ -757,8 +768,7 @@ pub struct ModalMetrics {
     accessory_extent: Pixels,
     horizontal_action_threshold: Pixels,
     minimum_action_width: Pixels,
-    corner_radius: Pixels,
-    border_width: Pixels,
+    control_radius: Pixels,
     progress_status_region_height: Pixels,
     progress_detail_region_height: Pixels,
     header_maximum_fraction: f32,
@@ -790,8 +800,7 @@ impl ModalMetrics {
             accessory_extent: px(40.0),
             horizontal_action_threshold: px(360.0),
             minimum_action_width: px(72.0),
-            corner_radius: px(8.0),
-            border_width: px(1.0),
+            control_radius: px(6.0),
             progress_status_region_height: px(48.0),
             progress_detail_region_height: px(36.0),
             header_maximum_fraction: 0.35,
@@ -845,8 +854,7 @@ impl ModalMetrics {
                 200.0,
                 72.0,
             ),
-            corner_radius: bounded_metric(self.corner_radius * factor, 4.0, 16.0, 8.0),
-            border_width: bounded_metric(self.border_width * factor, 1.0, 3.0, 1.0),
+            control_radius: bounded_metric(self.control_radius * factor, 3.0, 14.0, 6.0),
             progress_status_region_height: bounded_metric(
                 self.progress_status_region_height * factor,
                 32.0,
@@ -912,8 +920,7 @@ impl ModalMetrics {
             ),
             horizontal_action_threshold: self.horizontal_action_threshold * extent_scale,
             minimum_action_width: self.minimum_action_width * extent_scale,
-            corner_radius: self.corner_radius * spacing_scale,
-            border_width: self.border_width,
+            control_radius: self.control_radius * spacing_scale,
             progress_status_region_height: crate::appearance::scale_line_box(
                 self.progress_status_region_height,
                 self.body_size,
@@ -1008,12 +1015,20 @@ impl ModalMetrics {
 pub struct ModalTheme {
     paint: ModalPaint,
     metrics: ModalMetrics,
+    shell: FloatingShell,
+    scrim: Rgba,
 }
 
 impl ModalTheme {
     /// Creates the complete modal theme. Shared surfaces are intentionally animation-free.
     pub fn new(paint: ModalPaint, metrics: ModalMetrics) -> Self {
-        Self { paint, metrics }
+        let floating = crate::FloatingSurfaceTheme::default();
+        Self {
+            paint,
+            metrics,
+            shell: floating.shell(MODAL_ROLE),
+            scrim: floating.scrim(),
+        }
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -1025,6 +1040,18 @@ impl ModalTheme {
 }
 
 impl Global for ModalTheme {}
+
+/// A modal takes the window: it is the focal surface and the only one that dims what it covers.
+const MODAL_ROLE: FloatingRole = FloatingRole::Modal;
+
+/// Resolves the installed modal theme against the shared window-modal surface presentation.
+pub(super) fn modal_theme(cx: &gpui::App) -> ModalTheme {
+    let floating = crate::floating_surface::floating_theme(cx);
+    let mut theme = *cx.global::<ModalTheme>();
+    theme.shell = floating.shell(MODAL_ROLE);
+    theme.scrim = floating.scrim();
+    theme
+}
 
 /// Explicitly installs application-owned aggregate modal paint and bounded metrics.
 ///

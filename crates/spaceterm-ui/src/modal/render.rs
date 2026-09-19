@@ -20,7 +20,8 @@ use super::{
     policy::{ActionArrangement, DefaultActionPresentation, is_safe_cancel, select_action_axis},
 };
 use crate::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, Icon, IconName, ProgressBar, ProgressSize,
+    Button, ButtonRole, ButtonSize, ButtonVariant, FloatingShell, Icon, IconName, ProgressBar,
+    ProgressSize,
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -79,8 +80,9 @@ pub(super) fn init(cx: &mut App) {
 
 /// Final Operating-System Window layer for shared window-modal controls.
 ///
-/// Place it around the complete root content, normally as
-/// `ModalLayer::new(TooltipLayer::new(content))`. The active modal is painted as the final normal
+/// Place it around the complete root content. Tooltip dismissal is included. Supply complete
+/// CommandPalette owners through [`Self::transient`] so the layer owns their placement above
+/// ordinary content. The active modal is painted as the final normal
 /// child rather than a deferred draw, allowing a modal-owned deferred Menu to remain above it. The
 /// full-viewport scrim blocks outside pointer press, release, move, and wheel input without outside
 /// dismissal or click-through. The modal key context blocks underlay keyboard routing while the
@@ -92,6 +94,7 @@ pub(super) fn init(cx: &mut App) {
 #[derive(IntoElement)]
 pub struct ModalLayer {
     content: AnyElement,
+    transients: Vec<AnyElement>,
 }
 
 impl ModalLayer {
@@ -99,7 +102,17 @@ impl ModalLayer {
     pub fn new(content: impl IntoElement) -> Self {
         Self {
             content: content.into_any_element(),
+            transients: Vec::new(),
         }
+    }
+
+    /// Presents a complete transient owner above ordinary content and below an active modal.
+    ///
+    /// Keeping the owner intact preserves its action routing. Its deferred child Menus remain
+    /// above the normal surface without requiring callers to arrange paint-order siblings.
+    pub fn transient(mut self, owner: impl IntoElement) -> Self {
+        self.transients.push(owner.into_any_element());
+        self
     }
 }
 
@@ -110,14 +123,17 @@ impl RenderOnce for ModalLayer {
             root.read_with(cx, |root, _| (root.focus.clone(), root.owner.clone()));
         register_root_scope(&owner, &root_focus, cx);
 
-        div()
-            .id("spaceterm-modal-root")
-            .debug_selector(|| "spaceterm-modal-root".to_owned())
-            .relative()
-            .size_full()
-            .track_focus(&root_focus)
-            .child(self.content)
-            .child(ModalOwnerView { owner })
+        crate::TooltipLayer::new(
+            div()
+                .id("spaceterm-modal-root")
+                .debug_selector(|| "spaceterm-modal-root".to_owned())
+                .relative()
+                .size_full()
+                .track_focus(&root_focus)
+                .child(self.content)
+                .children(self.transients)
+                .child(ModalOwnerView { owner }),
+        )
     }
 }
 
@@ -166,7 +182,7 @@ pub(super) fn render_modal_owner(
     let Some(snapshot) = snapshot else {
         return div().into_any_element();
     };
-    let theme = *cx.global::<ModalTheme>();
+    let theme = super::modal_theme(cx);
     let policy = *cx.global::<ModalDesktopPolicy>();
     render_overlay(state, snapshot, owner, theme, policy, window, cx)
 }
@@ -182,6 +198,7 @@ fn render_overlay(
 ) -> AnyElement {
     let metrics = theme.metrics;
     let paint = theme.paint;
+    let shell = theme.shell;
     let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
     let desired_width = metrics.width_for(match snapshot.kind {
@@ -270,6 +287,7 @@ fn render_overlay(
         geometry.size.height * metrics.header_maximum_fraction(),
         metrics,
         paint,
+        shell,
         typography.heading().clone(),
     );
     let suppression_is_focused = suppression_focus.is_focused(window);
@@ -283,6 +301,7 @@ fn render_overlay(
         body_focus_anchors,
         metrics,
         paint,
+        shell,
         policy.text_direction(),
         window,
         cx,
@@ -300,7 +319,7 @@ fn render_overlay(
         footer_focus_anchors,
         geometry.size.height * metrics.footer_maximum_fraction(),
         metrics,
-        paint,
+        shell,
     );
     let presentation = snapshot.presentation;
     let default_action = enabled_action(snapshot.default_action, &snapshot.actions);
@@ -324,23 +343,18 @@ fn render_overlay(
         .min_h_0()
         .flex()
         .flex_col()
-        .overflow_hidden()
-        .rounded(metrics.corner_radius)
-        .border(metrics.border_width)
-        .border_color(paint.border)
-        .bg(paint.surface)
         .text_color(paint.primary_text)
         .font(typography.regular().clone())
         .track_focus(&scope)
         .key_context(MODAL_KEY_CONTEXT)
         .on_action(move |_: &TraverseForward, window, cx| {
-            if !crate::menu::window_menu_is_owned_by_current_modal(window, cx) {
+            if !super::window_has_owned_popup(window, cx) {
                 forward_focus.update(cx, |state, cx| state.focus_next(window, cx));
             }
             cx.stop_propagation();
         })
         .on_action(move |_: &TraverseBackward, window, cx| {
-            if !crate::menu::window_menu_is_owned_by_current_modal(window, cx) {
+            if !super::window_has_owned_popup(window, cx) {
                 backward_focus.update(cx, |state, cx| state.focus_previous(window, cx));
             }
             cx.stop_propagation();
@@ -364,7 +378,7 @@ fn render_overlay(
             cx.stop_propagation();
         })
         .on_action(move |_: &ActivateCancel, window, cx| {
-            if crate::menu::window_menu_is_owned_by_current_modal(window, cx) {
+            if super::window_has_owned_popup(window, cx) {
                 return;
             }
             if let Some(index) = cancel_action {
@@ -396,16 +410,28 @@ fn render_overlay(
         .child(div().size_0().track_focus(&leading))
         .child(header)
         .child(body)
-        .child(footer)
+        .when(!snapshot.actions.is_empty(), |surface| {
+            surface.child(footer)
+        })
         .child(div().size_0().track_focus(&trailing));
 
+    // The shell owns the modal's material, edge, corners, and elevation, and hosts every control
+    // resting on it so nested fields and buttons compose against this surface. Tooltip ancestry
+    // wraps the mounted surface so a tooltip raised from any descendant stays tied to this
+    // presentation through layout, prepaint, and paint.
     div()
         .id(("modal-overlay", presentation.value()))
         .absolute()
         .inset_0()
-        .child(div().absolute().inset_0().bg(paint.scrim))
+        .child(div().absolute().inset_0().bg(theme.scrim))
         .child(blocker)
-        .child(surface)
+        .child(crate::tooltip::ModalTooltipScope::new(
+            shell.mount(surface),
+            super::ModalParentToken {
+                window_id: window.window_handle().window_id(),
+                presentation,
+            },
+        ))
         .into_any_element()
 }
 
@@ -493,6 +519,7 @@ fn render_header(
     maximum_height: gpui::Pixels,
     metrics: ModalMetrics,
     paint: ModalPaint,
+    shell: FloatingShell,
     heading_font: gpui::Font,
 ) -> AnyElement {
     let (title, description) = match &snapshot.semantics {
@@ -516,8 +543,8 @@ fn render_header(
         .px(metrics.surface_padding)
         .pt(metrics.surface_padding)
         .pb(metrics.section_gap)
-        .border_b(metrics.border_width)
-        .border_color(paint.divider)
+        .border_b(shell.hairline())
+        .border_color(shell.divider())
         .child(
             div()
                 .debug_selector(|| "modal-header-title".to_owned())
@@ -557,6 +584,7 @@ fn render_body(
     body_focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
     paint: ModalPaint,
+    shell: FloatingShell,
     direction: TextDirection,
     window: &mut Window,
     cx: &mut App,
@@ -665,7 +693,7 @@ fn render_body(
                         press_owner,
                         body_focus_anchors.clone(),
                         metrics,
-                        paint,
+                        shell,
                         window,
                         cx,
                     ))
@@ -834,7 +862,7 @@ fn render_alert_suppression(
     press_owner: ModalPressOwner,
     focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
-    paint: ModalPaint,
+    shell: FloatingShell,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -940,10 +968,9 @@ fn render_alert_suppression(
         .gap(metrics.action_gap)
         .px(metrics.action_gap)
         .py(metrics.action_gap / 2.0)
-        .rounded(metrics.corner_radius)
-        .border(metrics.border_width)
-        .border_color(paint.surface)
-        .bg(paint.surface)
+        // The suppression row is part of the modal surface, not a panel resting on it: it carries
+        // no fill or edge of its own, only the hit area and focus ring its checkbox needs.
+        .rounded(metrics.control_radius)
         .text_size(metrics.body_size)
         .cursor_default()
         .block_mouse_except_scroll()
@@ -1014,17 +1041,17 @@ fn render_alert_suppression(
                 div()
                     .debug_selector(|| "modal-alert-suppression-keyboard-focus".to_owned())
                     .absolute()
-                    .top(-metrics.border_width * 3.0)
-                    .right(-metrics.border_width * 3.0)
-                    .bottom(-metrics.border_width * 3.0)
-                    .left(-metrics.border_width * 3.0)
-                    .rounded(metrics.corner_radius + metrics.border_width * 2.0)
-                    .border(metrics.border_width)
+                    .top(-shell.hairline() * 3.0)
+                    .right(-shell.hairline() * 3.0)
+                    .bottom(-shell.hairline() * 3.0)
+                    .left(-shell.hairline() * 3.0)
+                    .rounded(metrics.control_radius + shell.hairline() * 2.0)
+                    .border(shell.hairline())
                     .border_color(toggle_theme.focus_border()),
             )
         })
         .child(pointer_tracker)
-        .child(focus_anchor.bounds_tracker(metrics.border_width));
+        .child(focus_anchor.bounds_tracker(shell.hairline()));
 
     div().flex().min_w_0().child(control).into_any_element()
 }
@@ -1223,7 +1250,7 @@ fn render_footer(
     footer_focus_anchors: ModalFocusAnchorRegistry,
     maximum_height: gpui::Pixels,
     metrics: ModalMetrics,
-    paint: ModalPaint,
+    shell: FloatingShell,
 ) -> AnyElement {
     let presentation = snapshot.presentation;
     let ActionArrangement {
@@ -1308,8 +1335,8 @@ fn render_footer(
         .track_scroll(&footer_scroll)
         .px(metrics.surface_padding)
         .py(metrics.section_gap)
-        .border_t(metrics.border_width)
-        .border_color(paint.divider)
+        .border_t(shell.hairline())
+        .border_color(shell.divider())
         .flex()
         .when(axis == ActionAxis::Horizontal, |footer| {
             footer
@@ -1568,9 +1595,7 @@ impl ModalFocusRing {
     }
 
     fn repair_focus_loss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !window.is_window_active()
-            || crate::menu::window_menu_is_owned_by_current_modal(window, cx)
-        {
+        if !window.is_window_active() || super::window_has_owned_popup(window, cx) {
             return;
         }
         let Some(presentation) = self.presentation else {
@@ -1586,7 +1611,7 @@ impl ModalFocusRing {
     }
 
     fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::menu::window_menu_is_owned_by_current_modal(window, cx) {
+        if super::window_has_owned_popup(window, cx) {
             return;
         }
         if let Some(focus) = self.pending_reveal.take().and_then(|focus| focus.upgrade())

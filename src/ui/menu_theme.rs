@@ -5,26 +5,27 @@ use crate::appearance::{ChromeColors, Color};
 
 #[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
-    themed(colors, colors)
+    themed_with_rows(colors, colors, colors)
 }
 
-/// Paints `colors`, resolving row content against the opaque `reference`.
-pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> MenuTheme {
+/// Keeps a trigger's host treatment independent from rows on the shared floating material.
+pub(super) fn themed_with_rows(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+    row_colors: &ChromeColors,
+) -> MenuTheme {
     let paint = MenuPaint::new(
-        gpui_color(colors.elevated_surface_background),
-        gpui_color(colors.border),
         gpui_color(colors.text),
         gpui_color(colors.icon),
         gpui_color(colors.text_disabled),
         gpui_color(colors.ghost_element_selected),
         gpui_color(colors.ghost_element_selected_foreground),
         gpui_color(colors.error),
-        gpui_color(colors.border),
     )
     .rows(super::control_theme_catalog::overlay_list_rows(
-        reference, colors,
+        reference, row_colors,
     ))
-    .destructive_rows(destructive_rows(reference, colors))
+    .destructive_rows(destructive_rows(reference, row_colors))
     .hover_background(gpui_color(colors.ghost_element_hover))
     .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(
@@ -36,9 +37,8 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> MenuThe
 
     MenuTheme::new(
         paint,
-        MenuSizes::new(metrics(196.0), metrics(208.0), metrics(200.0)),
+        MenuSizes::new(metrics(200.0), metrics(224.0), metrics(264.0)),
     )
-    .shadow(super::appearance::control_shadow(colors, false))
 }
 
 fn destructive_rows(
@@ -96,10 +96,9 @@ fn metrics(width: f32) -> MenuMetrics {
         .horizontal_padding(px(6.0))
         .indicator_width(px(16.0))
         .gap(px(6.0))
-        .corner_radius(px(8.0))
-        .border_width(px(1.0))
+        .trigger_corner_radius(px(8.0))
         .font_sizes(px(12.0), px(11.0))
-        .panel_spacing(px(3.0), px(2.0))
+        .submenu_gap(px(2.0))
         .decoration_metrics(px(14.0), px(1.0))
 }
 

@@ -13,6 +13,9 @@ mod combo_box;
 mod combo_box_tests;
 mod command_palette;
 mod field_frame;
+mod floating_surface;
+#[cfg(test)]
+mod floating_surface_tests;
 mod fuzzy;
 mod icon;
 mod list_row;
@@ -59,6 +62,10 @@ pub use command_palette::{
     install_command_palette_keybindings,
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
+pub use floating_surface::{
+    FloatingControlThemes, FloatingLayer, FloatingRole, FloatingShell, FloatingSurfaceElement,
+    FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme,
+};
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
@@ -172,6 +179,8 @@ pub struct ControlThemeCatalog {
     text_input: TextInputTheme,
     tooltip: TooltipTheme,
     modal: ModalTheme,
+    floating: Option<FloatingSurfaceTheme>,
+    floating_controls: Option<FloatingControlThemes>,
 }
 
 impl gpui::Global for ControlThemeCatalog {}
@@ -250,7 +259,25 @@ impl ControlThemeCatalog {
             text_input,
             tooltip,
             modal,
+            floating: None,
+            floating_controls: None,
         }
+    }
+
+    /// Installs the complete in-window floating presentation shared by every surface family.
+    ///
+    /// `surfaces` owns material, hairlines, geometry, elevation, and layering for each semantic
+    /// role. `controls` is the same reusable control catalog resolved against the raised material,
+    /// so a button or a field nested in a menu, palette, dialog, or Pane notice composes against
+    /// the surface it rests on instead of against the window root.
+    pub fn floating(
+        mut self,
+        surfaces: FloatingSurfaceTheme,
+        controls: FloatingControlThemes,
+    ) -> Self {
+        self.floating = Some(surfaces);
+        self.floating_controls = Some(controls);
+        self
     }
 
     /// Sets the generation shared by every family in this complete catalog.
@@ -298,6 +325,12 @@ impl ControlThemeCatalog {
         self.text_input = self.text_input.scaled_metrics(text_scale, spacing_scale);
         self.tooltip = self.tooltip.scaled_metrics(text_scale, spacing_scale);
         self.modal = self.modal.scaled_metrics(text_scale, spacing_scale);
+        self.floating = self
+            .floating
+            .map(|floating| floating.scaled_metrics(text_scale, spacing_scale));
+        self.floating_controls = self
+            .floating_controls
+            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
         self
     }
 }
@@ -361,6 +394,12 @@ fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.text_input);
     cx.set_global(catalog.tooltip);
     cx.set_global(catalog.modal);
+    cx.set_global(catalog.floating.unwrap_or_default());
+    if let Some(controls) = catalog.floating_controls.clone() {
+        cx.set_global(controls);
+    } else if cx.has_global::<FloatingControlThemes>() {
+        cx.remove_global::<FloatingControlThemes>();
+    }
     cx.set_global(catalog);
 }
 

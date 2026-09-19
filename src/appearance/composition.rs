@@ -49,11 +49,12 @@ impl SurfaceMaterials {
     /// its difference from that sheet, and that difference is the whole of what tells a Pane from
     /// the shell, a card from the page, or a selected chip from the row beside it. Giving it up
     /// buys a few percent more desktop and costs the window its hierarchy, so a resting surface
-    /// keeps enough of its color to lift several levels off a pale desktop instead. A floating
-    /// surface covers live content rather than resting beside it, and keeps enough to stop what
-    /// it covers from reading through.
+    /// keeps enough of its color to lift several levels off a pale desktop instead.
+    ///
     const RESTING_RESIDUAL: f32 = 0.42;
-    const FLOATING_RESIDUAL: f32 = 0.12;
+    /// GPUI has no local backdrop blur. Floating surfaces retain dense tint to limit sharp
+    /// underlay interference; built-in foreground contrast is tested over black and white.
+    const FLOATING_RESIDUAL: f32 = 0.90;
     /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
     ///
     /// Panes stay close to the base, below the brighter cards and selected controls.
@@ -123,12 +124,19 @@ impl SurfaceMaterials {
 
     /// The share of an authored color one role still holds at this setting.
     ///
-    /// The sheet fades linearly. Other roles approach their residual through a quadratic curve,
+    /// The sheet fades linearly. Resting roles approach their residual through a quadratic curve,
     /// retaining more color at high transparency with a smaller change near the default.
-    /// Residuals below a half keep the curve strictly decreasing across the whole range.
+    /// Residuals below a half keep that curve strictly decreasing across the whole range.
+    ///
+    /// Floating surfaces use a linear curve because their larger residual would make the
+    /// quadratic curve non-monotonic.
     fn presence(self, role: SurfaceRole) -> f32 {
         let admitted = self.admitted();
-        (1.0 - admitted) + Self::transmission(role).0 * admitted * admitted
+        let residual = Self::transmission(role).0;
+        if matches!(role, SurfaceRole::Floating) {
+            return 1.0 - (1.0 - residual) * admitted;
+        }
+        (1.0 - admitted) + residual * admitted * admitted
     }
 
     /// How much of an authored surface color survives over the window's backdrop.
@@ -383,8 +391,21 @@ impl ChromeColors {
     /// Canonical surface backing for the opaque foundation. Definitions retain authored RGBA;
     /// rendering and derived foregrounds use the same known root/panel/field hierarchy.
     pub(crate) fn opaque_presentation(&self) -> Self {
-        let mut paint = self.clone();
+        self.presentation_over(self.background.with_alpha(255))
+    }
+
+    /// Resolves authored control fills against the raised host before root flattening loses
+    /// their alpha. The host material is composited once; descendants inherit that reference.
+    pub(crate) fn floating_presentation(&self) -> Self {
         let root = self.background.with_alpha(255);
+        let host = self.elevated_surface_background.source_over(root);
+        let mut paint = self.presentation_over(host);
+        paint.elevated_surface_background = host;
+        paint
+    }
+
+    fn presentation_over(&self, root: super::Color) -> Self {
+        let mut paint = self.clone();
         paint.background = root;
         paint.panel_background = self.panel_background.source_over(root);
         paint.elevated_surface_background = self.elevated_surface_background.source_over(root);

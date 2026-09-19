@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     time::Duration,
 };
@@ -8,21 +9,117 @@ use gpui::{
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
     IntoElement, KeyDownEvent, LayoutId, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     ParentElement as _, Pixels, Point, RenderOnce, Rgba, ScrollWheelEvent, SharedString, Size,
-    Style, Styled as _, Task, WeakEntity, Window, WindowId, deferred, div, point,
+    Style, Styled as _, Task, WeakEntity, Window, WindowId, div, point,
     prelude::FluentBuilder as _, px,
 };
 
+use crate::{FloatingRole, FloatingShell};
+
 const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
-const TOOLTIP_OVERLAY_PRIORITY: usize = 0;
+/// A tooltip is the quietest floating surface: short supplementary text over one control.
+const TOOLTIP_ROLE: FloatingRole = FloatingRole::Tooltip;
 const MAX_PRIMARY_CHARACTERS: usize = 512;
 const MAX_DETAIL_CHARACTERS: usize = 4096;
 const MAX_KEYBOARD_CHARACTERS: usize = 96;
 
-/// Application-owned colors for every tooltip surface.
+thread_local! {
+    static MODAL_TOOLTIP_PARENT: Cell<Option<crate::modal::ModalParentToken>> = const {
+        Cell::new(None)
+    };
+}
+
+struct ModalTooltipParentGuard(Option<crate::modal::ModalParentToken>);
+
+impl Drop for ModalTooltipParentGuard {
+    fn drop(&mut self) {
+        MODAL_TOOLTIP_PARENT.set(self.0);
+    }
+}
+
+/// Captures target ancestry during every phase, including retained views rendered in prepaint.
+pub(crate) struct ModalTooltipScope {
+    content: AnyElement,
+    parent: crate::modal::ModalParentToken,
+}
+
+impl IntoElement for ModalTooltipScope {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl ModalTooltipScope {
+    pub(crate) fn new(content: impl IntoElement, parent: crate::modal::ModalParentToken) -> Self {
+        Self {
+            content: content.into_any_element(),
+            parent,
+        }
+    }
+
+    fn enter(&self) -> ModalTooltipParentGuard {
+        ModalTooltipParentGuard(MODAL_TOOLTIP_PARENT.replace(Some(self.parent)))
+    }
+}
+
+impl Element for ModalTooltipScope {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let _parent = self.enter();
+        (self.content.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let _parent = self.enter();
+        self.content.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let _parent = self.enter();
+        self.content.paint(window, cx);
+    }
+}
+
+/// Application-owned text colors for every tooltip surface.
+///
+/// The surface itself, its edge, and its internal rule belong to the shared floating role, so a
+/// tooltip authors only the three registers of text it presents.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TooltipPaint {
-    background: Rgba,
-    border: Rgba,
     primary: Rgba,
     secondary: Rgba,
     keyboard: Rgba,
@@ -30,16 +127,8 @@ pub struct TooltipPaint {
 
 impl TooltipPaint {
     /// Creates the complete bounded tooltip paint catalog.
-    pub fn new(
-        background: Rgba,
-        border: Rgba,
-        primary: Rgba,
-        secondary: Rgba,
-        keyboard: Rgba,
-    ) -> Self {
+    pub fn new(primary: Rgba, secondary: Rgba, keyboard: Rgba) -> Self {
         Self {
-            background,
-            border,
             primary,
             secondary,
             keyboard,
@@ -47,7 +136,11 @@ impl TooltipPaint {
     }
 }
 
-/// Compact desktop metrics shared by every tooltip.
+/// Compact desktop text and placement metrics shared by every tooltip.
+///
+/// Corner geometry, edge, and elevation come from the shared [`FloatingRole::Tooltip`] treatment.
+/// What remains here is what a tooltip alone decides: how wide its text may run, how tightly that
+/// text is set, and how far the surface stands off its target and the viewport.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TooltipMetrics {
     maximum_width: Pixels,
@@ -57,8 +150,6 @@ pub struct TooltipMetrics {
     keyboard_gap: Pixels,
     target_gap: Pixels,
     viewport_margin: Pixels,
-    corner_radius: Pixels,
-    border_width: Pixels,
     primary_font_size: Pixels,
     secondary_font_size: Pixels,
     keyboard_font_size: Pixels,
@@ -78,8 +169,6 @@ impl TooltipMetrics {
             keyboard_gap: px(12.0),
             target_gap: px(6.0),
             viewport_margin: px(8.0),
-            corner_radius: px(5.0),
-            border_width: px(1.0),
             primary_font_size: px(11.0),
             secondary_font_size: px(10.0),
             keyboard_font_size: px(10.0),
@@ -105,13 +194,6 @@ impl TooltipMetrics {
         self.keyboard_gap = bounded_metric(keyboard_gap, 0.0, 32.0, 12.0);
         self.target_gap = bounded_metric(target_gap, 0.0, 24.0, 6.0);
         self.viewport_margin = bounded_metric(viewport_margin, 0.0, 32.0, 8.0);
-        self
-    }
-
-    /// Sets surface shape metrics.
-    pub fn surface(mut self, corner_radius: Pixels, border_width: Pixels) -> Self {
-        self.corner_radius = bounded_metric(corner_radius, 0.0, 16.0, 5.0);
-        self.border_width = bounded_metric(border_width, 0.0, 4.0, 1.0);
         self
     }
 
@@ -145,8 +227,6 @@ impl TooltipMetrics {
             keyboard_gap: crate::appearance::scale_metric(self.keyboard_gap, spacing_scale),
             target_gap: crate::appearance::scale_metric(self.target_gap, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
-            border_width: self.border_width,
             primary_font_size: crate::appearance::scale_metric(self.primary_font_size, text_scale),
             secondary_font_size: crate::appearance::scale_metric(
                 self.secondary_font_size,
@@ -182,16 +262,24 @@ fn bounded_metric(value: Pixels, minimum: f32, maximum: f32, fallback: f32) -> P
 }
 
 /// Application-installed presentation for every [`Tooltip`].
+///
+/// The surface treatment belongs to the shared tooltip role, so a tooltip is the same object at the
+/// same elevation wherever it appears, including above a modal surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TooltipTheme {
     paint: TooltipPaint,
     metrics: TooltipMetrics,
+    shell: FloatingShell,
 }
 
 impl TooltipTheme {
     /// Creates a complete tooltip theme from application-owned colors and bounded metrics.
     pub fn new(paint: TooltipPaint, metrics: TooltipMetrics) -> Self {
-        Self { paint, metrics }
+        Self {
+            paint,
+            metrics,
+            shell: crate::FloatingSurfaceTheme::default().shell(TOOLTIP_ROLE),
+        }
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -203,6 +291,13 @@ impl TooltipTheme {
 }
 
 impl Global for TooltipTheme {}
+
+/// Resolves the installed tooltip theme against the shared floating surface presentation.
+fn tooltip_theme(cx: &App) -> TooltipTheme {
+    let mut theme = *cx.global::<TooltipTheme>();
+    theme.shell = crate::floating_surface::shell(TOOLTIP_ROLE, cx);
+    theme
+}
 
 /// Short, semantic contextual help for one noninteractive desktop tooltip.
 ///
@@ -350,7 +445,8 @@ impl RenderOnce for TooltipTarget {
         let state = window.use_keyed_state(self.tooltip.id.clone(), cx, TooltipTargetState::new);
         let visible = self.visibility.is_visible();
         let enabled = visible && !self.disabled && !self.tooltip.text.is_empty();
-        let release = state.update(cx, |state, cx| state.synchronize(enabled, cx));
+        let parent = MODAL_TOOLTIP_PARENT.get();
+        let release = state.update(cx, |state, cx| state.synchronize(enabled, parent, cx));
         if let Some((window_id, reservation)) = release {
             release_window(window_id, reservation, cx);
         }
@@ -359,26 +455,27 @@ impl RenderOnce for TooltipTarget {
             let owner = state.downgrade();
             let state = state.read(cx);
             if state.visible && state.target_bounds.is_some() {
+                let theme = tooltip_theme(cx);
                 TooltipOverlay::new(
                     owner,
                     render_surface(
                         &self.tooltip,
-                        cx.global::<TooltipTheme>(),
+                        &theme,
                         crate::control_typography(cx).regular().clone(),
                         window.viewport_size(),
                     ),
-                    cx.global::<TooltipTheme>().metrics,
+                    theme.metrics,
                 )
                 .into_any_element()
             } else {
                 div().into_any_element()
             }
         };
-        let overlay = Some(
-            deferred(overlay_content)
-                .with_priority(TOOLTIP_OVERLAY_PRIORITY)
-                .into_any_element(),
-        );
+        // A tooltip carries no interactive children, so it always reaches its own shared layer.
+        let overlay = Some(crate::floating_surface::present(
+            TOOLTIP_ROLE.layer(false),
+            overlay_content,
+        ));
 
         TooltipTargetElement {
             target: self.target,
@@ -397,6 +494,7 @@ fn render_surface(
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
+    let shell = theme.shell;
     let available = available_tooltip_size(viewport, metrics.viewport_margin);
     let keyboard = tooltip.keyboard_equivalent.clone();
     let primary = div()
@@ -427,7 +525,7 @@ fn render_surface(
             )
         });
 
-    div()
+    let surface = div()
         .id(tooltip.debug_selector.clone())
         .debug_selector({
             let selector = tooltip.debug_selector.clone();
@@ -440,25 +538,31 @@ fn render_surface(
         .flex()
         .flex_col()
         .gap(metrics.content_gap)
-        .overflow_hidden()
-        .rounded(metrics.corner_radius)
-        .border(metrics.border_width)
-        .border_color(paint.border)
-        .bg(paint.background)
         .font(font)
         .cursor_default()
         .child(primary)
         .when_some(tooltip.detail.clone(), |surface, detail| {
-            surface.child(
-                div()
-                    .whitespace_normal()
-                    .text_size(metrics.secondary_font_size)
-                    .line_height(metrics.secondary_line_height)
-                    .text_color(paint.secondary)
-                    .child(detail),
-            )
-        })
-        .into_any_element()
+            // Detail is a second register, not a continuation of the primary line. The surface's own
+            // quiet rule separates the two without the weight of its outer edge.
+            surface
+                .child(
+                    div()
+                        .w_full()
+                        .h(shell.hairline())
+                        .flex_shrink_0()
+                        .bg(shell.divider()),
+                )
+                .child(
+                    div()
+                        .whitespace_normal()
+                        .text_size(metrics.secondary_font_size)
+                        .line_height(metrics.secondary_line_height)
+                        .text_color(paint.secondary)
+                        .child(detail),
+                )
+        });
+
+    shell.mount(surface).into_any_element()
 }
 
 struct TooltipLayerElement {
@@ -585,9 +689,6 @@ impl Element for TooltipTargetElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let hitbox = self
-            .visible
-            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
         let state = self.state.clone();
         let target_bounds = self.visible.then_some(bounds);
         let refresh = state.update(cx, |state, cx| state.update_bounds(target_bounds, cx));
@@ -595,6 +696,11 @@ impl Element for TooltipTargetElement {
             window.refresh();
         }
         self.target.prepaint(window, cx);
+        // Controls may occlude ancestor hover. The tooltip belongs to this target, so its
+        // nonblocking hitbox must sit above the target's own hitboxes, below later overlays.
+        let hitbox = self
+            .visible
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
         if let (Some(overlay), Some(layout_id)) =
             (self.overlay.as_mut(), request_layout.overlay_layout)
         {
@@ -708,7 +814,10 @@ fn show_target(
     cx: &mut App,
 ) {
     let window_id = window.window_handle().window_id();
-    if tooltip_suppressed(window_id, cx)
+    let Some(parent) = state.read_with(cx, |state, _| state.modal_parent).ok() else {
+        return;
+    };
+    if !tooltip_parent_is_eligible(parent, window, cx)
         || tooltip_suppression_epoch(window_id, cx) != suppression_epoch
         || !window.is_window_active()
     {
@@ -760,6 +869,7 @@ struct TooltipReservation(u64);
 struct TooltipOwnership {
     owner: WeakEntity<TooltipTargetState>,
     reservation: TooltipReservation,
+    modal_parent: Option<crate::modal::ModalParentToken>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -792,6 +902,7 @@ fn reserve_window(
 ) -> (TooltipReservation, Option<WeakEntity<TooltipTargetState>>) {
     let window_id = window.window_handle().window_id();
     let weak = owner.downgrade();
+    let modal_parent = owner.read(cx).modal_parent;
     cx.update_global::<TooltipCoordinator, _>(|coordinator, _| {
         coordinator.next_reservation = coordinator.next_reservation.wrapping_add(1);
         let reservation = TooltipReservation(coordinator.next_reservation);
@@ -802,6 +913,7 @@ fn reserve_window(
                 TooltipOwnership {
                     owner: weak.clone(),
                     reservation,
+                    modal_parent,
                 },
             )
             .map(|ownership| ownership.owner)
@@ -840,11 +952,43 @@ fn dismiss_window_tooltip(window_id: WindowId, cx: &mut App) {
     }
 }
 
+pub(crate) fn dismiss_modal_tooltip(parent: crate::modal::ModalParentToken, cx: &mut App) {
+    if cx.has_global::<TooltipCoordinator>()
+        && cx
+            .global::<TooltipCoordinator>()
+            .owners
+            .get(&parent.window_id)
+            .is_some_and(|owner| owner.modal_parent == Some(parent))
+    {
+        dismiss_window_tooltip(parent.window_id, cx);
+    }
+}
+
+fn tooltip_parent_is_eligible(
+    parent: Option<crate::modal::ModalParentToken>,
+    window: &Window,
+    cx: &App,
+) -> bool {
+    if parent != crate::modal::current_modal_parent(window, cx) {
+        return false;
+    }
+    let window_id = window.window_handle().window_id();
+    !cx.global::<TooltipCoordinator>()
+        .suppressions
+        .get(&window_id)
+        .is_some_and(|reasons| {
+            reasons
+                .iter()
+                .any(|reason| *reason != TooltipSuppression::Modal || parent.is_none())
+        })
+}
+
 #[cfg(test)]
 pub(crate) fn window_tooltips_suppressed(window: &Window, cx: &App) -> bool {
     tooltip_suppressed(window.window_handle().window_id(), cx)
 }
 
+#[cfg(test)]
 fn tooltip_suppressed(window_id: WindowId, cx: &App) -> bool {
     cx.has_global::<TooltipCoordinator>()
         && cx
@@ -902,6 +1046,7 @@ pub(crate) fn set_window_tooltip_suppression(
 }
 
 struct TooltipTargetState {
+    modal_parent: Option<crate::modal::ModalParentToken>,
     enabled: bool,
     hovered: bool,
     visible: bool,
@@ -930,6 +1075,7 @@ impl TooltipTargetState {
         })
         .detach();
         Self {
+            modal_parent: None,
             enabled: false,
             hovered: false,
             visible: false,
@@ -943,13 +1089,20 @@ impl TooltipTargetState {
     fn synchronize(
         &mut self,
         enabled: bool,
+        parent: Option<crate::modal::ModalParentToken>,
         cx: &mut gpui::Context<Self>,
     ) -> Option<(WindowId, TooltipReservation)> {
-        if self.enabled == enabled {
+        if self.enabled == enabled && self.modal_parent == parent {
             return None;
         }
+        let parent_changed = self.modal_parent != parent;
+        self.modal_parent = parent;
         self.enabled = enabled;
-        if enabled { None } else { self.dismiss(cx) }
+        if enabled && !parent_changed {
+            None
+        } else {
+            self.dismiss(cx)
+        }
     }
 
     fn update_bounds(
@@ -1118,6 +1271,9 @@ impl Element for TooltipOverlay {
             .owner
             .read_with(cx, |state, cx| {
                 let (window_id, reservation) = state.ownership?;
+                if !tooltip_parent_is_eligible(state.modal_parent, window, cx) {
+                    return None;
+                }
                 let target = state.target_bounds?;
                 let authoritative = cx
                     .global::<TooltipCoordinator>()
@@ -1315,13 +1471,7 @@ mod tests {
 
     fn test_theme() -> TooltipTheme {
         TooltipTheme::new(
-            TooltipPaint::new(
-                rgba(0x202020ff),
-                rgba(0x404040ff),
-                rgba(0xffffffff),
-                rgba(0xaaaaaaff),
-                rgba(0xccccccff),
-            ),
+            TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
             TooltipMetrics::new(px(320.0)),
         )
     }
@@ -1534,7 +1684,7 @@ mod tests {
         let state = cx.update(|window, cx| {
             cx.new(|cx| {
                 let mut state = TooltipTargetState::new(window, cx);
-                state.synchronize(true, cx);
+                state.synchronize(true, None, cx);
                 state
             })
         });

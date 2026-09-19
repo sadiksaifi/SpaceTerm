@@ -14,6 +14,14 @@ pub(super) fn catalog(
     // which stays the reference for every contrast decision.
     let reference = &appearance.colors;
     let colors = &appearance.control_colors;
+    let host = &appearance.floating_colors;
+    // The shell paints the material once. Idle rows inherit it, while row states keep their
+    // complete host-relative paints and content contrast reference.
+    let mut popup = host.clone();
+    popup.elevated_surface_background = appearance.surface(
+        crate::appearance::SurfaceRole::Floating,
+        appearance.colors.elevated_surface_background,
+    );
     ControlThemeCatalog::new(
         button_theme::theme(colors),
         toggle_theme::theme(colors),
@@ -22,12 +30,27 @@ pub(super) fn catalog(
         resize_handle_theme::theme(colors),
         segmented_control_theme::theme(colors),
         search_field_theme::themed(reference, colors),
-        menu_theme::themed(reference, colors),
-        command_palette_theme::themed(reference, colors),
-        combo_box_theme::themed(reference, colors),
+        menu_theme::themed_with_rows(host, colors, &popup),
+        command_palette_theme::themed(host, &popup),
+        combo_box_theme::themed_with_rows(host, colors, &popup),
         text_input_theme::theme(colors),
         tooltip_theme::theme(colors),
         modal_theme::theme(colors),
+    )
+    .floating(
+        appearance.floating_surfaces(),
+        spaceterm_ui::FloatingControlThemes::new(
+            button_theme::theme(host),
+            toggle_theme::theme(host),
+            progress_theme::theme(host, progress_motion),
+            segmented_control_theme::theme(host),
+            search_field_theme::themed(host, host),
+            text_input_theme::theme(host),
+        )
+        .triggers(
+            menu_theme::themed_with_rows(host, host, &popup),
+            combo_box_theme::themed_with_rows(host, host, &popup),
+        ),
     )
     .typography(spaceterm_ui::ControlTypography::new(
         appearance.regular.clone(),

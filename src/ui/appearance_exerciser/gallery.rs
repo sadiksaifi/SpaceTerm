@@ -11,7 +11,7 @@ use spaceterm_ui::{
     CommandPalette, CommandPaletteItem, ControlPreviewState, DeterminateProgress, FieldState, Icon,
     IconButton, IconName, ModalLayer, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize,
     ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption,
-    Switch, TextInput, TooltipLayer,
+    Switch, TextInput,
 };
 
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
@@ -305,7 +305,14 @@ impl Render for Gallery {
             .flex_col()
             .gap(px(9.0))
             .p(px(18.0))
-            .bg(rgba(appearance.colors.background.rgba_hex()))
+            .bg(rgba(
+                appearance
+                    .surface(
+                        crate::appearance::SurfaceRole::Sheet,
+                        appearance.colors.background,
+                    )
+                    .rgba_hex(),
+            ))
             .text_color(rgba(appearance.colors.text.rgba_hex()))
             .font(appearance.regular.clone())
             .text_size(px(12.0))
@@ -625,7 +632,7 @@ impl Render for Gallery {
                 ),
         );
         content=content.child(div().text_color(rgba(appearance.colors.text_muted.rgba_hex())).child("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press Ctrl+Alt+N to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-scheme Pane Captions."));
-        ModalLayer::new(TooltipLayer::new(content.child(self.palette.clone())))
+        ModalLayer::new(content).transient(self.palette.clone())
     }
 }
 

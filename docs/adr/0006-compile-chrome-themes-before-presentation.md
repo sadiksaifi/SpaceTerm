@@ -48,8 +48,16 @@ which stays the contrast reference. A translucent Pane lifts its default backdro
 elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
 thin elevation tints alone transmit too much desktop variation behind muted ANSI colors.
 Readability takes precedence over keeping a Pane lighter than its surroundings on bright backdrops.
-Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency. GPUI cannot blur
-content inside the window, so floating surfaces tint rather than blur what they cover.
+Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency.
+
+The desktop behind an Operating-System Window may use its platform's native effect. Everything
+inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
+reference, while platform Adapters own only native window capabilities. Separate native popup views
+would split interaction, accessibility, and lifecycle ownership across platforms, so menus, palettes,
+tooltips, modals, and Pane-local overlays remain GPUI-owned. GPUI cannot blur content already drawn
+inside the window. Floating surfaces therefore retain enough tint to keep covered text from
+competing with their own content. Opaque fallback preserves the same hierarchy. Future portable
+backdrop filtering belongs inside that contract rather than at individual callers.
 
 The window root owns the continuous window tint. Containers and resting controls paint only their color
 difference from that reference, and nested list rows paint only their own fill. Explicit Terminal cell

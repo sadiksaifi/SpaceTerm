@@ -71,6 +71,8 @@ pub(crate) struct ChromeAppearance {
     pub(crate) colors: ChromeColors,
     /// The same colors with the window's material applied to background fills, for controls.
     pub(crate) control_colors: ChromeColors,
+    /// Controls resolved from authored RGBA against the raised floating host.
+    pub(crate) floating_colors: ChromeColors,
     pub(crate) materials: SurfaceMaterials,
     pub(crate) regular: Font,
     pub(crate) emphasis: Font,
@@ -85,9 +87,11 @@ impl Default for ChromeAppearance {
         let regular = font(".SystemUIFont");
         let mut emphasis = regular.clone();
         emphasis.weight = FontWeight::SEMIBOLD;
-        let colors = ChromeColors::default().opaque_presentation();
+        let authored = ChromeColors::default();
+        let colors = authored.opaque_presentation();
         Self {
             control_colors: colors.clone(),
+            floating_colors: authored.floating_presentation(),
             colors,
             materials: SurfaceMaterials::OPAQUE,
             caption: regular.clone(),
@@ -129,18 +133,32 @@ impl ChromeAppearance {
         self.colors.row_selected_border
     }
 
-    pub(crate) fn shadow(&self) -> Vec<gpui::BoxShadow> {
-        vec![gpui::BoxShadow {
-            color: rgba(self.colors.shadow.rgba_hex()).into(),
-            offset: gpui::point(px(0.0), px(4.0)),
-            blur_radius: px(6.0),
-            spread_radius: px(-1.0),
-        }]
+    /// Resolves shared floating paints; the control catalog applies density once on installation.
+    pub(crate) fn floating_surfaces(&self) -> spaceterm_ui::FloatingSurfaceTheme {
+        use spaceterm_ui::{FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme};
+
+        let paint = |color| {
+            FloatingSurfacePaint::new(
+                rgba(self.surface(SurfaceRole::Floating, color).rgba_hex()),
+                rgba(self.colors.border.rgba_hex()),
+                rgba(self.colors.border_variant.rgba_hex()),
+            )
+        };
+        FloatingSurfaceTheme::new(
+            FloatingSurfacePaints::new(
+                paint(self.colors.elevated_surface_background),
+                paint(self.colors.preview_background),
+            ),
+            rgba(self.colors.shadow.rgba_hex()).into(),
+            rgba(self.colors.modal_scrim.rgba_hex()),
+        )
     }
+
     pub(crate) fn prepare(resolved: &ResolvedChromeAppearance) -> Self {
         let colors = resolved.colors.opaque_presentation();
         Self {
             control_colors: colors.material_presentation(resolved.composition.materials),
+            floating_colors: resolved.colors.floating_presentation(),
             colors,
             materials: resolved.composition.materials,
             regular: prepared_font(&resolved.typography.body),
@@ -285,20 +303,6 @@ mod typography_tests {
             "asking twice should not stack the feature"
         );
     }
-}
-
-pub(crate) fn control_shadow(colors: &ChromeColors, large: bool) -> spaceterm_ui::ControlShadow {
-    use spaceterm_ui::{ControlShadow, ControlShadowLayer};
-    let color = rgba(colors.shadow.rgba_hex()).into();
-    let (offset, blur, spread) = if large {
-        (10.0, 15.0, -3.0)
-    } else {
-        (4.0, 6.0, -1.0)
-    };
-    ControlShadow::double(
-        ControlShadowLayer::new(color, px(0.0), px(offset), px(blur), px(spread)),
-        ControlShadowLayer::new(color, px(0.0), px(2.0), px(4.0), px(-2.0)),
-    )
 }
 
 #[derive(Clone)]

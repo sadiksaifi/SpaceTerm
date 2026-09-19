@@ -319,7 +319,7 @@ impl ProgressBar {
 
 impl RenderOnce for ProgressBar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = *cx.global::<ProgressTheme>();
+        let theme = *crate::floating_surface::hosted_progress_theme(cx);
         let metrics = theme.sizes.metrics(self.size);
         let selector = self
             .debug_selector
@@ -538,7 +538,7 @@ impl ProgressRing {
 
 impl RenderOnce for ProgressRing {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = *cx.global::<ProgressTheme>();
+        let theme = *crate::floating_surface::hosted_progress_theme(cx);
         let metrics = theme.sizes.metrics(self.size);
         let paint = if self.inherited {
             RingPaint::Inherited

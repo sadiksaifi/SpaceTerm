@@ -645,7 +645,7 @@ impl ToggleCore {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
-        let style = cx.global::<ToggleTheme>().resolve(self.size, on);
+        let style = crate::floating_surface::hosted_toggle_theme(cx).resolve(self.size, on);
         let enabled = !self.disabled && self.on_activate.is_some();
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             ToggleControlState::new(window, cx)
@@ -671,8 +671,12 @@ impl ToggleCore {
         let focused = self.preview_state.map_or(focused, |state| state.focused());
         #[cfg(feature = "appearance-exerciser")]
         let paint = self.preview_state.map_or(paint, |state| {
-            cx.global::<ToggleTheme>()
-                .paint(on, enabled, state.hovered(), state.pressed())
+            crate::floating_surface::hosted_toggle_theme(cx).paint(
+                on,
+                enabled,
+                state.hovered(),
+                state.pressed(),
+            )
         });
         #[cfg(feature = "appearance-exerciser")]
         let keyboard_pressed = keyboard_pressed || self.preview_state.is_some();

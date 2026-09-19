@@ -5,15 +5,17 @@ use crate::appearance::{ChromeColors, Color};
 
 #[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> ComboBoxTheme {
-    themed(colors, colors)
+    themed_with_rows(colors, colors, colors)
 }
 
-/// Paints `colors`, resolving row content against the opaque `reference`.
-pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> ComboBoxTheme {
+/// Keeps a trigger's host treatment independent from rows on the shared floating material.
+pub(super) fn themed_with_rows(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+    row_colors: &ChromeColors,
+) -> ComboBoxTheme {
     ComboBoxTheme::new(
         ComboBoxPaint::new(
-            gpui_color(colors.elevated_surface_background),
-            gpui_color(colors.border),
             gpui_color(colors.text),
             gpui_color(colors.text_muted),
             gpui_color(colors.text_disabled),
@@ -26,19 +28,18 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> ComboBo
         )
         .trigger_icon_colors(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .rows(super::control_theme_catalog::overlay_list_rows(
-            reference, colors,
+            reference, row_colors,
         ))
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
         ComboBoxMetrics::new(px(240.0), px(28.0))
             .icon_trigger_size(px(28.0))
             .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
-            .spacing(px(4.0), px(8.0), px(18.0), px(6.0))
-            .shape(px(6.0), px(1.0))
+            .spacing(px(8.0), px(18.0), px(6.0))
+            .trigger_shape(px(6.0))
             .font_sizes(px(12.0), px(11.0))
             .text_geometry(px(16.0), px(12.0)),
     )
-    .shadow(super::appearance::control_shadow(colors, false))
 }
 
 fn gpui_color(color: Color) -> Rgba {

@@ -49,6 +49,23 @@ struct KeyPropagationProbe {
     propagated_key_downs: Rc<Cell<usize>>,
 }
 
+struct PastePointerRoot(Entity<TerminalPane>);
+
+impl Render for PastePointerRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        spaceterm_ui::ModalLayer::new(
+            div()
+                .id("paste-pointer-pane-frame")
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(self.0.clone()),
+        )
+    }
+}
+
 struct RecordingFilePreviewPanel {
     previews: Rc<Cell<usize>>,
     dismissals: Rc<Cell<usize>>,
@@ -3869,6 +3886,233 @@ fn native_service_return_is_rejected_without_terminal_input_focus(cx: &mut TestA
 }
 
 #[gpui::test]
+fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestAppContext) {
+    const MESSAGE: &str = "Paste confirmation expired without writing terminal input";
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    struct StatusLayoutProbe {
+        pane: Entity<TerminalPane>,
+    }
+    impl Render for StatusLayoutProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().relative().child(
+                div()
+                    .absolute()
+                    .left(px(240.0))
+                    .top(px(46.0))
+                    .right_0()
+                    .bottom_0()
+                    .child(self.pane.clone()),
+            )
+        }
+    }
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| StatusLayoutProbe { pane: pane.clone() });
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(580.0)));
+    pane.update(cx, |pane, cx| {
+        pane.status = Some(MESSAGE.to_owned());
+        pane.status_intent = StatusIntent::Warning;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let expected_width = cx.update(|window, cx| chrome(cx).measure(MESSAGE, 13.0, window));
+    let wide_message = cx.debug_bounds("terminal-status-message").unwrap();
+    let wide_shell = cx.debug_bounds("terminal-status").unwrap();
+    assert!(
+        wide_message.size.width + px(1.0) >= expected_width,
+        "A wide Pane must allocate the full message width: {wide_message:?}, expected {expected_width:?}"
+    );
+    assert!(wide_shell.contains(&wide_message.origin));
+    assert!(wide_message.right() <= wide_shell.right());
+    assert!(wide_message.bottom() <= wide_shell.bottom());
+
+    cx.simulate_resize(gpui::size(px(560.0), px(580.0)));
+    cx.run_until_parked();
+    let narrow_message = cx.debug_bounds("terminal-status-message").unwrap();
+    let narrow_shell = cx.debug_bounds("terminal-status").unwrap();
+    assert!(narrow_message.size.width < expected_width);
+    assert!(narrow_message.size.width > narrow_shell.size.width * 0.5);
+    assert!(narrow_message.size.height > wide_message.size.height);
+    assert!(narrow_shell.contains(&narrow_message.origin));
+    assert!(narrow_message.right() <= narrow_shell.right());
+    assert!(narrow_message.bottom() <= narrow_shell.bottom());
+}
+
+#[gpui::test]
+fn unsafe_paste_cancel_button_cancels_without_writing_terminal_input(cx: &mut TestAppContext) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(20),
+        byte_len: 12,
+        line_count: 2,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (pane, cx, records) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Cancelled),
+    );
+    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+
+    let cancel = cx.debug_bounds("cancel-unsafe-paste").unwrap();
+    cx.simulate_click(cancel.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+    assert!(cx.debug_bounds("unsafe-paste-confirmation").is_none());
+    assert!(records.commands().iter().any(|call| {
+        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+    }));
+    assert!(!records.commands().iter().any(|call| {
+        call.command
+            == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+    }));
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+}
+
+#[gpui::test]
+fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut TestAppContext) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(19),
+        byte_len: 12,
+        line_count: 2,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (pane, cx, _) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Written),
+    );
+    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let compact = cx.debug_bounds("unsafe-paste-confirmation").unwrap();
+    let geometry = pane.read_with(cx, |pane, _| (pane.grid_bounds, pane.last_geometry));
+
+    cx.update(|_, cx| {
+        let mut appearance = chrome(cx).clone();
+        appearance.spacing_scale *= 1.25;
+        spaceterm_ui::replace_control_theme_catalog(
+            cx,
+            super::super::control_theme_catalog::catalog(
+                &appearance,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
+        )
+        .unwrap();
+        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+            appearance,
+        )));
+    });
+    cx.run_until_parked();
+
+    let comfortable = cx.debug_bounds("unsafe-paste-confirmation").unwrap();
+    for (original, scaled) in [
+        (
+            compact.left() - pane_bounds.left(),
+            comfortable.left() - pane_bounds.left(),
+        ),
+        (
+            pane_bounds.right() - compact.right(),
+            pane_bounds.right() - comfortable.right(),
+        ),
+        (
+            pane_bounds.bottom() - compact.bottom(),
+            pane_bounds.bottom() - comfortable.bottom(),
+        ),
+    ] {
+        assert_eq!(scaled, original * 1.25);
+    }
+    assert_eq!(
+        pane.read_with(cx, |pane, _| (pane.grid_bounds, pane.last_geometry)),
+        geometry,
+        "Chrome notice spacing must not resize the terminal cell grid"
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.pending_paste),
+        Some(confirmation)
+    );
+}
+
+#[gpui::test]
+fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer_events(
+    cx: &mut TestAppContext,
+) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(21),
+        byte_len: 12,
+        line_count: 2,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (pane, cx, records) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Cancelled),
+    );
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| PastePointerRoot(pane.clone()));
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: true,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let grid = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap());
+    assert!(grid.size.width > px(100.0) && grid.size.height > px(100.0));
+    let start = grid.origin + point(px(8.0), px(8.0));
+    let end = start + point(px(40.0), px(0.0));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.pressed_button.is_none()));
+
+    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+    let cancel = cx.debug_bounds("cancel-unsafe-paste").unwrap().center();
+    cx.simulate_mouse_move(cancel, None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(cancel, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+    cx.run_until_parked();
+    cx.simulate_mouse_up(cancel, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+    assert!(records.commands().iter().any(|call| {
+        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+    }));
+}
+
+#[gpui::test]
 fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_ui(
     cx: &mut TestAppContext,
 ) {
@@ -5039,6 +5283,35 @@ fn stationary_link_hover_updates_when_the_platform_modifier_changes(cx: &mut Tes
     assert!(cx.debug_bounds("terminal-link-preview").is_some());
 
     cx.simulate_modifiers_change(Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-link-preview").is_none());
+}
+
+#[cfg(feature = "appearance-exerciser")]
+#[gpui::test]
+fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let (screen, state) = pane.read_with(cx, |pane, _| {
+        (Arc::clone(&pane.screen), pane.pane_state.clone())
+    });
+    let commands = records.commands();
+    assert!(cx.debug_bounds("terminal-link-preview").is_none());
+
+    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(true, cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("terminal-link-preview").is_some());
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.current_hovered_link().is_none());
+        assert!(!pane.pointer_modifiers.platform);
+        assert!(Arc::ptr_eq(&pane.screen, &screen));
+        assert_eq!(pane.pane_state, state);
+    });
+    assert_eq!(records.commands(), commands);
+
+    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 }

@@ -450,9 +450,11 @@ pub(crate) fn measure_button_intrinsic_width(
     window: &Window,
     cx: &App,
 ) -> Pixels {
-    let style =
-        cx.global::<ButtonTheme>()
-            .resolve(ButtonVariant::Secondary, size, ButtonShape::Rounded);
+    let style = crate::floating_surface::hosted_button_theme(cx).resolve(
+        ButtonVariant::Secondary,
+        size,
+        ButtonShape::Rounded,
+    );
     let text_style = window.text_style();
     let font = crate::control_typography(cx).regular().clone();
     let run = TextRun {
@@ -1094,9 +1096,11 @@ impl ButtonCore {
     }
 
     fn resolve_style(&self, cx: &App) -> ButtonStyle {
-        let mut style = cx
-            .global::<ButtonTheme>()
-            .resolve(self.variant, self.size, self.shape);
+        let mut style = crate::floating_surface::hosted_button_theme(cx).resolve(
+            self.variant,
+            self.size,
+            self.shape,
+        );
         if let Some((paints, focus_border)) = self.contextual_style {
             style.normal = paints.normal;
             style.hovered = paints.hovered;

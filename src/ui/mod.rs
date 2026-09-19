@@ -7,6 +7,8 @@ mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
 mod directory_picker;
+#[cfg(test)]
+mod floating_surface_tests;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;

@@ -4,6 +4,7 @@
 #[path = "appearance_exerciser_tests.rs"]
 mod tests;
 
+mod floating_fixtures;
 mod gallery;
 
 use std::{collections::BTreeSet, time::Duration};
@@ -45,6 +46,21 @@ impl Global for ExerciserWindows {}
 
 struct GalleryCaptionFixture;
 impl Global for GalleryCaptionFixture {}
+
+struct LinkPreviewFixture(bool);
+impl Global for LinkPreviewFixture {}
+
+pub(crate) fn set_link_preview_fixture(enabled: bool, cx: &mut App) {
+    cx.set_global(LinkPreviewFixture(enabled));
+    cx.refresh_windows();
+}
+
+/// Display text only; this fixture never supplies a terminal hyperlink target.
+pub(crate) fn link_preview_fixture(cx: &App) -> Option<&'static str> {
+    cx.try_global::<LinkPreviewFixture>()
+        .is_some_and(|fixture| fixture.0)
+        .then_some("https://example.invalid/appearance-fixture")
+}
 
 /// Synthetic display facts keep native acceptance captures independent of the host account.
 pub(crate) fn caption_fixture(cx: &App) -> Option<super::terminal_pane::PaneCaptionFacts> {
@@ -570,6 +586,16 @@ impl AppearanceExerciser {
         cx.notify();
     }
 
+    fn show_link_preview(&mut self, cx: &mut Context<Self>) {
+        set_link_preview_fixture(true, cx);
+        self.show_terminal_window(cx);
+    }
+
+    fn clear_link_preview(&mut self, cx: &mut Context<Self>) {
+        set_link_preview_fixture(false, cx);
+        self.show_terminal_window(cx);
+    }
+
     fn show_gallery(&mut self, cx: &mut Context<Self>) {
         self.status = if gallery::open(cx).is_ok() {
             "Opened deterministic state gallery"
@@ -648,7 +674,14 @@ impl AppearanceExerciser {
 impl Render for AppearanceExerciser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = super::appearance::chrome(cx).clone();
-        let background = rgba(appearance.colors.background.rgba_hex());
+        let background = rgba(
+            appearance
+                .surface(
+                    crate::appearance::SurfaceRole::Sheet,
+                    appearance.colors.background,
+                )
+                .rgba_hex(),
+        );
         let foreground = rgba(appearance.colors.text.rgba_hex());
         let muted = rgba(appearance.colors.text_muted.rgba_hex());
         let weak = cx.weak_entity();
@@ -738,6 +771,8 @@ impl Render for AppearanceExerciser {
                 .child(action("appearance-reload-fonts", "Reload Fonts", Self::reload_fonts))
                 .child(action("appearance-show-gallery", "Show State Gallery", Self::show_gallery))
                 .child(action("appearance-show-fixtures", "Show Acceptance Fixtures", Self::show_fixture_window))
+                .child(action("appearance-show-link-preview", "Show Link Preview", Self::show_link_preview))
+                .child(action("appearance-clear-link-preview", "Clear Link Preview", Self::clear_link_preview))
                 .child(action("appearance-show-terminal", "Show Terminal Window", Self::show_terminal_window)))
             .child(
                 div()
@@ -752,7 +787,7 @@ impl Render for AppearanceExerciser {
             .child(div().text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(
                 "The JSON editor is a bounded single-line development field. Export, edit or paste a native settings/color package, then use the matching action. Preview never writes; Commit uses the isolated retained Config root."
             ));
-        spaceterm_ui::ModalLayer::new(spaceterm_ui::TooltipLayer::new(content))
+        spaceterm_ui::ModalLayer::new(content)
     }
 }
 
@@ -770,6 +805,7 @@ impl Render for AppearanceDialogBody {
 struct AppearanceFixtures {
     window_appearance: appearance_runtime::WindowAppearanceOwner,
     input: Entity<TextInput>,
+    floating: Entity<floating_fixtures::FloatingFixtures>,
 }
 
 impl AppearanceFixtures {
@@ -786,6 +822,7 @@ impl AppearanceFixtures {
         .detach();
         Self {
             window_appearance,
+            floating: cx.new(|cx| floating_fixtures::FloatingFixtures::new(window, cx)),
             input: cx.new(|cx| {
                 TextInput::new(
                     "appearance-obscured-input",
@@ -900,7 +937,7 @@ impl Render for AppearanceFixtures {
             .flex_col()
             .gap(appearance.spacing(12.0))
             .p(appearance.spacing(16.0))
-            .bg(rgba(appearance.colors.background.rgba_hex()))
+            .bg(rgba(appearance.surface(crate::appearance::SurfaceRole::Sheet, appearance.colors.background).rgba_hex()))
             .text_color(rgba(appearance.colors.text.rgba_hex()))
             .text_size(appearance.text_size(13.0))
             .font(appearance.regular.clone())
@@ -940,7 +977,8 @@ impl Render for AppearanceFixtures {
                     .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
                     .whitespace_normal()
                     .child("Open each modal to verify that the input, combo box and menu remain safely obscured and cannot receive interaction through the scrim."),
-            );
-        spaceterm_ui::ModalLayer::new(spaceterm_ui::TooltipLayer::new(content))
+            )
+            .child(self.floating.clone());
+        spaceterm_ui::ModalLayer::new(content).transient(self.floating.read(cx).palette())
     }
 }

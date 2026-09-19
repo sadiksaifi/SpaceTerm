@@ -110,7 +110,11 @@ pub fn field_frame(
 
 /// Creates shared input presentation for a composite without one editor focus handle.
 pub fn field_surface(id: impl Into<ElementId>, state: FieldState, cx: &App) -> Stateful<Div> {
-    themed_field_surface(cx.global::<crate::TextInputTheme>().frame, id, state)
+    themed_field_surface(
+        crate::floating_surface::hosted_text_input_theme(cx).frame,
+        id,
+        state,
+    )
 }
 
 /// Creates the same surface for a control family that owns its own field paints.

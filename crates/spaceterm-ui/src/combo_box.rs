@@ -14,13 +14,13 @@ use gpui::{
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, WeakEntity,
-    WeakFocusHandle, Window, WindowId, actions, anchored, canvas, deferred, div, list,
+    WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div, list,
     prelude::FluentBuilder as _, px, size,
 };
 
 use crate::{
-    ControlShadow, Icon, IconName, TextInput, TextInputEvent, TextInputHomeEndBehavior,
-    TextInputTabBehavior, TextInputVariant,
+    FloatingRole, FloatingShell, Icon, IconName, TextInput, TextInputEvent,
+    TextInputHomeEndBehavior, TextInputTabBehavior, TextInputVariant,
     anchored_placement::{
         AnchoredPlacementConfig, AnchoredTextDirection, constrain_anchored_size, place_anchored,
     },
@@ -29,7 +29,8 @@ use crate::{
 };
 
 const KEY_CONTEXT: &str = "SpaceTermComboBox";
-const OVERLAY_PRIORITY: usize = 2;
+/// The open popup is an anchored popup, like the menus it sits beside.
+const COMBO_BOX_ROLE: FloatingRole = FloatingRole::Popover;
 
 actions!(
     spaceterm_combo_box,
@@ -388,7 +389,12 @@ impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
                         || state.disabled
                         || state.busy
                         || !state.popup_focus.contains_focused(window, cx)
-                        || crate::modal::window_modal_is_open(window, cx)
+                        || crate::modal::current_modal_parent(window, cx)
+                            != crate::modal::modal_parent_for_focus(
+                                &state.trigger_focus,
+                                window,
+                                cx,
+                            )
                         || crate::menu::window_menu_is_open(window, cx)
                     {
                         return false;
@@ -426,11 +432,12 @@ impl<I: Clone + Eq + 'static> ComboBoxHandle<I> {
 }
 
 /// Application-owned ComboBox paint values.
+///
+/// The open popup's material, edge, internal divider, corners, and elevation come from the shared
+/// anchored-popup surface. This catalog carries the trigger and the popup's content.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ComboBoxPaint {
     rows: Option<crate::ListRowPaints>,
-    background: Rgba,
-    border: Rgba,
     foreground: Rgba,
     trigger_icon_foreground: Rgba,
     trigger_icon_disabled: Rgba,
@@ -453,8 +460,6 @@ impl ComboBoxPaint {
         reason = "the bounded paint catalog is one theme fact"
     )]
     pub fn new(
-        background: Rgba,
-        border: Rgba,
         foreground: Rgba,
         muted: Rgba,
         disabled: Rgba,
@@ -467,8 +472,6 @@ impl ComboBoxPaint {
     ) -> Self {
         Self {
             rows: None,
-            background,
-            border,
             foreground,
             trigger_icon_foreground: foreground,
             trigger_icon_disabled: disabled,
@@ -534,6 +537,7 @@ pub struct ComboBoxMetrics {
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
+    trigger_corner_radius: Pixels,
     corner_radius: Pixels,
     border_width: Pixels,
     label_size: Pixels,
@@ -545,6 +549,7 @@ pub struct ComboBoxMetrics {
 impl ComboBoxMetrics {
     /// Creates compact native defaults around a panel width and trigger height.
     pub fn new(panel_width: Pixels, trigger_height: Pixels) -> Self {
+        let shell = crate::FloatingSurfaceTheme::default().shell(COMBO_BOX_ROLE);
         Self {
             panel_width,
             maximum_height: px(320.0),
@@ -553,12 +558,13 @@ impl ComboBoxMetrics {
             input_height: px(34.0),
             row_height: px(30.0),
             described_row_height: px(46.0),
-            panel_padding: px(4.0),
+            panel_padding: shell.content_inset(),
             horizontal_padding: px(10.0),
             leading_width: px(18.0),
             gap: px(8.0),
-            corner_radius: px(7.0),
-            border_width: px(1.0),
+            trigger_corner_radius: px(6.0),
+            corner_radius: shell.corner_radius(),
+            border_width: shell.hairline(),
             label_size: px(12.0),
             secondary_size: px(11.0),
             line_height: px(16.0),
@@ -587,25 +593,22 @@ impl ComboBoxMetrics {
         self
     }
 
-    /// Sets panel padding, content padding, leading-slot width, and column gap.
+    /// Sets content padding, leading-slot width, and column gap.
     pub fn spacing(
         mut self,
-        panel_padding: Pixels,
         horizontal_padding: Pixels,
         leading_width: Pixels,
         gap: Pixels,
     ) -> Self {
-        self.panel_padding = panel_padding;
         self.horizontal_padding = horizontal_padding;
         self.leading_width = leading_width;
         self.gap = gap;
         self
     }
 
-    /// Sets panel corner radius and border width.
-    pub fn shape(mut self, corner_radius: Pixels, border_width: Pixels) -> Self {
-        self.corner_radius = corner_radius;
-        self.border_width = border_width;
+    /// Sets the corner radius of the trigger that opens the popup.
+    pub fn trigger_shape(mut self, corner_radius: Pixels) -> Self {
+        self.trigger_corner_radius = corner_radius;
         self
     }
 
@@ -661,7 +664,7 @@ impl ComboBoxMetrics {
                 text_scale,
                 spacing_scale,
             ),
-            panel_padding: crate::appearance::scale_metric(self.panel_padding, spacing_scale),
+            panel_padding: self.panel_padding,
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
@@ -669,7 +672,11 @@ impl ComboBoxMetrics {
             leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
                 .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            trigger_corner_radius: crate::appearance::scale_metric(
+                self.trigger_corner_radius,
+                spacing_scale,
+            ),
+            corner_radius: self.corner_radius,
             border_width: self.border_width,
             label_size,
             secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
@@ -692,11 +699,14 @@ impl ComboBoxMetrics {
 }
 
 /// Application-owned presentation installed once for every ComboBox.
+///
+/// The open popup's surface treatment belongs to the shared anchored-popup role, so a ComboBox and
+/// a Menu opened beside it are the same object at the same elevation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ComboBoxTheme {
     paint: ComboBoxPaint,
     metrics: ComboBoxMetrics,
-    shadow: ControlShadow,
+    shell: FloatingShell,
 }
 
 impl ComboBoxTheme {
@@ -705,14 +715,8 @@ impl ComboBoxTheme {
         Self {
             paint,
             metrics,
-            shadow: ControlShadow::large_default(),
+            shell: crate::FloatingSurfaceTheme::default().shell(COMBO_BOX_ROLE),
         }
-    }
-
-    /// Sets the semantic elevation used by the open popup.
-    pub fn shadow(mut self, shadow: ControlShadow) -> Self {
-        self.shadow = shadow;
-        self
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -730,6 +734,17 @@ impl ComboBoxTheme {
 }
 
 impl Global for ComboBoxTheme {}
+
+/// Resolves the installed ComboBox theme against the shared anchored-popup surface.
+fn combo_box_theme(cx: &App) -> ComboBoxTheme {
+    let mut theme = *cx.global::<ComboBoxTheme>();
+    let shell = crate::floating_surface::shell(COMBO_BOX_ROLE, cx);
+    theme.metrics.corner_radius = shell.corner_radius();
+    theme.metrics.panel_padding = shell.content_inset();
+    theme.metrics.border_width = shell.hairline();
+    theme.shell = shell;
+    theme
+}
 
 type AcceptanceHandler<I> = Rc<dyn Fn(&ComboBoxAcceptance<I>, &mut Window, &mut App)>;
 type LifecycleHandler = Rc<dyn Fn(&ComboBoxLifecycleEvent, &mut App)>;
@@ -969,6 +984,8 @@ type ClaimComboBoxMenu = Rc<dyn Fn(&mut App) -> bool>;
 
 struct ErasedComboBoxRegistration {
     token: ComboBoxRegistration,
+    modal_parent: Option<crate::modal::ModalParentToken>,
+    popup_focus: WeakFocusHandle,
     replace: ReplaceComboBox,
     is_open: ComboBoxIsOpen,
     claim_menu: ClaimComboBoxMenu,
@@ -1010,6 +1027,8 @@ pub fn window_combo_box_is_open(window: &Window, cx: &App) -> bool {
 
 fn register_combo_box<I: Clone + Eq + 'static>(
     owner: WeakEntity<ComboBoxState<I>>,
+    modal_parent: Option<crate::modal::ModalParentToken>,
+    popup_focus: WeakFocusHandle,
     window: &Window,
     cx: &mut App,
 ) -> (ComboBoxRegistration, Option<WeakFocusHandle>) {
@@ -1045,6 +1064,8 @@ fn register_combo_box<I: Clone + Eq + 'static>(
             window_id,
             ErasedComboBoxRegistration {
                 token: registration,
+                modal_parent,
+                popup_focus,
                 replace,
                 is_open,
                 claim_menu,
@@ -1075,6 +1096,59 @@ pub(crate) fn dismiss_active_combo_box_for_replacement(
         .get(&window.window_handle().window_id())
         .map(|owner| owner.replace.clone());
     replace.and_then(|replace| replace(cx))
+}
+
+pub(crate) fn window_combo_box_is_owned_by_current_modal(window: &Window, cx: &App) -> bool {
+    let Some(parent) = crate::modal::current_modal_parent(window, cx) else {
+        return false;
+    };
+    cx.has_global::<ComboBoxCoordinator>()
+        && cx
+            .global::<ComboBoxCoordinator>()
+            .owners
+            .get(&parent.window_id)
+            .is_some_and(|owner| owner.modal_parent == Some(parent) && (owner.is_open)(cx))
+}
+
+pub(crate) fn focused_combo_box_modal_parent(
+    window: &Window,
+    cx: &App,
+) -> Option<crate::modal::ModalParentToken> {
+    let parent = crate::modal::current_modal_parent(window, cx)?;
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        return None;
+    }
+    let owner = cx
+        .global::<ComboBoxCoordinator>()
+        .owners
+        .get(&parent.window_id)?;
+    (owner.modal_parent == Some(parent)
+        && owner
+            .popup_focus
+            .upgrade()
+            .is_some_and(|focus| focus.contains_focused(window, cx)))
+    .then_some(parent)
+}
+
+pub(crate) fn dismiss_combo_box_owned_by_modal_parent(
+    parent: crate::modal::ModalParentToken,
+    cx: &mut App,
+) -> Option<WeakFocusHandle> {
+    if !cx.has_global::<ComboBoxCoordinator>() {
+        return None;
+    }
+    let owner = cx
+        .global::<ComboBoxCoordinator>()
+        .owners
+        .get(&parent.window_id)?;
+    if owner.modal_parent != Some(parent) {
+        return None;
+    }
+    let retired_focus = owner.popup_focus.clone();
+    let replace = owner.replace.clone();
+    let replacement = replace(cx)?;
+    cx.defer(move |cx| replacement.finish(cx));
+    Some(retired_focus)
 }
 
 pub(crate) fn claim_window_combo_box_menu(window: &Window, cx: &mut App) -> bool {
@@ -1156,7 +1230,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     registration: Option<ComboBoxRegistration>,
     window_id: WindowId,
     restore_focus: Option<WeakFocusHandle>,
-    restore_on_activation: Option<WeakFocusHandle>,
+    restore_on_activation: Option<(WeakFocusHandle, Option<crate::modal::ModalParentToken>)>,
     on_accept: Option<AcceptanceHandler<I>>,
     on_lifecycle: Option<LifecycleHandler>,
     _input_subscription: Subscription,
@@ -1228,14 +1302,18 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         });
         cx.observe_window_activation(window, |state, window, cx| {
             if state.open && !window.is_window_active() {
-                state.restore_on_activation = state.restore_focus.clone();
+                state.restore_on_activation = state
+                    .restore_focus
+                    .clone()
+                    .map(|focus| (focus, crate::modal::current_modal_parent(window, cx)));
                 state.close(ComboBoxCloseReason::Deactivated, false, Some(window), cx);
             } else if !state.open
                 && window.is_window_active()
                 && let Some(focus) = state
                     .restore_on_activation
                     .take()
-                    .and_then(|focus| focus.upgrade())
+                    .filter(|(_, parent)| *parent == crate::modal::current_modal_parent(window, cx))
+                    .and_then(|(focus, _)| focus.upgrade())
             {
                 focus.focus(window);
             }
@@ -1480,10 +1558,11 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        let modal_parent = crate::modal::modal_parent_for_focus(&self.trigger_focus, window, cx);
         if self.open
             || self.disabled
             || self.trigger_bounds.is_none()
-            || crate::modal::window_modal_is_open(window, cx)
+            || crate::modal::current_modal_parent(window, cx) != modal_parent
         {
             return false;
         }
@@ -1520,8 +1599,13 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         if let Some(position) = self.provisional_position() {
             self.list.scroll_to_reveal_item(position);
         }
-        let (registration, combo_predecessor) =
-            register_combo_box(cx.entity().downgrade(), window, cx);
+        let (registration, combo_predecessor) = register_combo_box(
+            cx.entity().downgrade(),
+            modal_parent,
+            self.popup_focus.downgrade(),
+            window,
+            cx,
+        );
         self.registration = Some(registration);
         self.restore_focus = palette_predecessor
             .or(menu_predecessor)
@@ -1818,7 +1902,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             });
             window.refresh();
         }
-        let theme = *cx.global::<ComboBoxTheme>();
+        let theme = combo_box_theme(cx);
         let font = crate::control_typography(cx).regular().clone();
         let snapshot = state.read(cx);
         let open = snapshot.open;
@@ -1871,7 +1955,8 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let key_state = state.downgrade();
         let debug_selector = self.debug_selector;
         let accessibility_name = self.accessibility_name;
-        let paint = theme.paint;
+        let paint = crate::floating_surface::hosted_combo_box_theme(cx)
+            .map_or(theme.paint, |theme| theme.paint);
         let metrics = theme.metrics;
         let (icon_trigger, custom_content) = match self.trigger {
             ComboBoxTrigger::Text => (false, None),
@@ -1920,12 +2005,12 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             })
             .flex()
             .items_center()
-            .rounded(metrics.corner_radius)
+            .rounded(metrics.trigger_corner_radius)
             .border(metrics.border_width)
             .border_color(if focused {
                 paint.focus_border
             } else if bezel {
-                paint.border
+                theme.shell.edge()
             } else {
                 paint.trigger_border
             })
@@ -2098,7 +2183,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let theme = *cx.global::<ComboBoxTheme>();
+    let theme = combo_box_theme(cx);
     let font = crate::control_typography(cx).regular().clone();
     let snapshot = state.read(cx);
     let Some(target) = snapshot.trigger_bounds else {
@@ -2255,12 +2340,6 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .h(bounds.size.height)
         .flex()
         .flex_col()
-        .overflow_hidden()
-        .rounded(theme.metrics.corner_radius)
-        .shadow(theme.shadow.layers())
-        .border(theme.metrics.border_width)
-        .border_color(theme.paint.border)
-        .bg(theme.paint.background)
         .text_size(theme.metrics.label_size)
         .line_height(theme.metrics.line_height)
         .font(font)
@@ -2290,9 +2369,9 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .child(
             div()
                 .w_full()
-                .h(theme.metrics.border_width)
+                .h(theme.shell.hairline())
                 .flex_shrink_0()
-                .bg(theme.paint.border),
+                .bg(theme.shell.divider()),
         )
         .child(
             div()
@@ -2303,6 +2382,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 .child(content)
                 .child(result_tracker),
         );
+    let panel = theme.shell.mount(panel);
 
     let up = state.downgrade();
     let down = state.downgrade();
@@ -2363,13 +2443,10 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .position(gpui::point(px(0.0), px(0.0)))
         .snap_to_window()
         .child(overlay);
-    if nested_menu_open {
-        overlay.into_any_element()
-    } else {
-        deferred(overlay)
-            .with_priority(OVERLAY_PRIORITY)
-            .into_any_element()
-    }
+    // A context menu opened from the editor is itself a deferred anchored popup, and GPUI cannot
+    // enqueue one while it is already processing deferred draws. While the popup hosts that menu it
+    // draws normally instead, and the menu defers above it.
+    crate::floating_surface::present(theme.shell.layer(nested_menu_open), overlay)
 }
 
 fn status_row(
@@ -2676,10 +2753,8 @@ mod tests {
         let text = gpui::rgba(0x111111ff);
         let icon = gpui::rgba(0xabcdef80);
         let disabled = gpui::rgba(0x123456ff);
-        let paint = ComboBoxPaint::new(
-            text, text, text, text, text, text, text, text, text, text, text,
-        )
-        .trigger_icon_colors(icon, disabled);
+        let paint = ComboBoxPaint::new(text, text, text, text, text, text, text, text, text)
+            .trigger_icon_colors(icon, disabled);
         assert_eq!(paint.trigger_icon_foreground, icon);
         assert_eq!(paint.trigger_icon_disabled, disabled);
         assert_eq!(paint.foreground, text);
@@ -2697,11 +2772,9 @@ mod tests {
         let selected = gpui::rgba(0x222222ff);
         let hovered = gpui::rgba(0xabcdef80);
         let hover_foreground = gpui::rgba(0x123456ff);
-        let paint = ComboBoxPaint::new(
-            base, base, base, base, base, selected, base, base, base, base, base,
-        )
-        .hover_background(hovered)
-        .hover_foreground(hover_foreground);
+        let paint = ComboBoxPaint::new(base, base, base, selected, base, base, base, base, base)
+            .hover_background(hovered)
+            .hover_foreground(hover_foreground);
         assert_eq!(paint.hover_background, hovered);
         assert_eq!(paint.hover_foreground, hover_foreground);
         assert_eq!(paint.selected_foreground, base);
