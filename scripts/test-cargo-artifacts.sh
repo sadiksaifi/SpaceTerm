@@ -106,8 +106,18 @@ PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_AFTER_FIRST=1 \
     sh "$active_child_pid_file" >/dev/null 2>&1
 status=$?
 set -e
-test "$status" -eq 2
-test -s "$active_child_pid_file"
+if [ "$status" -ne 2 ]; then
+    echo "active measurement failure returned status $status instead of 2" >&2
+    if [ -s "$active_child_pid_file" ]; then
+        active_child_pid=$(cat "$active_child_pid_file")
+        kill -TERM "-$active_child_pid" 2>/dev/null || true
+    fi
+    exit 1
+fi
+if [ ! -s "$active_child_pid_file" ]; then
+    echo "guarded command did not publish its process ID" >&2
+    exit 1
+fi
 active_child_pid=$(cat "$active_child_pid_file")
 if kill -0 "$active_child_pid" 2>/dev/null; then
     kill -TERM "-$active_child_pid" 2>/dev/null || true
