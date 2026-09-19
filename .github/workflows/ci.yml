@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-validation:
+    name: macOS validation
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SPACETERM_CARGO_TARGET_BUDGET_MIB: 10240
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install project tools
+        uses: jdx/mise-action@v4
+        with:
+          cache: true
+          minimum_release_age: 7d
+
+      - name: Restore Rust dependency artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          shared-key: macos-validation
+
+      - name: Prepare the macOS build environment
+        run: mise run setup:macos
+
+      - name: Run the macOS validation gate
+        run: mise run validate:macos
+
+      - name: Verify Remote Pane resize propagation
+        run: mise run test:remote-resize:macos

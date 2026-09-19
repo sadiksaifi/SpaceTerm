@@ -16,10 +16,15 @@ import time
 BREACH_STATUS = 75
 MONITOR_INTERVAL_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.05
+MEASUREMENT_ATTEMPTS = 3
 TERMINATE_GRACE_SECONDS = 1.0
 KILL_GRACE_SECONDS = 5.0
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 OWNER_FILE = ".spaceterm-cargo-target-owner"
+
+
+class ArtifactMeasurementError(Exception):
+    """The Cargo target size could not be measured reliably."""
 
 
 class Supervisor:
@@ -133,21 +138,41 @@ class Supervisor:
     def target_size_kib(self) -> int:
         if not self.target_dir.is_dir():
             return 0
-        try:
-            result = subprocess.run(
-                ["du", "-sk", str(self.target_dir)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+
+        for attempt in range(MEASUREMENT_ATTEMPTS):
             if self.received_signal is not None:
                 return 0
-            if result.returncode != 0:
-                raise ValueError
-            return int(result.stdout.split()[0])
-        except (OSError, ValueError, IndexError):
-            print("error: could not measure Cargo artifact usage", file=sys.stderr)
-            raise SystemExit(2) from None
+            try:
+                result = subprocess.run(
+                    ["du", "-sk", str(self.target_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if self.received_signal is not None:
+                    return 0
+                if result.returncode == 0:
+                    return int(result.stdout.split()[0])
+            except (OSError, ValueError, IndexError):
+                pass
+
+            # Cargo mutates the target tree while the supervisor measures it.
+            # BSD du can fail when an entry disappears during that traversal.
+            if attempt + 1 < MEASUREMENT_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+        print("error: could not measure Cargo artifact usage", file=sys.stderr)
+        raise ArtifactMeasurementError
+
+    def stop_after_measurement_failure(self) -> int:
+        termination_verified = self.terminate_active_group()
+        signal_status = self.received_signal
+        self._clear_active()
+        if signal_status is not None:
+            return 128 + signal_status
+        if not termination_verified:
+            print("warning: guarded command termination could not be verified", file=sys.stderr)
+        return 2
 
     def target_is_verified(self) -> bool:
         try:
@@ -232,7 +257,11 @@ class Supervisor:
     def run(self, command: list[str]) -> int:
         if not self.ensure_target_owned():
             return 2
-        if self.target_size_kib() > self.budget_kib:
+        try:
+            target_is_over_budget = self.target_size_kib() > self.budget_kib
+        except ArtifactMeasurementError:
+            return 2
+        if target_is_over_budget:
             print(
                 "Cargo target exceeds its disk budget from a previous command; cleaning it.",
                 file=sys.stderr,
@@ -271,7 +300,11 @@ class Supervisor:
 
             now = time.monotonic()
             if now >= next_measurement:
-                if self.target_size_kib() > self.budget_kib:
+                try:
+                    target_is_over_budget = self.target_size_kib() > self.budget_kib
+                except ArtifactMeasurementError:
+                    return self.stop_after_measurement_failure()
+                if target_is_over_budget:
                     budget_breached = True
                     termination_verified = self.terminate_active_group()
                     break
@@ -295,8 +328,11 @@ class Supervisor:
             return 128 + signal_status
 
         # Catch commands that cross the limit and finish between measurements.
-        if not budget_breached and self.target_size_kib() > self.budget_kib:
-            budget_breached = True
+        if not budget_breached:
+            try:
+                budget_breached = self.target_size_kib() > self.budget_kib
+            except ArtifactMeasurementError:
+                return 2
 
         if budget_breached:
             if termination_verified:

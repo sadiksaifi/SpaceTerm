@@ -47,6 +47,88 @@ status=$?
 set -e
 test "$status" -eq 37
 
+measurement_bin=$temp_root/measurement-bin
+measurement_sentinel=$temp_root/measurement-failed-once
+real_du=$(command -v du)
+mkdir -p "$measurement_bin"
+cat > "$measurement_bin/du" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_DU_ALWAYS:-0}" = 1 ]; then
+    exit 1
+fi
+if [ "${FAIL_DU_AFTER_FIRST:-0}" = 1 ]; then
+    if [ -e "$DU_FIRST_SUCCESS_SENTINEL" ]; then
+        while [ ! -s "$ACTIVE_CHILD_PID_FILE" ]; do
+            sleep 0.01
+        done
+        exit 1
+    fi
+    : > "$DU_FIRST_SUCCESS_SENTINEL"
+    exec "$REAL_DU" "$@"
+fi
+if [ ! -e "$TRANSIENT_DU_SENTINEL" ]; then
+    : > "$TRANSIENT_DU_SENTINEL"
+    exit 1
+fi
+exec "$REAL_DU" "$@"
+EOF
+chmod +x "$measurement_bin/du"
+
+target=$temp_root/transient-measurement/target
+prepare_owned_target "$target"
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" \
+    TRANSIENT_DU_SENTINEL="$measurement_sentinel" \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'exit 0'
+test -e "$measurement_sentinel"
+
+target=$temp_root/persistent-measurement-failure/target
+prepare_owned_target "$target"
+set +e
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_ALWAYS=1 \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'exit 0' >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 2
+
+target=$temp_root/active-measurement-failure/target
+active_child_pid_file=$temp_root/active-measurement-failure-child
+first_success_sentinel=$temp_root/measurement-succeeded-once
+prepare_owned_target "$target"
+set +e
+# shellcheck disable=SC2016
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_AFTER_FIRST=1 \
+    DU_FIRST_SUCCESS_SENTINEL="$first_success_sentinel" \
+    ACTIVE_CHILD_PID_FILE="$active_child_pid_file" \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'printf "%s\n" "$$" > "$1"; sleep 30' \
+    sh "$active_child_pid_file" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "active measurement failure returned status $status instead of 2" >&2
+    if [ -s "$active_child_pid_file" ]; then
+        active_child_pid=$(cat "$active_child_pid_file")
+        kill -TERM "-$active_child_pid" 2>/dev/null || true
+    fi
+    exit 1
+fi
+if [ ! -s "$active_child_pid_file" ]; then
+    echo "guarded command did not publish its process ID" >&2
+    exit 1
+fi
+active_child_pid=$(cat "$active_child_pid_file")
+active_child_state=$(ps -o stat= -p "$active_child_pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+case "$active_child_state" in
+    ''|Z*) ;;
+    *)
+        kill -TERM "-$active_child_pid" 2>/dev/null || true
+        echo "guarded command survived artifact measurement failure in state $active_child_state" >&2
+        exit 1
+        ;;
+esac
+
 target=$temp_root/dash/target
 prepare_owned_target "$target"
 set +e
