@@ -276,12 +276,16 @@ run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
 description = "Run native macOS Adapter tests"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
 
+[tasks."test:remote-resize:macos"]
+description = "Verify Remote Pane resize propagation through a local OpenSSH Control Connection"
+run = "./scripts/test-remote-resize-macos.sh"
+
 [tasks."lint:macos:scripts"]
 description = "Check macOS scripts and package metadata"
 run = '''
 set -eu
-bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
+bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh scripts/test-remote-resize-macos.sh
+shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh scripts/test-remote-resize-macos.sh
 python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Development-Info.plist
@@ -295,6 +299,7 @@ run = [
   { task = "validate" },
   { task = "fmt:check:macos" },
   { task = "test:macos" },
+  { task = "test:remote-resize:macos" },
   { task = "lint:macos:scripts" },
 ]
 

@@ -168,11 +168,20 @@ fn signal_group(
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
-    use std::time::Duration;
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::domain::SshDestination;
     use crate::platform::askpass::AskPassCapabilityCopy;
+    use crate::platform::macos_pty::MacosNativePtyAdapterFactory;
+    use crate::platform::native_pty::{NativePtyAdapterFactory as _, NativePtySize};
+    use crate::platform::shell_launch::PreparedShellLaunch;
+    use crate::ssh::command::{
+        OpenSshExecutable, SshCommandContext, SshCommandSpec, ValidatedRemoteShellCommand,
+    };
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(
@@ -203,6 +212,137 @@ mod tests {
             SshProcessStdio::Null,
             SshProcessStdio::Null,
         )
+    }
+
+    fn ssh_request(command: SshCommandSpec, home: &Path) -> SshProcessSpawnRequest {
+        SshProcessSpawnRequest::new(
+            command.executable().into(),
+            command.arguments().to_vec(),
+            home.to_owned(),
+            vec![
+                (OsString::from("HOME"), home.as_os_str().to_owned()),
+                (
+                    OsString::from("PATH"),
+                    OsString::from("/usr/bin:/bin:/usr/sbin:/sbin"),
+                ),
+            ],
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+        )
+    }
+
+    fn wait_for_control_socket(
+        adapter: &MacOsSshProcessAdapter,
+        master: &mut MacOsSshProcess,
+        control_path: &Path,
+    ) -> Result<(), &'static str> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if control_path.exists() {
+                return Ok(());
+            }
+            if adapter.try_status(master).ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("the OpenSSH Control Connection did not become ready")
+    }
+
+    fn wait_for_terminal_size(
+        output: &mpsc::Receiver<Vec<u8>>,
+        captured: &mut Vec<u8>,
+        expected: &str,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => {
+                    captured.extend_from_slice(&bytes);
+                    if String::from_utf8_lossy(captured)
+                        .lines()
+                        .any(|line| line.trim() == expected)
+                    {
+                        return true;
+                    }
+                    if captured.len() > 4 * 1024 {
+                        captured.drain(..captured.len() - 2 * 1024);
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    fn read_terminal_output(
+        mut reader: Box<dyn Read + Send>,
+    ) -> Result<(mpsc::Receiver<Vec<u8>>, JoinHandle<()>), &'static str> {
+        let (sender, receiver) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("spaceterm-remote-resize-reader".to_owned())
+            .spawn(move || {
+                let mut buffer = [0_u8; 512];
+                loop {
+                    let count = match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => count,
+                    };
+                    if sender.send(buffer[..count].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| "the multiplexed Remote Pane reader could not be started")?;
+        Ok((receiver, thread))
+    }
+
+    fn verify_remote_resize(commands: &SshCommandContext, home: &Path) -> Result<(), &'static str> {
+        let remote_command =
+            ValidatedRemoteShellCommand::new("while :; do stty size; sleep 0.1; done".to_owned())
+                .unwrap();
+        let launch = PreparedShellLaunch::remote(home, commands.pane_channel(remote_command))
+            .map_err(|_| "the multiplexed Remote Pane launch was invalid")?;
+        let pane = MacosNativePtyAdapterFactory
+            .create(
+                launch,
+                NativePtySize {
+                    rows: 24,
+                    columns: 80,
+                    ..NativePtySize::default()
+                },
+            )
+            .map_err(|_| "the multiplexed Remote Pane PTY could not be created")?;
+        let mut adapter = pane.adapter;
+        let reader = adapter
+            .take_reader()
+            .map_err(|_| "the multiplexed Remote Pane reader was unavailable")?;
+        let (receiver, reader_thread) = read_terminal_output(reader)?;
+        let mut captured = Vec::new();
+
+        let outcome = if !wait_for_terminal_size(&receiver, &mut captured, "24 80") {
+            Err("the remote PTY did not report its initial size")
+        } else if adapter
+            .resize(NativePtySize {
+                rows: 40,
+                columns: 120,
+                ..NativePtySize::default()
+            })
+            .is_err()
+        {
+            Err("the local Remote Pane PTY resize failed")
+        } else if !wait_for_terminal_size(&receiver, &mut captured, "40 120") {
+            Err("the remote PTY did not receive the resized dimensions")
+        } else {
+            Ok(())
+        };
+
+        let _ = pane.termination.request_termination();
+        let _ = adapter.wait_for_exit(Duration::from_secs(5));
+        drop(adapter);
+        let _ = reader_thread.join();
+        outcome
     }
 
     struct SignalMaskRestore(libc::sigset_t);
@@ -272,6 +412,41 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(exit.is_some_and(ProcessExit::is_success));
+    }
+
+    #[test]
+    #[ignore = "requires the local sshd fixture; run mise run test:remote-resize:macos"]
+    fn remote_pane_resize_reaches_a_local_openssh_server() {
+        let config = std::env::var_os("SPACETERM_LOCAL_SSH_CONFIG")
+            .map(PathBuf::from)
+            .expect("the local sshd fixture must provide its client configuration");
+        let home = config
+            .parent()
+            .expect("the local client configuration must have a parent")
+            .to_owned();
+        let control_path = home.join("control");
+        let commands = SshCommandContext::new(
+            OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh")).unwrap(),
+            config,
+            SshDestination::new("spaceterm-local".to_owned()).unwrap(),
+            control_path.clone(),
+        )
+        .unwrap();
+        let adapter = MacOsSshProcessAdapter;
+        let restore = block_sigwinch();
+        let mut master = adapter
+            .spawn(ssh_request(commands.master(), &home))
+            .unwrap();
+        drop(restore);
+
+        let outcome = wait_for_control_socket(&adapter, master.process_mut(), &control_path)
+            .and_then(|()| verify_remote_resize(&commands, &home));
+
+        adapter
+            .signal(master.process_mut(), ProcessSignal::Terminate)
+            .unwrap();
+        adapter.reap(master.into_process()).unwrap();
+        outcome.unwrap();
     }
 
     #[test]
