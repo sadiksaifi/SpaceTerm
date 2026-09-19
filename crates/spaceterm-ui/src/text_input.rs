@@ -2611,7 +2611,8 @@ impl Element for TextElement {
                 line.x_for_index(input.display_offset_for_source(input.buffer.selection.cursor()))
             };
             let scroll = input.reconcile_scroll(&line, bounds, theme.metrics);
-            let active = input.enabled && input.focused && input.window_active;
+            let active =
+                input.enabled && input.focus_handle.is_focused(window) && window.is_window_active();
             let (caret, selection) = if active && !input.buffer.selection.is_empty() {
                 (
                     None,

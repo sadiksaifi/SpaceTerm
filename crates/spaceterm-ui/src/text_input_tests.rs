@@ -376,6 +376,26 @@ fn caret_does_not_schedule_while_unfocused_or_inactive(cx: &mut TestAppContext) 
     });
 }
 
+#[gpui::test]
+fn losing_focus_removes_the_caret_from_the_rendered_frame(cx: &mut TestAppContext) {
+    let (_input, other_focus, _events, cx) = input_with_events(cx, "", false);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|window, _| window.painted_quads_for_test().len()),
+        1,
+        "the focused empty input should paint its caret"
+    );
+
+    cx.update(|window, _| other_focus.focus(window));
+    cx.run_until_parked();
+
+    assert!(
+        cx.update(|window, _| window.painted_quads_for_test().is_empty()),
+        "the unfocused input must not retain a caret primitive"
+    );
+}
+
 #[test]
 fn grapheme_movement_and_replacement_never_split_clusters() {
     let mut buffer = TextBuffer::new("Ae\u{301}👩‍💻B".into());
