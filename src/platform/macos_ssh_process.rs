@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
@@ -38,6 +39,11 @@ impl SshProcessAdapter for MacOsSshProcessAdapter {
         }
         if let Some((name, capability)) = request.askpass_capability_environment() {
             command.env(name, std::ffi::OsStr::from_bytes(capability));
+        }
+        // SAFETY: the callback runs after fork and performs only async-signal-safe signal-mask
+        // operations before exec. It does not access shared application state.
+        unsafe {
+            command.pre_exec(clear_child_signal_mask);
         }
         let mut child = command.spawn().map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -119,6 +125,21 @@ impl SshProcessAdapter for MacOsSshProcessAdapter {
     }
 }
 
+fn clear_child_signal_mask() -> io::Result<()> {
+    let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: sigemptyset initializes the provided signal set.
+    if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: sigemptyset initialized the signal set after succeeding above.
+    let empty = unsafe { empty.assume_init() };
+    // SAFETY: empty is initialized and the previous mask is not needed in the child process.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn stdio(mode: SshProcessStdio) -> Stdio {
     match mode {
         SshProcessStdio::Null => Stdio::null(),
@@ -166,6 +187,91 @@ mod tests {
             SshProcessStdio::Null,
             SshProcessStdio::Null,
         )
+    }
+
+    fn current_test_request(test: &str) -> SshProcessSpawnRequest {
+        SshProcessSpawnRequest::new(
+            std::env::current_exe().unwrap(),
+            vec![
+                OsString::from("--ignored"),
+                OsString::from("--exact"),
+                OsString::from(test),
+            ],
+            PathBuf::from("/private/tmp"),
+            Vec::new(),
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+        )
+    }
+
+    struct SignalMaskRestore(libc::sigset_t);
+
+    impl Drop for SignalMaskRestore {
+        fn drop(&mut self) {
+            // SAFETY: the saved signal set was initialized by pthread_sigmask for this thread.
+            let result =
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) };
+            assert_eq!(result, 0, "the test thread signal mask should be restored");
+        }
+    }
+
+    fn block_sigwinch() -> SignalMaskRestore {
+        let mut blocked = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: sigemptyset initializes the provided signal set.
+        assert_eq!(unsafe { libc::sigemptyset(blocked.as_mut_ptr()) }, 0);
+        // SAFETY: sigemptyset initialized the signal set above.
+        let mut blocked = unsafe { blocked.assume_init() };
+        // SAFETY: blocked is initialized and SIGWINCH is a valid signal number.
+        assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGWINCH) }, 0);
+        let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: both signal-set pointers are valid for the duration of this call.
+        assert_eq!(
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, previous.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: pthread_sigmask initialized previous after succeeding above.
+        SignalMaskRestore(unsafe { previous.assume_init() })
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the SSH process signal-mask test"]
+    fn spawned_ssh_process_child_requires_unblocked_sigwinch() {
+        let mut current = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: a null input set queries the current thread mask into the valid output pointer.
+        assert_eq!(
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), current.as_mut_ptr())
+            },
+            0
+        );
+        // SAFETY: pthread_sigmask initialized current after succeeding above.
+        let current = unsafe { current.assume_init() };
+        // SAFETY: current is initialized and SIGWINCH is a valid signal number.
+        assert_eq!(unsafe { libc::sigismember(&current, libc::SIGWINCH) }, 0);
+    }
+
+    #[test]
+    fn spawned_ssh_process_should_not_inherit_the_calling_thread_signal_mask() {
+        let adapter = MacOsSshProcessAdapter;
+        let restore = block_sigwinch();
+        let mut spawned = adapter
+            .spawn(current_test_request(
+                "platform::macos_ssh_process::tests::spawned_ssh_process_child_requires_unblocked_sigwinch",
+            ))
+            .unwrap();
+        drop(restore);
+
+        let exit = (0..100).find_map(|_| {
+            let exit = adapter.try_status(spawned.process_mut()).unwrap();
+            if exit.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            exit
+        });
+        adapter.reap(spawned.into_process()).unwrap();
+
+        assert!(exit.is_some_and(ProcessExit::is_success));
     }
 
     #[test]
