@@ -1899,6 +1899,13 @@ impl Window {
         self.platform_window.set_edited(edited);
     }
 
+    /// Moves the native macOS traffic lights without reopening the window.
+    ///
+    /// Other platforms ignore the position.
+    pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
+        self.platform_window.set_traffic_light_position(position);
+    }
+
     /// Determine the display on which the window is visible.
     pub fn display(&self, cx: &App) -> Option<Rc<dyn PlatformDisplay>> {
         cx.platform

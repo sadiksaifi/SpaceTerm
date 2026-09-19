@@ -227,6 +227,7 @@ enum WorkspaceSwitcherChoice {
 
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
+    window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<WorkspaceSwitcherChoice>,
     remote_workspace_name: Option<String>,
@@ -348,10 +349,14 @@ impl WorkspaceManager {
     ) -> Self {
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
         window_appearance.apply(window, cx);
+        let mut window_traffic_lights =
+            super::appearance_runtime::WindowTrafficLightOwner::workspace();
+        window_traffic_lights.apply(window, cx);
         cx.observe_global_in::<super::appearance_runtime::InstalledAppearance>(
             window,
             |manager, window, cx| {
                 manager.window_appearance.apply(window, cx);
+                manager.window_traffic_lights.apply(window, cx);
                 cx.notify();
             },
         )
@@ -455,6 +460,7 @@ impl WorkspaceManager {
 
         Self {
             window_appearance,
+            window_traffic_lights,
             transient: WorkspaceTransientUi {
                 picker: directory_picker,
                 pin_target: None,

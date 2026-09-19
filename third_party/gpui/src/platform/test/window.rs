@@ -18,6 +18,7 @@ pub(crate) struct TestWindowState {
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
     pub(crate) edited: bool,
+    pub(crate) traffic_light_position_updates: Vec<Point<Pixels>>,
     platform: Weak<TestPlatform>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
@@ -66,6 +67,7 @@ impl TestWindow {
             sprite_atlas: Arc::new(TestAtlas::new()),
             title: Default::default(),
             edited: false,
+            traffic_light_position_updates: Vec::new(),
             should_close_handler: None,
             hit_test_window_control_callback: None,
             input_callback: None,
@@ -217,6 +219,10 @@ impl PlatformWindow for TestWindow {
 
     fn set_edited(&mut self, edited: bool) {
         self.0.lock().edited = edited;
+    }
+
+    fn set_traffic_light_position(&self, position: Point<Pixels>) {
+        self.0.lock().traffic_light_position_updates.push(position);
     }
 
     fn show_character_palette(&self) {
