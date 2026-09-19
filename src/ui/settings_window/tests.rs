@@ -1001,6 +1001,40 @@ fn clicking_the_settings_titlebar_blurs_search(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn dragging_the_settings_titlebar_blurs_search_without_interrupting_window_movement(
+    cx: &mut TestAppContext,
+) {
+    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let window_drag: Rc<dyn OperatingSystemWindowDragPlatform> = records.clone();
+    let (window, _harness, cx) = open_settings_with_drag(
+        cx,
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        window_drag,
+    );
+    cx.simulate_keystrokes("cmd-f");
+    let drag_target = cx
+        .debug_bounds("settings-detail-drag-region-hitbox")
+        .expect("Settings heading drag target")
+        .center();
+
+    cx.simulate_mouse_down(drag_target, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(8.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::none());
+
+    assert_eq!(
+        (
+            window.read_with(cx, |window, cx| window.search.read(cx).is_focused()),
+            records.counts(),
+        ),
+        (false, (1, 1, 1, 0))
+    );
+}
+
+#[gpui::test]
 fn escape_clears_an_active_search(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     set_query(&window, "line", cx);
