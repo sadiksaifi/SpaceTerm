@@ -965,6 +965,76 @@ fn the_search_shortcut_focuses_the_search_field(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_blurs_an_empty_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
+}
+
+#[gpui::test]
+fn escape_with_an_empty_search_preserves_navigation_focus(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f tab");
+    cx.run_until_parked();
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+}
+
+#[gpui::test]
+fn clicking_the_settings_titlebar_blurs_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    click("settings-detail-drag-region", cx);
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
+}
+
+#[gpui::test]
+fn dragging_the_settings_titlebar_blurs_search_without_interrupting_window_movement(
+    cx: &mut TestAppContext,
+) {
+    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let window_drag: Rc<dyn OperatingSystemWindowDragPlatform> = records.clone();
+    let (window, _harness, cx) = open_settings_with_drag(
+        cx,
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        window_drag,
+    );
+    cx.simulate_keystrokes("cmd-f");
+    let drag_target = cx
+        .debug_bounds("settings-detail-drag-region-hitbox")
+        .expect("Settings heading drag target")
+        .center();
+
+    cx.simulate_mouse_down(drag_target, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(8.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::none());
+
+    assert_eq!(
+        (
+            window.read_with(cx, |window, cx| window.search.read(cx).is_focused()),
+            records.counts(),
+        ),
+        (false, (1, 1, 1, 0))
+    );
+}
+
+#[gpui::test]
 fn escape_clears_an_active_search(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     set_query(&window, "line", cx);
@@ -974,6 +1044,19 @@ fn escape_clears_an_active_search(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert!(window.read_with(cx, |window, _| window.query.is_empty()));
+}
+
+#[gpui::test]
+fn escape_blurs_an_active_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    set_query(&window, "line", cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
 }
 
 #[gpui::test]

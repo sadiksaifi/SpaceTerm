@@ -4929,6 +4929,21 @@ impl Window {
             .collect()
     }
 
+    /// Returns the clipped bounds of underline primitives submitted by the current test draw.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_underline_bounds_for_test(&self) -> Vec<Bounds<ScaledPixels>> {
+        let scene = if self.next_frame.scene.len() == 0 {
+            &self.rendered_frame.scene
+        } else {
+            &self.next_frame.scene
+        };
+        scene
+            .underlines
+            .iter()
+            .map(|underline| underline.bounds.intersect(&underline.content_mask.bounds))
+            .collect()
+    }
+
     /// Returns quad primitives submitted by the current test draw.
     #[cfg(any(test, feature = "test-support"))]
     pub fn painted_quads_for_test(&self) -> Vec<PaintedQuadForTest> {
