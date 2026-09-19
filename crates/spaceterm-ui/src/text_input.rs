@@ -1245,6 +1245,11 @@ impl TextInput {
     pub fn is_focused(&self) -> bool {
         self.focused
     }
+
+    fn is_visually_active(&self, window: &Window) -> bool {
+        self.enabled && self.focus_handle.is_focused(window) && window.is_window_active()
+    }
+
     /// Returns the directional grapheme-normalized selection.
     pub fn selection(&self) -> TextInputSelection {
         self.buffer.selection.public()
@@ -2122,7 +2127,7 @@ impl TextInput {
         let text_style = window.text_style();
         let font = text_style.font();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let marked_range = (!empty)
+        let marked_range = (!empty && self.is_visually_active(window))
             .then(|| {
                 self.composition
                     .as_ref()
@@ -2611,8 +2616,7 @@ impl Element for TextElement {
                 line.x_for_index(input.display_offset_for_source(input.buffer.selection.cursor()))
             };
             let scroll = input.reconcile_scroll(&line, bounds, theme.metrics);
-            let active =
-                input.enabled && input.focus_handle.is_focused(window) && window.is_window_active();
+            let active = input.is_visually_active(window);
             let (caret, selection) = if active && !input.buffer.selection.is_empty() {
                 (
                     None,

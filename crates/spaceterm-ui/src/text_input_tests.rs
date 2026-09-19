@@ -396,6 +396,27 @@ fn losing_focus_removes_the_caret_from_the_rendered_frame(cx: &mut TestAppContex
     );
 }
 
+#[gpui::test]
+fn losing_focus_removes_the_composition_underline_from_the_rendered_frame(cx: &mut TestAppContext) {
+    let (input, other_focus, _events, cx) = input_with_events(cx, "", false);
+    mark_text(&input, cx, "日本");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|window, _| window.painted_underline_bounds_for_test().len()),
+        1,
+        "the active composition should paint its marked-text underline"
+    );
+
+    cx.update(|window, _| other_focus.focus(window));
+    cx.run_until_parked();
+
+    assert!(
+        cx.update(|window, _| window.painted_underline_bounds_for_test().is_empty()),
+        "the unfocused input must not retain a composition underline"
+    );
+}
+
 #[test]
 fn grapheme_movement_and_replacement_never_split_clusters() {
     let mut buffer = TextBuffer::new("Ae\u{301}👩‍💻B".into());
