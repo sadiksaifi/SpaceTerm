@@ -977,6 +977,19 @@ fn escape_blurs_an_empty_search(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_with_an_empty_search_preserves_navigation_focus(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f tab");
+    cx.run_until_parked();
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+}
+
+#[gpui::test]
 fn clicking_the_settings_titlebar_blurs_search(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     cx.simulate_keystrokes("cmd-f");

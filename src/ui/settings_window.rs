@@ -496,8 +496,10 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_handle.focus(window);
         if self.query.is_empty() {
+            if self.search.read(cx).is_focused() {
+                self.focus_handle.focus(window);
+            }
             return;
         }
         self.search.update(cx, |search, cx| {
@@ -505,6 +507,7 @@ impl SettingsWindow {
         });
         self.query = SharedString::default();
         self.revealed = None;
+        self.focus_handle.focus(window);
         cx.notify();
     }
 
