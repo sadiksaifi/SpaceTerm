@@ -3,8 +3,8 @@
 
 use super::{BladeAtlas, BladeContext};
 use crate::{
-    Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite,
-    PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Underline,
+    BackdropFilter, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Underline,
 };
 use blade_graphics as gpu;
 use blade_util::{BufferBelt, BufferBeltDescriptor};
@@ -46,6 +46,20 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BackdropParams {
+    target_size: [f32; 2],
+    original_size: [f32; 2],
+    bounds: PodBounds,
+    content_mask: PodBounds,
+    corner_radii: [f32; 4],
+    sigma: f32,
+    opacity: f32,
+    pass_index: f32,
+    pad: f32,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -107,6 +121,14 @@ struct ShaderSurfacesData {
     s_surface: gpu::Sampler,
 }
 
+#[derive(blade_macros::ShaderData)]
+struct ShaderBackdropData {
+    backdrop: BackdropParams,
+    t_backdrop_source: gpu::TextureView,
+    t_backdrop_original: gpu::TextureView,
+    s_backdrop: gpu::Sampler,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
 struct PathSprite {
@@ -131,6 +153,7 @@ struct BladePipelines {
     mono_sprites: gpu::RenderPipeline,
     poly_sprites: gpu::RenderPipeline,
     surfaces: gpu::RenderPipeline,
+    backdrop: gpu::RenderPipeline,
 }
 
 impl BladePipelines {
@@ -146,6 +169,7 @@ impl BladePipelines {
         });
         shader.check_struct_size::<GlobalParams>();
         shader.check_struct_size::<SurfaceParams>();
+        shader.check_struct_size::<BackdropParams>();
         shader.check_struct_size::<Quad>();
         shader.check_struct_size::<Shadow>();
         shader.check_struct_size::<PathRasterizationVertex>();
@@ -300,6 +324,24 @@ impl BladePipelines {
                 color_targets,
                 multisample_state: gpu::MultisampleState::default(),
             }),
+            backdrop: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "backdrop",
+                data_layouts: &[&ShaderBackdropData::layout()],
+                vertex: shader.at("vs_backdrop"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState {
+                    topology: gpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                fragment: Some(shader.at("fs_backdrop")),
+                color_targets: &[gpu::ColorTargetState {
+                    format: surface_info.format,
+                    blend: None,
+                    write_mask: gpu::ColorWrites::default(),
+                }],
+                multisample_state: gpu::MultisampleState::default(),
+            }),
         }
     }
 
@@ -312,7 +354,19 @@ impl BladePipelines {
         gpu.destroy_render_pipeline(&mut self.mono_sprites);
         gpu.destroy_render_pipeline(&mut self.poly_sprites);
         gpu.destroy_render_pipeline(&mut self.surfaces);
+        gpu.destroy_render_pipeline(&mut self.backdrop);
     }
+}
+
+struct BackdropTextures {
+    size: gpu::Extent,
+    quarter_size: gpu::Extent,
+    snapshot: gpu::Texture,
+    snapshot_view: gpu::TextureView,
+    horizontal: gpu::Texture,
+    horizontal_view: gpu::TextureView,
+    vertical: gpu::Texture,
+    vertical_view: gpu::TextureView,
 }
 
 pub struct BladeSurfaceConfig {
@@ -340,6 +394,8 @@ pub struct BladeRenderer {
     path_intermediate_texture_view: gpu::TextureView,
     path_intermediate_msaa_texture: Option<gpu::Texture>,
     path_intermediate_msaa_texture_view: Option<gpu::TextureView>,
+    backdrop_textures: Option<BackdropTextures>,
+    backdrop_sampler: gpu::Sampler,
     rendering_parameters: RenderingParameters,
 }
 
@@ -351,7 +407,7 @@ impl BladeRenderer {
     ) -> anyhow::Result<Self> {
         let surface_config = gpu::SurfaceConfig {
             size: config.size,
-            usage: gpu::TextureUsage::TARGET,
+            usage: gpu::TextureUsage::TARGET | gpu::TextureUsage::COPY,
             display_sync: gpu::DisplaySync::Recent,
             color_space: gpu::ColorSpace::Srgb,
             allow_exclusive_full_screen: false,
@@ -380,6 +436,13 @@ impl BladeRenderer {
         let atlas = Arc::new(BladeAtlas::new(&context.gpu));
         let atlas_sampler = context.gpu.create_sampler(gpu::SamplerDesc {
             name: "path rasterization sampler",
+            mag_filter: gpu::FilterMode::Linear,
+            min_filter: gpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let backdrop_sampler = context.gpu.create_sampler(gpu::SamplerDesc {
+            name: "backdrop sampler",
+            address_modes: [gpu::AddressMode::ClampToEdge; 3],
             mag_filter: gpu::FilterMode::Linear,
             min_filter: gpu::FilterMode::Linear,
             ..Default::default()
@@ -426,6 +489,8 @@ impl BladeRenderer {
             path_intermediate_texture_view,
             path_intermediate_msaa_texture,
             path_intermediate_msaa_texture_view,
+            backdrop_textures: None,
+            backdrop_sampler,
             rendering_parameters,
         })
     }
@@ -508,6 +573,7 @@ impl BladeRenderer {
                 .unzip();
             self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
             self.path_intermediate_msaa_texture_view = path_intermediate_msaa_texture_view;
+            self.destroy_backdrop_textures();
         }
     }
 
@@ -558,6 +624,171 @@ impl BladeRenderer {
     #[cfg(target_os = "macos")]
     pub fn layer_ptr(&self) -> *mut metal::CAMetalLayer {
         objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
+    }
+
+    fn ensure_backdrop_textures(&mut self) {
+        let size = self.surface_config.size;
+        if self
+            .backdrop_textures
+            .as_ref()
+            .is_some_and(|textures| textures.size == size)
+        {
+            return;
+        }
+
+        self.destroy_backdrop_textures();
+        let quarter_size = gpu::Extent {
+            width: size.width.div_ceil(4).max(1),
+            height: size.height.div_ceil(4).max(1),
+            depth: 1,
+        };
+        let format = self.surface.info().format;
+        let (snapshot, snapshot_view) = create_backdrop_texture(
+            &self.gpu,
+            "backdrop snapshot",
+            format,
+            size,
+            gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
+        );
+        let (horizontal, horizontal_view) = create_backdrop_texture(
+            &self.gpu,
+            "backdrop horizontal",
+            format,
+            quarter_size,
+            gpu::TextureUsage::TARGET | gpu::TextureUsage::RESOURCE,
+        );
+        let (vertical, vertical_view) = create_backdrop_texture(
+            &self.gpu,
+            "backdrop vertical",
+            format,
+            quarter_size,
+            gpu::TextureUsage::TARGET | gpu::TextureUsage::RESOURCE,
+        );
+        self.backdrop_textures = Some(BackdropTextures {
+            size,
+            quarter_size,
+            snapshot,
+            snapshot_view,
+            horizontal,
+            horizontal_view,
+            vertical,
+            vertical_view,
+        });
+    }
+
+    fn destroy_backdrop_textures(&mut self) {
+        let Some(textures) = self.backdrop_textures.take() else {
+            return;
+        };
+        self.gpu.destroy_texture_view(textures.snapshot_view);
+        self.gpu.destroy_texture_view(textures.horizontal_view);
+        self.gpu.destroy_texture_view(textures.vertical_view);
+        self.gpu.destroy_texture(textures.snapshot);
+        self.gpu.destroy_texture(textures.horizontal);
+        self.gpu.destroy_texture(textures.vertical);
+    }
+
+    fn draw_backdrop_filter(
+        &mut self,
+        frame_texture: gpu::Texture,
+        frame_view: gpu::TextureView,
+        filter: &BackdropFilter,
+    ) {
+        let output = filter.bounds.intersect(&filter.content_mask.bounds);
+        if output.is_empty() {
+            return;
+        }
+
+        self.ensure_backdrop_textures();
+        let Some(textures) = self.backdrop_textures.as_ref() else {
+            return;
+        };
+        let size = textures.size;
+        let quarter_size = textures.quarter_size;
+        let snapshot = textures.snapshot;
+        let snapshot_view = textures.snapshot_view;
+        let horizontal = textures.horizontal;
+        let horizontal_view = textures.horizontal_view;
+        let vertical = textures.vertical;
+        let vertical_view = textures.vertical_view;
+
+        self.command_encoder.init_texture(snapshot);
+        self.command_encoder.init_texture(horizontal);
+        self.command_encoder.init_texture(vertical);
+        {
+            let mut transfer = self.command_encoder.transfer("backdrop snapshot");
+            transfer.copy_texture_to_texture(frame_texture.into(), snapshot.into(), size);
+        }
+
+        for pass_index in 0..3 {
+            let (target_size, target_view, source_view, init_op) = match pass_index {
+                0 => (
+                    quarter_size,
+                    horizontal_view,
+                    snapshot_view,
+                    gpu::InitOp::DontCare,
+                ),
+                1 => (
+                    quarter_size,
+                    vertical_view,
+                    horizontal_view,
+                    gpu::InitOp::DontCare,
+                ),
+                _ => (size, frame_view, vertical_view, gpu::InitOp::Load),
+            };
+            let halo = if pass_index < 2 {
+                (3.0 * filter.radius.0).ceil() + 8.0
+            } else {
+                0.0
+            };
+            let Some(scissor) = backdrop_scissor(output, halo, target_size, size) else {
+                continue;
+            };
+            let sigma = match pass_index {
+                0 => filter.radius.0 * target_size.width as f32 / size.width as f32,
+                1 => filter.radius.0 * target_size.height as f32 / size.height as f32,
+                _ => 0.0,
+            };
+            let backdrop = BackdropParams {
+                target_size: [target_size.width as f32, target_size.height as f32],
+                original_size: [size.width as f32, size.height as f32],
+                bounds: filter.bounds.into(),
+                content_mask: filter.content_mask.bounds.into(),
+                corner_radii: [
+                    filter.corner_radii.top_left.0,
+                    filter.corner_radii.top_right.0,
+                    filter.corner_radii.bottom_right.0,
+                    filter.corner_radii.bottom_left.0,
+                ],
+                sigma,
+                opacity: filter.opacity,
+                pass_index: pass_index as f32,
+                pad: 0.0,
+            };
+            let mut pass = self.command_encoder.render(
+                "backdrop",
+                gpu::RenderTargetSet {
+                    colors: &[gpu::RenderTarget {
+                        view: target_view,
+                        init_op,
+                        finish_op: gpu::FinishOp::Store,
+                    }],
+                    depth_stencil: None,
+                },
+            );
+            let mut encoder = pass.with(&self.pipelines.backdrop);
+            encoder.set_scissor_rect(&scissor);
+            encoder.bind(
+                0,
+                &ShaderBackdropData {
+                    backdrop,
+                    t_backdrop_source: source_view,
+                    t_backdrop_original: snapshot_view,
+                    s_backdrop: self.backdrop_sampler,
+                },
+            );
+            encoder.draw(0, 4, 0, 1);
+        }
     }
 
     #[profiling::function]
@@ -625,6 +856,7 @@ impl BladeRenderer {
         self.wait_for_gpu();
         self.atlas.destroy();
         self.gpu.destroy_sampler(self.atlas_sampler);
+        self.gpu.destroy_sampler(self.backdrop_sampler);
         self.instance_belt.destroy(&self.gpu);
         self.gpu.destroy_command_encoder(&mut self.command_encoder);
         self.pipelines.destroy(&self.gpu);
@@ -638,6 +870,7 @@ impl BladeRenderer {
         if let Some(msaa_view) = self.path_intermediate_msaa_texture_view {
             self.gpu.destroy_texture_view(msaa_view);
         }
+        self.destroy_backdrop_textures();
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -902,6 +1135,23 @@ impl BladeRenderer {
                         }
                     }
                 }
+                PrimitiveBatch::BackdropFilters(filters) => {
+                    drop(pass);
+                    for filter in filters {
+                        self.draw_backdrop_filter(frame.texture(), frame.texture_view(), filter);
+                    }
+                    pass = self.command_encoder.render(
+                        "main",
+                        gpu::RenderTargetSet {
+                            colors: &[gpu::RenderTarget {
+                                view: frame.texture_view(),
+                                init_op: gpu::InitOp::Load,
+                                finish_op: gpu::FinishOp::Store,
+                            }],
+                            depth_stencil: None,
+                        },
+                    );
+                }
             }
         }
         drop(pass);
@@ -916,6 +1166,70 @@ impl BladeRenderer {
         self.wait_for_gpu();
         self.last_sync_point = Some(sync_point);
     }
+}
+
+fn backdrop_scissor(
+    output: Bounds<ScaledPixels>,
+    halo: f32,
+    target_size: gpu::Extent,
+    original_size: gpu::Extent,
+) -> Option<gpu::ScissorRect> {
+    let scale_x = target_size.width as f32 / original_size.width.max(1) as f32;
+    let scale_y = target_size.height as f32 / original_size.height.max(1) as f32;
+    let target_width = target_size.width as f32;
+    let target_height = target_size.height as f32;
+    let output_x = output.origin.x.0;
+    let output_y = output.origin.y.0;
+    let output_right = output_x + output.size.width.0;
+    let output_bottom = output_y + output.size.height.0;
+    let x = ((output_x - halo) * scale_x)
+        .floor()
+        .clamp(0.0, target_width) as i32;
+    let y = ((output_y - halo) * scale_y)
+        .floor()
+        .clamp(0.0, target_height) as i32;
+    let right = ((output_right + halo) * scale_x)
+        .ceil()
+        .clamp(x as f32, target_width) as i32;
+    let bottom = ((output_bottom + halo) * scale_y)
+        .ceil()
+        .clamp(y as f32, target_height) as i32;
+    (right > x && bottom > y).then_some(gpu::ScissorRect {
+        x,
+        y,
+        w: (right - x) as u32,
+        h: (bottom - y) as u32,
+    })
+}
+
+fn create_backdrop_texture(
+    gpu: &gpu::Context,
+    name: &str,
+    format: gpu::TextureFormat,
+    size: gpu::Extent,
+    usage: gpu::TextureUsage,
+) -> (gpu::Texture, gpu::TextureView) {
+    let texture = gpu.create_texture(gpu::TextureDesc {
+        name,
+        format,
+        size,
+        array_layer_count: 1,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: gpu::TextureDimension::D2,
+        usage,
+        external: None,
+    });
+    let view = gpu.create_texture_view(
+        texture,
+        gpu::TextureViewDesc {
+            name,
+            format,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &Default::default(),
+        },
+    );
+    (texture, view)
 }
 
 fn create_path_intermediate_texture(

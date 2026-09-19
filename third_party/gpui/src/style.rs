@@ -238,6 +238,9 @@ pub struct Style {
     /// The fill color of this element
     pub background: Option<Fill>,
 
+    /// The Gaussian sigma of the backdrop blur in logical pixels, capped at 64 device pixels.
+    pub backdrop_blur: Option<Pixels>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -613,16 +616,22 @@ impl Style {
             cx.set_global(DebugBelow)
         }
 
-        #[cfg(debug_assertions)]
-        if self.debug || cx.has_global::<DebugBelow>() {
-            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
-        }
-
         let rem_size = window.rem_size();
         let corner_radii = self
             .corner_radii
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
+
+        if self.visibility == Visibility::Visible {
+            if let Some(radius) = self.backdrop_blur {
+                window.paint_backdrop_blur(bounds, corner_radii, radius);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        if self.debug || cx.has_global::<DebugBelow>() {
+            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
+        }
 
         window.paint_shadows(bounds, corner_radii, &self.box_shadow);
 
@@ -762,6 +771,7 @@ impl Default for Style {
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             background: None,
+            backdrop_blur: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),

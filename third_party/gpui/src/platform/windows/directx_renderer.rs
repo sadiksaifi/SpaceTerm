@@ -69,6 +69,8 @@ struct DirectXResources {
     path_intermediate_msaa_texture: ID3D11Texture2D,
     path_intermediate_msaa_view: [Option<ID3D11RenderTargetView>; 1],
 
+    backdrop: Option<DirectXBackdropResources>,
+
     // Cached window size and viewport
     width: u32,
     height: u32,
@@ -83,11 +85,29 @@ struct DirectXRenderPipelines {
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    backdrop: PipelineState<BackdropParams>,
 }
 
 struct DirectXGlobalElements {
     global_params_buffer: [Option<ID3D11Buffer>; 1],
     sampler: [Option<ID3D11SamplerState>; 1],
+    backdrop_sampler: [Option<ID3D11SamplerState>; 1],
+}
+
+struct DirectXBackdropResources {
+    width: u32,
+    height: u32,
+    quarter_width: u32,
+    quarter_height: u32,
+    snapshot_texture: ID3D11Texture2D,
+    snapshot_srv: [Option<ID3D11ShaderResourceView>; 1],
+    _horizontal_texture: ID3D11Texture2D,
+    horizontal_srv: [Option<ID3D11ShaderResourceView>; 1],
+    horizontal_rtv: [Option<ID3D11RenderTargetView>; 1],
+    _vertical_texture: ID3D11Texture2D,
+    vertical_srv: [Option<ID3D11ShaderResourceView>; 1],
+    vertical_rtv: [Option<ID3D11RenderTargetView>; 1],
+    quarter_viewport: [D3D11_VIEWPORT; 1],
 }
 
 struct DirectComposition {
@@ -303,6 +323,12 @@ impl DirectXRenderer {
                     sprites,
                 } => self.draw_polychrome_sprites(texture_id, sprites),
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
+                PrimitiveBatch::BackdropFilters(filters) => {
+                    for filter in filters {
+                        self.draw_backdrop_filter(filter)?;
+                    }
+                    Ok(())
+                }
             }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
                     scene.paths.len(),
                     scene.shadows.len(),
@@ -576,6 +602,158 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    fn ensure_backdrop_resources(&mut self) -> Result<()> {
+        let width = self.resources.width;
+        let height = self.resources.height;
+        if self
+            .resources
+            .backdrop
+            .as_ref()
+            .is_some_and(|resources| resources.width == width && resources.height == height)
+        {
+            return Ok(());
+        }
+        self.resources.backdrop = Some(DirectXBackdropResources::new(
+            &self.devices.device,
+            width,
+            height,
+        )?);
+        Ok(())
+    }
+
+    fn draw_backdrop_filter(&mut self, filter: &BackdropFilter) -> Result<()> {
+        let output = filter.bounds.intersect(&filter.content_mask.bounds);
+        let full_draw_bounds = backdrop_draw_bounds(
+            &output,
+            0.0,
+            self.resources.width,
+            self.resources.height,
+            self.resources.width,
+            self.resources.height,
+        );
+        if full_draw_bounds.is_empty() {
+            return Ok(());
+        }
+
+        self.ensure_backdrop_resources()?;
+        let Some(resources) = self.resources.backdrop.as_ref() else {
+            return Ok(());
+        };
+        let null_srvs: [Option<ID3D11ShaderResourceView>; 3] = [None, None, None];
+        unsafe {
+            self.devices
+                .device_context
+                .PSSetShaderResources(0, Some(&null_srvs));
+            self.devices
+                .device_context
+                .VSSetShaderResources(0, Some(&null_srvs));
+            self.devices.device_context.OMSetRenderTargets(None, None);
+            self.devices
+                .device_context
+                .CopyResource(&resources.snapshot_texture, &*self.resources.render_target);
+        }
+
+        let result: Result<()> = (|| {
+            for pass_index in 0..3 {
+                let (target_width, target_height, target_view, source_view, viewport) =
+                    match pass_index {
+                        0 => (
+                            resources.quarter_width,
+                            resources.quarter_height,
+                            &resources.horizontal_rtv,
+                            &resources.snapshot_srv,
+                            &resources.quarter_viewport,
+                        ),
+                        1 => (
+                            resources.quarter_width,
+                            resources.quarter_height,
+                            &resources.vertical_rtv,
+                            &resources.horizontal_srv,
+                            &resources.quarter_viewport,
+                        ),
+                        _ => (
+                            resources.width,
+                            resources.height,
+                            &self.resources.render_target_view,
+                            &resources.vertical_srv,
+                            &self.resources.viewport,
+                        ),
+                    };
+                let halo = if pass_index < 2 {
+                    (3.0 * filter.radius.0).ceil() + 8.0
+                } else {
+                    0.0
+                };
+                let draw_bounds = backdrop_draw_bounds(
+                    &output,
+                    halo,
+                    target_width,
+                    target_height,
+                    resources.width,
+                    resources.height,
+                );
+                if draw_bounds.is_empty() {
+                    continue;
+                }
+                let sigma = match pass_index {
+                    0 => filter.radius.0 * target_width as f32 / resources.width as f32,
+                    1 => filter.radius.0 * target_height as f32 / resources.height as f32,
+                    _ => 0.0,
+                };
+                let params = BackdropParams {
+                    draw_bounds,
+                    target_size: [target_width as f32, target_height as f32],
+                    original_size: [resources.width as f32, resources.height as f32],
+                    bounds: filter.bounds.clone(),
+                    content_mask: filter.content_mask.bounds.clone(),
+                    corner_radii: filter.corner_radii.clone(),
+                    sigma,
+                    opacity: filter.opacity,
+                    pass_index: pass_index as f32,
+                    _pad: 0.0,
+                };
+                self.pipelines.backdrop.update_buffer(
+                    &self.devices.device,
+                    &self.devices.device_context,
+                    &[params],
+                )?;
+                unsafe {
+                    self.devices
+                        .device_context
+                        .OMSetRenderTargets(Some(target_view), None);
+                }
+                self.pipelines.backdrop.draw_backdrop(
+                    &self.devices.device_context,
+                    source_view,
+                    &resources.snapshot_srv,
+                    viewport,
+                    &self.globals.global_params_buffer,
+                    &self.globals.backdrop_sampler,
+                )?;
+            }
+            Ok(())
+        })();
+
+        unsafe {
+            self.devices
+                .device_context
+                .PSSetShaderResources(0, Some(&null_srvs));
+            self.devices
+                .device_context
+                .VSSetShaderResources(0, Some(&null_srvs));
+            self.devices
+                .device_context
+                .OMSetRenderTargets(Some(&self.resources.render_target_view), None);
+            self.devices
+                .device_context
+                .RSSetViewports(Some(&self.resources.viewport));
+            self.devices
+                .device_context
+                .PSSetSamplers(0, Some(&self.globals.sampler));
+        }
+        result
+    }
+
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         let desc = unsafe { self.devices.adapter.GetDesc1() }?;
         let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
@@ -690,6 +868,7 @@ impl DirectXResources {
             path_intermediate_msaa_texture,
             path_intermediate_msaa_view,
             path_intermediate_srv,
+            backdrop: None,
             viewport,
             width,
             height,
@@ -718,8 +897,88 @@ impl DirectXResources {
         self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
         self.path_intermediate_msaa_view = path_intermediate_msaa_view;
         self.path_intermediate_srv = path_intermediate_srv;
+        self.backdrop = None;
         self.viewport = viewport;
         Ok(())
+    }
+}
+
+impl DirectXBackdropResources {
+    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        let quarter_width = width.div_ceil(4).max(1);
+        let quarter_height = height.div_ceil(4).max(1);
+        let (snapshot_texture, snapshot_srv, _) =
+            create_backdrop_texture(device, width, height, D3D11_BIND_SHADER_RESOURCE.0 as u32)?;
+        let intermediate_bind_flags =
+            (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+        let (horizontal_texture, horizontal_srv, horizontal_rtv) = create_backdrop_texture(
+            device,
+            quarter_width,
+            quarter_height,
+            intermediate_bind_flags,
+        )?;
+        let (vertical_texture, vertical_srv, vertical_rtv) = create_backdrop_texture(
+            device,
+            quarter_width,
+            quarter_height,
+            intermediate_bind_flags,
+        )?;
+        Ok(Self {
+            width,
+            height,
+            quarter_width,
+            quarter_height,
+            snapshot_texture,
+            snapshot_srv,
+            _horizontal_texture: horizontal_texture,
+            horizontal_srv,
+            horizontal_rtv: [horizontal_rtv],
+            _vertical_texture: vertical_texture,
+            vertical_srv,
+            vertical_rtv: [vertical_rtv],
+            quarter_viewport: [D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: quarter_width as f32,
+                Height: quarter_height as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }],
+        })
+    }
+}
+
+fn backdrop_draw_bounds(
+    output: &Bounds<ScaledPixels>,
+    halo: f32,
+    target_width: u32,
+    target_height: u32,
+    original_width: u32,
+    original_height: u32,
+) -> Bounds<ScaledPixels> {
+    let scale_x = target_width as f32 / original_width.max(1) as f32;
+    let scale_y = target_height as f32 / original_height.max(1) as f32;
+    let x = ((output.origin.x.0 - halo) * scale_x)
+        .floor()
+        .clamp(0.0, target_width as f32);
+    let y = ((output.origin.y.0 - halo) * scale_y)
+        .floor()
+        .clamp(0.0, target_height as f32);
+    let right = ((output.origin.x.0 + output.size.width.0 + halo) * scale_x)
+        .ceil()
+        .clamp(x, target_width as f32);
+    let bottom = ((output.origin.y.0 + output.size.height.0 + halo) * scale_y)
+        .ceil()
+        .clamp(y, target_height as f32);
+    Bounds {
+        origin: Point {
+            x: ScaledPixels::from(x),
+            y: ScaledPixels::from(y),
+        },
+        size: Size {
+            width: ScaledPixels::from(right - x),
+            height: ScaledPixels::from(bottom - y),
+        },
     }
 }
 
@@ -774,6 +1033,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let backdrop = PipelineState::new(
+            device,
+            "backdrop_pipeline",
+            ShaderModule::Backdrop,
+            1,
+            create_blend_state_for_replacement(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -783,6 +1049,7 @@ impl DirectXRenderPipelines {
             underline_pipeline,
             mono_sprites,
             poly_sprites,
+            backdrop,
         })
     }
 }
@@ -842,10 +1109,28 @@ impl DirectXGlobalElements {
             device.CreateSamplerState(&desc, Some(&mut output))?;
             [output]
         };
+        let backdrop_sampler = unsafe {
+            let desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+                BorderColor: [0.0; 4],
+                MinLOD: 0.0,
+                MaxLOD: D3D11_FLOAT32_MAX,
+            };
+            let mut output = None;
+            device.CreateSamplerState(&desc, Some(&mut output))?;
+            [output]
+        };
 
         Ok(Self {
             global_params_buffer,
             sampler,
+            backdrop_sampler,
         })
     }
 }
@@ -857,6 +1142,21 @@ struct GlobalParams {
     viewport_size: [f32; 2],
     grayscale_enhanced_contrast: f32,
     _pad: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct BackdropParams {
+    draw_bounds: Bounds<ScaledPixels>,
+    target_size: [f32; 2],
+    original_size: [f32; 2],
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: Corners<ScaledPixels>,
+    sigma: f32,
+    opacity: f32,
+    pass_index: f32,
+    _pad: f32,
 }
 
 struct PipelineState<T> {
@@ -974,6 +1274,34 @@ impl<T> PipelineState<T> {
             device_context.PSSetShaderResources(0, Some(texture));
 
             device_context.DrawInstanced(4, instance_count, 0, 0);
+        }
+        Ok(())
+    }
+
+    fn draw_backdrop(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        source: &[Option<ID3D11ShaderResourceView>],
+        original: &[Option<ID3D11ShaderResourceView>],
+        viewport: &[D3D11_VIEWPORT],
+        global_params: &[Option<ID3D11Buffer>],
+        sampler: &[Option<ID3D11SamplerState>],
+    ) -> Result<()> {
+        set_pipeline_state(
+            device_context,
+            &self.view,
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            viewport,
+            &self.vertex,
+            &self.fragment,
+            global_params,
+            &self.blend_state,
+        );
+        unsafe {
+            device_context.PSSetSamplers(0, Some(sampler));
+            device_context.PSSetShaderResources(0, Some(source));
+            device_context.PSSetShaderResources(2, Some(original));
+            device_context.DrawInstanced(4, 1, 0, 0);
         }
         Ok(())
     }
@@ -1159,6 +1487,46 @@ fn create_path_intermediate_texture(
 }
 
 #[inline]
+fn create_backdrop_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    bind_flags: u32,
+) -> Result<(
+    ID3D11Texture2D,
+    [Option<ID3D11ShaderResourceView>; 1],
+    Option<ID3D11RenderTargetView>,
+)> {
+    let texture = unsafe {
+        let mut output = None;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width.max(1),
+            Height: height.max(1),
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: RENDER_TARGET_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: bind_flags,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        device.CreateTexture2D(&desc, None, Some(&mut output))?;
+        output.unwrap()
+    };
+    let mut shader_resource_view = None;
+    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
+    let mut render_target_view = None;
+    if bind_flags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0 {
+        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut render_target_view))? };
+    }
+    Ok((texture, [shader_resource_view], render_target_view))
+}
+
+#[inline]
 fn create_path_intermediate_msaa_texture_and_view(
     device: &ID3D11Device,
     width: u32,
@@ -1292,6 +1660,18 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
 }
 
 #[inline]
+fn create_blend_state_for_replacement(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = false.into();
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+#[inline]
 fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
     unsafe {
         let mut shader = None;
@@ -1409,6 +1789,7 @@ pub(crate) mod shader_resources {
         PathSprite,
         MonochromeSprite,
         PolychromeSprite,
+        Backdrop,
         EmojiRasterization,
     }
 
@@ -1478,6 +1859,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::Backdrop => match target {
+                    ShaderTarget::Vertex => BACKDROP_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_FRAGMENT_BYTES,
                 },
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
@@ -1568,6 +1953,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::PathSprite => "path_sprite",
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                ShaderModule::Backdrop => "backdrop",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }

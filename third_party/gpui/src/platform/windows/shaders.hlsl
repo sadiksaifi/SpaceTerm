@@ -8,6 +8,7 @@ cbuffer GlobalParams: register(b0) {
 };
 
 Texture2D<float4> t_sprite: register(t0);
+Texture2D<float4> t_backdrop_original: register(t2);
 SamplerState s_sprite: register(s0);
 
 struct Bounds {
@@ -451,6 +452,97 @@ float quarter_ellipse_sdf(float2 pt, float2 radii) {
     // TODO: A better solution would be to use the gradient of the implicit
     // function for an ellipse to approximate a scaling factor.
     return unit_circle_sdf * (radii.x + radii.y) * -0.5;
+}
+
+/*
+**
+**              Backdrop filters
+**
+*/
+
+struct BackdropParams {
+    Bounds draw_bounds;
+    float2 target_size;
+    float2 original_size;
+    Bounds bounds;
+    Bounds content_mask;
+    Corners corner_radii;
+    float sigma;
+    float opacity;
+    float pass_index;
+    float pad;
+};
+
+struct BackdropVertexOutput {
+    float4 position: SV_Position;
+    nointerpolation uint backdrop_id: TEXCOORD0;
+};
+
+StructuredBuffer<BackdropParams> backdrop_params: register(t1);
+
+BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint backdrop_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    BackdropParams backdrop = backdrop_params[backdrop_id];
+    float2 position = unit_vertex * backdrop.draw_bounds.size + backdrop.draw_bounds.origin;
+    float2 device_position =
+        position / backdrop.target_size * float2(2.0, -2.0) + float2(-1.0, 1.0);
+
+    BackdropVertexOutput output;
+    output.position = float4(device_position, 0.0, 1.0);
+    output.backdrop_id = backdrop_id;
+    return output;
+}
+
+float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
+    BackdropParams backdrop = backdrop_params[input.backdrop_id];
+    float2 uv = input.position.xy / backdrop.target_size;
+    if (backdrop.pass_index < 2.0) {
+        float sigma = max(backdrop.sigma, 0.25);
+        int extent = int(ceil(3.0 * sigma));
+        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+        float total = 0.0;
+        for (int i = -extent; i <= extent; ++i) {
+            float offset_index = float(i);
+            float weight = exp(-0.5 * offset_index * offset_index / (sigma * sigma));
+            float2 offset = backdrop.pass_index < 0.5
+                ? float2(offset_index / backdrop.target_size.x, 0.0)
+                : float2(0.0, offset_index / backdrop.target_size.y);
+            float4 sampled_color;
+            if (backdrop.pass_index < 0.5) {
+                float2 pixel = 1.0 / backdrop.original_size;
+                sampled_color = (
+                    t_sprite.SampleLevel(s_sprite, uv + offset + pixel, 0.0) +
+                    t_sprite.SampleLevel(s_sprite, uv + offset - pixel, 0.0) +
+                    t_sprite.SampleLevel(s_sprite, uv + offset + float2(pixel.x, -pixel.y), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, uv + offset + float2(-pixel.x, pixel.y), 0.0)
+                ) * 0.25;
+            } else {
+                sampled_color = t_sprite.SampleLevel(s_sprite, uv + offset, 0.0);
+            }
+            sum += sampled_color * weight;
+            total += weight;
+        }
+        return sum / total;
+    }
+
+    float4 original = t_backdrop_original.SampleLevel(s_sprite, uv, 0.0);
+    float2 half_size = backdrop.bounds.size * 0.5;
+    float2 delta = input.position.xy - backdrop.bounds.origin - half_size;
+    float radius = delta.y < 0.0
+        ? (delta.x < 0.0 ? backdrop.corner_radii.top_left : backdrop.corner_radii.top_right)
+        : (delta.x < 0.0 ? backdrop.corner_radii.bottom_left : backdrop.corner_radii.bottom_right);
+    float2 q = abs(delta) - half_size + radius;
+    float distance = length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    float2 mask_end = backdrop.content_mask.origin + backdrop.content_mask.size;
+    float2 mask_distance = min(
+        input.position.xy - backdrop.content_mask.origin,
+        mask_end - input.position.xy
+    );
+    float coverage = saturate(
+        min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5
+    ) * backdrop.opacity;
+    float4 blurred = t_sprite.SampleLevel(s_sprite, uv, 0.0);
+    return lerp(original, blurred, coverage);
 }
 
 /*

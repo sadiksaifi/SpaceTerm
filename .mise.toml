@@ -135,6 +135,25 @@ arg "<filter>" help="Test name filter"
 '''
 run = './scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
 
+[tasks."test:gpui:scene"]
+description = "Test vendored GPUI scene ordering and backdrop filtering"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked scene::tests"
+
+[tasks."check:gpui:blade:macos"]
+description = "Check the portable Blade renderer through its macOS backend"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --no-default-features --features macos-blade --locked"
+
+[tasks."test:gpui:backdrop:macos"]
+description = "Verify backdrop-filter pixels on a native Metal GPU"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked backdrop::tests"
+
+[tasks."check:gpui:windows"]
+description = "Cross-check the vendored GPUI DirectX renderer for Windows"
+usage = '''
+flag "--target <target>" default="x86_64-pc-windows-msvc" help="Windows Rust target triple"
+'''
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --target "${usage_target?}" --no-default-features --locked'
+
 [tasks."test:vendor"]
 description = "Test terminal-library patches with the application feature set"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"

@@ -2,8 +2,8 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
+    AsyncWindowContext, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds, BoxShadow,
+    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
@@ -2970,6 +2970,39 @@ impl Window {
                 color: shadow.color.opacity(opacity),
             });
         }
+    }
+
+    /// Paints a backdrop blur into the scene at the current stacking context.
+    ///
+    /// `radius` is the Gaussian sigma in logical pixels, capped at 64 device pixels.
+    /// Non-positive and non-finite values paint no filter. The filter affects only previously
+    /// painted content inside the rounded bounds and the current content mask.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        radius: Pixels,
+    ) {
+        const MAX_BACKDROP_BLUR_RADIUS: f32 = 64.;
+
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity();
+        if !radius.0.is_finite() || radius.0 <= 0. || !opacity.is_finite() || opacity <= 0. {
+            return;
+        }
+
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: bounds.scale(scale_factor),
+            content_mask: self.content_mask().scale(scale_factor),
+            corner_radii: corner_radii.scale(scale_factor),
+            radius: ScaledPixels((radius.0 * scale_factor).min(MAX_BACKDROP_BLUR_RADIUS)),
+            opacity: opacity.min(1.),
+        });
     }
 
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
