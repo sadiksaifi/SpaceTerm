@@ -47,6 +47,41 @@ status=$?
 set -e
 test "$status" -eq 37
 
+measurement_bin=$temp_root/measurement-bin
+measurement_sentinel=$temp_root/measurement-failed-once
+real_du=$(command -v du)
+mkdir -p "$measurement_bin"
+cat > "$measurement_bin/du" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_DU_ALWAYS:-0}" = 1 ]; then
+    exit 1
+fi
+if [ ! -e "$TRANSIENT_DU_SENTINEL" ]; then
+    : > "$TRANSIENT_DU_SENTINEL"
+    exit 1
+fi
+exec "$REAL_DU" "$@"
+EOF
+chmod +x "$measurement_bin/du"
+
+target=$temp_root/transient-measurement/target
+prepare_owned_target "$target"
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" \
+    TRANSIENT_DU_SENTINEL="$measurement_sentinel" \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'exit 0'
+test -e "$measurement_sentinel"
+
+target=$temp_root/persistent-measurement-failure/target
+prepare_owned_target "$target"
+set +e
+PATH="$measurement_bin:$PATH" REAL_DU="$real_du" FAIL_DU_ALWAYS=1 \
+    CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
+    "$guard" run -- sh -c 'exit 0' >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 2
+
 target=$temp_root/dash/target
 prepare_owned_target "$target"
 set +e

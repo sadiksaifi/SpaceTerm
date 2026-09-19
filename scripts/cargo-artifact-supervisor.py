@@ -16,6 +16,7 @@ import time
 BREACH_STATUS = 75
 MONITOR_INTERVAL_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.05
+MEASUREMENT_ATTEMPTS = 3
 TERMINATE_GRACE_SECONDS = 1.0
 KILL_GRACE_SECONDS = 5.0
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -133,21 +134,31 @@ class Supervisor:
     def target_size_kib(self) -> int:
         if not self.target_dir.is_dir():
             return 0
-        try:
-            result = subprocess.run(
-                ["du", "-sk", str(self.target_dir)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+
+        for attempt in range(MEASUREMENT_ATTEMPTS):
             if self.received_signal is not None:
                 return 0
-            if result.returncode != 0:
-                raise ValueError
-            return int(result.stdout.split()[0])
-        except (OSError, ValueError, IndexError):
-            print("error: could not measure Cargo artifact usage", file=sys.stderr)
-            raise SystemExit(2) from None
+            try:
+                result = subprocess.run(
+                    ["du", "-sk", str(self.target_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if self.received_signal is not None:
+                    return 0
+                if result.returncode == 0:
+                    return int(result.stdout.split()[0])
+            except (OSError, ValueError, IndexError):
+                pass
+
+            # Cargo mutates the target tree while the supervisor measures it.
+            # BSD du can fail when an entry disappears during that traversal.
+            if attempt + 1 < MEASUREMENT_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+        print("error: could not measure Cargo artifact usage", file=sys.stderr)
+        raise SystemExit(2)
 
     def target_is_verified(self) -> bool:
         try:
