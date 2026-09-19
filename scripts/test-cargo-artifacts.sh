@@ -119,11 +119,15 @@ if [ ! -s "$active_child_pid_file" ]; then
     exit 1
 fi
 active_child_pid=$(cat "$active_child_pid_file")
-if kill -0 "$active_child_pid" 2>/dev/null; then
-    kill -TERM "-$active_child_pid" 2>/dev/null || true
-    echo "guarded command survived artifact measurement failure" >&2
-    exit 1
-fi
+active_child_state=$(ps -o stat= -p "$active_child_pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+case "$active_child_state" in
+    ''|Z*) ;;
+    *)
+        kill -TERM "-$active_child_pid" 2>/dev/null || true
+        echo "guarded command survived artifact measurement failure in state $active_child_state" >&2
+        exit 1
+        ;;
+esac
 
 target=$temp_root/dash/target
 prepare_owned_target "$target"
