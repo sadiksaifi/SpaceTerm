@@ -965,6 +965,29 @@ fn the_search_shortcut_focuses_the_search_field(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_blurs_an_empty_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
+}
+
+#[gpui::test]
+fn clicking_the_settings_titlebar_blurs_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    click("settings-detail-drag-region", cx);
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
+}
+
+#[gpui::test]
 fn escape_clears_an_active_search(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     set_query(&window, "line", cx);
@@ -974,6 +997,19 @@ fn escape_clears_an_active_search(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert!(window.read_with(cx, |window, _| window.query.is_empty()));
+}
+
+#[gpui::test]
+fn escape_blurs_an_active_search(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    set_query(&window, "line", cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(!window.read_with(cx, |window, cx| window.search.read(cx).is_focused()));
 }
 
 #[gpui::test]

@@ -496,6 +496,7 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_handle.focus(window);
         if self.query.is_empty() {
             return;
         }
@@ -504,7 +505,6 @@ impl SettingsWindow {
         });
         self.query = SharedString::default();
         self.revealed = None;
-        self.focus_handle.focus(window);
         cx.notify();
     }
 
@@ -710,6 +710,7 @@ impl SettingsWindow {
     ) -> WindowDragRegionResponse {
         match event {
             WindowDragRegionEvent::InteractionStarted { .. } => {
+                self.focus_handle.focus(window);
                 if let Err(error) = self
                     .operating_system_window_drag_platform
                     .interaction_started()
