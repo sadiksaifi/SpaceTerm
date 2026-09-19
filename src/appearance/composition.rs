@@ -12,6 +12,31 @@ pub(crate) enum WindowBackgroundAppearance {
     Blurred,
 }
 
+/// Independent facts that constrain native-window and in-window composition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CompositionCapabilities {
+    pub(crate) native_window_transparency: bool,
+    pub(crate) accessibility_allows_transparency: bool,
+}
+
+impl CompositionCapabilities {
+    pub(crate) const fn new(
+        native_window_transparency: bool,
+        accessibility_allows_transparency: bool,
+    ) -> Self {
+        Self {
+            native_window_transparency,
+            accessibility_allows_transparency,
+        }
+    }
+}
+
+impl Default for CompositionCapabilities {
+    fn default() -> Self {
+        Self::new(false, true)
+    }
+}
+
 /// The layer a painted background belongs to in the window's material hierarchy.
 ///
 /// One window sheet admits the native backdrop. Resting surfaces add only the color difference
@@ -25,8 +50,7 @@ pub(crate) enum SurfaceRole {
     /// Anything resting on the base without covering other content: Panes, Tab and sidebar
     /// chips, buttons, fields, steppers, toggles and rows.
     Surface,
-    /// Menus, popovers, dialogs and tooltips, which cover rendered content. GPUI cannot blur what
-    /// is painted beneath them, so they stay denser to keep covered text from bleeding through.
+    /// Menus, popovers, dialogs and tooltips, which filter and tint rendered content beneath them.
     Floating,
 }
 
@@ -40,8 +64,6 @@ impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
     pub(crate) const OPAQUE: Self = Self { glass: 0 };
 
-    /// Floating surfaces give their color up more slowly, because they cover rendered content.
-    const FLOATING_RETENTION: f32 = 0.3;
     /// What a resting surface still paints at the maximum setting, and what a floating one does.
     ///
     /// The sheet is the window's transmission: one continuous tint over everything, so the
@@ -52,9 +74,11 @@ impl SurfaceMaterials {
     /// keeps enough of its color to lift several levels off a pale desktop instead.
     ///
     const RESTING_RESIDUAL: f32 = 0.42;
-    /// GPUI has no local backdrop blur. Floating surfaces retain dense tint to limit sharp
-    /// underlay interference; built-in foreground contrast is tested over black and white.
-    const FLOATING_RESIDUAL: f32 = 0.90;
+    /// What a floating material still paints at maximum transparency.
+    ///
+    /// Backdrop blur now softens detailed content without replacing transmission with dense tint.
+    /// The same curve applies with blur on and off, so Blur changes filtering rather than opacity.
+    const FLOATING_RESIDUAL: f32 = 0.70;
     /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
     ///
     /// Panes stay close to the base, below the brighter cards and selected controls.
@@ -118,7 +142,7 @@ impl SurfaceMaterials {
         match role {
             SurfaceRole::Sheet => (0.0, 1.0),
             SurfaceRole::Base | SurfaceRole::Surface => (Self::RESTING_RESIDUAL, 1.0),
-            SurfaceRole::Floating => (Self::FLOATING_RESIDUAL, Self::FLOATING_RETENTION),
+            SurfaceRole::Floating => (Self::FLOATING_RESIDUAL, 1.0),
         }
     }
 
@@ -303,36 +327,51 @@ impl SurfaceMaterials {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedWindowComposition {
     pub(crate) requested: WindowBackgroundAppearance,
+    /// Effective native Operating-System Window backdrop.
     pub(crate) effective: WindowBackgroundAppearance,
+    /// Materials resting on the native window sheet.
     pub(crate) materials: SurfaceMaterials,
+    /// In-window floating materials, independent of native-window capability.
+    pub(crate) floating_materials: SurfaceMaterials,
+    /// Whether floating shells filter already-painted GPUI content.
+    pub(crate) floating_blur: bool,
 }
 
 impl ResolvedWindowComposition {
     pub(crate) fn resolve(
         preferences: &super::preferences::BackgroundPreferences,
-        supported: bool,
+        capabilities: CompositionCapabilities,
     ) -> Self {
         let requested = if preferences.blur {
             WindowBackgroundAppearance::Blurred
         } else {
             WindowBackgroundAppearance::Transparent
         };
-        let materials = SurfaceMaterials::derive(preferences.transparency);
+        let requested_materials = SurfaceMaterials::derive(preferences.transparency);
+        let floating_materials = if capabilities.accessibility_allows_transparency {
+            requested_materials
+        } else {
+            SurfaceMaterials::OPAQUE
+        };
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
-        let enabled = supported && !materials.is_opaque();
+        let native_enabled = capabilities.native_window_transparency
+            && capabilities.accessibility_allows_transparency
+            && !requested_materials.is_opaque();
         Self {
             requested,
-            effective: if enabled {
+            effective: if native_enabled {
                 requested
             } else {
                 WindowBackgroundAppearance::Opaque
             },
-            materials: if enabled {
-                materials
+            materials: if native_enabled {
+                requested_materials
             } else {
                 SurfaceMaterials::OPAQUE
             },
+            floating_materials,
+            floating_blur: preferences.blur && !floating_materials.is_opaque(),
         }
     }
 }

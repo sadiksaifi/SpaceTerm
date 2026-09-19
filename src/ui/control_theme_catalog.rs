@@ -15,13 +15,14 @@ pub(super) fn catalog(
     let reference = &appearance.colors;
     let colors = &appearance.control_colors;
     let host = &appearance.floating_colors;
+    let field = &appearance.floating_field_colors;
     // The shell paints the material once. Idle rows inherit it, while row states keep their
     // complete host-relative paints and content contrast reference.
     let mut popup = host.clone();
-    popup.elevated_surface_background = appearance.surface(
-        crate::appearance::SurfaceRole::Floating,
-        appearance.colors.elevated_surface_background,
-    );
+    popup.elevated_surface_background =
+        appearance.floating_surface(appearance.colors.elevated_surface_background);
+    let mut row_reference = host.clone();
+    row_reference.elevated_surface_background = popup.elevated_surface_background.with_alpha(255);
     ControlThemeCatalog::new(
         button_theme::theme(colors),
         toggle_theme::theme(colors),
@@ -30,12 +31,12 @@ pub(super) fn catalog(
         resize_handle_theme::theme(colors),
         segmented_control_theme::theme(colors),
         search_field_theme::themed(reference, colors),
-        menu_theme::themed_with_rows(host, colors, &popup),
-        command_palette_theme::themed(host, &popup),
-        combo_box_theme::themed_with_rows(host, colors, &popup),
+        menu_theme::themed_with_rows(&row_reference, colors, &popup),
+        command_palette_theme::themed(&row_reference, &popup),
+        combo_box_theme::themed_with_rows(&row_reference, colors, &popup),
         text_input_theme::theme(colors),
-        tooltip_theme::theme(colors),
-        modal_theme::theme(colors),
+        tooltip_theme::theme(host),
+        modal_theme::theme(host),
     )
     .floating(
         appearance.floating_surfaces(),
@@ -44,12 +45,12 @@ pub(super) fn catalog(
             toggle_theme::theme(host),
             progress_theme::theme(host, progress_motion),
             segmented_control_theme::theme(host),
-            search_field_theme::themed(host, host),
-            text_input_theme::theme(host),
+            search_field_theme::themed(field, field),
+            text_input_theme::themed(field, host),
         )
         .triggers(
-            menu_theme::themed_with_rows(host, host, &popup),
-            combo_box_theme::themed_with_rows(host, host, &popup),
+            menu_theme::themed_with_rows(&row_reference, host, &popup),
+            combo_box_theme::themed_with_rows(&row_reference, host, &popup),
         ),
     )
     .typography(spaceterm_ui::ControlTypography::new(
@@ -195,32 +196,7 @@ pub(super) fn readable_on(
     background: crate::appearance::Color,
     minimum_contrast: f64,
 ) -> crate::appearance::Color {
-    let rendered = proposed.source_over(background);
-    if rendered.contrast_ratio(background) >= minimum_contrast {
-        return rendered;
-    }
-
-    let dark = crate::appearance::Color::rgb(0x000000);
-    let light = crate::appearance::Color::rgb(0xffffff);
-    let target = if dark.contrast_ratio(background) >= light.contrast_ratio(background) {
-        dark
-    } else {
-        light
-    };
-    let mut lower = 0.0;
-    let mut upper = 1.0;
-    let mut readable = target;
-    for _ in 0..16 {
-        let amount = (lower + upper) / 2.0;
-        let candidate = rendered.mix(target, amount);
-        if candidate.contrast_ratio(background) >= minimum_contrast {
-            readable = candidate;
-            upper = amount;
-        } else {
-            lower = amount;
-        }
-    }
-    readable
+    super::appearance::readable_on_background(proposed, background, minimum_contrast)
 }
 
 fn gpui_color(color: crate::appearance::Color) -> gpui::Rgba {
@@ -244,8 +220,11 @@ mod tests {
             let rows_at = |transparency: f32| {
                 let mut preferences = AppearancePreferences::default();
                 preferences.background.transparency = transparency;
-                let materials =
-                    ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+                let materials = ResolvedWindowComposition::resolve(
+                    &preferences.background,
+                    crate::appearance::CompositionCapabilities::new(true, true),
+                )
+                .materials;
                 let paint = reference.material_presentation(materials);
                 (overlay_list_rows(&reference, &paint), paint)
             };

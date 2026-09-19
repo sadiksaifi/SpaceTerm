@@ -26,23 +26,41 @@ impl AppearanceGeneration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SystemAppearance(Option<Appearance>, bool);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SystemAppearance {
+    appearance: Option<Appearance>,
+    composition: super::CompositionCapabilities,
+}
+
+impl Default for SystemAppearance {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
 
 impl SystemAppearance {
     #[cfg(test)]
     pub(crate) const fn available(appearance: Appearance) -> Self {
-        Self(Some(appearance), false)
+        Self {
+            appearance: Some(appearance),
+            composition: super::CompositionCapabilities::new(false, true),
+        }
     }
     pub(crate) const fn unavailable() -> Self {
-        Self(None, false)
+        Self {
+            appearance: None,
+            composition: super::CompositionCapabilities::new(false, true),
+        }
     }
-    pub(crate) const fn with_transparency(mut self, supported: bool) -> Self {
-        self.1 = supported;
+    pub(crate) const fn with_composition(
+        mut self,
+        composition: super::CompositionCapabilities,
+    ) -> Self {
+        self.composition = composition;
         self
     }
     pub(crate) const fn effective(self) -> Appearance {
-        match self.0 {
+        match self.appearance {
             Some(appearance) => appearance,
             None => Appearance::Dark,
         }
@@ -51,7 +69,10 @@ impl SystemAppearance {
 
 impl From<Option<Appearance>> for SystemAppearance {
     fn from(value: Option<Appearance>) -> Self {
-        Self(value, false)
+        Self {
+            appearance: value,
+            composition: super::CompositionCapabilities::new(false, true),
+        }
     }
 }
 
@@ -245,11 +266,11 @@ impl SchemeCatalog {
             .validate()
             .map_err(ResolutionError::Preferences)?;
         let mut diagnostics = Vec::new();
-        if preferences.mode == super::AppearanceMode::Auto && system.0.is_none() {
+        if preferences.mode == super::AppearanceMode::Auto && system.appearance.is_none() {
             diagnostics.push(AppearanceDiagnostic::SystemAppearanceUnavailable);
         }
         let composition =
-            super::ResolvedWindowComposition::resolve(&preferences.background, system.1);
+            super::ResolvedWindowComposition::resolve(&preferences.background, system.composition);
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
         let requested_chrome = preferences.chrome.schemes.get(appearance);

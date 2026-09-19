@@ -181,6 +181,7 @@ mod tests {
         });
 
         assert!(cx.update(|cx| {
+            let floating = &appearance::chrome(cx).floating_colors;
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ToggleTheme>()
                 && cx.has_global::<spaceterm_ui::ProgressTheme>()
@@ -198,8 +199,7 @@ mod tests {
                         &appearance::chrome(cx).colors,
                         spaceterm_ui::ProgressMotion::Standard,
                     )
-                && *cx.global::<spaceterm_ui::ModalTheme>()
-                    == modal_theme::theme(&appearance::chrome(cx).colors)
+                && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme(floating)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
                     == spaceterm_ui::ModalDesktopPolicy::mac_os()

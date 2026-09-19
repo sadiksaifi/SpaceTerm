@@ -1238,12 +1238,12 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("Your transparency choice is kept")
+            .contains("Floating surfaces still use your transparency choice")
     );
     assert!(
         guidance(SettingsRowId::BackgroundBlur, cx)
             .unwrap()
-            .contains("Your blur choice is kept")
+            .contains("Floating surfaces still use your blur choice")
     );
 
     // The fallback must not disable editing the choices that will apply when support returns.
@@ -1254,12 +1254,14 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert_eq!(retained.transparency, 0.4);
     assert!(!retained.blur);
 
-    harness.platform.set_transparency_supported(true);
+    harness
+        .platform
+        .set_native_window_transparency_supported(true);
     cx.run_until_parked();
     assert_eq!(document_of(&window, cx).preferences.background, retained);
     assert_eq!(
         guidance(SettingsRowId::BackgroundBlur, cx),
-        Some("Soften the desktop behind the window.")
+        Some("Soften the desktop behind the window and content behind floating surfaces.")
     );
     assert!(
         guidance(SettingsRowId::Transparency, cx)
@@ -1271,18 +1273,42 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
         crate::appearance::WindowBackgroundAppearance::Transparent
     );
 
-    harness.platform.set_transparency_supported(false);
+    harness
+        .platform
+        .set_native_window_transparency_supported(false);
     cx.run_until_parked();
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("currently keep the window opaque")
+            .contains("Floating surfaces still use your transparency choice")
     );
     assert_eq!(document_of(&window, cx).preferences.background, retained);
     assert_eq!(
         harness.storage.document().unwrap().preferences.background,
         retained
     );
+}
+
+#[gpui::test]
+fn backdrop_guidance_distinguishes_accessibility_from_native_capability(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    harness
+        .platform
+        .set_native_window_transparency_supported(true);
+    harness.platform.set_reduce_transparency(true);
+    cx.run_until_parked();
+    let (transparency, blur) = window.read_with(cx, |settings, cx| {
+        (
+            settings
+                .row_description(SettingsRowId::Transparency, cx)
+                .unwrap(),
+            settings
+                .row_description(SettingsRowId::BackgroundBlur, cx)
+                .unwrap(),
+        )
+    });
+    assert!(transparency.contains("window and floating surfaces opaque"));
+    assert!(blur.contains("disable window and floating-surface blur"));
 }
 
 #[gpui::test]
@@ -1293,7 +1319,9 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
     document.preferences.background.transparency = 0.0;
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     for supported in [false, true] {
-        harness.platform.set_transparency_supported(supported);
+        harness
+            .platform
+            .set_native_window_transparency_supported(supported);
         cx.run_until_parked();
         let (transparency, blur) = window.read_with(cx, |settings, cx| {
             (

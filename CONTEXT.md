@@ -200,10 +200,13 @@ Source identity and attribution, separate from the installed identifier and disp
 Opaque, transparent or blurred native presentation, independent of Light/Dark and color alpha.
 
 **Transparency**:
-The application-scoped amount of desktop visible through Workspace backgrounds, from zero
-(opaque) to one (maximum transparency). Terminal text and explicit cell colors retain their own appearance.
+The application-scoped amount of underlying content visible through window backgrounds and floating
+surfaces, from zero (opaque) to one (maximum transparency). Terminal text and explicit cell colors retain their own appearance.
+
+**Blur**:
+The application-scoped choice to soften the desktop behind window backgrounds and application
+content behind floating surfaces. Foreground controls and text remain sharp.
 
 **Surface Material**:
-The translucency and neutral shading of a background fill. The window backing admits the desktop,
-while Panes and controls retain enough tint to remain distinct at maximum transparency. Floating
-surfaces over content stay denser.
+The translucency and neutral shading of a background fill. Window backgrounds admit the desktop;
+floating surfaces admit application content beneath them while retaining tint for readability.

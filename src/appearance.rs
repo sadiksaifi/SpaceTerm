@@ -194,7 +194,8 @@ mod tests;
 pub(crate) use crate::theme::Color;
 pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
-    ResolvedWindowComposition, SurfaceMaterials, SurfaceRole, WindowBackgroundAppearance,
+    CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
+    WindowBackgroundAppearance,
 };
 pub(crate) use document::{
     ImportCandidate, ImportError, SettingsDocument, SettingsDocumentError, ZedImportKind,

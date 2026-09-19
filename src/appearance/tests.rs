@@ -17,7 +17,8 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
-                    SystemAppearance::unavailable().with_transparency(true),
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
                     &AvailableFonts::default(),
                 )
                 .unwrap();
@@ -79,7 +80,8 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
-            SystemAppearance::unavailable().with_transparency(true),
+            SystemAppearance::unavailable()
+                .with_composition(CompositionCapabilities::new(true, true)),
             &AvailableFonts::default(),
         )
         .unwrap();
@@ -128,7 +130,8 @@ fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() 
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
-                SystemAppearance::unavailable().with_transparency(true),
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
                 &AvailableFonts::default(),
             )
             .unwrap();
@@ -189,7 +192,8 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
-                SystemAppearance::unavailable().with_transparency(true),
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
                 &AvailableFonts::default(),
             )
             .unwrap();
@@ -216,8 +220,11 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
         for transparency in [0.05, 0.15, 0.35, 0.7, 1.0] {
             let mut preferences = AppearancePreferences::default();
             preferences.background.transparency = transparency;
-            let materials =
-                ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+            let materials = ResolvedWindowComposition::resolve(
+                &preferences.background,
+                CompositionCapabilities::new(true, true),
+            )
+            .materials;
             let paint = reference.material_presentation(materials);
             // The rungs a Workspace rests on, in the order both appearances author them: the
             // shell, a hovered element, and the persistent selection.
@@ -258,7 +265,11 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     for (transparency, minimum) in [(0.15, 12_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
         let mut preferences = AppearancePreferences::default();
         preferences.background.transparency = transparency;
-        let materials = ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+        let materials = ResolvedWindowComposition::resolve(
+            &preferences.background,
+            CompositionCapabilities::new(true, true),
+        )
+        .materials;
         let sheet = materials
             .paint(
                 SurfaceRole::Sheet,
@@ -407,7 +418,8 @@ fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
-                    SystemAppearance::unavailable().with_transparency(true),
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
                     &AvailableFonts::default(),
                 )
                 .unwrap();

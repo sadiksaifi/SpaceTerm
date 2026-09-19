@@ -11,8 +11,8 @@ use gpui::{App, Global, Task, font, px};
 use crate::platform::window_frame::WindowFrameGeometry;
 
 use crate::appearance::{
-    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass,
-    ResolvedAppearance, SchemeCatalog, SystemAppearance,
+    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
+    CompositionCapabilities, FontClass, ResolvedAppearance, SchemeCatalog, SystemAppearance,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -101,12 +101,17 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             installed.0.generation.next()
         })
         .ok_or(SettingsError::RevisionExhausted)?;
+    let accessibility = platform.accessibility_display_options();
     let resolved = catalog
         .resolve(
             generation,
             &candidate.preferences,
-            SystemAppearance::from(platform.system_appearance())
-                .with_transparency(platform.supports_transparency()),
+            SystemAppearance::from(platform.system_appearance()).with_composition(
+                CompositionCapabilities::new(
+                    platform.supports_native_window_transparency(),
+                    accessibility.allows_transparency(),
+                ),
+            ),
             &fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;

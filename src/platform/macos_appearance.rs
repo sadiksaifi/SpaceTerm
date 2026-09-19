@@ -7,7 +7,8 @@ use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 
 use super::appearance::{
-    AppearancePlatform, SystemAppearanceObservation, SystemAppearanceSubscription,
+    AccessibilityDisplayOptions, AppearancePlatform, SystemAppearanceObservation,
+    SystemAppearanceSubscription,
 };
 use crate::appearance::Appearance;
 
@@ -28,7 +29,10 @@ impl AppearancePlatform for MacosAppearancePlatform {
             reduce != objc::runtime::NO
         }
     }
-    fn supports_transparency(&self) -> bool {
+    fn supports_native_window_transparency(&self) -> bool {
+        true
+    }
+    fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
         // SAFETY: display accessibility preferences are queried on the AppKit thread.
         unsafe {
             let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
@@ -36,7 +40,10 @@ impl AppearancePlatform for MacosAppearancePlatform {
                 msg_send![workspace, accessibilityDisplayShouldReduceTransparency];
             let contrast: objc::runtime::BOOL =
                 msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
-            reduce == objc::runtime::NO && contrast == objc::runtime::NO
+            AccessibilityDisplayOptions {
+                reduce_transparency: reduce != objc::runtime::NO,
+                increase_contrast: contrast != objc::runtime::NO,
+            }
         }
     }
     fn apply_window_backdrop(&self, window: &gpui::Window, blurred: bool) {

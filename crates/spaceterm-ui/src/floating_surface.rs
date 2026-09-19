@@ -1,11 +1,11 @@
 //! One presentation system for every surface that floats over window content.
 //!
-//! A floating surface covers content that is already painted. GPUI cannot blur what is beneath it,
-//! so the window's material keeps a dense readability floor here while resting surfaces stay
-//! translucent. Every floating family selects a semantic [`FloatingRole`] and receives the complete
-//! treatment for it: material, outer edge, internal divider, corner geometry, content inset,
-//! elevation, clipping, and the window layer the surface reaches. No call site chooses its own
-//! alpha, radius, border, separator, or shadow.
+//! A floating surface covers content that is already painted. Its shared shell applies the resolved
+//! tint and, when requested, filters that backdrop before content is drawn. Every floating family
+//! selects a semantic [`FloatingRole`] and receives the complete treatment for it: material,
+//! backdrop filter, outer edge, internal divider, corner geometry, content inset, elevation,
+//! clipping, and the window layer the surface reaches. No call site chooses its own alpha, blur,
+//! radius, border, separator, or shadow.
 //!
 //! Controls nested inside a floating surface resolve against that surface rather than against the
 //! window root. [`FloatingShell::mount`] enters a host scope for the complete lifetime of the
@@ -195,6 +195,7 @@ pub struct FloatingSurfaceTheme {
     paints: FloatingSurfacePaints,
     shadow_ink: Hsla,
     scrim: Rgba,
+    backdrop_blur: Pixels,
     spacing_scale: f32,
 }
 
@@ -205,8 +206,15 @@ impl FloatingSurfaceTheme {
             paints,
             shadow_ink,
             scrim,
+            backdrop_blur: px(0.0),
             spacing_scale: 1.0,
         }
+    }
+
+    /// Requests one logical-pixel Gaussian sigma for every shell in this catalog.
+    pub fn backdrop_blur(mut self, radius: Pixels) -> Self {
+        self.backdrop_blur = radius.max(px(0.0));
+        self
     }
 
     /// The scrim painted beneath a window-modal surface.
@@ -227,6 +235,7 @@ impl FloatingSurfaceTheme {
             role,
             paint,
             elevation: role.elevation(self.shadow_ink),
+            backdrop_blur: self.backdrop_blur,
             corner_radius: px(radius * scale),
             content_inset: px(inset * scale),
         }
@@ -275,6 +284,7 @@ pub struct FloatingShell {
     role: FloatingRole,
     paint: FloatingSurfacePaint,
     elevation: ControlShadow,
+    backdrop_blur: Pixels,
     corner_radius: Pixels,
     content_inset: Pixels,
 }
@@ -293,6 +303,11 @@ impl FloatingShell {
     /// The distance from the surface edge to the rows and controls resting on it.
     pub fn content_inset(&self) -> Pixels {
         self.content_inset
+    }
+
+    /// The Gaussian sigma used to filter already-painted content beneath this shell.
+    pub fn backdrop_blur_radius(&self) -> Pixels {
+        self.backdrop_blur
     }
 
     /// The concentric radius of a row or control inset directly inside this surface.
@@ -333,13 +348,17 @@ impl FloatingShell {
     /// The caller keeps placement, size, and behavior; material, edge, corners, elevation, and
     /// clipping belong to the role.
     pub fn frame<E: Styled>(&self, frame: E) -> E {
-        frame
+        let frame = frame
             .overflow_hidden()
             .rounded(self.corner_radius)
             .border(self.hairline())
-            .border_color(self.edge())
-            .bg(self.material())
-            .shadow(self.elevation.layers())
+            .border_color(self.edge());
+        let frame = if self.backdrop_blur > px(0.0) {
+            frame.backdrop_blur(self.backdrop_blur)
+        } else {
+            frame
+        };
+        frame.bg(self.material()).shadow(self.elevation.layers())
     }
 
     /// Applies the surface treatment and hosts every descendant control on this surface.
@@ -576,4 +595,26 @@ pub(crate) fn hosted_text_input_theme(cx: &App) -> &TextInputTheme {
         || cx.global::<TextInputTheme>(),
         |themes| &themes.text_input,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_blur_is_shared_by_every_role_and_does_not_scale_with_layout_density() {
+        let theme = FloatingSurfaceTheme::default().backdrop_blur(px(20.0));
+        let scaled = theme.scaled_metrics(1.5, 1.25);
+        for role in [
+            FloatingRole::Popover,
+            FloatingRole::Command,
+            FloatingRole::Modal,
+            FloatingRole::Tooltip,
+            FloatingRole::Notice,
+            FloatingRole::Readout,
+        ] {
+            assert_eq!(theme.shell(role).backdrop_blur_radius(), px(20.0));
+            assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(20.0));
+        }
+    }
 }

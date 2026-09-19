@@ -40,9 +40,10 @@ comes from one neutral ladder in both appearances: the base is the darkest (Dark
 Setting controls transmission through a continuous window tint. Resting Chrome surfaces use minimal-alpha
 color overlays against the opaque scheme reference. One neutral elevation ladder is compressed
 into the overlay each appearance may spend, so near-white Light surfaces neither recreate opaque
-panels nor collapse onto a shared ceiling. Floating surfaces over content use a denser curve;
+panels nor collapse onto a shared ceiling. Floating surfaces over content retain a visible tint;
 zero keeps the opaque presentation, while one clears the window tint and retains color on resting
-and floating surfaces. The separate blur Setting controls the native material.
+and floating surfaces. The separate blur Setting controls both native and in-window backdrop
+filtering without changing that tint curve.
 Surface composition derives material fills from the opaque presentation,
 which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
 elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
@@ -54,10 +55,14 @@ The desktop behind an Operating-System Window may use its platform's native effe
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
 reference, while platform Adapters own only native window capabilities. Separate native popup views
 would split interaction, accessibility, and lifecycle ownership across platforms, so menus, palettes,
-tooltips, modals, and Pane-local overlays remain GPUI-owned. GPUI cannot blur content already drawn
-inside the window. Floating surfaces therefore retain enough tint to keep covered text from
-competing with their own content. Opaque fallback preserves the same hierarchy. Future portable
-backdrop filtering belongs inside that contract rather than at individual callers.
+tooltips, modals, and Pane-local overlays remain GPUI-owned. Their shared shell applies GPUI's
+portable backdrop filter before painting its tint. Floating surfaces retain enough tint to keep
+filtered content from competing with their own content. Reduce Transparency and Increase Contrast
+make both native and in-window materials opaque without erasing the user's Settings. A platform's
+lack of native desktop transparency does not disable GPUI floating-surface translucency or blur.
+If a custom floating tint would admit no readable neutral foreground across the possible backdrop
+range, its floating-only RGB moves minimally toward the appearance endpoint while retaining the
+same alpha; authored and resting-surface colors remain unchanged.
 
 The window root owns the continuous window tint. Containers and resting controls paint only their color
 difference from that reference, and nested list rows paint only their own fill. Explicit Terminal cell

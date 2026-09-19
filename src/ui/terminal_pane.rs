@@ -3278,6 +3278,7 @@ impl TerminalPane {
         let appearance = chrome(cx).clone();
         // Find takes keyboard and pointer input over the Pane, so it is a Notice.
         let shell = floating_shell(FloatingRole::Notice, cx);
+        let floating_colors = &appearance.floating_colors;
         let input = self.find_input.as_ref()?.clone();
         let snapshot = self
             .screen
@@ -3354,7 +3355,7 @@ impl TerminalPane {
                                 .flex_shrink_0()
                                 .whitespace_normal()
                                 .text_size(appearance.text_size(11.0))
-                                .text_color(gpui_color(appearance.colors.text_muted))
+                                .text_color(gpui_color(floating_colors.text_muted))
                                 .child(result_label),
                         )
                         .child(find_icon_button(
@@ -3824,6 +3825,7 @@ impl Render for TerminalPane {
         // Notice; the hovered-link preview only reports, so it is the quieter Readout.
         let notice_shell = floating_shell(FloatingRole::Notice, cx);
         let readout_shell = floating_shell(FloatingRole::Readout, cx);
+        let floating_colors = &appearance.floating_colors;
         let status = self.authoritative_status();
         let (status_color, status_icon) = match self.pane_state {
             PaneTerminalState::Failed { .. } => (appearance.colors.error, IconName::TriangleAlert),
@@ -4043,7 +4045,7 @@ impl Render for TerminalPane {
                                 .max_w(appearance.spacing(520.0))
                                 .px(appearance.spacing(6.0))
                                 .py(appearance.spacing(3.0))
-                                .text_color(gpui_color(appearance.colors.preview_foreground))
+                                .text_color(gpui_color(floating_colors.preview_foreground))
                                 .text_size(appearance.text_size(13.0))
                                 .child(div().truncate().child(text)),
                         ),
@@ -4085,7 +4087,7 @@ impl Render for TerminalPane {
                                 .bottom_0()
                                 .w(width)
                                 .max_w(relative(0.94))
-                                .text_color(gpui_color(appearance.colors.text))
+                                .text_color(gpui_color(floating_colors.text))
                                 .text_size(appearance.text_size(13.0))
                                 .flex()
                                 .flex_row()
@@ -4192,6 +4194,7 @@ fn render_paste_confirmation(
     appearance: super::appearance::ChromeAppearance,
     shell: FloatingShell,
 ) -> impl IntoElement {
+    let floating_colors = &appearance.floating_colors;
     let cancel_pane = pane.clone();
     let explanation = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
         "This text contains control sequences that may change terminal behavior or execute commands."
@@ -4209,7 +4212,7 @@ fn render_paste_confirmation(
             .bottom(appearance.spacing(16.0))
             .flex()
             .flex_row()
-            .text_color(gpui_color(appearance.colors.text))
+            .text_color(gpui_color(floating_colors.text))
             .text_size(appearance.text_size(13.0))
             .occlude()
             // This notice asks the reader to weigh a risk, so the warning stays visible as a

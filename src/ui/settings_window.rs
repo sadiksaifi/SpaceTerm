@@ -2279,29 +2279,38 @@ impl SettingsWindow {
             SettingsRowId::Transparency | SettingsRowId::BackgroundBlur => {
                 let zero_transparency =
                     self.editor.document().preferences.background.transparency == 0.0;
-                let forced_opaque = !zero_transparency
-                    && super::appearance_runtime::current(cx)
-                        .chrome
-                        .composition
-                        .effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque;
+                let composition = super::appearance_runtime::current(cx).chrome.composition;
+                let accessibility_forced_opaque =
+                    !zero_transparency && composition.floating_materials.is_opaque();
+                let native_unavailable = !zero_transparency
+                    && composition.effective
+                        == crate::appearance::WindowBackgroundAppearance::Opaque
+                    && !composition.floating_materials.is_opaque();
                 Some(match row {
                     SettingsRowId::Transparency if zero_transparency => {
-                        "The window is opaque at 0. Increase this value to show the desktop behind it."
+                        "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
                     }
-                    SettingsRowId::Transparency if forced_opaque => {
-                        "System support or accessibility settings currently keep the window opaque. Your transparency choice is kept."
+                    SettingsRowId::Transparency if accessibility_forced_opaque => {
+                        "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
+                    }
+                    SettingsRowId::Transparency if native_unavailable => {
+                        "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
                     SettingsRowId::Transparency => {
-                        "Show the desktop behind the window. 0 is opaque; 1 is maximum transparency."
+                        "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
                     _ if zero_transparency => {
-                        "Blur affects the desktop behind the window. Increase Transparency above 0 to see it."
+                        "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
                     }
-                    _ if forced_opaque => {
-                        "Desktop blur is unavailable while system support or accessibility settings keep the window opaque. Your blur choice is kept."
+                    _ if accessibility_forced_opaque => {
+                        "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
                     }
-                    _ => "Soften the desktop behind the window.",
+                    _ if native_unavailable => {
+                        "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
+                    }
+                    _ => {
+                        "Soften the desktop behind the window and content behind floating surfaces."
+                    }
                 })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),

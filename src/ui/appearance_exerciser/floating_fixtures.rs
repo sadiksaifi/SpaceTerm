@@ -6,8 +6,8 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, Render, Window, div, px, rgba};
 use spaceterm_ui::{
     Alert, AlertIntent, Button, ButtonSize, ButtonVariant, ComboBox, ComboBoxItem, CommandPalette,
-    CommandPaletteItem, ContextMenu, Dialog, DialogCloseDecision, DialogInitialFocus, Menu,
-    MenuEntry, MenuSize, ModalAction, ModalActionRole, ModalId, Picker, PickerOption,
+    CommandPaletteItem, ContextMenu, Dialog, DialogCloseDecision, DialogInitialFocus, FloatingRole,
+    Menu, MenuEntry, MenuSize, ModalAction, ModalActionRole, ModalId, Picker, PickerOption,
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressState, TextInput,
     Tooltip,
 };
@@ -336,6 +336,20 @@ impl Render for FloatingFixtures {
                     .text_size(px(12.0)).overflow_hidden()
                     .child("SYNTHETIC 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ · fine text behind a floating surface · ".repeat(4))
             }));
+        let backdrop_probe = appearance
+            .floating_surfaces()
+            .shell(FloatingRole::Notice)
+            .mount(
+                div()
+                    .absolute()
+                    .top(px(96.0))
+                    .left(px(36.0))
+                    .w(px(420.0))
+                    .p(appearance.spacing(14.0))
+                    .text_color(rgba(appearance.colors.text.rgba_hex()))
+                    .debug_selector(|| "fixture-backdrop-probe".to_owned())
+                    .child("Persistent floating probe: compare the fine text behind this surface with Blur off and Blur on."),
+            );
         div()
             .flex()
             .flex_col()
@@ -354,7 +368,13 @@ impl Render for FloatingFixtures {
                             .p(appearance.spacing(8.0))
                             .child(controls),
                     )
-                    .child(div().relative().h(px(432.0)).child(pattern)),
+                    .child(
+                        div()
+                            .relative()
+                            .h(px(432.0))
+                            .child(pattern)
+                            .child(backdrop_probe),
+                    ),
             )
     }
 }
