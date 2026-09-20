@@ -202,6 +202,386 @@ fn maximum_floating_transparency_does_not_rebuild_an_opaque_slab_when_nested() {
 }
 
 #[test]
+fn floating_control_states_transmit_their_host_until_the_opaque_override() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let paint = &translucent.floating_control_colors;
+        for (state, color) in [
+            ("button", paint.element_background),
+            ("button hover", paint.element_hover),
+            ("button pressed", paint.element_active),
+            ("button disabled", paint.element_disabled),
+            ("trigger", paint.ghost_element_background),
+            ("trigger hover", paint.ghost_element_hover),
+            ("toggle", paint.toggle_off_background),
+            ("toggle hover", paint.toggle_off_hover_background),
+            (
+                "segmented selection",
+                translucent.floating_segmented_colors.selection_background,
+            ),
+            ("field", paint.input_background),
+            ("disabled field", paint.input_disabled_background),
+        ] {
+            assert!(
+                color.a < 255,
+                "{appearance:?} {state} must leave the floating host visible: {color:?}"
+            );
+        }
+        assert_ne!(paint.element_background, paint.element_hover);
+        assert_ne!(paint.element_hover, paint.element_active);
+
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        for (paint, reference) in [
+            (
+                opaque.floating_control_colors.element_hover,
+                opaque.floating_colors.element_hover,
+            ),
+            (
+                opaque.floating_control_colors.ghost_element_hover,
+                opaque.floating_colors.ghost_element_hover,
+            ),
+            (
+                opaque.floating_control_colors.input_background,
+                opaque.floating_colors.input_background,
+            ),
+        ] {
+            assert_eq!(paint, reference);
+        }
+    }
+}
+
+#[test]
+fn panel_and_card_controls_compile_against_their_immediate_hosts() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        for (name, host, expected_background) in [
+            (
+                "Panel",
+                &translucent.panel_controls,
+                translucent.colors.panel_background,
+            ),
+            (
+                "Card",
+                &translucent.card_controls,
+                translucent.colors.elevated_surface_background,
+            ),
+        ] {
+            assert_eq!(host.reference.background, expected_background);
+            for (state, fill) in [
+                ("button", host.colors.element_background),
+                ("button hover", host.colors.element_hover),
+                ("button pressed", host.colors.element_active),
+                ("trigger hover", host.colors.ghost_element_hover),
+                ("field", host.colors.input_background),
+                ("segmented track", host.segmented.element_background),
+                ("segmented option", host.segmented.selection_background),
+            ] {
+                assert!(
+                    fill.a < 255,
+                    "{appearance:?} {name} {state} must transmit its immediate host: {fill:?}"
+                );
+            }
+            assert_ne!(host.colors.element_background, host.colors.element_hover);
+            assert_ne!(host.colors.element_hover, host.colors.element_active);
+        }
+
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        assert_eq!(
+            opaque.panel_controls.colors,
+            opaque.panel_controls.reference
+        );
+        assert_eq!(opaque.card_controls.colors, opaque.card_controls.reference);
+        assert_eq!(
+            opaque.panel_controls.segmented,
+            opaque.panel_controls.reference
+        );
+        assert_eq!(
+            opaque.card_controls.segmented,
+            opaque.card_controls.reference
+        );
+    }
+
+    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+    let input = Color::rgba(0x20406080);
+    let disabled_input = Color::rgba(0x60402060);
+    let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
+    authored.input_background = input;
+    authored.input_disabled_background = disabled_input;
+    let prepared = ChromeAppearance::prepare(&resolved.chrome);
+    for host in [&prepared.panel_controls, &prepared.card_controls] {
+        assert_eq!(
+            host.reference.input_background,
+            input.source_over(host.reference.background),
+        );
+        assert_eq!(
+            host.reference.input_disabled_background,
+            disabled_input.source_over(host.reference.background),
+        );
+    }
+}
+
+#[test]
+fn floating_control_content_remains_readable_on_material_state_fills() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let colors = &prepared.floating_control_colors;
+        let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+        let text_states = [
+            (
+                "button",
+                colors.element_background,
+                colors.element_foreground,
+                4.5,
+            ),
+            (
+                "button hover",
+                colors.element_hover,
+                colors.element_hover_foreground,
+                4.5,
+            ),
+            (
+                "button pressed",
+                colors.element_active,
+                colors.element_active_foreground,
+                4.5,
+            ),
+            (
+                "button disabled",
+                colors.element_disabled,
+                colors.element_disabled_foreground,
+                3.0,
+            ),
+            (
+                "ghost",
+                colors.ghost_element_background,
+                colors.ghost_element_foreground,
+                4.5,
+            ),
+            (
+                "ghost hover",
+                colors.ghost_element_hover,
+                colors.ghost_element_hover_foreground,
+                4.5,
+            ),
+            (
+                "ghost pressed",
+                colors.ghost_element_active,
+                colors.ghost_element_active_foreground,
+                4.5,
+            ),
+            (
+                "primary",
+                colors.primary_background,
+                colors.primary_foreground,
+                4.5,
+            ),
+            (
+                "primary hover",
+                colors.primary_hover_background,
+                colors.primary_hover_foreground,
+                4.5,
+            ),
+            (
+                "primary pressed",
+                colors.primary_pressed_background,
+                colors.primary_pressed_foreground,
+                4.5,
+            ),
+            (
+                "destructive",
+                colors.destructive_background,
+                colors.destructive_foreground,
+                4.5,
+            ),
+            (
+                "toggle off",
+                colors.toggle_off_background,
+                colors.toggle_off_mark,
+                3.0,
+            ),
+            (
+                "toggle off hover",
+                colors.toggle_off_hover_background,
+                colors.toggle_off_hover_mark,
+                3.0,
+            ),
+            (
+                "toggle on",
+                colors.toggle_on_background,
+                colors.toggle_on_mark,
+                3.0,
+            ),
+            (
+                "toggle on hover",
+                colors.toggle_on_hover_background,
+                colors.toggle_on_hover_mark,
+                3.0,
+            ),
+        ];
+        for (state, fill, foreground, minimum) in text_states {
+            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+                let host = shell_endpoint_background(shell, underlay);
+                let background = fill.source_over(host);
+                let contrast = foreground
+                    .source_over(background)
+                    .contrast_ratio(background);
+                assert!(
+                    contrast >= minimum,
+                    "{appearance:?} {state} contrast={contrast:.2} on {background:?}"
+                );
+            }
+        }
+        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            let host = shell_endpoint_background(shell, underlay);
+            assert!(
+                colors.text_accent.source_over(host).contrast_ratio(host) >= 4.5,
+                "{appearance:?} bare-button accent must read over the host"
+            );
+            let progress_track = colors.toggle_off_background.source_over(host);
+            assert!(
+                colors
+                    .text_accent
+                    .source_over(progress_track)
+                    .contrast_ratio(progress_track)
+                    >= 4.5,
+                "{appearance:?} progress accent must read over its track"
+            );
+            for (status, foreground) in [
+                ("info", colors.info),
+                ("success", colors.success),
+                ("warning", colors.warning),
+                ("error", colors.error),
+            ] {
+                assert!(
+                    foreground.source_over(host).contrast_ratio(host) >= 3.0,
+                    "{appearance:?} {status} indicator must read over the modal host"
+                );
+            }
+        }
+        let segmented = &prepared.floating_segmented_colors;
+        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            let host = shell_endpoint_background(shell, underlay);
+            let track = segmented.element_background.source_over(host);
+            for (state, fill, foreground, minimum) in [
+                ("segment", Color::rgba(0), segmented.text_secondary, 4.5),
+                (
+                    "segment hover",
+                    segmented.ghost_element_hover,
+                    segmented.ghost_element_hover_foreground,
+                    4.5,
+                ),
+                (
+                    "segment pressed",
+                    segmented.ghost_element_active,
+                    segmented.ghost_element_active_foreground,
+                    4.5,
+                ),
+                (
+                    "selected segment",
+                    segmented.selection_background,
+                    segmented.selection_foreground,
+                    4.5,
+                ),
+                (
+                    "selected segment hover",
+                    segmented.selection_hover_background,
+                    segmented.selection_hover_foreground,
+                    4.5,
+                ),
+                (
+                    "selected segment pressed",
+                    segmented.selection_pressed_background,
+                    segmented.selection_pressed_foreground,
+                    4.5,
+                ),
+                (
+                    "selected segment disabled",
+                    segmented.selection_disabled_background,
+                    segmented.selection_disabled_foreground,
+                    3.0,
+                ),
+            ] {
+                let background = fill.source_over(track);
+                let contrast = foreground
+                    .source_over(background)
+                    .contrast_ratio(background);
+                assert!(
+                    contrast >= minimum,
+                    "{appearance:?} {state} contrast={contrast:.2} on {background:?}"
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn installed_floating_catalog_uses_the_material_control_presentation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_, prepared) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+    let reference = &prepared.floating_colors;
+    let colors = &prepared.floating_control_colors;
+    let field = &prepared.floating_field_colors;
+    let mut popup = reference.clone();
+    popup.elevated_surface_background =
+        prepared.floating_surface(prepared.colors.elevated_surface_background);
+    let expected = spaceterm_ui::SurfaceControlThemes::new(
+        super::button_theme::theme(colors),
+        super::toggle_theme::theme(colors),
+        super::progress_theme::theme(colors, spaceterm_ui::ProgressMotion::Standard),
+        super::segmented_control_theme::theme(&prepared.floating_segmented_colors),
+        super::search_field_theme::themed(&prepared.floating_field_reference, field),
+        super::text_input_theme::themed(field, reference),
+    )
+    .triggers(
+        super::menu_theme::themed_with_rows(reference, colors, &popup),
+        super::combo_box_theme::themed_with_rows(reference, colors, &popup),
+    );
+    let expected_panel = super::control_theme_catalog::surface_control_themes(
+        &prepared.panel_controls,
+        reference,
+        &popup,
+        spaceterm_ui::ProgressMotion::Standard,
+    );
+    let expected_card = super::control_theme_catalog::surface_control_themes(
+        &prepared.card_controls,
+        reference,
+        &popup,
+        spaceterm_ui::ProgressMotion::Standard,
+    );
+
+    cx.update(|cx| {
+        spaceterm_ui::init(
+            cx,
+            super::control_theme_catalog::catalog(
+                &prepared,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
+        )
+        .expect("floating catalog should install");
+        assert_eq!(
+            cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                .hosted_controls(spaceterm_ui::ControlHost::Floating),
+            Some(&expected),
+        );
+        assert_eq!(
+            cx.global::<spaceterm_ui::ModalTheme>(),
+            &super::modal_theme::theme(colors),
+        );
+        assert_eq!(
+            cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                .hosted_controls(spaceterm_ui::ControlHost::Panel),
+            Some(&expected_panel),
+        );
+        assert_eq!(
+            cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                .hosted_controls(spaceterm_ui::ControlHost::Card),
+            Some(&expected_card),
+        );
+    });
+}
+
+#[test]
 fn floating_wash_eases_from_opaque_to_thin_without_an_opacity_step() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         let mut previous = 255_u8;
@@ -560,6 +940,7 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
     authored.input_background = Color::rgb(0xffffff);
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let bare = &prepared.floating_colors;
+    let field_reference = &prepared.floating_field_reference;
     let standard = &prepared.floating_field_colors;
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
 
@@ -569,15 +950,67 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
             assert!(foreground.contrast_ratio(background) >= 4.5);
         }
     }
-    for foreground in [standard.input_text, standard.input_placeholder] {
-        assert!(foreground.contrast_ratio(standard.input_background) >= 4.5);
+    for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        let shell_background = shell_endpoint_background(shell, underlay);
+        let background = standard.input_background.source_over(shell_background);
+        for foreground in [standard.input_text, standard.input_placeholder] {
+            assert!(
+                foreground
+                    .source_over(background)
+                    .contrast_ratio(background)
+                    >= 4.5
+            );
+        }
+        let disabled_background = standard
+            .input_disabled_background
+            .source_over(shell_background);
+        assert!(
+            standard
+                .input_disabled_text
+                .source_over(disabled_background)
+                .contrast_ratio(disabled_background)
+                >= 4.5
+        );
+        let selection_background = standard.input_selection_background.source_over(background);
+        assert!(
+            standard
+                .input_selection_foreground
+                .source_over(selection_background)
+                .contrast_ratio(selection_background)
+                >= 4.5
+        );
     }
+    assert!(
+        standard.input_background.a < 255,
+        "a Standard field must preserve its floating material"
+    );
     assert_ne!(bare.input_text, standard.input_text);
     assert_ne!(
         super::text_input_theme::theme(bare),
         super::text_input_theme::themed(standard, bare),
         "floating Standard and Bare variants must keep distinct foregrounds"
     );
+
+    let resting_disc = field_reference.input_placeholder.source_over(
+        field_reference
+            .input_background
+            .source_over(field_reference.panel_background),
+    );
+    let clear_glyph = super::control_theme_catalog::readable_on(
+        field_reference.input_background,
+        resting_disc,
+        4.5,
+    );
+    for disc in [
+        standard.input_placeholder,
+        standard.input_placeholder.mix(standard.input_text, 0.5),
+        standard.input_text,
+    ] {
+        assert!(
+            clear_glyph.contrast_ratio(disc) >= 4.5,
+            "the clear glyph must remain readable on every enabled disc state"
+        );
+    }
 }
 
 #[test]

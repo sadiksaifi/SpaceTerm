@@ -45,7 +45,7 @@ fn test_catalog(hosted: bool, generation: u64, host_fill: gpui::Rgba) -> Control
     catalog.floating = None;
     catalog.floating_controls = None;
     if hosted {
-        let controls = FloatingControlThemes::new(
+        let controls = SurfaceControlThemes::new(
             catalog.button,
             catalog.toggle,
             catalog.progress,
@@ -595,4 +595,244 @@ fn scaling_catalog_should_preserve_role_materials_and_hairlines_while_growing_ge
             "{role:?}"
         );
     }
+}
+
+const PANEL_FIELD: gpui::Rgba = gpui::Rgba {
+    r: 0.2,
+    g: 0.6,
+    b: 0.4,
+    a: 1.0,
+};
+const CARD_FIELD: gpui::Rgba = gpui::Rgba {
+    r: 0.7,
+    g: 0.3,
+    b: 0.2,
+    a: 1.0,
+};
+
+fn surface_host_catalog(
+    generation: u64,
+    panel: gpui::Rgba,
+    card: gpui::Rgba,
+) -> ControlThemeCatalog {
+    let catalog = test_catalog(true, generation, HOST_FIELD);
+    let controls = |fill| {
+        SurfaceControlThemes::new(
+            catalog.button,
+            catalog.toggle,
+            catalog.progress,
+            catalog.segmented_control,
+            catalog.search_field,
+            input_theme(fill, px(6.0)),
+        )
+    };
+    let panel = controls(panel);
+    let card = controls(card);
+    catalog.resting_controls(panel, card)
+}
+
+struct NestedHostFixture {
+    fields: [Entity<RetainedField>; 7],
+    phases: [PhaseObservations; 7],
+}
+
+impl NestedHostFixture {
+    fn new(observations: FieldObservations, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            fields: [
+                "window-before",
+                "panel",
+                "card",
+                "floating",
+                "window-override",
+                "panel-after",
+                "window-after",
+            ]
+            .map(|id| {
+                cx.new(|cx| RetainedField {
+                    id,
+                    input: cx.new(|cx| TextInput::new(id, id, "", window, cx)),
+                    observations: Rc::clone(&observations),
+                })
+            }),
+            phases: std::array::from_fn(|_| PhaseObservations::default()),
+        }
+    }
+
+    fn field(&self, index: usize) -> PhaseField {
+        PhaseField {
+            content: self.fields[index].clone().into_any_element(),
+            observations: Rc::clone(&self.phases[index]),
+        }
+    }
+}
+
+impl Render for NestedHostFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .child(self.field(0))
+            .child(
+                ControlHost::Panel.mount(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(self.field(1))
+                        .child(
+                            ControlHost::Card.mount(
+                                div().flex().flex_col().child(self.field(2)).child(
+                                    FloatingSurfaceTheme::default()
+                                        .shell(FloatingRole::Popover)
+                                        .host(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .child(self.field(3))
+                                                .child(ControlHost::Window.mount(self.field(4))),
+                                        ),
+                                ),
+                            ),
+                        )
+                        .child(self.field(5)),
+                ),
+            )
+            .child(self.field(6))
+    }
+}
+
+#[gpui::test]
+fn control_hosts_resolve_nearest_material_in_all_phases_and_restore_siblings(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD)))
+        .unwrap();
+    let observations = FieldObservations::default();
+    let (root, cx) = cx
+        .add_window_view(|window, cx| NestedHostFixture::new(Rc::clone(&observations), window, cx));
+    cx.run_until_parked();
+    let expected = [
+        ROOT_FIELD,
+        PANEL_FIELD,
+        CARD_FIELD,
+        HOST_FIELD,
+        ROOT_FIELD,
+        PANEL_FIELD,
+        ROOT_FIELD,
+    ];
+    root.read_with(cx, |root, cx| {
+        for (index, expected) in expected.into_iter().enumerate() {
+            let id = root.fields[index].read(cx).id;
+            assert!(
+                observations
+                    .borrow()
+                    .iter()
+                    .any(|(seen, fill)| { *seen == id && *fill == Some(expected.into()) }),
+                "{id} must use its nearest material host"
+            );
+            for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+                assert!(
+                    root.phases[index]
+                        .borrow()
+                        .iter()
+                        .any(|(seen, fill)| { *seen == phase && *fill == Some(expected.into()) }),
+                    "{id} must keep its material host during {phase:?}"
+                );
+            }
+        }
+    });
+}
+
+#[gpui::test]
+fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_hosts(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD)))
+        .unwrap();
+    let observations = FieldObservations::default();
+    let (_, cx) = cx
+        .add_window_view(|window, cx| NestedHostFixture::new(Rc::clone(&observations), window, cx));
+    cx.run_until_parked();
+    observations.borrow_mut().clear();
+    cx.update(|_, cx| {
+        replace_control_theme_catalog(cx, surface_host_catalog(2, CARD_FIELD, PANEL_FIELD)).unwrap()
+    });
+    cx.run_until_parked();
+    for (id, expected) in [
+        ("panel", CARD_FIELD),
+        ("card", PANEL_FIELD),
+        ("floating", HOST_FIELD),
+        ("window-after", ROOT_FIELD),
+    ] {
+        assert!(
+            observations
+                .borrow()
+                .iter()
+                .any(|(seen, fill)| *seen == id && *fill == Some(expected.into())),
+            "{id} did not refresh"
+        );
+    }
+
+    observations.borrow_mut().clear();
+    cx.update(|_, cx| {
+        replace_control_theme_catalog(cx, test_catalog(true, 3, HOST_FIELD)).unwrap()
+    });
+    cx.run_until_parked();
+    for id in ["panel", "card", "panel-after"] {
+        assert!(
+            observations
+                .borrow()
+                .iter()
+                .any(|(seen, fill)| *seen == id && *fill == Some(ROOT_FIELD.into())),
+            "{id} retained an omitted host override"
+        );
+    }
+    cx.update(|_, cx| {
+        let catalog = cx.global::<ControlThemeCatalog>();
+        assert!(catalog.hosted_controls(ControlHost::Panel).is_none());
+        assert!(catalog.hosted_controls(ControlHost::Card).is_none());
+        assert!(catalog.hosted_controls(ControlHost::Floating).is_some());
+    });
+}
+
+#[gpui::test]
+fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    for host in [
+        ControlHost::Window,
+        ControlHost::Panel,
+        ControlHost::Card,
+        ControlHost::Floating,
+    ] {
+        cx.update(|window, _| window.reset_paint_call_counts_for_test());
+        cx.draw(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(100.0), px(100.0)),
+            |_, _| host.mount(div().size_full()),
+        );
+        assert_eq!(
+            cx.update(|window, _| window.quad_paint_call_count_for_test()),
+            0,
+            "{host:?} must select control paints without adding fill, edge, shadow, or backdrop effects"
+        );
+    }
+}
+
+#[test]
+fn resting_host_metrics_scale_once_with_the_complete_catalog() {
+    let initial = surface_host_catalog(1, PANEL_FIELD, CARD_FIELD);
+    let scaled = initial.clone().scale_metrics(1.5, 1.25);
+    for host in [ControlHost::Panel, ControlHost::Card, ControlHost::Floating] {
+        let original = initial.hosted_controls(host).unwrap();
+        assert_ne!(scaled.hosted_controls(host), Some(original));
+        assert_eq!(
+            scaled.hosted_controls(host),
+            Some(&original.clone().scale_metrics(1.5, 1.25))
+        );
+    }
+    assert!(scaled.hosted_controls(ControlHost::Window).is_none());
+    assert_eq!(
+        scaled.installed_generation(),
+        initial.installed_generation()
+    );
 }

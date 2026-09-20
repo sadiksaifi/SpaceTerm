@@ -103,7 +103,8 @@ fn navigation_chip(
 ) -> SelectionChip {
     SelectionChip::new(
         ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
-        navigation_chip_paint(selected, available, &appearance.colors).raised(appearance),
+        navigation_chip_paint(selected, available, &appearance.colors)
+            .raised_on(appearance, appearance.colors.panel_background),
     )
 }
 
@@ -1014,7 +1015,7 @@ impl SettingsWindow {
                     )
             })
             .collect::<Vec<_>>();
-        div()
+        let sidebar = div()
             .debug_selector(|| "settings-sidebar".to_owned())
             .flex()
             .flex_col()
@@ -1062,6 +1063,9 @@ impl SettingsWindow {
                             .children(entries),
                     ),
             )
+            .into_any_element();
+        spaceterm_ui::ControlHost::Panel
+            .mount(sidebar)
             .into_any_element()
     }
 
@@ -1652,7 +1656,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1704,7 +1708,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1739,7 +1743,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1777,7 +1781,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 

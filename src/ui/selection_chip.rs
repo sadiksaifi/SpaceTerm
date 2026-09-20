@@ -68,9 +68,19 @@ impl ChipPaint {
     ///
     /// Fills add the resting surface overlay over the shared tint. Selection comes from the
     /// authored color difference; rims retain their quiet neutral edge.
-    pub(crate) fn raised(self, appearance: &crate::ui::appearance::ChromeAppearance) -> Self {
+    pub(crate) fn raised_on(
+        self,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        semantic_host: Color,
+    ) -> Self {
         let material = |color: Option<Color>| {
-            color.map(|color| appearance.surface(crate::appearance::SurfaceRole::Surface, color))
+            color.map(|color| {
+                appearance.materials.paint(
+                    crate::appearance::SurfaceRole::Surface,
+                    semantic_host,
+                    color,
+                )
+            })
         };
         Self {
             fill: material(self.fill),
@@ -151,5 +161,71 @@ impl SelectionChip {
         .border_color(rgba(color.rgba_hex()))
         .debug_selector(move || selector.to_owned())
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appearance::{
+        AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+        SchemeCatalog, SystemAppearance,
+    };
+
+    fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = transparency;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .expect("built-in appearance should resolve");
+        crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome)
+    }
+
+    fn selected(colors: &crate::appearance::ChromeColors) -> ChipPaint {
+        ChipPaint {
+            fill: Some(colors.row_selected_background),
+            rim: Some(colors.row_selected_border),
+            hover_fill: Some(colors.row_selected_hover_background),
+            hover_rim: Some(colors.row_selected_hover_border),
+        }
+    }
+
+    #[test]
+    fn raised_chip_materializes_each_state_against_its_actual_host() {
+        let appearance = appearance(1.0);
+        let colors = &appearance.colors;
+        let host = colors.panel_background;
+        let paint = selected(colors).raised_on(&appearance, host);
+        let expected_fill = appearance.materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            colors.row_selected_background,
+        );
+        let expected_hover = appearance.materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            colors.row_selected_hover_background,
+        );
+
+        assert_eq!(paint.fill, Some(expected_fill));
+        assert_eq!(paint.hover_fill, Some(expected_hover));
+        assert_ne!(paint.fill, paint.hover_fill);
+    }
+
+    #[test]
+    fn opaque_chip_keeps_its_authored_states() {
+        let appearance = appearance(0.0);
+        let colors = &appearance.colors;
+        let authored = selected(colors);
+        let paint = authored.raised_on(&appearance, colors.panel_background);
+
+        assert_eq!(paint.fill, authored.fill);
+        assert_eq!(paint.hover_fill, authored.hover_fill);
     }
 }

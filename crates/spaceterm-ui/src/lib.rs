@@ -63,8 +63,8 @@ pub use command_palette::{
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use floating_surface::{
-    FloatingControlThemes, FloatingLayer, FloatingRole, FloatingShell, FloatingSurfaceElement,
-    FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme,
+    ControlHost, ControlHostElement, FloatingLayer, FloatingRole, FloatingShell,
+    FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme, SurfaceControlThemes,
 };
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
@@ -180,7 +180,9 @@ pub struct ControlThemeCatalog {
     tooltip: TooltipTheme,
     modal: ModalTheme,
     floating: Option<FloatingSurfaceTheme>,
-    floating_controls: Option<FloatingControlThemes>,
+    floating_controls: Option<SurfaceControlThemes>,
+    panel_controls: Option<SurfaceControlThemes>,
+    card_controls: Option<SurfaceControlThemes>,
 }
 
 impl gpui::Global for ControlThemeCatalog {}
@@ -261,6 +263,8 @@ impl ControlThemeCatalog {
             modal,
             floating: None,
             floating_controls: None,
+            panel_controls: None,
+            card_controls: None,
         }
     }
 
@@ -273,11 +277,38 @@ impl ControlThemeCatalog {
     pub fn floating(
         mut self,
         surfaces: FloatingSurfaceTheme,
-        controls: FloatingControlThemes,
+        controls: SurfaceControlThemes,
     ) -> Self {
         self.floating = Some(surfaces);
         self.floating_controls = Some(controls);
         self
+    }
+
+    /// Sets controls compiled against the actual resting panel and card materials.
+    ///
+    /// These bundles share the catalog's generation and metric scaling. Their hosts add no
+    /// surface effects; callers still paint each panel or card exactly once.
+    pub fn resting_controls(
+        mut self,
+        panel: SurfaceControlThemes,
+        card: SurfaceControlThemes,
+    ) -> Self {
+        self.panel_controls = Some(panel);
+        self.card_controls = Some(card);
+        self
+    }
+
+    /// Returns the resolved override for one material host.
+    ///
+    /// Window controls use the root family themes, so Window returns `None`. An omitted host
+    /// bundle also returns `None` and falls back to those root themes, never an enclosing host.
+    pub fn hosted_controls(&self, host: ControlHost) -> Option<&SurfaceControlThemes> {
+        match host {
+            ControlHost::Window => None,
+            ControlHost::Panel => self.panel_controls.as_ref(),
+            ControlHost::Card => self.card_controls.as_ref(),
+            ControlHost::Floating => self.floating_controls.as_ref(),
+        }
     }
 
     /// Sets the generation shared by every family in this complete catalog.
@@ -330,6 +361,12 @@ impl ControlThemeCatalog {
             .map(|floating| floating.scaled_metrics(text_scale, spacing_scale));
         self.floating_controls = self
             .floating_controls
+            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+        self.panel_controls = self
+            .panel_controls
+            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+        self.card_controls = self
+            .card_controls
             .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
         self
     }
@@ -395,11 +432,6 @@ fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
     cx.set_global(catalog.tooltip);
     cx.set_global(catalog.modal);
     cx.set_global(catalog.floating.unwrap_or_default());
-    if let Some(controls) = catalog.floating_controls.clone() {
-        cx.set_global(controls);
-    } else if cx.has_global::<FloatingControlThemes>() {
-        cx.remove_global::<FloatingControlThemes>();
-    }
     cx.set_global(catalog);
 }
 

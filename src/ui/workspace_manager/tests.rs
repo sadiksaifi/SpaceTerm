@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
+    DivInspectorState, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseDownEvent,
+    MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+    point,
 };
 use spaceterm_ui::{
     Alert, Dialog, DialogCloseDecision, DialogInitialFocus, ModalAction, ModalActionRole, ModalId,
@@ -7369,6 +7370,78 @@ fn clicking_the_active_inline_rename_should_keep_it_editable(cx: &mut TestAppCon
     });
     assert_eq!(focus_state, (true, false, true));
     assert_eq!(rename_state, (WorkspaceId::new(1), "Dev".to_owned(), true));
+}
+
+#[gpui::test]
+fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let mut appearance = cx.update(|_, cx| crate::ui::appearance::chrome(cx).clone());
+    appearance.control_colors.input_background = Color::rgb(0xcc2233);
+    appearance.panel_controls.colors.input_background = Color::rgb(0x228844);
+    let window_background = gpui_color(appearance.control_colors.input_background);
+    let panel_background = gpui_color(appearance.panel_controls.colors.input_background);
+    assert_ne!(window_background, panel_background);
+    let catalog = crate::ui::control_theme_catalog::catalog(
+        &appearance,
+        spaceterm_ui::ProgressMotion::Standard,
+    )
+    .generation(spaceterm_ui::ControlThemeGeneration::new(u64::MAX));
+    cx.update(|window, cx| {
+        assert_eq!(
+            spaceterm_ui::replace_control_theme_catalog(cx, catalog),
+            Ok(spaceterm_ui::ControlThemeReplacement::Applied)
+        );
+        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    right_click("workspace-row-1-active", cx);
+    click("workspace-menu-row-rename", cx);
+
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let styles = Rc::clone(&observed);
+    cx.update(|window, cx| {
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("workspace-rename-input-1")
+        .expect("inline rename frame must render");
+    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    for _ in 0..16 {
+        if let Some(background) = observed
+            .borrow()
+            .iter()
+            .rev()
+            .find(|style| style.bounds == bounds)
+            .map(|style| style.base_style.background.clone())
+        {
+            assert_eq!(
+                background,
+                Some(panel_background.into()),
+                "inline rename frame must use Panel input paint, not Window input paint"
+            );
+            return;
+        }
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+    panic!("inspector did not expose the inline rename frame");
 }
 
 #[gpui::test]

@@ -5,10 +5,10 @@ use std::{
 };
 
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement as _,
-    Keystroke, Modifiers, MouseButton, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent,
-    Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div, point,
-    prelude::FluentBuilder as _, px, rgba,
+    AppContext as _, Context, DivInspectorState, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement as _, Keystroke, Modifiers, MouseButton, ParentElement as _, Render, ScrollDelta,
+    ScrollWheelEvent, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div,
+    point, prelude::FluentBuilder as _, px, rgba,
 };
 
 use crate::{
@@ -351,8 +351,13 @@ impl Render for IconTriggerRoot {
                             .into_any_element()
                     })
                     .when(self.custom, |combo| {
-                        combo
-                            .custom_trigger(div().w_full().px(px(12.0)).child("Workspace identity"))
+                        combo.custom_trigger(
+                            div()
+                                .debug_selector(|| "combo-box-custom-content".to_owned())
+                                .w_full()
+                                .px(px(12.0))
+                                .child("Workspace identity"),
+                        )
                     })
                     .full_width(true)
                     .disabled(self.disabled)
@@ -2609,6 +2614,102 @@ fn custom_trigger_should_open_from_padding_across_its_full_width(cx: &mut TestAp
         cx.run_until_parked();
     }
     assert_eq!(events.borrow().len(), 4);
+}
+
+#[gpui::test]
+fn custom_trigger_should_own_its_fill_while_the_wrapper_keeps_interaction(cx: &mut TestAppContext) {
+    let (root, events, cx) = icon_trigger_window(cx, false);
+    root.update(cx, |root, cx| {
+        root.custom = true;
+        cx.notify();
+    });
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let observed_styles = Rc::clone(&observed);
+    cx.update(|window, cx| {
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            observed_styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("custom trigger wrapper");
+    cx.debug_bounds("combo-box-custom-content")
+        .expect("custom trigger content");
+    let inspect_wrapper = |observed: &Rc<RefCell<Vec<DivInspectorState>>>,
+                           trigger: gpui::Bounds<gpui::Pixels>,
+                           cx: &mut VisualTestContext| {
+        for _ in 0..16 {
+            if let Some(background) = observed
+                .borrow()
+                .iter()
+                .rev()
+                .find(|state| state.bounds == trigger)
+                .map(|state| state.base_style.background.clone())
+            {
+                return Some(background);
+            }
+            cx.simulate_event(ScrollWheelEvent {
+                position: trigger.center(),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        }
+        None
+    };
+
+    let center = trigger.center();
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    cx.update(|window, cx| window.toggle_inspector(cx));
+    cx.run_until_parked();
+    let inspected_trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("custom trigger wrapper with inspector open");
+    observed.borrow_mut().clear();
+    cx.simulate_mouse_move(inspected_trigger.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        inspect_wrapper(&observed, inspected_trigger, cx),
+        Some(None),
+        "hovering custom content must not add the ComboBox trigger fill beneath it"
+    );
+
+    cx.update(|window, cx| window.toggle_inspector(cx));
+    cx.run_until_parked();
+    let center = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("custom trigger wrapper after inspector closes")
+        .center();
+    cx.simulate_click(center, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert_eq!(events.borrow().as_slice(), [ComboBoxLifecycleEvent::Opened]);
+
+    cx.update(|window, cx| window.toggle_inspector(cx));
+    cx.run_until_parked();
+    let inspected_trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("open custom trigger wrapper with inspector open");
+    observed.borrow_mut().clear();
+    cx.simulate_mouse_move(inspected_trigger.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        inspect_wrapper(&observed, inspected_trigger, cx),
+        Some(None),
+        "opening custom content must not add the ComboBox trigger fill beneath it"
+    );
+    cx.update(|window, cx| window.toggle_inspector(cx));
+    cx.run_until_parked();
 }
 
 #[gpui::test]

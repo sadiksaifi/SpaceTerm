@@ -211,7 +211,8 @@ impl TabChromePresentation {
     ) -> SelectionChip {
         SelectionChip::new(
             tab_chip_shape(appearance, cx),
-            self.tab_chip_paint(active).raised(appearance),
+            self.tab_chip_paint(active)
+                .raised_on(appearance, self.background),
         )
     }
 
@@ -272,12 +273,22 @@ impl TabChromePresentation {
         active: bool,
         ancestor_hovered: bool,
         colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
     ) -> spaceterm_ui::ButtonVariantStyle {
-        self.control_style(active, ancestor_hovered, colors)
+        let host = if active {
+            self.active_tab_hover_background
+        } else {
+            self.hover_background
+        };
+        self.control_style(active, ancestor_hovered, colors, materials, host)
     }
 
-    fn bar_control_style(&self, colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
-        self.control_style(false, false, colors)
+    fn bar_control_style(
+        &self,
+        colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
+    ) -> spaceterm_ui::ButtonVariantStyle {
+        self.control_style(false, false, colors, materials, self.background)
     }
 
     fn control_style(
@@ -285,6 +296,8 @@ impl TabChromePresentation {
         active: bool,
         ancestor_hovered: bool,
         colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
+        host: Color,
     ) -> spaceterm_ui::ButtonVariantStyle {
         let clear = gpui::rgba(0);
         let icon = if ancestor_hovered {
@@ -299,8 +312,13 @@ impl TabChromePresentation {
             self.inactive_tab_icon
         };
         let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
+        let hover_background = materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            self.hover_background,
+        );
         let hover = spaceterm_ui::ButtonPaint::new(
-            gpui_color(self.hover_background),
+            gpui_color(hover_background),
             gpui_color(self.hover_icon),
             clear,
         );
@@ -1225,8 +1243,12 @@ impl TabManager {
         let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
-        let control_style =
-            presentation.close_control_style(active, ancestor_hovered, &appearance.colors);
+        let control_style = presentation.close_control_style(
+            active,
+            ancestor_hovered,
+            &appearance.colors,
+            appearance.materials,
+        );
         let hover_foreground = presentation.tab_hover_foreground(active);
         let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let close_clearance = (active || ancestor_hovered).then(|| {
@@ -1449,7 +1471,8 @@ impl TabManager {
                         })
                         .variant(ButtonVariant::Ghost)
                         .contextual_style(
-                            presentation.bar_control_style(&appearance.colors),
+                            presentation
+                                .bar_control_style(&appearance.colors, appearance.materials),
                             gpui_color(appearance.colors.border_focused),
                         )
                         .size(ButtonSize::Regular)
@@ -1890,7 +1913,12 @@ mod tests {
                 presentation.tab_hover_foreground(false),
                 colors.tab_hover_foreground
             );
-            let close = presentation.close_control_style(true, true, &colors);
+            let close = presentation.close_control_style(
+                true,
+                true,
+                &colors,
+                crate::appearance::SurfaceMaterials::OPAQUE,
+            );
             assert_eq!(
                 close.hovered().background(),
                 gpui_color(colors.tab_hover_background),
@@ -1902,7 +1930,12 @@ mod tests {
             );
             assert_eq!(
                 presentation
-                    .close_control_style(false, true, &colors)
+                    .close_control_style(
+                        false,
+                        true,
+                        &colors,
+                        crate::appearance::SurfaceMaterials::OPAQUE,
+                    )
                     .normal()
                     .foreground(),
                 gpui_color(colors.tab_hover_icon),
@@ -2089,7 +2122,12 @@ mod tests {
         let colors = colors.opaque_presentation();
         for window_active in [false, true] {
             let presentation = TabChromePresentation::resolve(window_active, &colors);
-            let style = presentation.close_control_style(true, false, &colors);
+            let style = presentation.close_control_style(
+                true,
+                false,
+                &colors,
+                crate::appearance::SurfaceMaterials::OPAQUE,
+            );
             assert_eq!(style.normal().background(), rgba(0));
             assert_eq!(
                 style.hovered().background(),
@@ -2117,7 +2155,12 @@ mod tests {
             );
 
             for active in [true, false] {
-                let style = presentation.close_control_style(active, true, &colors);
+                let style = presentation.close_control_style(
+                    active,
+                    true,
+                    &colors,
+                    crate::appearance::SurfaceMaterials::OPAQUE,
+                );
                 assert_eq!(
                     style.normal().background(),
                     rgba(0),
@@ -2130,6 +2173,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tab_contextual_controls_should_materialize_hover_against_their_actual_host() {
+        use crate::appearance::{
+            AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+            SchemeCatalog, SurfaceRole, SystemAppearance,
+        };
+
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = 1.0;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let presentation = TabChromePresentation::resolve(true, &appearance.colors);
+
+        let close =
+            presentation.close_control_style(true, true, &appearance.colors, appearance.materials);
+        let expected_close = appearance.materials.paint(
+            SurfaceRole::Surface,
+            presentation.active_tab_hover_background,
+            presentation.hover_background,
+        );
+        assert!(expected_close.a < 255);
+        assert_eq!(close.hovered().background(), gpui_color(expected_close));
+
+        let create = presentation.bar_control_style(&appearance.colors, appearance.materials);
+        let expected_create = appearance.materials.paint(
+            SurfaceRole::Surface,
+            presentation.background,
+            presentation.hover_background,
+        );
+        assert!(expected_create.a < 255);
+        assert_eq!(create.hovered().background(), gpui_color(expected_create));
     }
 
     struct InspectedIconStyle {

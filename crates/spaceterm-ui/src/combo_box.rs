@@ -932,7 +932,8 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     ///
     /// Content must be decorative, without nested controls. The trigger uses the compact icon
     /// target height and the content's intrinsic width, or its parent's width with `full_width`.
-    /// Supply any desired padding inside the content; no label or chevron is added.
+    /// Supply any desired padding and fill states inside the content; no wrapper fill, label, or
+    /// chevron is added. The wrapper retains its focus border and all interaction semantics.
     pub fn custom_trigger(mut self, content: impl IntoElement) -> Self {
         self.trigger = ComboBoxTrigger::Custom(content.into_any_element());
         self
@@ -2014,10 +2015,16 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             } else {
                 paint.trigger_border
             })
-            .bg(if open {
-                paint.trigger_hover_background
-            } else {
-                paint.trigger_background
+            .when(!custom_trigger, |trigger| {
+                trigger
+                    .bg(if open {
+                        paint.trigger_hover_background
+                    } else {
+                        paint.trigger_background
+                    })
+                    .when(enabled && !open, |trigger| {
+                        trigger.hover(move |style| style.bg(paint.trigger_hover_background))
+                    })
             })
             .text_color(if enabled {
                 paint.foreground
@@ -2028,9 +2035,6 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .font(font)
             .cursor_default()
             .when(enabled, |trigger| trigger.track_focus(&focus))
-            .when(enabled && !open, |trigger| {
-                trigger.hover(move |style| style.bg(paint.trigger_hover_background))
-            })
             .children(
                 self.trigger_leading
                     .filter(|_| !custom_trigger)

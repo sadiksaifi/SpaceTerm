@@ -82,6 +82,14 @@ difference from that reference, and nested list rows paint only their own fill. 
 backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
 colors retain their own semantics.
 
+Controls inherit their containing surface's material. Window, Panel, Card and Floating hosts select
+prepared control themes from the same catalog. Their normal, hover, pressed, selected and disabled
+fills remain host-relative overlays; they do not introduce separate backdrop filters. Segmented
+options resolve against their track, and selection chips resolve against their actual panel or
+titlebar. Floating field and control content resolves against the composed state, while semantic
+colors and focus indicators retain their meaning. A custom trigger that owns its surface also owns
+its hover fill, so the wrapper cannot add another highlight underneath it.
+
 GPUI's rectangular descendant clipping requires terminal content to end above the Pane's bottom
 corner arcs. A small bottom inset preserves those rounded edges without an opaque overpaint.
 The empty corner fillets and Split gaps each own one Chrome fill.

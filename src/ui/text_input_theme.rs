@@ -11,7 +11,7 @@ pub(super) fn theme(colors: &ChromeColors) -> TextInputTheme {
     themed(colors, colors)
 }
 
-/// Standard fields paint their own opaque frame; Bare fields inherit the floating material.
+/// Standard fields paint a frame compiled for their host; Bare fields inherit the host directly.
 pub(super) fn themed(standard: &ChromeColors, bare: &ChromeColors) -> TextInputTheme {
     let paint = |colors: &ChromeColors| {
         TextInputPaint::new(

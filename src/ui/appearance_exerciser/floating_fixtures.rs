@@ -8,8 +8,8 @@ use spaceterm_ui::{
     Alert, AlertIntent, Button, ButtonSize, ButtonVariant, ComboBox, ComboBoxItem, CommandPalette,
     CommandPaletteItem, ContextMenu, Dialog, DialogCloseDecision, DialogInitialFocus, FloatingRole,
     Menu, MenuEntry, MenuSize, ModalAction, ModalActionRole, ModalId, Picker, PickerOption,
-    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressState, TextInput,
-    Tooltip,
+    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressState, SegmentedControl,
+    SegmentedOption, Switch, TextInput, Tooltip,
 };
 
 use super::{AppearanceExerciser, ExerciserWindows};
@@ -20,6 +20,7 @@ pub(super) struct FloatingFixtures {
     picker_value: u8,
     combo_value: Option<u8>,
     palette: Entity<CommandPalette<u8>>,
+    interaction_probe: Entity<TooltipDialogBody>,
     status: &'static str,
     patterned_backdrop: bool,
 }
@@ -126,6 +127,7 @@ impl FloatingFixtures {
             picker_value: 1,
             combo_value: Some(1),
             palette,
+            interaction_probe: cx.new(|cx| TooltipDialogBody::new(window, cx)),
             status: "All content below is synthetic. Preview changes are not saved.",
             patterned_backdrop: true,
         }
@@ -370,6 +372,23 @@ impl Render for FloatingFixtures {
                     .debug_selector(|| "fixture-backdrop-probe".to_owned())
                     .child("Persistent floating probe: compare the fine text behind this surface with Blur off and Blur on."),
             );
+        let interaction_probe = appearance
+            .floating_surfaces()
+            .shell(FloatingRole::Popover)
+            .mount(
+                div()
+                    .absolute()
+                    .top(px(24.0))
+                    .left(gpui::relative(0.5))
+                    .right(px(24.0))
+                    .p(appearance.spacing(14.0))
+                    .flex()
+                    .flex_col()
+                    .gap(appearance.spacing(10.0))
+                    .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
+                    .child("Interactive material over patterned content")
+                    .child(self.interaction_probe.clone()),
+            );
         div()
             .flex()
             .flex_col()
@@ -393,7 +412,8 @@ impl Render for FloatingFixtures {
                             .relative()
                             .h(px(432.0))
                             .when(self.patterned_backdrop, |backing| backing.child(pattern))
-                            .child(backdrop_probe),
+                            .child(backdrop_probe)
+                            .child(interaction_probe),
                     ),
             )
     }
@@ -401,6 +421,8 @@ impl Render for FloatingFixtures {
 
 struct TooltipDialogBody {
     input: Entity<TextInput>,
+    switch_on: bool,
+    selected_segment: bool,
 }
 
 impl TooltipDialogBody {
@@ -415,6 +437,8 @@ impl TooltipDialogBody {
                     cx,
                 )
             }),
+            switch_on: false,
+            selected_segment: false,
         }
     }
 }
@@ -460,6 +484,51 @@ impl Render for TooltipDialogBody {
                     ],
                 )
                 .on_accept(|_, _, _| {}),
+            )
+            .child(
+                div().flex().gap(appearance.spacing(8.0)).children(
+                    [
+                        ("Outline", ButtonVariant::Outline, false),
+                        ("Ghost", ButtonVariant::Ghost, false),
+                        ("Disabled", ButtonVariant::Secondary, true),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, variant, disabled))| {
+                        Button::new(("fixture-dialog-state", index), label)
+                            .variant(variant)
+                            .disabled(disabled)
+                            .on_activate(|_, _, _| {})
+                    }),
+                ),
+            )
+            .child(
+                Switch::new("fixture-dialog-switch", "Synthetic switch", self.switch_on).on_change(
+                    cx.listener(|this, change: &spaceterm_ui::SwitchChange, _, cx| {
+                        this.switch_on = change.requested();
+                        cx.notify();
+                    }),
+                ),
+            )
+            .children(
+                SegmentedControl::new(
+                    "fixture-dialog-segments",
+                    "Synthetic selection",
+                    &self.selected_segment,
+                    vec![
+                        SegmentedOption::new(false, "First"),
+                        SegmentedOption::new(true, "Second"),
+                    ],
+                )
+                .ok()
+                .map(|control| {
+                    control.on_change(cx.listener(
+                        |this, change: &spaceterm_ui::SegmentedChange<bool>, _, cx| {
+                            this.selected_segment = *change.requested();
+                            cx.notify();
+                        },
+                    ))
+                }),
             )
     }
 }

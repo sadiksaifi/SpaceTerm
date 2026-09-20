@@ -403,57 +403,78 @@ impl FloatingShell {
     }
 
     /// Applies the surface treatment and hosts every descendant control on this surface.
-    pub fn mount(&self, frame: impl Styled + IntoElement) -> FloatingSurfaceElement {
-        FloatingSurfaceElement {
-            content: self.frame(frame).into_any_element(),
-            role: self.role,
-        }
+    pub fn mount(&self, frame: impl Styled + IntoElement) -> ControlHostElement {
+        ControlHost::Floating.mount(self.frame(frame))
     }
 
     /// Hosts descendant controls on this surface without painting a shell.
     ///
     /// Reserved for the layers that deliberately carry no surface of their own but still own the
     /// controls beneath them.
-    pub fn host(&self, content: impl IntoElement) -> FloatingSurfaceElement {
-        FloatingSurfaceElement {
+    pub fn host(&self, content: impl IntoElement) -> ControlHostElement {
+        ControlHost::Floating.mount(content)
+    }
+}
+
+/// The material host used to resolve descendant control presentation.
+///
+/// These roles select already-compiled paints, not surface effects. Panel and Card describe
+/// resting surfaces over the window sheet; Floating describes a floating shell. The nearest
+/// explicit host wins. A deferred popup must carry its own host into the deferred draw.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ControlHost {
+    /// The window sheet and its root control themes.
+    #[default]
+    Window,
+    /// A resting navigation or supporting panel.
+    Panel,
+    /// A resting card above the window's page surface.
+    Card,
+    /// A popup, dialog, tooltip, or Pane notice with a floating shell.
+    Floating,
+}
+
+impl ControlHost {
+    /// Selects this host for layout, prepaint, and paint without drawing a surface.
+    ///
+    /// The caller owns the actual host material. Controls must resolve their themes inside
+    /// these phases, rather than eagerly constructing themed frames before mounting them.
+    /// This wrapper paints no fill, edge, shadow, or blur and does not alter interaction state.
+    pub fn mount(self, content: impl IntoElement) -> ControlHostElement {
+        ControlHostElement {
             content: content.into_any_element(),
-            role: self.role,
+            host: self,
         }
     }
 }
 
 thread_local! {
-    static CURRENT_FLOATING_HOST: Cell<Option<FloatingRole>> = const { Cell::new(None) };
+    static CURRENT_CONTROL_HOST: Cell<ControlHost> = const { Cell::new(ControlHost::Window) };
 }
 
-struct FloatingHostGuard {
-    previous: Option<FloatingRole>,
+struct ControlHostGuard {
+    previous: ControlHost,
 }
 
-impl Drop for FloatingHostGuard {
+impl Drop for ControlHostGuard {
     fn drop(&mut self) {
-        CURRENT_FLOATING_HOST.with(|current| current.set(self.previous.take()));
+        CURRENT_CONTROL_HOST.with(|current| current.set(self.previous));
     }
 }
 
-fn enter_host<R>(role: FloatingRole, work: impl FnOnce() -> R) -> R {
-    let previous = CURRENT_FLOATING_HOST.with(|current| current.replace(Some(role)));
-    let _guard = FloatingHostGuard { previous };
+fn enter_host<R>(host: ControlHost, work: impl FnOnce() -> R) -> R {
+    let previous = CURRENT_CONTROL_HOST.with(|current| current.replace(host));
+    let _guard = ControlHostGuard { previous };
     work()
 }
 
-/// Whether the control being resolved rests on a floating surface rather than on the window root.
-pub(crate) fn hosted_by_floating_surface() -> bool {
-    CURRENT_FLOATING_HOST.with(Cell::get).is_some()
-}
-
-/// A surface that paints one floating shell and hosts the controls resting on it.
-pub struct FloatingSurfaceElement {
+/// Selects descendant control paints for the current material host without adding a surface.
+pub struct ControlHostElement {
     content: AnyElement,
-    role: FloatingRole,
+    host: ControlHost,
 }
 
-impl IntoElement for FloatingSurfaceElement {
+impl IntoElement for ControlHostElement {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -461,7 +482,7 @@ impl IntoElement for FloatingSurfaceElement {
     }
 }
 
-impl Element for FloatingSurfaceElement {
+impl Element for ControlHostElement {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -480,9 +501,9 @@ impl Element for FloatingSurfaceElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let role = self.role;
+        let host = self.host;
         let content = &mut self.content;
-        (enter_host(role, || content.request_layout(window, cx)), ())
+        (enter_host(host, || content.request_layout(window, cx)), ())
     }
 
     fn prepaint(
@@ -494,9 +515,9 @@ impl Element for FloatingSurfaceElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let role = self.role;
+        let host = self.host;
         let content = &mut self.content;
-        enter_host(role, || content.prepaint(window, cx));
+        enter_host(host, || content.prepaint(window, cx));
     }
 
     fn paint(
@@ -509,21 +530,19 @@ impl Element for FloatingSurfaceElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let role = self.role;
+        let host = self.host;
         let content = &mut self.content;
-        enter_host(role, || content.paint(window, cx));
+        enter_host(host, || content.paint(window, cx));
     }
 }
 
-/// The presentation ordinary controls take while they rest on a floating surface.
+/// The presentation ordinary controls take while they rest on one material host.
 ///
 /// A control's fill is authored as a difference from the surface beneath it. On the window root
-/// that difference is composed against the root; on a floating surface it must be composed against
-/// that surface instead, or the same field and the same button grow muddier the deeper they are
-/// nested. The application resolves one complete catalog against the raised material, and every
-/// control inside a floating surface reads it in place of its root-relative family theme.
+/// that difference is composed against the root; on a panel, card, or floating surface it must be
+/// composed against that actual host. The application publishes all host bundles in one catalog.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FloatingControlThemes {
+pub struct SurfaceControlThemes {
     button: ButtonTheme,
     toggle: ToggleTheme,
     progress: ProgressTheme,
@@ -534,7 +553,7 @@ pub struct FloatingControlThemes {
     combo_box: Option<ComboBoxTheme>,
 }
 
-impl FloatingControlThemes {
+impl SurfaceControlThemes {
     /// Creates the complete catalog of host-relative control presentation.
     pub fn new(
         button: ButtonTheme,
@@ -582,13 +601,10 @@ impl FloatingControlThemes {
     }
 }
 
-impl gpui::Global for FloatingControlThemes {}
-
-fn hosted(cx: &App) -> Option<&FloatingControlThemes> {
-    if !hosted_by_floating_surface() {
-        return None;
-    }
-    cx.try_global::<FloatingControlThemes>()
+fn hosted(cx: &App) -> Option<&SurfaceControlThemes> {
+    let host = CURRENT_CONTROL_HOST.with(Cell::get);
+    cx.try_global::<crate::ControlThemeCatalog>()?
+        .hosted_controls(host)
 }
 
 pub(crate) fn hosted_menu_theme(cx: &App) -> Option<&MenuTheme> {

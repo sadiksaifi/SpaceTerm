@@ -2934,6 +2934,11 @@ impl WorkspaceManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
+        let top_chrome_background = if window.is_window_active() {
+            appearance.colors.title_bar_background
+        } else {
+            appearance.colors.title_bar_inactive_background
+        };
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let chip_inset = frame.sidebar_chip_inset();
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
@@ -3042,6 +3047,7 @@ impl WorkspaceManager {
                 .custom_trigger(identity.render(
                     gpui_color(appearance.colors.row_selected_foreground),
                     appearance,
+                    top_chrome_background,
                 ))
                 .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)
@@ -3127,11 +3133,7 @@ impl WorkspaceManager {
             .h(top_chrome_height)
             .bg(gpui_color(appearance.surface(
                 crate::appearance::SurfaceRole::Base,
-                if window.is_window_active() {
-                    appearance.colors.title_bar_background
-                } else {
-                    appearance.colors.title_bar_inactive_background
-                },
+                top_chrome_background,
             )))
             .child(drag_region)
             .into_any_element()

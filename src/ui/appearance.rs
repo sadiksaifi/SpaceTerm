@@ -72,9 +72,21 @@ pub(crate) struct ChromeAppearance {
     pub(crate) colors: ChromeColors,
     /// The same colors with the window's material applied to background fills, for controls.
     pub(crate) control_colors: ChromeColors,
-    /// Controls resolved once against the raised floating host and its admitted backdrops.
+    /// Segmented option fills compiled against their immediate track host.
+    pub(crate) segmented_control_colors: ChromeColors,
+    /// Control presentation for a Panel host.
+    pub(crate) panel_controls: PreparedControlHost,
+    /// Control presentation for a Card host.
+    pub(crate) card_controls: PreparedControlHost,
+    /// Opaque semantic and contrast reference for controls on the raised floating host.
     pub(crate) floating_colors: ChromeColors,
-    /// Standard field content resolved against its own opaque frame on a floating host.
+    /// Floating control fills expressed as overlays on the raised host.
+    pub(crate) floating_control_colors: ChromeColors,
+    /// Floating segmented option fills compiled against their material track.
+    pub(crate) floating_segmented_colors: ChromeColors,
+    /// Opaque field reference carrying content resolved for its material frame.
+    pub(crate) floating_field_reference: ChromeColors,
+    /// Standard field fills and content resolved against their material frame on a floating host.
     pub(crate) floating_field_colors: ChromeColors,
     pub(crate) materials: SurfaceMaterials,
     pub(crate) floating_materials: SurfaceMaterials,
@@ -85,6 +97,13 @@ pub(crate) struct ChromeAppearance {
     pub(crate) heading: Font,
     pub(crate) text_scale: f32,
     pub(crate) spacing_scale: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PreparedControlHost {
+    pub(crate) reference: ChromeColors,
+    pub(crate) colors: ChromeColors,
+    pub(crate) segmented: ChromeColors,
 }
 
 impl Default for ChromeAppearance {
@@ -114,11 +133,50 @@ impl Default for ChromeAppearance {
             floating_readout_material,
             floating_readout_wash,
         );
-        let floating_field_colors = resolve_floating_field_colors(floating_colors.clone());
+        let control_colors = colors.material_presentation(SurfaceMaterials::OPAQUE);
+        let segmented_control_colors =
+            compile_segmented_control_colors(&colors, &control_colors, SurfaceMaterials::OPAQUE);
+        let panel_controls =
+            prepare_control_host(&authored, colors.panel_background, SurfaceMaterials::OPAQUE);
+        let card_controls = prepare_control_host(
+            &authored,
+            colors.elevated_surface_background,
+            SurfaceMaterials::OPAQUE,
+        );
+        let floating_control_colors = resolve_floating_control_colors(
+            &floating_colors,
+            floating_colors.material_presentation(floating_materials),
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_segmented_colors = resolve_floating_segmented_colors(
+            &floating_colors,
+            compile_segmented_control_colors(
+                &floating_colors,
+                &floating_control_colors,
+                floating_materials,
+            ),
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_field_reference = resolve_floating_field_colors(
+            floating_colors.clone(),
+            &floating_control_colors,
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_field_colors =
+            floating_field_reference.material_presentation(floating_materials);
         Self {
             appearance: Appearance::Dark,
-            control_colors: colors.clone(),
+            control_colors,
+            segmented_control_colors,
+            panel_controls,
+            card_controls,
+            floating_control_colors,
+            floating_segmented_colors,
             floating_colors,
+            floating_field_reference,
             floating_field_colors,
             colors,
             materials: SurfaceMaterials::OPAQUE,
@@ -266,9 +324,9 @@ fn readable_on_material(
     readable_on_backgrounds(proposed, backgrounds, minimum_contrast)
 }
 
-pub(super) fn readable_on_backgrounds(
+pub(super) fn readable_on_backgrounds<const N: usize>(
     proposed: Color,
-    backgrounds: [Color; 2],
+    backgrounds: [Color; N],
     minimum_contrast: f64,
 ) -> Color {
     let minimum = |color: Color| {
@@ -303,22 +361,352 @@ pub(super) fn readable_on_backgrounds(
     readable
 }
 
-fn resolve_floating_field_colors(mut colors: ChromeColors) -> ChromeColors {
-    colors.input_text = readable_on_background(colors.input_text, colors.input_background, 4.5);
-    colors.input_placeholder =
-        readable_on_background(colors.input_placeholder, colors.input_background, 4.5);
-    colors.input_caret = readable_on_background(colors.input_caret, colors.input_background, 3.0);
-    colors.input_disabled_text = readable_on_background(
-        colors.input_disabled_text,
-        colors.input_disabled_background,
+fn resolve_floating_field_colors(
+    mut reference: ChromeColors,
+    paint: &ChromeColors,
+    material: Color,
+    wash: Color,
+) -> ChromeColors {
+    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+        .map(|underlay| wash.source_over(material.source_over(underlay)));
+    let field_backgrounds =
+        host_backgrounds.map(|background| paint.input_background.source_over(background));
+    let disabled_backgrounds =
+        host_backgrounds.map(|background| paint.input_disabled_background.source_over(background));
+    reference.input_text = readable_on_backgrounds(reference.input_text, field_backgrounds, 4.5);
+    reference.input_placeholder =
+        readable_on_backgrounds(reference.input_placeholder, field_backgrounds, 4.5);
+    reference.input_caret = readable_on_backgrounds(reference.input_caret, field_backgrounds, 3.0);
+    reference.input_disabled_text =
+        readable_on_backgrounds(reference.input_disabled_text, disabled_backgrounds, 4.5);
+    let selection_backgrounds = field_backgrounds
+        .map(|background| paint.input_selection_background.source_over(background));
+    reference.input_selection_foreground = readable_on_backgrounds(
+        reference.input_selection_foreground,
+        selection_backgrounds,
         4.5,
     );
-    let selection = colors
-        .input_selection_background
-        .source_over(colors.input_background);
-    colors.input_selection_foreground =
-        readable_on_background(colors.input_selection_foreground, selection, 4.5);
-    colors
+    reference
+}
+
+fn resolve_floating_control_colors(
+    reference: &ChromeColors,
+    mut paint: ChromeColors,
+    material: Color,
+    wash: Color,
+) -> ChromeColors {
+    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+        .map(|underlay| wash.source_over(material.source_over(underlay)));
+    macro_rules! state {
+        ($fill:ident, $minimum:expr, $($content:ident),+ $(,)?) => {{
+            let (fill, [$($content),+]) = resolve_floating_state(
+                reference.$fill,
+                paint.$fill,
+                reference.elevated_surface_background,
+                host_backgrounds,
+                [$(reference.$content),+],
+                $minimum,
+            );
+            paint.$fill = fill;
+            $(paint.$content = $content;)+
+        }};
+    }
+    state!(element_background, 4.5, element_foreground, element_icon);
+    state!(
+        element_hover,
+        4.5,
+        element_hover_foreground,
+        element_hover_icon
+    );
+    state!(
+        element_active,
+        4.5,
+        element_active_foreground,
+        element_active_icon
+    );
+    state!(
+        element_disabled,
+        3.0,
+        element_disabled_foreground,
+        element_disabled_icon
+    );
+    state!(
+        ghost_element_background,
+        4.5,
+        ghost_element_foreground,
+        ghost_element_icon
+    );
+    state!(
+        ghost_element_hover,
+        4.5,
+        ghost_element_hover_foreground,
+        ghost_element_hover_icon
+    );
+    state!(
+        ghost_element_active,
+        4.5,
+        ghost_element_active_foreground,
+        ghost_element_active_icon
+    );
+    state!(
+        ghost_element_selected,
+        4.5,
+        ghost_element_selected_foreground
+    );
+    state!(
+        ghost_element_disabled,
+        3.0,
+        ghost_element_disabled_foreground,
+        ghost_element_disabled_icon
+    );
+    state!(primary_background, 4.5, primary_foreground, primary_icon);
+    state!(
+        primary_hover_background,
+        4.5,
+        primary_hover_foreground,
+        primary_hover_icon
+    );
+    state!(
+        primary_pressed_background,
+        4.5,
+        primary_pressed_foreground,
+        primary_pressed_icon
+    );
+    state!(
+        primary_disabled_background,
+        3.0,
+        primary_disabled_foreground,
+        primary_disabled_icon
+    );
+    state!(
+        destructive_background,
+        4.5,
+        destructive_foreground,
+        destructive_icon
+    );
+    state!(
+        destructive_hover_background,
+        4.5,
+        destructive_hover_foreground,
+        destructive_hover_icon
+    );
+    state!(
+        destructive_pressed_background,
+        4.5,
+        destructive_pressed_foreground,
+        destructive_pressed_icon
+    );
+    state!(
+        destructive_disabled_background,
+        3.0,
+        destructive_disabled_foreground,
+        destructive_disabled_icon
+    );
+    state!(
+        selection_background,
+        4.5,
+        selection_foreground,
+        selection_icon
+    );
+    state!(
+        selection_hover_background,
+        4.5,
+        selection_hover_foreground,
+        selection_hover_icon
+    );
+    state!(
+        selection_pressed_background,
+        4.5,
+        selection_pressed_foreground,
+        selection_pressed_icon
+    );
+    state!(
+        selection_disabled_background,
+        3.0,
+        selection_disabled_foreground,
+        selection_disabled_icon
+    );
+    state!(toggle_off_background, 3.0, toggle_off_mark);
+    state!(toggle_off_hover_background, 3.0, toggle_off_hover_mark);
+    state!(toggle_off_pressed_background, 3.0, toggle_off_pressed_mark);
+    state!(
+        toggle_off_disabled_background,
+        3.0,
+        toggle_off_disabled_mark
+    );
+    state!(toggle_on_background, 3.0, toggle_on_mark);
+    state!(toggle_on_hover_background, 3.0, toggle_on_hover_mark);
+    state!(toggle_on_pressed_background, 3.0, toggle_on_pressed_mark);
+    state!(toggle_on_disabled_background, 3.0, toggle_on_disabled_mark);
+    for (target, proposed, minimum) in [
+        (&mut paint.link_text, reference.link_text, 4.5),
+        (&mut paint.link_text_hover, reference.link_text_hover, 4.5),
+        (
+            &mut paint.link_text_pressed,
+            reference.link_text_pressed,
+            4.5,
+        ),
+        (
+            &mut paint.link_text_disabled,
+            reference.link_text_disabled,
+            3.0,
+        ),
+        (&mut paint.toggle_off_label, reference.toggle_off_label, 4.5),
+        (
+            &mut paint.toggle_off_hover_label,
+            reference.toggle_off_hover_label,
+            4.5,
+        ),
+        (
+            &mut paint.toggle_off_pressed_label,
+            reference.toggle_off_pressed_label,
+            4.5,
+        ),
+        (
+            &mut paint.toggle_off_disabled_label,
+            reference.toggle_off_disabled_label,
+            3.0,
+        ),
+        (&mut paint.toggle_on_label, reference.toggle_on_label, 4.5),
+        (
+            &mut paint.toggle_on_hover_label,
+            reference.toggle_on_hover_label,
+            4.5,
+        ),
+        (
+            &mut paint.toggle_on_pressed_label,
+            reference.toggle_on_pressed_label,
+            4.5,
+        ),
+        (
+            &mut paint.toggle_on_disabled_label,
+            reference.toggle_on_disabled_label,
+            3.0,
+        ),
+    ] {
+        *target = readable_on_backgrounds(proposed, host_backgrounds, minimum);
+    }
+    let progress_backgrounds =
+        host_backgrounds.map(|background| paint.toggle_off_background.source_over(background));
+    paint.text_accent = readable_on_backgrounds(
+        reference.text_accent,
+        [
+            host_backgrounds[0],
+            host_backgrounds[1],
+            progress_backgrounds[0],
+            progress_backgrounds[1],
+        ],
+        4.5,
+    );
+    paint.info = readable_on_backgrounds(reference.info, host_backgrounds, 3.0);
+    paint.success = readable_on_backgrounds(reference.success, host_backgrounds, 3.0);
+    paint.warning = readable_on_backgrounds(reference.warning, host_backgrounds, 3.0);
+    paint.error = readable_on_backgrounds(reference.error, host_backgrounds, 3.0);
+    paint
+}
+
+fn resolve_floating_state<const N: usize>(
+    reference_fill: Color,
+    paint_fill: Color,
+    reference_surface: Color,
+    host_backgrounds: [Color; 2],
+    proposed: [Color; N],
+    minimum_contrast: f64,
+) -> (Color, [Color; N]) {
+    let backgrounds = host_backgrounds.map(|background| paint_fill.source_over(background));
+    let resolved =
+        proposed.map(|color| readable_on_backgrounds(color, backgrounds, minimum_contrast));
+    if resolved.iter().all(|color| {
+        backgrounds.into_iter().all(|background| {
+            color.source_over(background).contrast_ratio(background) >= minimum_contrast
+        })
+    }) {
+        return (paint_fill, resolved);
+    }
+    let fallback = reference_fill.source_over(reference_surface);
+    (
+        fallback,
+        proposed.map(|color| readable_on_backgrounds(color, [fallback; 2], minimum_contrast)),
+    )
+}
+
+fn compile_segmented_control_colors(
+    reference: &ChromeColors,
+    paint: &ChromeColors,
+    materials: SurfaceMaterials,
+) -> ChromeColors {
+    if materials.is_opaque() {
+        return paint.clone();
+    }
+    let mut segmented = paint.clone();
+    let option =
+        |target| materials.paint(SurfaceRole::Surface, reference.element_background, target);
+    segmented.ghost_element_hover = option(reference.ghost_element_hover);
+    segmented.ghost_element_active = option(reference.ghost_element_active);
+    segmented.selection_background = option(reference.selection_background);
+    segmented.selection_hover_background = option(reference.selection_hover_background);
+    segmented.selection_pressed_background = option(reference.selection_pressed_background);
+    segmented.selection_disabled_background = option(reference.selection_disabled_background);
+    segmented
+}
+
+fn prepare_control_host(
+    authored: &ChromeColors,
+    host: Color,
+    materials: SurfaceMaterials,
+) -> PreparedControlHost {
+    let reference = authored.host_presentation(host);
+    let colors = reference.material_presentation(materials);
+    let segmented = compile_segmented_control_colors(&reference, &colors, materials);
+    PreparedControlHost {
+        reference,
+        colors,
+        segmented,
+    }
+}
+
+fn resolve_floating_segmented_colors(
+    reference: &ChromeColors,
+    mut paint: ChromeColors,
+    material: Color,
+    wash: Color,
+) -> ChromeColors {
+    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+        .map(|underlay| wash.source_over(material.source_over(underlay)));
+    let track_backgrounds =
+        host_backgrounds.map(|background| paint.element_background.source_over(background));
+    macro_rules! state {
+        ($fill:ident, $minimum:expr, $($content:ident),+ $(,)?) => {{
+            let (fill, [$($content),+]) = resolve_floating_state(
+                reference.$fill,
+                paint.$fill,
+                reference.element_background,
+                track_backgrounds,
+                [$(reference.$content),+],
+                $minimum,
+            );
+            paint.$fill = fill;
+            $(paint.$content = $content;)+
+        }};
+    }
+    paint.text_secondary =
+        readable_on_backgrounds(reference.text_secondary, track_backgrounds, 4.5);
+    paint.text_disabled = readable_on_backgrounds(reference.text_disabled, track_backgrounds, 3.0);
+    state!(ghost_element_hover, 4.5, ghost_element_hover_foreground);
+    state!(ghost_element_active, 4.5, ghost_element_active_foreground);
+    state!(selection_background, 4.5, selection_foreground);
+    state!(selection_hover_background, 4.5, selection_hover_foreground);
+    state!(
+        selection_pressed_background,
+        4.5,
+        selection_pressed_foreground
+    );
+    state!(
+        selection_disabled_background,
+        3.0,
+        selection_disabled_foreground
+    );
+    paint
 }
 
 pub(super) fn readable_on_background(
@@ -448,11 +836,56 @@ impl ChromeAppearance {
             floating_readout_material,
             floating_readout_wash,
         );
-        let floating_field_colors = resolve_floating_field_colors(floating_colors.clone());
+        let control_colors = colors.material_presentation(resolved.composition.materials);
+        let segmented_control_colors = compile_segmented_control_colors(
+            &colors,
+            &control_colors,
+            resolved.composition.materials,
+        );
+        let panel_controls = prepare_control_host(
+            &resolved.colors,
+            colors.panel_background,
+            resolved.composition.materials,
+        );
+        let card_controls = prepare_control_host(
+            &resolved.colors,
+            colors.elevated_surface_background,
+            resolved.composition.materials,
+        );
+        let floating_control_colors = resolve_floating_control_colors(
+            &floating_colors,
+            floating_colors.material_presentation(resolved.composition.floating_materials),
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_segmented_colors = resolve_floating_segmented_colors(
+            &floating_colors,
+            compile_segmented_control_colors(
+                &floating_colors,
+                &floating_control_colors,
+                resolved.composition.floating_materials,
+            ),
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_field_reference = resolve_floating_field_colors(
+            floating_colors.clone(),
+            &floating_control_colors,
+            floating_raised_material,
+            floating_raised_wash,
+        );
+        let floating_field_colors =
+            floating_field_reference.material_presentation(resolved.composition.floating_materials);
         Self {
             appearance: resolved.appearance,
-            control_colors: colors.material_presentation(resolved.composition.materials),
+            control_colors,
+            segmented_control_colors,
+            panel_controls,
+            card_controls,
+            floating_control_colors,
+            floating_segmented_colors,
             floating_colors,
+            floating_field_reference,
             floating_field_colors,
             colors,
             materials: resolved.composition.materials,

@@ -124,7 +124,7 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
         ),
     )
     .generation(ControlThemeGeneration::new(generation));
-    let floating_controls = FloatingControlThemes::new(
+    let floating_controls = SurfaceControlThemes::new(
         catalog.button,
         catalog.toggle,
         catalog.progress,
@@ -155,7 +155,10 @@ impl Render for CatalogObserver {
         let _ = cx.global::<TooltipTheme>();
         let _ = cx.global::<ModalTheme>();
         let _ = cx.global::<FloatingSurfaceTheme>();
-        let _ = cx.global::<FloatingControlThemes>();
+        let _ = cx
+            .global::<ControlThemeCatalog>()
+            .hosted_controls(ControlHost::Floating)
+            .unwrap();
         let _ = cx.global::<ControlThemeCatalog>();
         self.renders.set(self.renders.get() + 1);
         div().child(
@@ -238,7 +241,9 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
                 .expect("floating theme is installed")
         );
         assert_eq!(
-            cx.global::<FloatingControlThemes>(),
+            cx.global::<ControlThemeCatalog>()
+                .hosted_controls(ControlHost::Floating)
+                .unwrap(),
             replacement
                 .floating_controls
                 .as_ref()

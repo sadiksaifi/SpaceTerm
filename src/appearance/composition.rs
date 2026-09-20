@@ -488,6 +488,14 @@ impl ChromeColors {
         paint
     }
 
+    /// Resolves authored control fills against one opaque semantic host.
+    pub(crate) fn host_presentation(&self, host: super::Color) -> Self {
+        let mut paint = self.presentation_over(host);
+        paint.input_background = self.input_background.source_over(host);
+        paint.input_disabled_background = self.input_disabled_background.source_over(host);
+        paint
+    }
+
     fn presentation_over(&self, root: super::Color) -> Self {
         let mut paint = self.clone();
         paint.background = root;

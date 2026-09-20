@@ -154,7 +154,12 @@ pub(super) struct WorkspaceChromeIdentity {
 }
 
 impl WorkspaceChromeIdentity {
-    pub(super) fn render(self, switcher_color: Rgba, appearance: &ChromeAppearance) -> AnyElement {
+    pub(super) fn render(
+        self,
+        switcher_color: Rgba,
+        appearance: &ChromeAppearance,
+        semantic_host: Color,
+    ) -> AnyElement {
         let status = self.status(appearance);
         let status_normal = status.map(|status| gpui_color(status.paint.normal));
         let status_hovered = status.map(|status| gpui_color(status.paint.hovered));
@@ -168,7 +173,7 @@ impl WorkspaceChromeIdentity {
                 hover_fill: Some(appearance.colors.row_selected_hover_background),
                 hover_rim: Some(appearance.colors.row_selected_hover_border),
             }
-            .raised(appearance),
+            .raised_on(appearance, semantic_host),
         );
         let chip = div()
             .id("workspace-chip")

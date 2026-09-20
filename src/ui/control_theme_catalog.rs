@@ -10,11 +10,16 @@ pub(super) fn catalog(
     appearance: &super::appearance::ChromeAppearance,
     progress_motion: spaceterm_ui::ProgressMotion,
 ) -> ControlThemeCatalog {
-    // Controls paint the window's material. Overlay rows also receive the opaque presentation,
-    // which stays the reference for every contrast decision.
+    // Controls paint the window's material. Floating controls use the same semantic colors as
+    // their host, with fills compiled into overlays so the shell remains visible beneath them.
+    // Overlay rows also receive the opaque presentation as their contrast reference.
     let reference = &appearance.colors;
     let colors = &appearance.control_colors;
+    let segmented = &appearance.segmented_control_colors;
     let host = &appearance.floating_colors;
+    let floating_controls = &appearance.floating_control_colors;
+    let floating_segmented = &appearance.floating_segmented_colors;
+    let field_reference = &appearance.floating_field_reference;
     let field = &appearance.floating_field_colors;
     // The shell applies its backdrop tone and elevation wash once. Idle rows inherit that host,
     // while row states keep their complete host-relative paints and content contrast reference.
@@ -22,34 +27,47 @@ pub(super) fn catalog(
     popup.elevated_surface_background =
         appearance.floating_surface(appearance.colors.elevated_surface_background);
     let row_reference = host.clone();
+    let panel_controls = surface_control_themes(
+        &appearance.panel_controls,
+        &row_reference,
+        &popup,
+        progress_motion,
+    );
+    let card_controls = surface_control_themes(
+        &appearance.card_controls,
+        &row_reference,
+        &popup,
+        progress_motion,
+    );
     ControlThemeCatalog::new(
         button_theme::theme(colors),
         toggle_theme::theme(colors),
         progress_theme::theme(colors, progress_motion),
         scrollbar_theme::theme(colors),
         resize_handle_theme::theme(colors),
-        segmented_control_theme::theme(colors),
+        segmented_control_theme::theme(segmented),
         search_field_theme::themed(reference, colors),
         menu_theme::themed_with_rows(&row_reference, colors, &popup),
         command_palette_theme::themed(&row_reference, &popup),
         combo_box_theme::themed_with_rows(&row_reference, colors, &popup),
         text_input_theme::theme(colors),
         tooltip_theme::theme(host),
-        modal_theme::theme(host),
+        modal_theme::theme(floating_controls),
     )
+    .resting_controls(panel_controls, card_controls)
     .floating(
         appearance.floating_surfaces(),
-        spaceterm_ui::FloatingControlThemes::new(
-            button_theme::theme(host),
-            toggle_theme::theme(host),
-            progress_theme::theme(host, progress_motion),
-            segmented_control_theme::theme(host),
-            search_field_theme::themed(field, field),
+        spaceterm_ui::SurfaceControlThemes::new(
+            button_theme::theme(floating_controls),
+            toggle_theme::theme(floating_controls),
+            progress_theme::theme(floating_controls, progress_motion),
+            segmented_control_theme::theme(floating_segmented),
+            search_field_theme::themed(field_reference, field),
             text_input_theme::themed(field, host),
         )
         .triggers(
-            menu_theme::themed_with_rows(&row_reference, host, &popup),
-            combo_box_theme::themed_with_rows(&row_reference, host, &popup),
+            menu_theme::themed_with_rows(&row_reference, floating_controls, &popup),
+            combo_box_theme::themed_with_rows(&row_reference, floating_controls, &popup),
         ),
     )
     .typography(spaceterm_ui::ControlTypography::new(
@@ -58,6 +76,26 @@ pub(super) fn catalog(
         appearance.heading.clone(),
     ))
     .scale_metrics(appearance.text_scale, appearance.spacing_scale)
+}
+
+pub(super) fn surface_control_themes(
+    host: &super::appearance::PreparedControlHost,
+    row_reference: &crate::appearance::ChromeColors,
+    popup: &crate::appearance::ChromeColors,
+    progress_motion: spaceterm_ui::ProgressMotion,
+) -> spaceterm_ui::SurfaceControlThemes {
+    spaceterm_ui::SurfaceControlThemes::new(
+        button_theme::theme(&host.colors),
+        toggle_theme::theme(&host.colors),
+        progress_theme::theme(&host.colors, progress_motion),
+        segmented_control_theme::theme(&host.segmented),
+        search_field_theme::themed(&host.reference, &host.colors),
+        text_input_theme::theme(&host.colors),
+    )
+    .triggers(
+        menu_theme::themed_with_rows(row_reference, &host.colors, popup),
+        combo_box_theme::themed_with_rows(row_reference, &host.colors, popup),
+    )
 }
 
 /// One overlay row state in application colors.

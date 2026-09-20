@@ -179,23 +179,25 @@ impl SettingsGroup {
                 ),
             )
             .child(
-                div()
-                    .debug_selector(move || card_selector.clone())
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .py(appearance.spacing(CARD_PADDING_Y))
-                    .rounded(radius)
-                    // A revealed row fills to the card's own edges, so the card clips it back to
-                    // its corners instead of letting a square fill escape a rounded shape.
-                    .overflow_hidden()
-                    // A card is a surface resting on the page's base, lighter or brighter than it.
-                    .bg(gpui_color(appearance.surface(
-                        crate::appearance::SurfaceRole::Surface,
-                        appearance.colors.elevated_surface_background,
-                    )))
-                    .children(self.rows),
+                spaceterm_ui::ControlHost::Card.mount(
+                    div()
+                        .debug_selector(move || card_selector.clone())
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .py(appearance.spacing(CARD_PADDING_Y))
+                        .rounded(radius)
+                        // A revealed row fills to the card's own edges, so the card clips it back to
+                        // its corners instead of letting a square fill escape a rounded shape.
+                        .overflow_hidden()
+                        // A card is a surface resting on the page's base, lighter or brighter than it.
+                        .bg(gpui_color(appearance.surface(
+                            crate::appearance::SurfaceRole::Surface,
+                            appearance.colors.elevated_surface_background,
+                        )))
+                        .children(self.rows),
+                ),
             )
     }
 }
@@ -402,15 +404,20 @@ impl SettingsRow {
             .py(appearance.spacing(8.0))
             .rounded(px(6.0))
             .when(self.highlighted, |row| {
-                row.bg(gpui_color(appearance.surface(
-                    crate::appearance::SurfaceRole::Surface,
-                    appearance.colors.row_selected_background,
-                )))
+                row.bg(gpui_color(highlighted_row_background(appearance)))
             })
             .children(label_above)
             .child(primary)
             .children(trailing_caption)
     }
+}
+
+pub(super) fn highlighted_row_background(appearance: &ChromeAppearance) -> Color {
+    appearance.materials.paint(
+        crate::appearance::SurfaceRole::Surface,
+        appearance.colors.elevated_surface_background,
+        appearance.colors.row_selected_background,
+    )
 }
 
 fn highlighted_label(
@@ -545,8 +552,38 @@ impl Stepper {
         self
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance, cx: &App) -> impl IntoElement {
-        let accessibility_name = self.accessibility_name;
+    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+        StepperElement {
+            width: appearance.text_size(132.0),
+            height: appearance.height(28.0, 12.0),
+            spacing: appearance.spacing(2.0),
+            font: appearance.tabular(),
+            font_size: appearance.text_size(text::BODY),
+            foreground: gpui_color(if self.enabled {
+                appearance.colors.input_text
+            } else {
+                appearance.colors.input_disabled_text
+            }),
+            control: self,
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct StepperElement {
+    control: Stepper,
+    width: gpui::Pixels,
+    height: gpui::Pixels,
+    spacing: gpui::Pixels,
+    font: gpui::Font,
+    font_size: gpui::Pixels,
+    foreground: Rgba,
+}
+
+impl gpui::RenderOnce for StepperElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let control = self.control;
+        let accessibility_name = control.accessibility_name;
         let step = |selector: String,
                     verb: &'static str,
                     icon: IconName,
@@ -569,10 +606,10 @@ impl Stepper {
                 }
             })
         };
-        let selector = self.selector;
+        let selector = control.selector;
         spaceterm_ui::field_surface(
             selector,
-            spaceterm_ui::FieldState::default().disabled(!self.enabled),
+            spaceterm_ui::FieldState::default().disabled(!control.enabled),
             cx,
         )
         .debug_selector(move || selector.to_owned())
@@ -580,18 +617,18 @@ impl Stepper {
         .flex_row()
         .items_center()
         .flex_none()
-        .w(appearance.text_size(132.0))
-        .gap(appearance.spacing(2.0))
-        .px(appearance.spacing(2.0))
-        .h(appearance.height(28.0, 12.0))
+        .w(self.width)
+        .gap(self.spacing)
+        .px(self.spacing)
+        .h(self.height)
         .rounded(px(6.0))
         .child(step(
             format!("{selector}-decrease"),
             "Decrease",
             IconName::Minus,
             -1,
-            self.enabled && self.can_decrease,
-            self.on_step.clone(),
+            control.enabled && control.can_decrease,
+            control.on_step.clone(),
         ))
         .child(
             div()
@@ -600,26 +637,22 @@ impl Stepper {
                 .text_align(gpui::TextAlign::Center)
                 // Tabular figures, so the readout holds still while a step runs: the digits of
                 // 9 and 10, or of 1.11 and 1.2, occupy the same width.
-                .font(appearance.tabular())
-                .text_size(appearance.text_size(text::BODY))
-                .text_color(gpui_color(if self.enabled {
-                    appearance.colors.input_text
-                } else {
-                    appearance.colors.input_disabled_text
-                }))
+                .font(self.font)
+                .text_size(self.font_size)
+                .text_color(self.foreground)
                 .debug_selector({
                     let value_selector = format!("{selector}-value");
                     move || value_selector.clone()
                 })
-                .child(self.value),
+                .child(control.value),
         )
         .child(step(
             format!("{selector}-increase"),
             "Increase",
             IconName::Plus,
             1,
-            self.enabled && self.can_increase,
-            self.on_step,
+            control.enabled && control.can_increase,
+            control.on_step,
         ))
     }
 }
