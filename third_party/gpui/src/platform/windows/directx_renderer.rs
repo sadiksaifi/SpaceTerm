@@ -627,6 +627,7 @@ impl DirectXRenderer {
                 })
             });
         let Some((width, height)) = required_size else {
+            self.resources.backdrop = None;
             return Ok(());
         };
         if self
