@@ -12,8 +12,11 @@ not reset either family's scheme slots.
 
 The Chrome Theme Compiler owns one ordered dependency program for built-ins, native definitions,
 Zed imports and live overrides. Exact user overrides precede authored values. Missing roles derive
-from the effective same-definition dependencies. Only missing background and text use neutral
-fallbacks; Light/Dark does not select a hidden parent. Parent inheritance is unsupported. Authored
+from the effective same-definition dependencies. Missing background and text use neutral fallbacks.
+Missing success, warning, and error use portable semantic seeds adjusted for contrast against the
+definition's own background, so a link accent cannot turn destructive feedback into an informational
+color. Explicitly authored status colors and overrides remain exact. Light/Dark selects these
+fallback seeds, never a hidden parent Color Scheme. Parent inheritance is unsupported. Authored
 inputs remain stored separately from resolved paints, whose role provenance records authored,
 overridden, derived or neutral fallback origin. This preserves intent when dependency inputs change.
 

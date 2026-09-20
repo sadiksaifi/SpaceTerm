@@ -483,12 +483,14 @@ macro_rules! resting_fill_roles {
             row_background,
             row_hover_background,
             row_selected_background,
+            navigation_selected_background,
             row_selected_hover_background,
             toggle_on_background,
             toggle_on_hover_background,
             toggle_on_pressed_background,
             toggle_on_disabled_background,
             toggle_off_background,
+            progress_track,
             toggle_off_hover_background,
             toggle_off_pressed_background,
             toggle_off_disabled_background,
@@ -763,6 +765,39 @@ mod tests {
             (paint.resize_dragged, colors.resize_dragged),
         ] {
             assert_eq!(actual, semantic, "semantic signal must stay authored");
+        }
+    }
+
+    #[test]
+    fn support_role_fallbacks_follow_the_same_surface_transforms_as_their_sources() {
+        let colors = super::super::builtin::chrome_base(super::super::Appearance::Dark);
+        for presentation in [
+            colors.opaque_presentation(),
+            colors.floating_presentation(),
+            colors.material_presentation(SurfaceMaterials::derive(0.6)),
+        ] {
+            assert_eq!(
+                presentation.progress_track,
+                presentation.toggle_off_background
+            );
+            assert_eq!(presentation.progress_indicator, presentation.text_accent);
+            assert_eq!(presentation.focus_ring, presentation.border_focused);
+            assert_eq!(
+                presentation.navigation_selected_background,
+                presentation.row_selected_background
+            );
+            assert_eq!(
+                presentation.navigation_selected_foreground,
+                presentation.row_selected_foreground
+            );
+            assert_eq!(
+                presentation.navigation_selected_secondary,
+                presentation.row_selected_secondary
+            );
+            assert_eq!(
+                presentation.navigation_selected_icon,
+                presentation.row_selected_icon
+            );
         }
     }
 

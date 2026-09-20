@@ -23,22 +23,31 @@ pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTh
 }
 
 fn paint(colors: &ChromeColors) -> ProgressPaint {
-    // The track takes the canonical unswitched mark track, the one neutral role each appearance
-    // authors for a band an indicator rides along. Every scheme keeps it a visible step off the
-    // window root and the chrome shell, so a zero extent still reads as a track and a partial
-    // extent reads as progress along it, while the role itself stays achromatic and never competes
-    // with the indicator. The derived element surfaces are tuned to sit flush with the surface
-    // under them, which is right for a resting control and leaves a thin band invisible.
-    //
-    // The indicator is the canonical accent, which is what this palette reserves for small active
-    // indicators and what modal progress already fills with, so one operation reads the same
-    // wherever it is presented.
     ProgressPaint::new(
-        gpui_color(colors.toggle_off_background),
-        gpui_color(colors.text_accent),
+        gpui_color(colors.progress_track),
+        gpui_color(colors.progress_indicator),
     )
 }
 
 fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paint_uses_dedicated_progress_roles() {
+        let mut colors = ChromeColors::default();
+        colors.progress_track = Color::rgba(0x11223344);
+        colors.progress_indicator = Color::rgba(0x55667788);
+        colors.toggle_off_background = Color::rgb(0xaabbcc);
+        colors.text_accent = Color::rgb(0xddeeff);
+
+        assert_eq!(
+            paint(&colors),
+            ProgressPaint::new(rgba(0x11223344), rgba(0x55667788))
+        );
+    }
 }
