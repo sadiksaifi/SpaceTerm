@@ -52,7 +52,11 @@ struct SurfaceParams {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BackdropParams {
     target_size: [f32; 2],
+    source_size: [f32; 2],
+    source_active_size: [f32; 2],
     original_size: [f32; 2],
+    original_active_size: [f32; 2],
+    snapshot_origin: [f32; 2],
     bounds: PodBounds,
     content_mask: PodBounds,
     corner_radii: [f32; 4],
@@ -670,20 +674,54 @@ impl BladeRenderer {
         objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
     }
 
-    fn ensure_backdrop_textures(&mut self) {
-        let size = self.surface_config.size;
+    fn prepare_backdrop_textures(&mut self, scene: &Scene) {
+        let viewport = Size {
+            width: DevicePixels(self.surface_config.size.width as i32),
+            height: DevicePixels(self.surface_config.size.height as i32),
+        };
+        let required_size = scene
+            .batches()
+            .filter_map(|batch| match batch {
+                PrimitiveBatch::BackdropFilters(filters) => Some(filters),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|filter| filter.snapshot_bounds(viewport))
+            .fold(None, |required: Option<gpu::Extent>, bounds| {
+                let width = u32::from(bounds.size.width).next_multiple_of(4);
+                let height = u32::from(bounds.size.height).next_multiple_of(4);
+                Some(match required {
+                    Some(required) => gpu::Extent {
+                        width: required.width.max(width),
+                        height: required.height.max(height),
+                        depth: 1,
+                    },
+                    None => gpu::Extent {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                })
+            });
+
+        let Some(required_size) = required_size else {
+            return;
+        };
         if self
             .backdrop_textures
             .as_ref()
-            .is_some_and(|textures| textures.size == size)
+            .map(|textures| textures.size)
+            == Some(required_size)
         {
             return;
         }
 
+        self.wait_for_gpu();
         self.destroy_backdrop_textures();
+        let size = required_size;
         let quarter_size = gpu::Extent {
-            width: size.width.div_ceil(4).max(1),
-            height: size.height.div_ceil(4).max(1),
+            width: size.width / 4,
+            height: size.height / 4,
             depth: 1,
         };
         let format = self.surface.info().format;
@@ -739,16 +777,29 @@ impl BladeRenderer {
         filter: &BackdropFilter,
     ) {
         let output = filter.bounds.intersect(&filter.content_mask.bounds);
-        if output.is_empty() {
+        let viewport = Size {
+            width: DevicePixels(self.surface_config.size.width as i32),
+            height: DevicePixels(self.surface_config.size.height as i32),
+        };
+        let Some(snapshot_bounds) = filter.snapshot_bounds(viewport) else {
             return;
-        }
+        };
 
-        self.ensure_backdrop_textures();
         let Some(textures) = self.backdrop_textures.as_ref() else {
             return;
         };
         let size = textures.size;
         let quarter_size = textures.quarter_size;
+        let active_size = gpu::Extent {
+            width: u32::from(snapshot_bounds.size.width),
+            height: u32::from(snapshot_bounds.size.height),
+            depth: 1,
+        };
+        let active_quarter_size = gpu::Extent {
+            width: active_size.width.div_ceil(4),
+            height: active_size.height.div_ceil(4),
+            depth: 1,
+        };
         let snapshot = textures.snapshot;
         let snapshot_view = textures.snapshot_view;
         let horizontal = textures.horizontal;
@@ -761,43 +812,94 @@ impl BladeRenderer {
         self.command_encoder.init_texture(vertical);
         {
             let mut transfer = self.command_encoder.transfer("backdrop snapshot");
-            transfer.copy_texture_to_texture(frame_texture.into(), snapshot.into(), size);
+            transfer.copy_texture_to_texture(
+                gpu::TexturePiece {
+                    texture: frame_texture,
+                    mip_level: 0,
+                    array_layer: 0,
+                    origin: [
+                        u32::from(snapshot_bounds.origin.x),
+                        u32::from(snapshot_bounds.origin.y),
+                        0,
+                    ],
+                },
+                snapshot.into(),
+                active_size,
+            );
         }
 
         let first_pass = if filter.radius.0 > 0.0 { 0 } else { 2 };
         for pass_index in first_pass..3 {
-            let (target_size, target_view, source_view, init_op) = match pass_index {
-                0 => (
-                    quarter_size,
-                    horizontal_view,
-                    snapshot_view,
-                    gpu::InitOp::DontCare,
-                ),
-                1 => (
-                    quarter_size,
-                    vertical_view,
-                    horizontal_view,
-                    gpu::InitOp::DontCare,
-                ),
-                _ if filter.radius.0 > 0.0 => (size, frame_view, vertical_view, gpu::InitOp::Load),
-                _ => (size, frame_view, snapshot_view, gpu::InitOp::Load),
-            };
-            let halo = if pass_index < 2 {
-                (3.0 * filter.radius.0).ceil() + 8.0
+            let (target_size, source_size, source_active_size, target_view, source_view, init_op) =
+                match pass_index {
+                    0 => (
+                        quarter_size,
+                        size,
+                        active_size,
+                        horizontal_view,
+                        snapshot_view,
+                        gpu::InitOp::DontCare,
+                    ),
+                    1 => (
+                        quarter_size,
+                        quarter_size,
+                        active_quarter_size,
+                        vertical_view,
+                        horizontal_view,
+                        gpu::InitOp::DontCare,
+                    ),
+                    _ if filter.radius.0 > 0.0 => (
+                        self.surface_config.size,
+                        quarter_size,
+                        active_quarter_size,
+                        frame_view,
+                        vertical_view,
+                        gpu::InitOp::Load,
+                    ),
+                    _ => (
+                        self.surface_config.size,
+                        size,
+                        active_size,
+                        frame_view,
+                        snapshot_view,
+                        gpu::InitOp::Load,
+                    ),
+                };
+            let scissor = if pass_index < 2 {
+                gpu::ScissorRect {
+                    x: 0,
+                    y: 0,
+                    w: active_quarter_size.width,
+                    h: active_quarter_size.height,
+                }
             } else {
-                0.0
-            };
-            let Some(scissor) = backdrop_scissor(output, halo, target_size, size) else {
-                continue;
+                let Some(scissor) = backdrop_scissor(
+                    output,
+                    0.0,
+                    self.surface_config.size,
+                    self.surface_config.size,
+                ) else {
+                    continue;
+                };
+                scissor
             };
             let sigma = match pass_index {
-                0 => filter.radius.0 * target_size.width as f32 / size.width as f32,
-                1 => filter.radius.0 * target_size.height as f32 / size.height as f32,
+                0 | 1 => filter.radius.0 / 4.0,
                 _ => 0.0,
             };
             let backdrop = BackdropParams {
                 target_size: [target_size.width as f32, target_size.height as f32],
+                source_size: [source_size.width as f32, source_size.height as f32],
+                source_active_size: [
+                    source_active_size.width as f32,
+                    source_active_size.height as f32,
+                ],
                 original_size: [size.width as f32, size.height as f32],
+                original_active_size: [active_size.width as f32, active_size.height as f32],
+                snapshot_origin: [
+                    snapshot_bounds.origin.x.0 as f32,
+                    snapshot_bounds.origin.y.0 as f32,
+                ],
                 bounds: filter.bounds.into(),
                 content_mask: filter.content_mask.bounds.into(),
                 corner_radii: [
@@ -923,6 +1025,7 @@ impl BladeRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.prepare_backdrop_textures(scene);
         self.command_encoder.start();
         self.atlas.before_frame(&mut self.command_encoder);
 

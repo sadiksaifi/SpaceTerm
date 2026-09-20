@@ -93,7 +93,11 @@ struct Edges {
 
 struct BackdropParams {
     target_size: vec2<f32>,
+    source_size: vec2<f32>,
+    source_active_size: vec2<f32>,
     original_size: vec2<f32>,
+    original_active_size: vec2<f32>,
+    snapshot_origin: vec2<f32>,
     bounds: Bounds,
     content_mask: Bounds,
     corner_radii: vec4<f32>,
@@ -126,10 +130,22 @@ fn fs_present(input: BackdropVarying) -> @location(0) vec4<f32> {
     return textureLoad(t_scene, vec2<i32>(input.position.xy), 0);
 }
 
+fn clamp_backdrop_uv(
+    uv: vec2<f32>,
+    texture_size: vec2<f32>,
+    active_size: vec2<f32>,
+) -> vec2<f32> {
+    return clamp(
+        uv,
+        vec2<f32>(0.5) / texture_size,
+        max(active_size - vec2<f32>(0.5), vec2<f32>(0.5)) / texture_size,
+    );
+}
+
 @fragment
 fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
-    let uv = input.position.xy / backdrop.target_size;
     if (backdrop.pass_index < 2.0) {
+        let uv = input.position.xy / backdrop.target_size;
         let sigma = max(backdrop.sigma, 0.25);
         let extent = i32(ceil(3.0 * sigma));
         var sum = vec4<f32>(0.0);
@@ -146,21 +162,53 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
             if (backdrop.pass_index < 0.5) {
                 let pixel = 1.0 / backdrop.original_size;
                 sample = (
-                    textureSample(t_backdrop_source, s_backdrop, uv + offset + pixel) +
-                    textureSample(t_backdrop_source, s_backdrop, uv + offset - pixel) +
                     textureSample(
                         t_backdrop_source,
                         s_backdrop,
-                        uv + offset + vec2<f32>(pixel.x, -pixel.y),
+                        clamp_backdrop_uv(
+                            uv + offset + pixel,
+                            backdrop.source_size,
+                            backdrop.source_active_size,
+                        ),
                     ) +
                     textureSample(
                         t_backdrop_source,
                         s_backdrop,
-                        uv + offset + vec2<f32>(-pixel.x, pixel.y),
+                        clamp_backdrop_uv(
+                            uv + offset - pixel,
+                            backdrop.source_size,
+                            backdrop.source_active_size,
+                        ),
+                    ) +
+                    textureSample(
+                        t_backdrop_source,
+                        s_backdrop,
+                        clamp_backdrop_uv(
+                            uv + offset + vec2<f32>(pixel.x, -pixel.y),
+                            backdrop.source_size,
+                            backdrop.source_active_size,
+                        ),
+                    ) +
+                    textureSample(
+                        t_backdrop_source,
+                        s_backdrop,
+                        clamp_backdrop_uv(
+                            uv + offset + vec2<f32>(-pixel.x, pixel.y),
+                            backdrop.source_size,
+                            backdrop.source_active_size,
+                        ),
                     )
                 ) * 0.25;
             } else {
-                sample = textureSample(t_backdrop_source, s_backdrop, uv + offset);
+                sample = textureSample(
+                    t_backdrop_source,
+                    s_backdrop,
+                    clamp_backdrop_uv(
+                        uv + offset,
+                        backdrop.source_size,
+                        backdrop.source_active_size,
+                    ),
+                );
             }
             sum += sample * weight;
             total += weight;
@@ -168,7 +216,19 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
         return sum / total;
     }
 
-    let original = textureSample(t_backdrop_original, s_backdrop, uv);
+    let local_position = input.position.xy - backdrop.snapshot_origin;
+    let uv = local_position / backdrop.original_size;
+    let source_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.source_size,
+        backdrop.source_active_size,
+    );
+    let original_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.original_size,
+        backdrop.original_active_size,
+    );
+    let original = textureSample(t_backdrop_original, s_backdrop, original_uv);
     let half_size = backdrop.bounds.size * 0.5;
     let delta = input.position.xy - backdrop.bounds.origin - half_size;
     var radius: f32;
@@ -189,7 +249,7 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     ) * backdrop.opacity;
-    let filtered = textureSample(t_backdrop_source, s_backdrop, uv);
+    let filtered = textureSample(t_backdrop_source, s_backdrop, source_uv);
     let lower = backdrop.tone.rgb * backdrop.tone.a * filtered.a;
     let upper = (
         backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
