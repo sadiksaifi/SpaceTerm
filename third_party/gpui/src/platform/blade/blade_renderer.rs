@@ -130,6 +130,11 @@ struct ShaderBackdropData {
     s_backdrop: gpu::Sampler,
 }
 
+#[derive(blade_macros::ShaderData)]
+struct ShaderPresentData {
+    t_scene: gpu::TextureView,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
 struct PathSprite {
@@ -155,6 +160,7 @@ struct BladePipelines {
     poly_sprites: gpu::RenderPipeline,
     surfaces: gpu::RenderPipeline,
     backdrop: gpu::RenderPipeline,
+    present: gpu::RenderPipeline,
 }
 
 impl BladePipelines {
@@ -343,6 +349,24 @@ impl BladePipelines {
                 }],
                 multisample_state: gpu::MultisampleState::default(),
             }),
+            present: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "present",
+                data_layouts: &[&ShaderPresentData::layout()],
+                vertex: shader.at("vs_backdrop"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState {
+                    topology: gpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                fragment: Some(shader.at("fs_present")),
+                color_targets: &[gpu::ColorTargetState {
+                    format: surface_info.format,
+                    blend: None,
+                    write_mask: gpu::ColorWrites::default(),
+                }],
+                multisample_state: gpu::MultisampleState::default(),
+            }),
         }
     }
 
@@ -356,6 +380,7 @@ impl BladePipelines {
         gpu.destroy_render_pipeline(&mut self.poly_sprites);
         gpu.destroy_render_pipeline(&mut self.surfaces);
         gpu.destroy_render_pipeline(&mut self.backdrop);
+        gpu.destroy_render_pipeline(&mut self.present);
     }
 }
 
@@ -395,6 +420,8 @@ pub struct BladeRenderer {
     path_intermediate_texture_view: gpu::TextureView,
     path_intermediate_msaa_texture: Option<gpu::Texture>,
     path_intermediate_msaa_texture_view: Option<gpu::TextureView>,
+    scene_texture: gpu::Texture,
+    scene_texture_view: gpu::TextureView,
     backdrop_textures: Option<BackdropTextures>,
     backdrop_sampler: gpu::Sampler,
     rendering_parameters: RenderingParameters,
@@ -408,7 +435,7 @@ impl BladeRenderer {
     ) -> anyhow::Result<Self> {
         let surface_config = gpu::SurfaceConfig {
             size: config.size,
-            usage: gpu::TextureUsage::TARGET | gpu::TextureUsage::COPY,
+            usage: gpu::TextureUsage::TARGET,
             display_sync: gpu::DisplaySync::Recent,
             color_space: gpu::ColorSpace::Srgb,
             allow_exclusive_full_screen: false,
@@ -465,6 +492,12 @@ impl BladeRenderer {
                 rendering_parameters.path_sample_count,
             )
             .unzip();
+        let (scene_texture, scene_texture_view) = create_scene_texture(
+            &context.gpu,
+            surface.info().format,
+            config.size.width,
+            config.size.height,
+        );
 
         #[cfg(target_os = "macos")]
         let core_video_texture_cache = unsafe {
@@ -490,6 +523,8 @@ impl BladeRenderer {
             path_intermediate_texture_view,
             path_intermediate_msaa_texture,
             path_intermediate_msaa_texture_view,
+            scene_texture,
+            scene_texture_view,
             backdrop_textures: None,
             backdrop_sampler,
             rendering_parameters,
@@ -574,6 +609,14 @@ impl BladeRenderer {
                 .unzip();
             self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
             self.path_intermediate_msaa_texture_view = path_intermediate_msaa_texture_view;
+            self.gpu.destroy_texture_view(self.scene_texture_view);
+            self.gpu.destroy_texture(self.scene_texture);
+            (self.scene_texture, self.scene_texture_view) = create_scene_texture(
+                &self.gpu,
+                self.surface.info().format,
+                gpu_size.width,
+                gpu_size.height,
+            );
             self.destroy_backdrop_textures();
         }
     }
@@ -874,6 +917,8 @@ impl BladeRenderer {
         if let Some(msaa_view) = self.path_intermediate_msaa_texture_view {
             self.gpu.destroy_texture_view(msaa_view);
         }
+        self.gpu.destroy_texture_view(self.scene_texture_view);
+        self.gpu.destroy_texture(self.scene_texture);
         self.destroy_backdrop_textures();
     }
 
@@ -886,6 +931,7 @@ impl BladeRenderer {
             self.surface.acquire_frame()
         };
         self.command_encoder.init_texture(frame.texture());
+        self.command_encoder.init_texture(self.scene_texture);
 
         let globals = GlobalParams {
             viewport_size: [
@@ -903,7 +949,7 @@ impl BladeRenderer {
             "main",
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
+                    view: self.scene_texture_view,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
                     finish_op: gpu::FinishOp::Store,
                 }],
@@ -953,7 +999,7 @@ impl BladeRenderer {
                         "main",
                         gpu::RenderTargetSet {
                             colors: &[gpu::RenderTarget {
-                                view: frame.texture_view(),
+                                view: self.scene_texture_view,
                                 init_op: gpu::InitOp::Load,
                                 finish_op: gpu::FinishOp::Store,
                             }],
@@ -1142,13 +1188,17 @@ impl BladeRenderer {
                 PrimitiveBatch::BackdropFilters(filters) => {
                     drop(pass);
                     for filter in filters {
-                        self.draw_backdrop_filter(frame.texture(), frame.texture_view(), filter);
+                        self.draw_backdrop_filter(
+                            self.scene_texture,
+                            self.scene_texture_view,
+                            filter,
+                        );
                     }
                     pass = self.command_encoder.render(
                         "main",
                         gpu::RenderTargetSet {
                             colors: &[gpu::RenderTarget {
-                                view: frame.texture_view(),
+                                view: self.scene_texture_view,
                                 init_op: gpu::InitOp::Load,
                                 finish_op: gpu::FinishOp::Store,
                             }],
@@ -1159,6 +1209,27 @@ impl BladeRenderer {
             }
         }
         drop(pass);
+
+        if let mut pass = self.command_encoder.render(
+            "present",
+            gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: frame.texture_view(),
+                    init_op: gpu::InitOp::DontCare,
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            },
+        ) {
+            let mut encoder = pass.with(&self.pipelines.present);
+            encoder.bind(
+                0,
+                &ShaderPresentData {
+                    t_scene: self.scene_texture_view,
+                },
+            );
+            encoder.draw(0, 4, 0, 1);
+        }
 
         self.command_encoder.present(frame);
         let sync_point = self.gpu.submit(&mut self.command_encoder);
@@ -1234,6 +1305,25 @@ fn create_backdrop_texture(
         },
     );
     (texture, view)
+}
+
+fn create_scene_texture(
+    gpu: &gpu::Context,
+    format: gpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (gpu::Texture, gpu::TextureView) {
+    create_backdrop_texture(
+        gpu,
+        "scene",
+        format,
+        gpu::Extent {
+            width,
+            height,
+            depth: 1,
+        },
+        gpu::TextureUsage::TARGET | gpu::TextureUsage::RESOURCE | gpu::TextureUsage::COPY,
+    )
 }
 
 fn create_path_intermediate_texture(

@@ -107,6 +107,7 @@ var<uniform> backdrop: BackdropParams;
 var t_backdrop_source: texture_2d<f32>;
 var t_backdrop_original: texture_2d<f32>;
 var s_backdrop: sampler;
+var t_scene: texture_2d<f32>;
 
 struct BackdropVarying {
     @builtin(position) position: vec4<f32>,
@@ -118,6 +119,11 @@ fn vs_backdrop(@builtin(vertex_index) vertex_id: u32) -> BackdropVarying {
     var out = BackdropVarying();
     out.position = vec4<f32>(unit_vertex * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
     return out;
+}
+
+@fragment
+fn fs_present(input: BackdropVarying) -> @location(0) vec4<f32> {
+    return textureLoad(t_scene, vec2<i32>(input.position.xy), 0);
 }
 
 @fragment
