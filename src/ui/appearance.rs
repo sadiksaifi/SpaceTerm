@@ -622,9 +622,13 @@ fn resolve_floating_control_colors(
     paint.toggle_off_mark =
         readable_on_backgrounds(reference.toggle_off_mark, progress_backgrounds, 3.0);
     paint.info = readable_on_backgrounds(reference.info, host_backgrounds, 3.0);
+    paint.info_border = readable_on_backgrounds(reference.info_border, host_backgrounds, 3.0);
     paint.success = readable_on_backgrounds(reference.success, host_backgrounds, 3.0);
+    paint.success_border = readable_on_backgrounds(reference.success_border, host_backgrounds, 3.0);
     paint.warning = readable_on_backgrounds(reference.warning, host_backgrounds, 3.0);
+    paint.warning_border = readable_on_backgrounds(reference.warning_border, host_backgrounds, 3.0);
     paint.error = readable_on_backgrounds(reference.error, host_backgrounds, 3.0);
+    paint.error_border = readable_on_backgrounds(reference.error_border, host_backgrounds, 3.0);
     paint
 }
 
@@ -1184,6 +1188,26 @@ mod typography_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn floating_warning_border_keeps_its_role_and_resolves_against_the_host() {
+        use crate::appearance::{ChromeColors, Color};
+
+        let reference = ChromeColors {
+            warning: Color::rgb(0xd02020),
+            warning_border: Color::rgb(0xf0f0f0),
+            ..ChromeColors::default()
+        };
+        let resolved = resolve_floating_control_colors(
+            &reference,
+            reference.clone(),
+            Color::rgba(0),
+            Color::rgb(0xffffff),
+        );
+
+        assert_ne!(resolved.warning_border, resolved.warning);
+        assert!(resolved.warning_border.contrast_ratio(Color::rgb(0xffffff)) >= 3.0,);
     }
 
     #[test]

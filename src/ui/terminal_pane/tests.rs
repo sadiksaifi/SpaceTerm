@@ -3958,11 +3958,13 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
     );
     let root_warning = Color::rgb(0xff2020);
     let floating_warning = Color::rgb(0x20ff20);
+    let floating_warning_border = Color::rgb(0x2020ff);
     cx.update(|_, cx| {
         let mut appearance = chrome(cx).clone();
         appearance.colors.warning = root_warning;
         appearance.colors.warning_border = root_warning;
         appearance.floating_control_colors.warning = floating_warning;
+        appearance.floating_control_colors.warning_border = floating_warning_border;
         cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
             appearance,
         )));
@@ -4008,10 +4010,11 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
             .collect::<Vec<_>>()
     });
     assert!(
-        paste_backgrounds.contains(&gpui_color(floating_warning).into()),
-        "paste rail must use the floating warning: {paste_backgrounds:?}",
+        paste_backgrounds.contains(&gpui_color(floating_warning_border).into()),
+        "paste rail must use the floating warning border: {paste_backgrounds:?}",
     );
     assert!(!paste_backgrounds.contains(&gpui_color(root_warning).into()));
+    assert!(!paste_backgrounds.contains(&gpui_color(floating_warning).into()));
 }
 
 #[gpui::test]

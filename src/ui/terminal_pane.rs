@@ -4225,7 +4225,9 @@ fn render_paste_confirmation(
                     .debug_selector(|| "unsafe-paste-confirmation-warning".to_owned())
                     .w(shell.hairline() * 2.0)
                     .flex_shrink_0()
-                    .bg(gpui_color(appearance.floating_control_colors.warning)),
+                    .bg(gpui_color(
+                        appearance.floating_control_colors.warning_border,
+                    )),
             )
             .child(
                 div()
