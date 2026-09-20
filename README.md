@@ -80,8 +80,12 @@ development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks 
 platform segment such as `:macos`.
 
 Run `mise run validate:macos` for the full macOS validation suite, including SpaceTerm's patched
-terminal library. Inside a SpaceTerm Pane, `mise run smoke:unix:kitty-graphics` displays image
-layering and scaling checks.
+terminal library. Both `validate:portable` and `validate` include GPUI scene-ordering tests.
+`validate` also requires the host renderer checks: Metal pixel tests and Blade compilation on
+macOS, Blade/WGSL compilation on Linux, and native MSVC/DirectX/HLSL compilation on Windows.
+The Windows check requires the Windows SDK's FXC compiler; cross-checking Windows from another
+platform does not validate HLSL. Inside a SpaceTerm Pane, `mise run smoke:unix:kitty-graphics`
+displays image layering and scaling checks.
 
 The terminal engine is pinned in the `third_party/ghostty` submodule and built from source.
 SpaceTerm maintains its Rust integration as local workspace dependencies. See

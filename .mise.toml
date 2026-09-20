@@ -143,6 +143,10 @@ run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --
 description = "Check the portable Blade renderer through its macOS backend"
 run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --no-default-features --features macos-blade --locked"
 
+[tasks."check:gpui:blade:linux"]
+description = "Check the Blade renderer and WGSL shaders for X11 and Wayland"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --no-default-features --features x11,wayland --locked"
+
 [tasks."test:gpui:backdrop:macos"]
 description = "Verify backdrop-filter pixels on a native Metal GPU"
 run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked backdrop::tests"
@@ -153,6 +157,25 @@ usage = '''
 flag "--target <target>" default="x86_64-pc-windows-msvc" help="Windows Rust target triple"
 '''
 run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --target "${usage_target?}" --no-default-features --locked'
+
+[tasks."validate:gpui"]
+description = "Validate the current platform's GPUI renderers and shaders"
+run = "python3 scripts/validate-gpui.py"
+
+[tasks."validate:gpui:macos"]
+description = "Validate Metal pixels and the alternate Blade renderer"
+run = [
+  { task = "test:gpui:backdrop:macos" },
+  { task = "check:gpui:blade:macos" },
+]
+
+[tasks."validate:gpui:linux"]
+description = "Validate the Linux Blade renderer and WGSL shaders"
+run = [{ task = "check:gpui:blade:linux" }]
+
+[tasks."validate:gpui:windows"]
+description = "Validate native MSVC DirectX and compile HLSL with the Windows SDK"
+run = [{ task = "check:gpui:windows" }]
 
 [tasks."test:vendor"]
 description = "Test terminal-library patches with the application feature set"
@@ -180,7 +203,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/validate-gpui.py
 '''
 
 [tasks."lint:diff"]
@@ -202,6 +225,7 @@ run = [
   { task = "fmt:check" },
   { task = "check:portable" },
   { task = "test:portable" },
+  { task = "test:gpui:scene" },
   { task = "lint:portable" },
   { task = "lint:diff" },
 ]
@@ -213,6 +237,8 @@ run = [
   { task = "fmt:check" },
   { task = "check" },
   { task = "test" },
+  { task = "test:gpui:scene" },
+  { task = "validate:gpui" },
   { task = "lint" },
   { task = "test:vendor" },
   { task = "test:vendor:no-graphics" },
