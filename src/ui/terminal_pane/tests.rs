@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use super::*;
-use crate::appearance::TerminalColors;
+use crate::appearance::{Color, TerminalColors};
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -3937,6 +3937,81 @@ fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestA
     assert!(narrow_shell.contains(&narrow_message.origin));
     assert!(narrow_message.right() <= narrow_shell.right());
     assert!(narrow_message.bottom() <= narrow_shell.bottom());
+}
+
+#[gpui::test]
+fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(21),
+        byte_len: 12,
+        line_count: 2,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (pane, cx, _) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Cancelled),
+    );
+    let root_warning = Color::rgb(0xff2020);
+    let floating_warning = Color::rgb(0x20ff20);
+    cx.update(|_, cx| {
+        let mut appearance = chrome(cx).clone();
+        appearance.colors.warning = root_warning;
+        appearance.colors.warning_border = root_warning;
+        appearance.floating_control_colors.warning = floating_warning;
+        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+            appearance,
+        )));
+    });
+    pane.update(cx, |pane, cx| {
+        pane.status = Some("Review terminal state".to_owned());
+        pane.status_intent = StatusIntent::Warning;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let status_rail = cx
+        .debug_bounds("terminal-status-intent")
+        .expect("warning status should render its intent rail");
+    let status_backgrounds = cx.update(|window, _| {
+        let status_rail = status_rail.scale(window.scale_factor());
+        window
+            .painted_quads_for_test()
+            .into_iter()
+            .filter(|quad| quad.visible_bounds.intersects(&status_rail))
+            .map(|quad| quad.background)
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        status_backgrounds.contains(&gpui_color(floating_warning).into()),
+        "status rail must use the floating warning: {status_backgrounds:?}",
+    );
+    assert!(!status_backgrounds.contains(&gpui_color(root_warning).into()));
+
+    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+    let paste_rail = cx
+        .debug_bounds("unsafe-paste-confirmation-warning")
+        .expect("unsafe paste should render its warning rail");
+    let paste_backgrounds = cx.update(|window, _| {
+        let paste_rail = paste_rail.scale(window.scale_factor());
+        window
+            .painted_quads_for_test()
+            .into_iter()
+            .filter(|quad| quad.visible_bounds.intersects(&paste_rail))
+            .map(|quad| quad.background)
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        paste_backgrounds.contains(&gpui_color(floating_warning).into()),
+        "paste rail must use the floating warning: {paste_backgrounds:?}",
+    );
+    assert!(!paste_backgrounds.contains(&gpui_color(root_warning).into()));
 }
 
 #[gpui::test]

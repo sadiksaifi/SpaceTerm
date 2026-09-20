@@ -3826,15 +3826,18 @@ impl Render for TerminalPane {
         let notice_shell = floating_shell(FloatingRole::Notice, cx);
         let readout_shell = floating_shell(FloatingRole::Readout, cx);
         let floating_colors = &appearance.floating_colors;
+        let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
         let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => (appearance.colors.error, IconName::TriangleAlert),
-            PaneTerminalState::Exited(_) => (appearance.colors.text_muted, IconName::Square),
+            PaneTerminalState::Failed { .. } => {
+                (floating_control_colors.error, IconName::TriangleAlert)
+            }
+            PaneTerminalState::Exited(_) => (floating_colors.text_muted, IconName::Square),
             PaneTerminalState::Running => match self.status_intent {
-                StatusIntent::Information => (appearance.colors.info, IconName::Info),
-                StatusIntent::Success => (appearance.colors.success, IconName::Check),
-                StatusIntent::Warning => (appearance.colors.warning, IconName::TriangleAlert),
-                StatusIntent::Error => (appearance.colors.error, IconName::TriangleAlert),
+                StatusIntent::Information => (floating_control_colors.info, IconName::Info),
+                StatusIntent::Success => (floating_control_colors.success, IconName::Check),
+                StatusIntent::Warning => (floating_control_colors.warning, IconName::TriangleAlert),
+                StatusIntent::Error => (floating_control_colors.error, IconName::TriangleAlert),
             },
         };
         let diagnostics_available =
@@ -4222,7 +4225,7 @@ fn render_paste_confirmation(
                     .debug_selector(|| "unsafe-paste-confirmation-warning".to_owned())
                     .w(shell.hairline() * 2.0)
                     .flex_shrink_0()
-                    .bg(gpui_color(appearance.colors.warning_border)),
+                    .bg(gpui_color(appearance.floating_control_colors.warning)),
             )
             .child(
                 div()
