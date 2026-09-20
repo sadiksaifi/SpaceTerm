@@ -23,11 +23,64 @@ use super::appearance::{ChromeAppearance, InstalledChrome};
 pub(crate) struct InstalledAppearance(pub(crate) Arc<ResolvedAppearance>);
 impl Global for InstalledAppearance {}
 
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccessibilityPreviewFact {
+    ReduceTransparency,
+    IncreaseContrast,
+    ShowBorders,
+    ReduceMotion,
+    DifferentiateWithoutColor,
+}
+
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AccessibilityPreviewOverride {
+    reduce_transparency: Option<bool>,
+    increase_contrast: Option<bool>,
+    show_borders: Option<bool>,
+    reduce_motion: Option<bool>,
+    differentiate_without_color: Option<bool>,
+}
+
+#[cfg(feature = "appearance-exerciser")]
+impl AccessibilityPreviewOverride {
+    fn apply(self, mut capabilities: CompositionCapabilities) -> CompositionCapabilities {
+        capabilities.reduce_transparency = self
+            .reduce_transparency
+            .unwrap_or(capabilities.reduce_transparency);
+        capabilities.increase_contrast = self
+            .increase_contrast
+            .unwrap_or(capabilities.increase_contrast);
+        capabilities.show_borders = self.show_borders.unwrap_or(capabilities.show_borders);
+        capabilities.reduce_motion = self.reduce_motion.unwrap_or(capabilities.reduce_motion);
+        capabilities.differentiate_without_color = self
+            .differentiate_without_color
+            .unwrap_or(capabilities.differentiate_without_color);
+        capabilities
+    }
+
+    fn set(&mut self, fact: AccessibilityPreviewFact, enabled: bool) {
+        let value = Some(enabled);
+        match fact {
+            AccessibilityPreviewFact::ReduceTransparency => self.reduce_transparency = value,
+            AccessibilityPreviewFact::IncreaseContrast => self.increase_contrast = value,
+            AccessibilityPreviewFact::ShowBorders => self.show_borders = value,
+            AccessibilityPreviewFact::ReduceMotion => self.reduce_motion = value,
+            AccessibilityPreviewFact::DifferentiateWithoutColor => {
+                self.differentiate_without_color = value;
+            }
+        }
+    }
+}
+
 pub(crate) struct AppearanceRuntime {
     pub(crate) settings: UserSettings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
     progress_motion: spaceterm_ui::ProgressMotion,
+    #[cfg(feature = "appearance-exerciser")]
+    accessibility_preview: AccessibilityPreviewOverride,
     _tasks: Vec<Task<()>>,
     _observation: Option<Box<dyn SystemAppearanceSubscription>>,
 }
@@ -75,6 +128,8 @@ pub(crate) fn install(
         platform,
         fonts,
         progress_motion: spaceterm_ui::ProgressMotion::Standard,
+        #[cfg(feature = "appearance-exerciser")]
+        accessibility_preview: AccessibilityPreviewOverride::default(),
         _tasks: tasks,
         _observation: observation,
     });
@@ -108,6 +163,11 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         reduce_motion: platform.prefers_reduced_motion(),
         differentiate_without_color: accessibility.differentiate_without_color,
     };
+    #[cfg(feature = "appearance-exerciser")]
+    let capabilities = cx
+        .global::<AppearanceRuntime>()
+        .accessibility_preview
+        .apply(capabilities);
     let resolved = catalog
         .resolve(
             generation,
@@ -173,6 +233,38 @@ pub(crate) fn progress_motion(cx: &App) -> spaceterm_ui::ProgressMotion {
         .map_or(spaceterm_ui::ProgressMotion::Standard, |runtime| {
             runtime.progress_motion
         })
+}
+
+#[cfg(feature = "appearance-exerciser")]
+pub(crate) fn set_accessibility_preview(
+    fact: AccessibilityPreviewFact,
+    enabled: bool,
+    cx: &mut App,
+) -> Result<(), SettingsError> {
+    let previous = {
+        let runtime = cx.global_mut::<AppearanceRuntime>();
+        let previous = runtime.accessibility_preview;
+        runtime.accessibility_preview.set(fact, enabled);
+        previous
+    };
+    if let Err(error) = refresh(cx) {
+        cx.global_mut::<AppearanceRuntime>().accessibility_preview = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "appearance-exerciser")]
+pub(crate) fn reset_accessibility_preview(cx: &mut App) -> Result<(), SettingsError> {
+    let previous = {
+        let runtime = cx.global_mut::<AppearanceRuntime>();
+        std::mem::take(&mut runtime.accessibility_preview)
+    };
+    if let Err(error) = refresh(cx) {
+        cx.global_mut::<AppearanceRuntime>().accessibility_preview = previous;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Called only at startup or an explicit font reload. No frame or timer enumerates fonts.

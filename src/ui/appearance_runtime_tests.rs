@@ -226,6 +226,101 @@ fn non_material_accessibility_facts_are_retained_and_reprepare_chrome(cx: &mut T
     });
 }
 
+#[cfg(feature = "appearance-exerciser")]
+#[gpui::test]
+fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values(
+    cx: &mut TestAppContext,
+) {
+    let (settings, platform) = start(cx);
+    platform.set_native_window_transparency_supported(true);
+    platform.set_increase_contrast(true);
+    platform.set_show_borders(true);
+    platform.set_reduced_motion(true);
+    cx.run_until_parked();
+    let settings_before = settings.export_document().unwrap();
+    let generation_before = cx.update(|cx| current(cx).generation);
+
+    cx.update(|cx| {
+        set_accessibility_preview(AccessibilityPreviewFact::IncreaseContrast, false, cx).unwrap();
+        set_accessibility_preview(AccessibilityPreviewFact::ShowBorders, false, cx).unwrap();
+        set_accessibility_preview(
+            AccessibilityPreviewFact::DifferentiateWithoutColor,
+            true,
+            cx,
+        )
+        .unwrap();
+    });
+
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.native_window_transparency,
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, false, false, true, true)
+        );
+        assert!(current(cx).generation > generation_before);
+    });
+    assert_eq!(settings.export_document().unwrap(), settings_before);
+    assert_eq!(
+        (
+            platform.accessibility_display_options(),
+            platform.prefers_reduced_motion(),
+            platform.supports_native_window_transparency(),
+        ),
+        (
+            crate::platform::appearance::AccessibilityDisplayOptions {
+                reduce_transparency: false,
+                increase_contrast: true,
+                show_borders: true,
+                differentiate_without_color: false,
+            },
+            true,
+            true,
+        )
+    );
+
+    cx.update(|cx| {
+        set_accessibility_preview(AccessibilityPreviewFact::ReduceTransparency, true, cx).unwrap();
+        set_accessibility_preview(AccessibilityPreviewFact::ReduceMotion, false, cx).unwrap();
+    });
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, false, false, true)
+        );
+    });
+
+    cx.update(|cx| reset_accessibility_preview(cx).unwrap());
+
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.native_window_transparency,
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, true, true, true, false)
+        );
+    });
+}
+
 #[gpui::test]
 fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx: &mut TestAppContext,

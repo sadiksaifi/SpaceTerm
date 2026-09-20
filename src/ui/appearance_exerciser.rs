@@ -402,6 +402,91 @@ impl AppearanceExerciser {
         cx.notify();
     }
 
+    fn toggle_accessibility_preview(
+        &mut self,
+        fact: appearance_runtime::AccessibilityPreviewFact,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let capabilities = appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities;
+        let enabled = match fact {
+            appearance_runtime::AccessibilityPreviewFact::ReduceTransparency => {
+                capabilities.reduce_transparency
+            }
+            appearance_runtime::AccessibilityPreviewFact::IncreaseContrast => {
+                capabilities.increase_contrast
+            }
+            appearance_runtime::AccessibilityPreviewFact::ShowBorders => capabilities.show_borders,
+            appearance_runtime::AccessibilityPreviewFact::ReduceMotion => {
+                capabilities.reduce_motion
+            }
+            appearance_runtime::AccessibilityPreviewFact::DifferentiateWithoutColor => {
+                capabilities.differentiate_without_color
+            }
+        };
+        self.status = if appearance_runtime::set_accessibility_preview(fact, !enabled, cx).is_ok() {
+            format!(
+                "{label} preview {}; System Settings unchanged",
+                if enabled { "off" } else { "on" }
+            )
+        } else {
+            format!("{label} preview rejected")
+        };
+        cx.notify();
+    }
+
+    fn toggle_reduce_transparency_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ReduceTransparency,
+            "Reduce Transparency",
+            cx,
+        );
+    }
+
+    fn toggle_increase_contrast_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::IncreaseContrast,
+            "Increase Contrast",
+            cx,
+        );
+    }
+
+    fn toggle_show_borders_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ShowBorders,
+            "Show Borders",
+            cx,
+        );
+    }
+
+    fn toggle_reduce_motion_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ReduceMotion,
+            "Reduce Motion",
+            cx,
+        );
+    }
+
+    fn toggle_differentiate_without_color_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::DifferentiateWithoutColor,
+            "Differentiate Without Color",
+            cx,
+        );
+    }
+
+    fn reset_accessibility_previews(&mut self, cx: &mut Context<Self>) {
+        self.status = if appearance_runtime::reset_accessibility_preview(cx).is_ok() {
+            String::from("Accessibility previews reset to live system settings")
+        } else {
+            String::from("Accessibility preview reset rejected")
+        };
+        cx.notify();
+    }
+
     fn cancel(&mut self, cx: &mut Context<Self>) {
         let result = self
             .preview
@@ -697,6 +782,24 @@ impl Render for AppearanceExerciser {
                         let _ = weak.update(cx, handler);
                     })
             };
+        let accessibility_action =
+            |id: &'static str, label: String, handler: fn(&mut Self, &mut Context<Self>)| {
+                let weak = weak.clone();
+                Button::new(id, label)
+                    .debug_selector(id)
+                    .size(ButtonSize::Small)
+                    .variant(ButtonVariant::Secondary)
+                    .on_activate(move |_, _, cx| {
+                        let _ = weak.update(cx, handler);
+                    })
+            };
+        let capabilities = appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities;
+        let preview_label = |label: &str, enabled: bool| {
+            format!("Preview {label}: {}", if enabled { "On" } else { "Off" })
+        };
         let checkbox_weak = weak.clone();
         let checkbox = Checkbox::new(
             "appearance-checkbox",
@@ -736,6 +839,41 @@ impl Render for AppearanceExerciser {
                 move || format!("appearance-diagnostics-generation-{generation}")
             }).text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
             .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.height(32.0, 13.0)).child(self.editor.clone()))
+            .child(div().text_color(muted).child("Synthetic accessibility previews; System Settings remain unchanged"))
+            .child(div().flex().flex_wrap().gap(px(8.0))
+                .child(accessibility_action(
+                    "appearance-preview-reduce-transparency",
+                    preview_label("Reduce Transparency", capabilities.reduce_transparency),
+                    Self::toggle_reduce_transparency_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-increase-contrast",
+                    preview_label("Increase Contrast", capabilities.increase_contrast),
+                    Self::toggle_increase_contrast_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-show-borders",
+                    preview_label("Show Borders", capabilities.show_borders),
+                    Self::toggle_show_borders_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-reduce-motion",
+                    preview_label("Reduce Motion", capabilities.reduce_motion),
+                    Self::toggle_reduce_motion_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-differentiate-without-color",
+                    preview_label(
+                        "Differentiate Without Color",
+                        capabilities.differentiate_without_color,
+                    ),
+                    Self::toggle_differentiate_without_color_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-reset-accessibility-previews",
+                    String::from("Reset Accessibility Previews to System Settings"),
+                    Self::reset_accessibility_previews,
+                )))
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(action("appearance-apply", "Apply JSON Preview", Self::apply_editor))
                 .child(
