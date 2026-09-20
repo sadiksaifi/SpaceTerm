@@ -268,7 +268,7 @@ impl FloatingSurfaceTheme {
 
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
         Self {
-            spacing_scale,
+            spacing_scale: self.spacing_scale * normalized_scale(spacing_scale),
             ..self
         }
     }
@@ -678,6 +678,20 @@ mod tests {
         ] {
             assert_eq!(theme.shell(role).backdrop_blur_radius(), px(20.0));
             assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(20.0));
+        }
+    }
+
+    #[test]
+    fn spacing_scale_composes_across_catalog_scaling() {
+        let theme = FloatingSurfaceTheme::default();
+        let scaled = theme.scaled_metrics(1.0, 1.25);
+        let identity_after_scale = scaled.scaled_metrics(1.0, 1.0);
+        let composed = scaled.scaled_metrics(1.0, 1.2);
+        let direct = theme.scaled_metrics(1.0, 1.5);
+
+        for role in [FloatingRole::Popover, FloatingRole::Modal] {
+            assert_eq!(identity_after_scale.shell(role), scaled.shell(role));
+            assert_eq!(composed.shell(role), direct.shell(role));
         }
     }
 }
