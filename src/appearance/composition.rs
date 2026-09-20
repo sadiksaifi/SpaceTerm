@@ -498,6 +498,8 @@ impl ChromeColors {
         let host = self.elevated_surface_background.source_over(root);
         let mut paint = self.presentation_over(host);
         paint.elevated_surface_background = host;
+        paint.input_background = self.input_background.source_over(host);
+        paint.input_disabled_background = self.input_disabled_background.source_over(host);
         paint
     }
 
@@ -710,6 +712,33 @@ mod tests {
         ] {
             assert_eq!(actual, semantic, "semantic signal must stay authored");
         }
+    }
+
+    #[test]
+    fn floating_fields_composite_directly_over_the_raised_host() {
+        let colors = ChromeColors {
+            background: Color::rgb(0x101010),
+            panel_background: Color::rgb(0x903020),
+            elevated_surface_background: Color::rgb(0x204060),
+            input_background: Color::rgba(0xc0e0a080),
+            input_disabled_background: Color::rgba(0x8060e040),
+            ..ChromeColors::default()
+        };
+        let host = colors
+            .elevated_surface_background
+            .source_over(colors.background.with_alpha(255));
+        let presentation = colors.floating_presentation();
+
+        assert_eq!(
+            (
+                presentation.input_background,
+                presentation.input_disabled_background
+            ),
+            (
+                colors.input_background.source_over(host),
+                colors.input_disabled_background.source_over(host),
+            ),
+        );
     }
 
     #[test]
