@@ -45,8 +45,16 @@ fn check_wgsl_shaders() {
     let shader_source = std::fs::read_to_string(&shader_path).unwrap();
 
     match naga::front::wgsl::parse_str(&shader_source) {
-        Ok(_) => {
-            // All clear
+        Ok(module) => {
+            let mut validator = naga::valid::Validator::new(
+                // Blade assigns resource bindings when it creates each pipeline.
+                naga::valid::ValidationFlags::all() - naga::valid::ValidationFlags::BINDINGS,
+                naga::valid::Capabilities::all(),
+            );
+            if let Err(error) = validator.validate(&module) {
+                println!("cargo::error=WGSL shader validation failed:\n{error:?}");
+                process::exit(1);
+            }
         }
         Err(e) => {
             println!("cargo::error=WGSL shader compilation failed:\n{}", e);
