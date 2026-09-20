@@ -639,6 +639,9 @@ fn compile_segmented_control_colors(
         return paint.clone();
     }
     let mut segmented = paint.clone();
+    segmented.border = materials.edge(reference.element_background, reference.border);
+    segmented.border_variant =
+        materials.edge(reference.ghost_element_active, reference.border_variant);
     let option =
         |target| materials.paint(SurfaceRole::Surface, reference.element_background, target);
     segmented.ghost_element_hover = option(reference.ghost_element_hover);
@@ -775,10 +778,10 @@ impl ChromeAppearance {
         )
     }
 
-    /// The hairline around every Pane: the same neutral edge a selected Workspace row or Active Tab
-    /// chip carries, at every transparency.
+    /// Pane boundaries use the structural separator independently of decorative row rims.
     pub(crate) fn pane_rim(&self) -> Color {
-        self.colors.row_selected_border
+        self.materials
+            .edge(self.colors.panel_background, self.colors.tab_separator)
     }
 
     /// Resolves shared floating paints; the control catalog applies density once on installation.
@@ -792,10 +795,14 @@ impl ChromeAppearance {
                 self.colors.background,
                 color,
             );
+            let edge = self.floating_materials.edge(color, self.colors.border);
+            let divider = self
+                .floating_materials
+                .edge(color, self.colors.border_variant);
             FloatingSurfacePaint::new(
                 rgba(wash.rgba_hex()),
-                rgba(self.colors.border.rgba_hex()),
-                rgba(self.colors.border_variant.rgba_hex()),
+                rgba(edge.rgba_hex()),
+                rgba(divider.rgba_hex()),
             )
             .backdrop_tone(rgba(tone.rgba_hex()))
         };

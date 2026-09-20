@@ -59,12 +59,25 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
             let pane = prepared.pane_surface(opaque.terminal.colors.background);
             let controls = &prepared.control_colors;
             assert_eq!(controls.text, prepared.colors.text);
-            assert_eq!(controls.border, prepared.colors.border);
-            assert_eq!(prepared.pane_rim(), prepared.colors.row_selected_border);
+            assert_eq!(
+                controls.border,
+                prepared
+                    .materials
+                    .edge(prepared.colors.background, prepared.colors.border)
+            );
+            assert_eq!(
+                prepared.pane_rim(),
+                prepared.materials.edge(
+                    prepared.colors.panel_background,
+                    prepared.colors.tab_separator,
+                )
+            );
             if transparency == 0.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
+                assert_eq!(controls.border, prepared.colors.border);
+                assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
                 assert_eq!(
                     resolved.chrome.composition.effective,
                     WindowBackgroundAppearance::Opaque
@@ -123,7 +136,6 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         for target in [
             resolved.terminal.colors.background,
             prepared.colors.elevated_surface_background,
-            prepared.colors.row_selected_background,
             prepared.colors.selection_background,
         ] {
             let overlay = prepared.surface(SurfaceRole::Surface, target);
@@ -144,6 +156,34 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
                 "a resting surface must continue to transmit most of its backing"
             );
         }
+        let shell = prepared
+            .surface(SurfaceRole::Base, prepared.colors.panel_background)
+            .source_over(sheet);
+        let selected_overlay = prepared.materials.paint(
+            SurfaceRole::Surface,
+            prepared.colors.panel_background,
+            prepared.colors.row_selected_background,
+        );
+        let selected = selected_overlay.source_over(shell);
+        assert!(
+            selected.r < shell.r && selected.g < shell.g && selected.b < shell.b,
+            "Light selection should shade its shell host: {selected:?} against {shell:?}"
+        );
+        assert!(
+            [
+                selected.r.abs_diff(shell.r),
+                selected.g.abs_diff(shell.g),
+                selected.b.abs_diff(shell.b),
+            ]
+            .into_iter()
+            .all(|delta| delta >= 5),
+            "Light selection should remain visible against its shell host: {selected:?} against \
+             {shell:?}"
+        );
+        assert!(
+            selected_overlay.a < 128,
+            "a selected row must continue to transmit most of its shell host"
+        );
     }
 }
 
@@ -240,9 +280,7 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
     }
 }
 
-/// The elevation ladder is what tells a Pane from a selected chip from a hovered row once the
-/// fills are translucent, so it has to survive the whole Stepper range rather than collapsing
-/// onto one wash part of the way up it.
+/// Row hover and selection must remain distinct on every host once their fills are translucent.
 #[test]
 fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
     for appearance in [Appearance::Light, Appearance::Dark] {
@@ -255,33 +293,34 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
                 CompositionCapabilities::new(true, true),
             )
             .materials;
-            let paint = reference.material_presentation(materials);
-            // The rungs a Workspace rests on, in the order both appearances author them: the
-            // shell, a hovered element, and the persistent selection.
-            let ladder = [
-                paint.panel_background,
-                paint.element_hover,
-                paint.row_selected_background,
-            ];
-            let alphas = ladder.map(|rung| rung.a);
-            assert!(
-                alphas.windows(2).all(|pair| pair[0] <= pair[1]),
-                "{appearance:?} at {transparency}: ladder out of order {alphas:?}"
-            );
-            assert!(
-                alphas[2] > alphas[0] && alphas[1] > 0,
-                "{appearance:?} at {transparency}: ladder collapsed {alphas:?}"
-            );
-            // A Pane rests above the hovered rung in both appearances and never disappears.
             let pane = materials.paint(
                 SurfaceRole::Surface,
                 reference.background,
                 reference.elevated_surface_background,
             );
             assert!(
-                pane.a > alphas[1],
-                "{appearance:?} at {transparency}: a Pane sank into the ladder"
+                pane.a > 0,
+                "{appearance:?} at {transparency}: Pane material disappeared"
             );
+            for (host_name, host) in [
+                ("shell", reference.panel_background),
+                ("raised surface", reference.elevated_surface_background),
+            ] {
+                let hover =
+                    materials.paint(SurfaceRole::Surface, host, reference.row_hover_background);
+                let selected = materials.paint(
+                    SurfaceRole::Surface,
+                    host,
+                    reference.row_selected_background,
+                );
+                assert!(
+                    hover.a > 0 && selected.a > hover.a,
+                    "{appearance:?} at {transparency}: row ladder collapsed on the \
+                     {host_name}: hover={} selection={}",
+                    hover.a,
+                    selected.a
+                );
+            }
         }
     }
 }
@@ -315,17 +354,26 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
         let shell = rendered(SurfaceRole::Base, reference.panel_background);
         let selected = rendered(SurfaceRole::Surface, reference.row_selected_background);
         let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
-        for (name, above, below) in [
-            ("Pane over the sheet", pane, sheet),
-            ("selected chip over the shell", selected, shell),
-            ("shell over the sheet", shell, sheet),
+        for (name, surface, host) in [
+            ("Pane against the sheet", pane, sheet),
+            ("selected row against the shell", selected, shell),
+            ("shell against the sheet", shell, sheet),
         ] {
-            let step = above.g.saturating_sub(below.g);
+            let step = surface.g.abs_diff(host.g);
             assert!(
                 step >= minimum.min(3),
                 "{name} at {transparency}: {step} levels of separation"
             );
         }
+        assert!(pane.g > sheet.g, "a Pane should lift from the light sheet");
+        assert!(
+            shell.g > sheet.g,
+            "the shell should lift from the light sheet"
+        );
+        assert!(
+            selected.g < shell.g,
+            "a selected row should shade the light shell"
+        );
         assert!(
             pane.g.saturating_sub(sheet.g) >= minimum,
             "a Pane at {transparency} must stay clearly above the sheet: {pane:?} over {sheet:?}"

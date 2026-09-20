@@ -117,27 +117,13 @@ impl OverlayRow {
         border: crate::appearance::Color,
     ) -> Self {
         let mut fill = row_fill((reference, reference_surface), (paint, paint_surface));
-        let mut backgrounds = if paint_surface.is_opaque() {
-            let background = fill.source_over(paint_surface);
-            [background; 2]
-        } else {
-            [
-                crate::appearance::Color::rgb(0x000000),
-                crate::appearance::Color::rgb(0xffffff),
-            ]
-            .map(|underlay| fill.source_over(paint_surface.source_over(underlay)))
-        };
-        let neutral_is_readable = [
-            crate::appearance::Color::rgb(0x000000),
-            crate::appearance::Color::rgb(0xffffff),
-        ]
-        .into_iter()
-        .any(|foreground| {
-            backgrounds
-                .into_iter()
-                .all(|background| foreground.contrast_ratio(background) >= 4.5)
-        });
-        if !neutral_is_readable {
+        if !paint_surface.is_opaque()
+            && let Some(compressed) = readable_material_row_fill(fill, paint_surface)
+        {
+            fill = compressed;
+        }
+        let mut backgrounds = row_backgrounds(fill, paint_surface);
+        if shared_neutral(backgrounds).is_none() {
             fill = reference.source_over(reference_surface);
             backgrounds = [fill; 2];
         }
@@ -145,7 +131,11 @@ impl OverlayRow {
             fill,
             content: content
                 .map(|color| super::appearance::readable_on_backgrounds(color, backgrounds, 4.5)),
-            border,
+            border: if paint_surface == reference_surface || fill.is_opaque() {
+                border
+            } else {
+                relative_edge(reference.source_over(reference_surface), border)
+            },
         }
     }
 
@@ -160,6 +150,73 @@ impl OverlayRow {
             gpui_color(self.border),
         )
     }
+}
+
+fn row_backgrounds(
+    fill: crate::appearance::Color,
+    surface: crate::appearance::Color,
+) -> [crate::appearance::Color; 2] {
+    if surface.is_opaque() {
+        return [fill.source_over(surface); 2];
+    }
+    [
+        crate::appearance::Color::rgb(0x000000),
+        crate::appearance::Color::rgb(0xffffff),
+    ]
+    .map(|underlay| fill.source_over(surface.source_over(underlay)))
+}
+
+fn shared_neutral(backgrounds: [crate::appearance::Color; 2]) -> Option<crate::appearance::Color> {
+    let score = |foreground: crate::appearance::Color| {
+        backgrounds
+            .into_iter()
+            .map(|background| foreground.contrast_ratio(background))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let dark = crate::appearance::Color::rgb(0x000000);
+    let light = crate::appearance::Color::rgb(0xffffff);
+    let (foreground, contrast) = if score(dark) >= score(light) {
+        (dark, score(dark))
+    } else {
+        (light, score(light))
+    };
+    (contrast >= 4.5).then_some(foreground)
+}
+
+/// Compresses one row-state overlay into the readable interval connected to transparent.
+///
+/// Fully opaque ink can become readable again after crossing an inaccessible middle interval;
+/// stopping at the first failure keeps the result on the material side of that interval. The
+/// compression curve preserves ordering among states that share the same ink and host instead of
+/// flattening each of them onto one alpha ceiling.
+fn readable_material_row_fill(
+    fill: crate::appearance::Color,
+    surface: crate::appearance::Color,
+) -> Option<crate::appearance::Color> {
+    let foreground = shared_neutral(row_backgrounds(fill.with_alpha(0), surface))?;
+    if fill.a == 0 {
+        return Some(fill);
+    }
+    let ink = fill.with_alpha(255);
+    let mut ceiling = 0_u8;
+    for alpha in 1..=u8::MAX {
+        let backgrounds = row_backgrounds(ink.with_alpha(alpha), surface);
+        if backgrounds
+            .into_iter()
+            .all(|background| foreground.contrast_ratio(background) >= 4.5)
+        {
+            ceiling = alpha;
+        } else {
+            break;
+        }
+    }
+    if ceiling == 0 {
+        return None;
+    }
+    let ceiling = f64::from(ceiling) / 255.0;
+    let alpha = f64::from(fill.a) / 255.0;
+    let compressed = ceiling * alpha * (1.0 + ceiling) / (alpha + ceiling);
+    Some(fill.with_alpha((compressed.clamp(0.0, ceiling) * 255.0).round() as u8))
 }
 
 pub(super) fn overlay_list_rows(
@@ -232,7 +289,11 @@ pub(super) fn overlay_list_rows(
             gpui_color(reference.text_disabled),
             gpui_color(reference.icon_disabled),
             gpui_color(reference.text_disabled),
-            gpui_color(reference.row_border),
+            gpui_color(if surfaces.0 == surfaces.1 {
+                reference.row_border
+            } else {
+                relative_edge(surfaces.0, reference.row_border)
+            }),
         ),
     )
 }
@@ -255,39 +316,19 @@ pub(super) fn row_fill(
         } else {
             reference_surface
         };
-        relative_overlay(base, target)
+        target.relative_overlay(base)
     }
 }
 
-fn relative_overlay(
-    base: crate::appearance::Color,
-    target: crate::appearance::Color,
+/// Reconstructs an authored edge over its semantic host for a translucent row.
+pub(super) fn relative_edge(
+    host: crate::appearance::Color,
+    edge: crate::appearance::Color,
 ) -> crate::appearance::Color {
-    let b = [base.r, base.g, base.b].map(f64::from);
-    let t = [target.r, target.g, target.b].map(f64::from);
-    let alpha = b
-        .iter()
-        .zip(t)
-        .map(|(&base, target)| {
-            if target > base {
-                (target - base) / (255.0 - base)
-            } else if target < base {
-                (base - target) / base
-            } else {
-                0.0
-            }
-        })
-        .fold(0.0_f64, f64::max);
-    if alpha == 0.0 {
-        return crate::appearance::Color::rgba(0);
+    if edge.a == 0 {
+        return edge;
     }
-    let ink: [u8; 3] = std::array::from_fn(|index| {
-        ((t[index] - (1.0 - alpha) * b[index]) / alpha)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    });
-    crate::appearance::Color::from_rgb_components(ink[0], ink[1], ink[2])
-        .with_alpha((alpha * 255.0).round() as u8)
+    edge.source_over(host).relative_overlay(host)
 }
 
 pub(super) fn readable_on(
@@ -370,6 +411,18 @@ mod tests {
             row.content
                 .into_iter()
                 .all(|content| content.contrast_ratio(middle) >= 4.5)
+        );
+    }
+
+    #[test]
+    fn nonzero_row_state_uses_fallback_when_no_nonzero_readable_alpha_exists() {
+        let surface = Color::rgba(0x00000089);
+        let fill = Color::rgba(0xffffff10);
+
+        assert!(shared_neutral(row_backgrounds(fill.with_alpha(0), surface)).is_some());
+        assert!(
+            readable_material_row_fill(fill, surface).is_none(),
+            "a requested state must not disappear when its readable interval has zero width"
         );
     }
 
@@ -508,6 +561,104 @@ mod tests {
                     "Light overlay text stays dark at every transparency"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn built_in_floating_row_states_remain_distinct_translucent_and_readable_at_maximum_glass() {
+        use crate::appearance::{
+            Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences,
+            AvailableFonts, CompositionCapabilities, SchemeCatalog, SystemAppearance,
+        };
+        use crate::ui::appearance::ChromeAppearance;
+
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let mut preferences = AppearancePreferences {
+                mode: match appearance {
+                    Appearance::Light => AppearanceMode::Light,
+                    Appearance::Dark => AppearanceMode::Dark,
+                },
+                ..AppearancePreferences::default()
+            };
+            preferences.background.transparency = 1.0;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::available(appearance)
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .expect("built-in appearance should resolve");
+            let prepared = ChromeAppearance::prepare(&resolved.chrome);
+            let reference = &prepared.floating_colors;
+            let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
+            let mut paint = reference.clone();
+            paint.elevated_surface_background = material;
+            type RowColors = fn(&ChromeColors) -> [Color; 6];
+            let states: [RowColors; 3] = [
+                |c| {
+                    [
+                        c.row_hover_background,
+                        c.row_hover_foreground,
+                        c.row_hover_secondary,
+                        c.row_hover_icon,
+                        c.row_hover_match,
+                        c.row_hover_border,
+                    ]
+                },
+                |c| {
+                    [
+                        c.row_selected_background,
+                        c.row_selected_foreground,
+                        c.row_selected_secondary,
+                        c.row_selected_icon,
+                        c.row_selected_match,
+                        c.row_selected_border,
+                    ]
+                },
+                |c| {
+                    [
+                        c.row_selected_hover_background,
+                        c.row_selected_hover_foreground,
+                        c.row_selected_hover_secondary,
+                        c.row_selected_hover_icon,
+                        c.row_selected_hover_match,
+                        c.row_selected_hover_border,
+                    ]
+                },
+            ];
+            let rows = states.map(|pick| {
+                let [fill, foreground, secondary, icon, matched, border] = pick(reference);
+                OverlayRow::resolve(
+                    (fill, reference.elevated_surface_background),
+                    (pick(&paint)[0], paint.elevated_surface_background),
+                    [foreground, secondary, icon, matched],
+                    border,
+                )
+            });
+
+            for row in rows {
+                assert!(
+                    row.fill.a > 0 && row.fill.a < 255,
+                    "{appearance:?} row state must remain a translucent material: {:?}",
+                    row.fill
+                );
+                for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+                    let background = row.fill.source_over(material.source_over(underlay));
+                    assert!(
+                        row.content
+                            .into_iter()
+                            .all(|content| content.contrast_ratio(background) >= 4.5),
+                        "{appearance:?} row content must read over {background:?}"
+                    );
+                }
+            }
+            let alphas = rows.map(|row| row.fill.a);
+            assert!(
+                alphas.windows(2).all(|pair| pair[0] < pair[1]),
+                "{appearance:?} row states must retain their authored order: {alphas:?}"
+            );
         }
     }
 

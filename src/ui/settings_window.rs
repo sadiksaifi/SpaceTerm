@@ -846,7 +846,10 @@ impl SettingsWindow {
                         .left_0()
                         .w_full()
                         .h(appearance.spacing(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(appearance.colors.border)),
+                        .bg(gpui_color(appearance.materials.edge(
+                            appearance.colors.background,
+                            appearance.colors.border,
+                        ))),
                 )
             })
             .into_any_element()
@@ -2038,13 +2041,17 @@ impl SettingsWindow {
             .w_full()
             .flex_none()
             .h(appearance.height(FOOTER_HEIGHT, text::BODY))
-            .border_t_1()
-            .border_color(gpui_color(appearance.colors.border))
             .child(
                 div()
                     .flex_none()
                     .h_full()
                     .w(appearance.text_size(SIDEBAR_WIDTH))
+                    .border_t_1()
+                    .border_color(gpui_color(
+                        appearance
+                            .materials
+                            .edge(appearance.colors.panel_background, appearance.colors.border),
+                    ))
                     .bg(gpui_color(appearance.control_colors.panel_background)),
             )
             .child(
@@ -2053,6 +2060,12 @@ impl SettingsWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .border_t_1()
+                    .border_color(gpui_color(
+                        appearance
+                            .materials
+                            .edge(appearance.colors.background, appearance.colors.border),
+                    ))
                     .bg(gpui_color(appearance.surface(
                         crate::appearance::SurfaceRole::Base,
                         appearance.colors.background,

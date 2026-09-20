@@ -153,8 +153,9 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             pressed: 0x242424,
             selected: 0x2e2e2e,
             selected_inactive: 0x1c1c1c,
-            row_selected: 0x272727,
-            row_selected_rim: 0x333333,
+            row_hover: 0x282828,
+            row_selected: 0x323232,
+            tab_active: 0x2e2e2e,
             row_selected_text: 0xf2f2f2,
             row_selected_secondary: 0xbcbcbc,
             text: 0xe4e4e4,
@@ -162,8 +163,8 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             text_muted: 0x999999,
             text_placeholder: 0x9a9a9a,
             text_disabled: 0x606060,
-            separator: 0x272727,
-            separator_quiet: 0x1e1e1e,
+            separator: 0x2d2d2d,
+            separator_quiet: 0x262626,
             separator_disabled: 0x222222,
             field_outline: 0x2f2f2f,
             control_outline: 0x313131,
@@ -201,8 +202,9 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             pressed: 0xe6e6e6,
             selected: 0xf8f8f8,
             selected_inactive: 0xf0f0f0,
-            row_selected: 0xf8f8f8,
-            row_selected_rim: 0xd6d6d6,
+            row_hover: 0xdcdcdc,
+            row_selected: 0xd0d0d0,
+            tab_active: 0xfafafa,
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
@@ -262,16 +264,12 @@ struct ChromePalette {
     /// It stays on the same side of the chrome shell as the focused chip rather than crossing to
     /// the other side of it, so an unfocused window reads as quieter rather than as inverted.
     selected_inactive: u32,
-    /// The selected row of a persistent list: a chip the reader reads as the current place.
-    ///
-    /// This rung is authored apart from `selected` because a list row and a segmented option do
-    /// not sit on the same surface. A row chip rests on the chrome shell and on the raised menu
-    /// surface, so it is tuned to carry a visible edge against both without ever reaching the
-    /// lightness of the raised surface itself.
+    /// Row hover steps in the same direction from both the shell and raised menu surface.
+    row_hover: u32,
+    /// Persistent row selection is stronger than hover on both hosts, without a decorative rim.
     row_selected: u32,
-    /// The chip's hairline. Darker than its fill in light and lighter in dark, so the same role
-    /// reads as a lit edge in either appearance rather than as an outline drawn around a box.
-    row_selected_rim: u32,
+    /// The Active Tab is lifted from the title bar, independently of list-row fills.
+    tab_active: u32,
     /// The label on a selected chip, which is the strongest text in a navigation list.
     row_selected_text: u32,
     /// Path, machine, and count text on a selected chip, lifted so the chip never reads dimmer
@@ -368,32 +366,28 @@ impl ChromePalette {
             // A persistent list row is authored apart from the shared selection rung. Deriving it
             // would tie the Workspace sidebar, the Settings sections, and every menu row to the
             // fill a segmented option needs against its own track, and those surfaces differ.
+            row_hover_background: opaque(self.row_hover),
             row_selected_background: opaque(self.row_selected),
-            row_selected_border: opaque(self.row_selected_rim),
-            row_selected_hover_border: opaque(self.row_selected_rim),
+            // Built-in rows use fill and text for selection. Custom appearances may author rims.
+            row_selected_border: translucent(0),
+            row_selected_hover_border: translucent(0),
             row_selected_foreground: opaque(self.row_selected_text),
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
             row_selected_hover_secondary: opaque(self.row_selected_secondary),
             // The Active Tab is an inset chip resting inside the title bar rather than a
-            // full-height panel continuous with the content, so it takes the same rung as a
-            // selected list row. Painting it the window root would read as a well cut into the
-            // bar in dark Chrome and as a raised card in light, which is one shape describing two
-            // different things.
-            tab_active_background: opaque(self.row_selected),
-            // The rest of that hierarchy comes along with the rung: the same lit rim, and the
-            // same heavier fill and text under the pointer, so a Tab and a navigation row answer
-            // hover identically.
+            // full-height panel continuous with the content, so it reads as lifted out of that
+            // bar. Painting it the window root would read as a well cut into the bar in dark
+            // Chrome and as a raised card in light, which is one shape describing two things.
+            tab_active_background: opaque(self.tab_active),
+            // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
+            // hover identically. The chip's shape is its fill; no hairline is drawn around it.
             tab_active_foreground: opaque(self.row_selected_text),
-            tab_active_border: opaque(self.row_selected_rim),
+            tab_active_border: translucent(0),
             tab_active_hover_foreground: opaque(self.row_selected_text),
             tab_inactive_selected_background: opaque(self.selected_inactive),
             tab_inactive_selected_foreground: opaque(self.text_secondary),
-            // An unfocused window quietens the rim by the same proportion it quietens the fill,
-            // so the Tab keeps its edge without outlining a chip that has stepped back.
-            tab_inactive_selected_border: Some(
-                Color::rgb(self.row_selected_rim).mix(Color::rgb(self.selected_inactive), 0.5),
-            ),
+            tab_inactive_selected_border: translucent(0),
             tab_separator: opaque(self.tab_separator),
 
             primary_background: opaque(self.emphasis),
@@ -681,30 +675,18 @@ mod tests {
         }
     }
 
-    /// The Active Tab rests on the same rung as the selected row of a navigation list.
+    /// The Active Tab and selected rows carry the same content hierarchy with distinct materials.
     ///
-    /// Both are inset chips on the chrome shell, so a palette that gave them different materials
-    /// would make one window present two conventions for the same idea. The unfocused window's Tab
-    /// keeps that identity with a shorter step off the bar: it has to stay on the same side of the
-    /// shell, because crossing to the other side reads as a different state rather than a quieter
-    /// one.
+    /// A Tab only rests on the title bar, so its fill can lift from that surface independently of a
+    /// row that must work on both the chrome shell and a raised menu. Both shapes are stated by fill
+    /// rather than a decorative outline. The unfocused window's Tab keeps its identity with a
+    /// shorter step off the bar.
     #[test]
-    fn the_active_tab_should_rest_on_the_same_chip_material_as_a_selected_row() {
+    fn the_active_tab_should_lift_independently_from_borderless_selected_rows() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance).opaque_presentation();
 
             for (role, tab, row) in [
-                (
-                    "fill",
-                    colors.tab_active_background,
-                    colors.row_selected_background,
-                ),
-                ("rim", colors.tab_active_border, colors.row_selected_border),
-                (
-                    "hovered fill",
-                    colors.tab_active_hover_background,
-                    colors.row_selected_hover_background,
-                ),
                 (
                     "text",
                     colors.tab_active_foreground,
@@ -726,12 +708,39 @@ mod tests {
                     "{appearance:?} should give the Active Tab and a selected row one {role}"
                 );
             }
-            let shell = weight(colors.panel_background);
-            let focused = weight(colors.tab_active_background) - shell;
-            let unfocused = weight(colors.tab_inactive_selected_background) - shell;
+            assert_ne!(
+                colors.tab_active_background, colors.row_selected_background,
+                "{appearance:?} should tune the Active Tab for its title-bar host"
+            );
+            assert_ne!(
+                colors.tab_active_hover_background, colors.tab_active_background,
+                "{appearance:?} Active Tab should answer hover"
+            );
+            assert_ne!(
+                colors.row_selected_hover_background, colors.row_selected_background,
+                "{appearance:?} selected row should answer hover"
+            );
+            for (role, border) in [
+                ("selected row", colors.row_selected_border),
+                ("selected row hover", colors.row_selected_hover_border),
+                ("Active Tab", colors.tab_active_border),
+                (
+                    "inactive-window Active Tab",
+                    colors.tab_inactive_selected_border,
+                ),
+            ] {
+                assert_eq!(
+                    border.a, 0,
+                    "{appearance:?} built-in {role} should state its shape without an outline"
+                );
+            }
+
+            let bar = weight(colors.title_bar_background);
+            let focused = weight(colors.tab_active_background) - bar;
+            let unfocused = weight(colors.tab_inactive_selected_background) - bar;
             assert!(
-                focused * unfocused > 0.0,
-                "{appearance:?} should keep the unfocused Tab on the shell's lit side, got \
+                focused > 0.0 && unfocused > 0.0,
+                "{appearance:?} should lift both Active Tab states from the title bar, got \
                  {unfocused} against {focused}"
             );
             assert!(
@@ -742,17 +751,6 @@ mod tests {
             assert_eq!(
                 colors.tab_inactive_background, colors.title_bar_background,
                 "{appearance:?} should leave an inactive Tab as text on the bar"
-            );
-            // The unfocused rim keeps its lit side of the fill, at a shorter step than the focused one.
-            let rim_step = |rim, fill| weight(rim) - weight(fill);
-            let focused_rim = rim_step(colors.tab_active_border, colors.tab_active_background);
-            let unfocused_rim = rim_step(
-                colors.tab_inactive_selected_border,
-                colors.tab_inactive_selected_background,
-            );
-            assert!(
-                focused_rim * unfocused_rim > 0.0 && unfocused_rim.abs() < focused_rim.abs(),
-                "{appearance:?} should quieten the unfocused Tab rim, got {unfocused_rim} against                  {focused_rim}"
             );
         }
     }
@@ -804,42 +802,54 @@ mod tests {
         }
     }
 
-    /// Each appearance separates its structural surfaces by weight rather than by hue.
+    /// Rows step consistently from every built-in host without introducing hue.
     ///
-    /// Root, chrome shell, hover and a selected chip are read as depth: the base is the darkest or
-    /// most shaded rung and everything resting on it is lighter, in both appearances, so floating
-    /// surfaces lift off the base without any color of their own.
+    /// Persistent rows can rest on the chrome shell or on a raised menu. Hover and selection must
+    /// move in the same direction from both hosts, with selection taking the stronger step, so the
+    /// same interaction never reads as a lift in one list and a recess in another.
     #[test]
-    fn the_surface_ladder_should_climb_in_one_direction_in_both_appearances() {
+    fn the_row_ladder_should_step_consistently_from_shell_and_raised_surfaces() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance).opaque_presentation();
-            let ladder = [
-                ("root", colors.background),
-                ("shell", colors.panel_background),
-                ("hover", colors.element_hover),
-                ("selected chip", colors.row_selected_background),
-            ];
 
-            for (role, surface) in ladder {
+            for (role, surface) in [
+                ("shell", colors.panel_background),
+                ("raised", colors.elevated_surface_background),
+                ("row hover", colors.row_hover_background),
+                ("selected row", colors.row_selected_background),
+            ] {
                 assert!(
                     tint(surface) <= NEUTRAL_TINT,
                     "{appearance:?} {role} surface carries a hue cast: {surface:?}"
                 );
             }
-            for pair in ladder.windows(2) {
-                let [(lower, from), (upper, to)] = pair else {
-                    unreachable!()
-                };
-                let climb = weight(*to) - weight(*from);
+            for (host_name, host) in [
+                ("shell", colors.panel_background),
+                ("raised surface", colors.elevated_surface_background),
+            ] {
+                let hover_step = weight(colors.row_hover_background) - weight(host);
+                let selection_step = weight(colors.row_selected_background) - weight(host);
                 assert!(
-                    climb > 0.0,
-                    "{appearance:?} should raise {upper} above {lower}"
+                    hover_step * selection_step > 0.0,
+                    "{appearance:?} row hover and selection should step the same way from the \
+                     {host_name}, got {hover_step} and {selection_step}"
                 );
-                let step = to.contrast_ratio(*from);
                 assert!(
-                    step < 1.6,
-                    "{appearance:?} steps from {lower} to {upper} at {step}, which reads as an edge"
+                    selection_step.abs() > hover_step.abs(),
+                    "{appearance:?} selection should step farther than hover from the \
+                     {host_name}, got {selection_step} against {hover_step}"
                 );
+                for (role, fill) in [
+                    ("hover", colors.row_hover_background),
+                    ("selection", colors.row_selected_background),
+                ] {
+                    let contrast = fill.contrast_ratio(host);
+                    assert!(
+                        contrast > 1.0 && contrast < 1.6,
+                        "{appearance:?} {role} steps from the {host_name} at {contrast}, which \
+                         should stay visible without reading as an edge"
+                    );
+                }
             }
             assert!(
                 colors

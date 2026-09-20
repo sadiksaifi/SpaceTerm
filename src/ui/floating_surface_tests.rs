@@ -1,7 +1,7 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, ResolvedAppearance, SchemeCatalog, SystemAppearance,
-    WindowBackgroundAppearance,
+    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SchemeCatalog,
+    SystemAppearance, WindowBackgroundAppearance,
 };
 use crate::ui::appearance::ChromeAppearance;
 use spaceterm_ui::{FloatingRole, FloatingShell};
@@ -198,6 +198,71 @@ fn maximum_floating_transparency_does_not_rebuild_an_opaque_slab_when_nested() {
         assert_eq!(prepared.colors.text.a, 255);
         assert_eq!(prepared.colors.text_muted.a, 255);
         assert_eq!(prepared.floating_colors.input_placeholder.a, 255);
+    }
+}
+
+#[test]
+fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessible_presentation() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+
+        let mut preferences = AppearancePreferences {
+            mode: match appearance {
+                Appearance::Light => AppearanceMode::Light,
+                Appearance::Dark => AppearanceMode::Dark,
+            },
+            ..AppearancePreferences::default()
+        };
+        preferences.chrome.density = ChromeDensity::Compact;
+        preferences.background.transparency = 1.0;
+        preferences.background.blur = true;
+        let accessible = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::available(appearance)
+                    .with_composition(CompositionCapabilities::new(true, false)),
+                &AvailableFonts::default(),
+            )
+            .expect("valid accessibility surface case should resolve");
+        let accessible = ChromeAppearance::prepare(&accessible.chrome);
+
+        for role in FLOATING_ROLES {
+            let translucent_shell = translucent.floating_surfaces().shell(role);
+            assert!(
+                translucent_shell.edge().a < 1.0,
+                "{appearance:?} {role:?} edge must transmit the native-backed host"
+            );
+            assert!(
+                translucent_shell.divider().a < 1.0,
+                "{appearance:?} {role:?} divider must transmit the native-backed host"
+            );
+
+            let opaque_shell = opaque.floating_surfaces().shell(role);
+            assert_eq!(
+                opaque_shell.edge(),
+                gpui::rgba(opaque.colors.border.rgba_hex()),
+                "{appearance:?} {role:?} opaque edge must keep its authored contrast"
+            );
+            assert_eq!(
+                opaque_shell.divider(),
+                gpui::rgba(opaque.colors.border_variant.rgba_hex()),
+                "{appearance:?} {role:?} opaque divider must keep its authored contrast"
+            );
+
+            let accessible_shell = accessible.floating_surfaces().shell(role);
+            assert_eq!(
+                accessible_shell.edge(),
+                opaque_shell.edge(),
+                "{appearance:?} {role:?} accessibility fallback must restore the opaque edge"
+            );
+            assert_eq!(
+                accessible_shell.divider(),
+                opaque_shell.divider(),
+                "{appearance:?} {role:?} accessibility fallback must restore the opaque divider"
+            );
+        }
     }
 }
 

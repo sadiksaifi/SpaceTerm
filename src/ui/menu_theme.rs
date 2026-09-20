@@ -45,7 +45,7 @@ fn destructive_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
 ) -> spaceterm_ui::ListRowPaints {
-    use super::control_theme_catalog::OverlayRow;
+    use super::control_theme_catalog::{OverlayRow, relative_edge};
     use spaceterm_ui::{ListRowPaint, ListRowPaints};
     let surfaces = (
         reference.elevated_surface_background,
@@ -61,6 +61,7 @@ fn destructive_rows(
         );
         let [foreground, _, icon, _] = row.content;
         let fill = row.fill;
+        let border = row.border;
         ListRowPaint::new(
             gpui_color(fill),
             gpui_color(foreground),
@@ -85,7 +86,11 @@ fn destructive_rows(
             gpui_color(reference.text_disabled),
             gpui_color(reference.icon_disabled),
             gpui_color(reference.text_disabled),
-            gpui_color(reference.row_border),
+            gpui_color(if surfaces.0 == surfaces.1 {
+                reference.row_border
+            } else {
+                relative_edge(surfaces.0, reference.row_border)
+            }),
         ),
     )
 }

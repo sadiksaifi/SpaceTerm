@@ -195,9 +195,9 @@ impl TabChromePresentation {
 
     /// The material one Tab rests on, as an inset chip within the title-bar surface.
     ///
-    /// The Active Tab is the selected row of the navigation sidebars moved into the title bar: the
-    /// same fill, the same lit rim, and the same heavier fill under the pointer. Only the Active Tab
-    /// carries a rim, so the row of Tabs never turns back into a row of boxes.
+    /// The Active Tab uses an inset selection fill tuned to the title bar, with a stronger fill
+    /// under the pointer. Built-in appearances omit decorative outlines; custom Tab edges remain
+    /// supported.
     ///
     /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
     /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
@@ -1663,7 +1663,11 @@ fn render_tab_separator(
                 })
                 .w_full()
                 .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
-                .bg(gpui_color(presentation.tab_separator)),
+                .bg(gpui_color(
+                    appearance
+                        .materials
+                        .edge(presentation.background, presentation.tab_separator),
+                )),
         )
         .into_any_element()
 }
@@ -1944,13 +1948,13 @@ mod tests {
         }
     }
 
-    /// The Active Tab is the navigation sidebars' selected row, placed in the title bar.
+    /// The Active Tab carries selected-row content on a material tuned for the title bar.
     ///
-    /// The Workspace sidebar and the Settings navigation paint their current item from the
-    /// selected-row roles. A focused window's Active Tab must resolve to exactly those paints at rest
-    /// and under the pointer, so the three surfaces cannot drift back into near-matches.
+    /// The Workspace sidebar and Settings navigation need a fill that works on shell and raised
+    /// surfaces. The Active Tab has one title-bar host, so it keeps the shared text hierarchy while
+    /// using its own borderless fill and hover response.
     #[test]
-    fn built_in_active_tab_should_paint_the_selected_row_hierarchy() {
+    fn built_in_active_tab_should_use_an_independent_borderless_chip_material() {
         use crate::appearance::{Appearance, builtin_chrome_base};
 
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1961,12 +1965,12 @@ mod tests {
             assert_eq!(
                 (chip.fill, chip.rim, chip.hover_fill, chip.hover_rim),
                 (
-                    Some(colors.row_selected_background),
-                    Some(colors.row_selected_border),
-                    Some(colors.row_selected_hover_background),
-                    Some(colors.row_selected_hover_border),
+                    Some(colors.tab_active_background),
+                    Some(colors.tab_active_border),
+                    Some(colors.tab_active_hover_background),
+                    Some(colors.tab_active_border),
                 ),
-                "{appearance:?} Active Tab chip should match a selected navigation row"
+                "{appearance:?} Active Tab chip should use its own authored states"
             );
             assert_eq!(
                 (
@@ -1979,13 +1983,24 @@ mod tests {
                 ),
                 "{appearance:?} Active Tab title should match a selected navigation label"
             );
-            assert_ne!(
-                chip.rim, chip.fill,
-                "{appearance:?} Active Tab rim should describe an edge"
+            assert_eq!(
+                colors.tab_active_border.a, 0,
+                "{appearance:?} Active Tab should state its shape without an outline"
             );
             assert_ne!(
                 chip.hover_fill, chip.fill,
                 "{appearance:?} Active Tab should answer hover"
+            );
+            assert_ne!(
+                chip.fill,
+                Some(colors.row_selected_background),
+                "{appearance:?} Active Tab should be tuned independently of navigation rows"
+            );
+            assert!(
+                colors.tab_active_background.r > colors.title_bar_background.r
+                    && colors.tab_active_background.g > colors.title_bar_background.g
+                    && colors.tab_active_background.b > colors.title_bar_background.b,
+                "{appearance:?} Active Tab should lift from the title bar"
             );
         }
     }

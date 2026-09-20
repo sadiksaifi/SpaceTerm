@@ -278,6 +278,19 @@ impl SurfaceMaterials {
             .multiply_opacity(retention)
     }
 
+    /// Resolves a decorative edge as a host-relative overlay when glass is active.
+    ///
+    /// Opaque and accessibility-limited presentations retain the authored edge exactly. An
+    /// explicit transparent edge also stays absent. Otherwise authored alpha is first composed
+    /// into the semantic target, then reconstructed as the smallest overlay that preserves the
+    /// edge's direction away from its immediate host.
+    pub(crate) fn edge(self, host: super::Color, edge: super::Color) -> super::Color {
+        if self.is_opaque() || edge.a == 0 {
+            return edge;
+        }
+        edge.source_over(host).relative_overlay(host)
+    }
+
     /// Resolves the small host-relative lift that separates a floating shell from its backdrop.
     ///
     /// Backdrop tone owns color legibility without changing framebuffer alpha. This wash carries
@@ -517,13 +530,19 @@ impl ChromeColors {
         paint
     }
 
-    /// Presentation fills for a translucent window, from an opaque presentation. Only background
-    /// fills change; text, icons, borders and marks stay opaque, and contrast decisions keep using
-    /// the opaque presentation this is derived from.
+    /// Presentation paints for a translucent window, from an opaque presentation.
+    ///
+    /// Background fills and their decorative edges become host-relative. Text, icons and semantic
+    /// signals stay opaque, and contrast decisions keep using the opaque presentation this is
+    /// derived from.
     pub(crate) fn material_presentation(&self, materials: super::SurfaceMaterials) -> Self {
         use super::SurfaceRole;
         let mut paint = self.clone();
         let surface = |role, color| materials.paint(role, self.background, color);
+        let edge = |host, color| materials.edge(host, color);
+        let filled_host = |fill: super::Color| {
+            if fill.a == 0 { self.background } else { fill }
+        };
         paint.background = surface(SurfaceRole::Base, self.background);
         paint.panel_background = surface(SurfaceRole::Base, self.panel_background);
         paint.title_bar_background = surface(SurfaceRole::Base, self.title_bar_background);
@@ -539,6 +558,55 @@ impl ChromeColors {
             ghost_element_disabled
         );
         resting_fill_roles!(resting);
+
+        paint.border = edge(self.background, self.border);
+        paint.border_variant = edge(self.background, self.border_variant);
+        paint.border_disabled = edge(self.background, self.border_disabled);
+        paint.resize_idle = edge(self.background, self.resize_idle);
+        paint.resize_disabled = edge(self.background, self.resize_disabled);
+
+        paint.input_border = edge(self.input_background, self.input_border);
+        paint.input_disabled_border =
+            edge(self.input_disabled_background, self.input_disabled_border);
+
+        paint.element_border = edge(self.element_background, self.element_border);
+        paint.element_hover_border = edge(self.element_hover, self.element_hover_border);
+        paint.element_active_border = edge(self.element_active, self.element_active_border);
+        paint.element_disabled_border = edge(self.element_disabled, self.element_disabled_border);
+
+        paint.ghost_element_border = edge(
+            filled_host(self.ghost_element_background),
+            self.ghost_element_border,
+        );
+        paint.ghost_element_hover_border = edge(
+            filled_host(self.ghost_element_hover),
+            self.ghost_element_hover_border,
+        );
+        paint.ghost_element_active_border = edge(
+            filled_host(self.ghost_element_active),
+            self.ghost_element_active_border,
+        );
+        paint.ghost_element_disabled_border = edge(
+            filled_host(self.ghost_element_disabled),
+            self.ghost_element_disabled_border,
+        );
+
+        paint.outline_border = edge(self.element_background, self.outline_border);
+        paint.outline_hover_border = edge(self.element_hover, self.outline_hover_border);
+        paint.outline_pressed_border = edge(self.element_active, self.outline_pressed_border);
+        paint.outline_disabled_border = edge(self.element_disabled, self.outline_disabled_border);
+
+        paint.selection_border = edge(self.selection_background, self.selection_border);
+        paint.selection_hover_border =
+            edge(self.selection_hover_background, self.selection_hover_border);
+        paint.selection_pressed_border = edge(
+            self.selection_pressed_background,
+            self.selection_pressed_border,
+        );
+        paint.selection_disabled_border = edge(
+            self.selection_disabled_background,
+            self.selection_disabled_border,
+        );
         paint
     }
 }
@@ -546,7 +614,103 @@ impl ChromeColors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appearance::Color;
+    use crate::appearance::{ChromeColors, Color};
+
+    #[test]
+    fn decorative_edges_keep_exact_opaque_and_transparent_authorship() {
+        let host = Color::rgb(0x202020);
+        let authored = Color::rgba(0x90a0b080);
+        let absent = Color::rgba(0x12345600);
+
+        assert_eq!(SurfaceMaterials::OPAQUE.edge(host, authored), authored);
+        assert_eq!(SurfaceMaterials::derive(1.0).edge(host, absent), absent);
+    }
+
+    #[test]
+    fn material_edges_preserve_authored_alpha_composites_and_contrast_polarity() {
+        let material = SurfaceMaterials::derive(1.0);
+        for (host, authored, rises) in [
+            (Color::rgb(0x202020), Color::rgba(0xe0e0e080), true),
+            (Color::rgb(0xe0e0e0), Color::rgba(0x20202080), false),
+        ] {
+            let edge = material.edge(host, authored);
+            let expected = authored.source_over(host);
+            let actual = edge.source_over(host);
+
+            assert_eq!(
+                actual, expected,
+                "authored alpha must survive as a composite"
+            );
+            assert!(edge.a < 255, "material edge retained opaque ink: {edge:?}");
+            assert_eq!(actual.r > host.r, rises, "edge changed contrast polarity");
+            assert_eq!(actual.g > host.g, rises, "edge changed contrast polarity");
+            assert_eq!(actual.b > host.b, rises, "edge changed contrast polarity");
+        }
+    }
+
+    #[test]
+    fn material_presentation_changes_only_decorative_edge_families() {
+        let colors = ChromeColors {
+            background: Color::rgb(0x202020),
+            input_background: Color::rgb(0x303030),
+            input_border: Color::rgba(0xd0d0d080),
+            element_background: Color::rgb(0x383838),
+            element_border: Color::rgba(0x12345600),
+            border_focused: Color::rgb(0x4080ff),
+            input_focused_border: Color::rgb(0x5090ff),
+            input_invalid_border: Color::rgb(0xff4050),
+            primary_border: Color::rgb(0x3060c0),
+            destructive_border: Color::rgb(0xc03030),
+            toggle_off_border: Color::rgb(0x808080),
+            error_border: Color::rgb(0xd04040),
+            resize_idle: Color::rgba(0xc0c0c080),
+            resize_disabled: Color::rgb(0x606060),
+            resize_hovered: Color::rgb(0x80a0ff),
+            resize_focused: Color::rgb(0x4080ff),
+            resize_dragged: Color::rgb(0x2060d0),
+            ..ChromeColors::default()
+        };
+
+        assert_eq!(
+            colors.material_presentation(SurfaceMaterials::OPAQUE),
+            colors,
+            "opaque presentation must retain every authored edge exactly"
+        );
+
+        let paint = colors.material_presentation(SurfaceMaterials::derive(1.0));
+        assert_eq!(paint.element_border, colors.element_border);
+        assert_eq!(
+            paint.input_border.source_over(colors.input_background),
+            colors.input_border.source_over(colors.input_background),
+            "custom authored alpha must retain its semantic composite"
+        );
+        assert!(paint.input_border.a < 255);
+        assert_eq!(
+            paint.resize_idle.source_over(colors.background),
+            colors.resize_idle.source_over(colors.background),
+            "idle resize structure must retain its authored composite"
+        );
+        assert_eq!(
+            paint.resize_disabled.source_over(colors.background),
+            colors.resize_disabled.source_over(colors.background),
+            "disabled resize structure must retain its authored composite"
+        );
+        assert!(paint.resize_idle.a < 255 && paint.resize_disabled.a < 255);
+        for (actual, semantic) in [
+            (paint.border_focused, colors.border_focused),
+            (paint.input_focused_border, colors.input_focused_border),
+            (paint.input_invalid_border, colors.input_invalid_border),
+            (paint.primary_border, colors.primary_border),
+            (paint.destructive_border, colors.destructive_border),
+            (paint.toggle_off_border, colors.toggle_off_border),
+            (paint.error_border, colors.error_border),
+            (paint.resize_hovered, colors.resize_hovered),
+            (paint.resize_focused, colors.resize_focused),
+            (paint.resize_dragged, colors.resize_dragged),
+        ] {
+            assert_eq!(actual, semantic, "semantic signal must stay authored");
+        }
+    }
 
     #[test]
     fn overlay_reconstructs_neutral_and_chromatic_targets_without_a_full_tint() {
