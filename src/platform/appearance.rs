@@ -10,11 +10,13 @@ pub(crate) struct SystemAppearanceObservation {
     pub(crate) subscription: Box<dyn SystemAppearanceSubscription>,
 }
 
-/// Accessibility display choices that suppress translucent presentation without erasing Settings.
+/// Accessibility display choices supplied independently of retained appearance Settings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AccessibilityDisplayOptions {
     pub(crate) reduce_transparency: bool,
     pub(crate) increase_contrast: bool,
+    pub(crate) show_borders: bool,
+    pub(crate) differentiate_without_color: bool,
 }
 
 impl AccessibilityDisplayOptions {
@@ -83,6 +85,18 @@ pub(crate) mod testing {
             self.accessibility.set(options);
             self.set_system_appearance(self.fact.get());
         }
+        pub(crate) fn set_show_borders(&self, shown: bool) {
+            let mut options = self.accessibility.get();
+            options.show_borders = shown;
+            self.accessibility.set(options);
+            self.set_system_appearance(self.fact.get());
+        }
+        pub(crate) fn set_differentiate_without_color(&self, differentiate: bool) {
+            let mut options = self.accessibility.get();
+            options.differentiate_without_color = differentiate;
+            self.accessibility.set(options);
+            self.set_system_appearance(self.fact.get());
+        }
         pub(crate) fn set_reduced_motion(&self, reduced: bool) {
             self.reduced_motion.set(reduced);
             self.set_system_appearance(self.fact.get());
@@ -130,5 +144,22 @@ pub(crate) mod testing {
         fn apply_native_appearance(&self, appearance: Appearance) {
             self.applied.borrow_mut().push(appearance);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_material_accessibility_facts_do_not_suppress_transparency() {
+        let platform = testing::RecordingAppearancePlatform::default();
+        platform.set_show_borders(true);
+        platform.set_differentiate_without_color(true);
+        let options = platform.accessibility_display_options();
+
+        assert!(options.show_borders);
+        assert!(options.differentiate_without_color);
+        assert!(options.allows_transparency());
     }
 }

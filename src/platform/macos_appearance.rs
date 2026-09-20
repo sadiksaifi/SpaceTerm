@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, sync::OnceLock};
 
 use cocoa::base::{id, nil};
 use cocoa::foundation::{NSInteger, NSString};
@@ -16,6 +16,76 @@ const APPEARANCE_NOTIFICATION: &str = "AppleInterfaceThemeChangedNotification";
 const APPEARANCE_OBSERVER_CLASS: &str = "SpaceTermDistributedAppearanceObserver";
 const APPEARANCE_SENDER_IVAR: &str = "spaceTermAppearanceSender";
 const SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSInteger = 4;
+const ACCESSIBILITY_FRAMEWORK: &[u8] =
+    b"/System/Library/Frameworks/Accessibility.framework/Accessibility\0";
+const SHOW_BORDERS_GETTER: &[u8] = b"AXShowBordersEnabled\0";
+const SHOW_BORDERS_NOTIFICATION: &[u8] = b"AXShowBordersEnabledStatusDidChangeNotification\0";
+
+type ShowBordersGetter = unsafe extern "C" fn() -> objc::runtime::BOOL;
+
+#[derive(Clone, Copy)]
+struct ShowBordersSymbols {
+    _framework: usize,
+    getter: ShowBordersGetter,
+    notification: Option<usize>,
+}
+
+static SHOW_BORDERS_SYMBOLS: OnceLock<Option<ShowBordersSymbols>> = OnceLock::new();
+
+fn show_borders_symbols() -> Option<ShowBordersSymbols> {
+    *SHOW_BORDERS_SYMBOLS.get_or_init(|| {
+        // SAFETY: the path names Apple's public Accessibility framework. The retained handle keeps
+        // every resolved symbol and the exported notification object valid for the process.
+        unsafe {
+            let framework = libc::dlopen(
+                ACCESSIBILITY_FRAMEWORK.as_ptr().cast(),
+                libc::RTLD_LAZY | libc::RTLD_LOCAL,
+            );
+            if framework.is_null() {
+                return None;
+            }
+            let getter = libc::dlsym(framework, SHOW_BORDERS_GETTER.as_ptr().cast());
+            if getter.is_null() {
+                let _ = libc::dlclose(framework);
+                return None;
+            }
+            let notification = libc::dlsym(framework, SHOW_BORDERS_NOTIFICATION.as_ptr().cast());
+            let notification = if notification.is_null() {
+                None
+            } else {
+                let name = *notification.cast::<id>();
+                (name != nil).then_some(name as usize)
+            };
+            Some(ShowBordersSymbols {
+                _framework: framework as usize,
+                getter: std::mem::transmute::<*mut c_void, ShowBordersGetter>(getter),
+                notification,
+            })
+        }
+    })
+}
+
+fn show_borders_enabled(increase_contrast: bool) -> bool {
+    let native = show_borders_symbols().map(|symbols| {
+        // SAFETY: symbol loading verifies the public C function is present and retains its
+        // framework. The function has no arguments and returns Objective-C BOOL.
+        unsafe { (symbols.getter)() != objc::runtime::NO }
+    });
+    resolve_show_borders(native, increase_contrast)
+}
+
+const fn resolve_show_borders(native: Option<bool>, increase_contrast: bool) -> bool {
+    match native {
+        Some(shown) => shown,
+        None => increase_contrast,
+    }
+}
+
+fn show_borders_changed_notification() -> Option<id> {
+    show_borders_symbols()?
+        .notification
+        .map(|notification| notification as id)
+}
 
 pub(crate) struct MacosAppearancePlatform;
 
@@ -40,9 +110,15 @@ impl AppearancePlatform for MacosAppearancePlatform {
                 msg_send![workspace, accessibilityDisplayShouldReduceTransparency];
             let contrast: objc::runtime::BOOL =
                 msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
+            let differentiate: objc::runtime::BOOL = msg_send![
+                workspace,
+                accessibilityDisplayShouldDifferentiateWithoutColor
+            ];
             AccessibilityDisplayOptions {
                 reduce_transparency: reduce != objc::runtime::NO,
                 increase_contrast: contrast != objc::runtime::NO,
+                show_borders: show_borders_enabled(contrast != objc::runtime::NO),
+                differentiate_without_color: differentiate != objc::runtime::NO,
             }
         }
     }
@@ -147,6 +223,7 @@ unsafe fn observe_distributed(
         ];
         let _: () = msg_send![accessibility_name, release];
     }
+    let show_borders = unsafe { observe_show_borders(observer) };
 
     Some(SystemAppearanceObservation {
         changed,
@@ -155,8 +232,30 @@ unsafe fn observe_distributed(
             observer,
             name,
             accessibility_center,
+            show_borders,
         }),
     })
+}
+
+struct NativeNotificationRegistration {
+    center: id,
+    name: id,
+}
+
+/// SAFETY: called on the AppKit thread with a live selector observer.
+unsafe fn observe_show_borders(observer: id) -> Option<NativeNotificationRegistration> {
+    let name = show_borders_changed_notification()?;
+    let center: id = unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
+    if center == nil {
+        return None;
+    }
+    let center: id = unsafe { msg_send![center, retain] };
+    unsafe {
+        let _: () = msg_send![center,
+            addObserver: observer selector: sel!(appearanceChanged:) name: name object: nil
+        ];
+    }
+    Some(NativeNotificationRegistration { center, name })
 }
 
 unsafe fn new_appearance_observer(sender: async_channel::Sender<()>) -> Option<id> {
@@ -221,6 +320,7 @@ struct MacosAppearanceSubscription {
     observer: id,
     name: id,
     accessibility_center: id,
+    show_borders: Option<NativeNotificationRegistration>,
 }
 
 impl SystemAppearanceSubscription for MacosAppearanceSubscription {}
@@ -230,6 +330,12 @@ impl Drop for MacosAppearanceSubscription {
         // SAFETY: NSDistributedNotificationCenter does not retain selector observers. Remove the
         // observer while every registration argument is still alive, then release owned objects.
         unsafe {
+            if let Some(registration) = self.show_borders.as_ref() {
+                let _: () = msg_send![registration.center,
+                    removeObserver: self.observer name: registration.name object: nil
+                ];
+                let _: () = msg_send![registration.center, release];
+            }
             let _: () = msg_send![self.accessibility_center, removeObserver: self.observer];
             let _: () = msg_send![self.accessibility_center, release];
             let _: () = msg_send![self.center,
@@ -245,6 +351,14 @@ impl Drop for MacosAppearanceSubscription {
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_borders_prefers_the_independent_fact_and_falls_back_to_legacy_contrast() {
+        assert!(!resolve_show_borders(Some(false), true));
+        assert!(resolve_show_borders(Some(true), false));
+        assert!(resolve_show_borders(None, true));
+        assert!(!resolve_show_borders(None, false));
+    }
 
     #[gpui::test]
     fn forcing_native_chrome_does_not_change_the_system_preference(cx: &mut gpui::TestAppContext) {
@@ -309,6 +423,39 @@ mod tests {
                 let _: () = msg_send![observer, release];
                 assert!(changed.is_closed());
             }
+        });
+    }
+
+    #[gpui::test]
+    fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let Some(name) = show_borders_changed_notification() else {
+                return;
+            };
+            let observation = MacosAppearancePlatform
+                .observe()
+                .expect("native appearance observation should be available");
+            let SystemAppearanceObservation {
+                changed,
+                subscription,
+            } = observation;
+            // SAFETY: the public notification name and the default center are live for the process,
+            // and notification delivery is synchronous on this AppKit thread.
+            unsafe {
+                let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
+                for _ in 0..32 {
+                    let _: () = msg_send![center, postNotificationName: name object: nil];
+                }
+            }
+            assert_eq!(changed.len(), 1);
+            changed
+                .try_recv()
+                .expect("coalesced Show Borders wakeup should be available");
+
+            drop(subscription);
+            assert!(changed.is_closed());
         });
     }
 }
