@@ -1365,7 +1365,7 @@ pub struct PaintedGlyphForTest {
     pub kind: PaintedGlyphKindForTest,
 }
 
-/// The clipped bounds and scene order of one quad primitive.
+/// The clipped bounds, resolved paint, and scene order of one quad primitive.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaintedQuadForTest {
@@ -1373,6 +1373,10 @@ pub struct PaintedQuadForTest {
     pub visible_bounds: Bounds<ScaledPixels>,
     /// The scene order used for compositing.
     pub order: u32,
+    /// The background submitted to the renderer.
+    pub background: Background,
+    /// The border color submitted to the renderer.
+    pub border_color: Hsla,
 }
 
 impl GlyphPaintRegion {
@@ -5070,6 +5074,8 @@ impl Window {
             .map(|quad| PaintedQuadForTest {
                 visible_bounds: quad.bounds.intersect(&quad.content_mask.bounds),
                 order: quad.order,
+                background: quad.background,
+                border_color: quad.border_color,
             })
             .collect()
     }
