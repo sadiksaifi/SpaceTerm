@@ -1468,7 +1468,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                         return;
                     }
                     window.prevent_default();
-                    open_menu(&key_state, Some(position), OpenDirection::First, window, cx);
+                    open_menu(&key_state, Some(position), window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1477,7 +1477,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 }
                 if matches!(event.keystroke.key.as_str(), "space" | "enter" | "down") {
                     window.prevent_default();
-                    open_menu(&key_state, None, OpenDirection::First, window, cx);
+                    open_menu(&key_state, None, window, cx);
                     cx.stop_propagation();
                 }
             });
@@ -1857,11 +1857,6 @@ pub(crate) fn dismiss_active_menu_for_replacement(
     Some(MenuReplacementFocus(replacement.restore_focus))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OpenDirection {
-    First,
-}
-
 #[derive(Default)]
 struct MenuPanelScroll {
     handle: ScrollHandle,
@@ -2048,7 +2043,6 @@ impl MenuState {
     fn open(
         &mut self,
         context_anchor: Option<Point<Pixels>>,
-        direction: OpenDirection,
         reservation: Option<MenuReservation>,
         inherited_focus: Option<WeakFocusHandle>,
         combo_box_overlay_hosted: bool,
@@ -2077,9 +2071,7 @@ impl MenuState {
         self.active_path.clear();
         self.panel_scroll.clear();
         self.highlighted.clear();
-        self.highlighted.push(match direction {
-            OpenDirection::First => initial_selectable(&self.entries),
-        });
+        self.highlighted.push(initial_selectable(&self.entries));
         self.typeahead.clear();
         self.last_typeahead = None;
         self.invalidate_submenu_task();
@@ -2560,14 +2552,13 @@ fn toggle_menu(
     if is_open {
         dismiss_menu(state, MenuCloseReason::Trigger, true, window, cx);
     } else {
-        open_menu(state, anchor, OpenDirection::First, window, cx);
+        open_menu(state, anchor, window, cx);
     }
 }
 
 fn open_menu(
     state: &WeakEntity<MenuState>,
     anchor: Option<Point<Pixels>>,
-    direction: OpenDirection,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -2606,7 +2597,6 @@ fn open_menu(
     let opened = entity.update(cx, |state, cx| {
         let opened = state.open(
             anchor,
-            direction,
             Some(reservation),
             inherited_focus,
             combo_box_overlay_hosted,
@@ -4731,7 +4721,7 @@ mod tests {
                     false,
                     lifecycle,
                 );
-                state.open(None, OpenDirection::First, None, None, false, window, cx);
+                state.open(None, None, None, false, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4827,7 +4817,6 @@ mod tests {
                 );
                 state.open(
                     Some(point(px(24.0), px(24.0))),
-                    OpenDirection::First,
                     None,
                     None,
                     false,
@@ -4911,8 +4900,8 @@ mod tests {
                     })),
                 );
             });
-            open_menu(&first.downgrade(), None, OpenDirection::First, window, app);
-            open_menu(&second.downgrade(), None, OpenDirection::First, window, app);
+            open_menu(&first.downgrade(), None, window, app);
+            open_menu(&second.downgrade(), None, window, app);
         });
 
         assert_eq!(
@@ -4955,7 +4944,7 @@ mod tests {
                     })),
                 );
             });
-            open_menu(&weak_state, None, OpenDirection::First, window, app);
+            open_menu(&weak_state, None, window, app);
         });
 
         let activation_events = events.clone();
@@ -4964,7 +4953,7 @@ mod tests {
             activation_events
                 .borrow_mut()
                 .push(ActivationOrderEvent::Activation);
-            open_menu(&reopening_state, None, OpenDirection::First, window, cx);
+            open_menu(&reopening_state, None, window, cx);
         });
         cx.update(|window, app| {
             activate_menu(
