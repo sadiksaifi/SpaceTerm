@@ -1,9 +1,11 @@
-//! Native acceptance support using production controls over synthetic high-contrast content.
+//! Native acceptance support using production controls over controlled high-contrast content.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Render, Window, div, px, rgba};
+use gpui::{
+    App, Context, Entity, Image, ImageFormat, ObjectFit, Render, Window, div, img, px, rgba,
+};
 use spaceterm_ui::{
     Alert, AlertIntent, Button, ButtonSize, ButtonVariant, ComboBox, ComboBoxItem, CommandPalette,
     CommandPaletteItem, ContextMenu, Dialog, DialogCloseDecision, DialogInitialFocus, FloatingRole,
@@ -22,7 +24,33 @@ pub(super) struct FloatingFixtures {
     palette: Entity<CommandPalette<u8>>,
     interaction_probe: Entity<TooltipDialogBody>,
     status: &'static str,
-    patterned_backdrop: bool,
+    backdrop: BackdropMode,
+    photographic_backdrop: Arc<Image>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackdropMode {
+    Patterned,
+    Photographic,
+    Window,
+}
+
+impl BackdropMode {
+    const fn next(self) -> Self {
+        match self {
+            Self::Patterned => Self::Photographic,
+            Self::Photographic => Self::Window,
+            Self::Window => Self::Patterned,
+        }
+    }
+
+    const fn next_label(self) -> &'static str {
+        match self.next() {
+            Self::Patterned => "Show patterned backing",
+            Self::Photographic => "Show photographic backing",
+            Self::Window => "Show window backing",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -116,7 +144,7 @@ impl FloatingFixtures {
                     CommandPaletteItem::new(1, "Open synthetic item")
                         .description("Hover the selected result to inspect the combined state"),
                     CommandPaletteItem::new(2, "Open another synthetic item")
-                        .description("Secondary text must remain legible over the pattern"),
+                        .description("Secondary text must remain legible over the backdrop"),
                     CommandPaletteItem::new(3, "Unavailable synthetic item").disabled(true),
                 ],
                 window,
@@ -128,8 +156,13 @@ impl FloatingFixtures {
             combo_value: Some(1),
             palette,
             interaction_probe: cx.new(|cx| TooltipDialogBody::new(window, cx)),
-            status: "All content below is synthetic. Preview changes are not saved.",
-            patterned_backdrop: true,
+            status: "Backdrop content is controlled. Preview changes are not saved.",
+            backdrop: BackdropMode::Patterned,
+            photographic_backdrop: Arc::new(Image::from_bytes(
+                ImageFormat::Jpeg,
+                include_bytes!("../../../assets/appearance-exerciser/blue-marble-2012.jpg")
+                    .to_vec(),
+            )),
         }
     }
 
@@ -138,7 +171,7 @@ impl FloatingFixtures {
             ModalId::new("floating-acceptance-alert"),
             "Synthetic alert",
             "Review the floating surface",
-            "Check the warning, text, action states, and separation from the patterned content.",
+            "Check the warning, text, action states, and separation from the backdrop content.",
             vec![ModalAction::new(
                 (),
                 "Close",
@@ -274,21 +307,14 @@ impl Render for FloatingFixtures {
             .flex_wrap()
             .gap(appearance.spacing(8.0))
             .child(
-                Button::new(
-                    "fixture-toggle-backing",
-                    if self.patterned_backdrop {
-                        "Show window backing"
-                    } else {
-                        "Show patterned backing"
-                    },
-                )
-                .size(ButtonSize::Small)
-                .on_activate(move |_, _, cx| {
-                    let _ = backdrop_weak.update(cx, |fixture, cx| {
-                        fixture.patterned_backdrop = !fixture.patterned_backdrop;
-                        cx.notify();
-                    });
-                }),
+                Button::new("fixture-toggle-backing", self.backdrop.next_label())
+                    .size(ButtonSize::Small)
+                    .on_activate(move |_, _, cx| {
+                        let _ = backdrop_weak.update(cx, |fixture, cx| {
+                            fixture.backdrop = fixture.backdrop.next();
+                            cx.notify();
+                        });
+                    }),
             )
             .children(
                 [
@@ -370,8 +396,32 @@ impl Render for FloatingFixtures {
                     .p(appearance.spacing(14.0))
                     .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
                     .debug_selector(|| "fixture-backdrop-probe".to_owned())
-                    .child("Persistent floating probe: compare the fine text behind this surface with Blur off and Blur on."),
+                    .child("Persistent floating probe: compare the backdrop detail behind this surface with Blur off and Blur on."),
             );
+        let backdrop = match self.backdrop {
+            BackdropMode::Patterned => Some(
+                div()
+                    .debug_selector(|| "fixture-backing-patterned".to_owned())
+                    .absolute()
+                    .inset_0()
+                    .child(pattern)
+                    .into_any_element(),
+            ),
+            BackdropMode::Photographic => Some(
+                div()
+                    .debug_selector(|| "fixture-backing-photographic".to_owned())
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .child(
+                        img(self.photographic_backdrop.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .into_any_element(),
+            ),
+            BackdropMode::Window => None,
+        };
         let interaction_probe = appearance
             .floating_surfaces()
             .shell(FloatingRole::Popover)
@@ -386,7 +436,7 @@ impl Render for FloatingFixtures {
                     .flex_col()
                     .gap(appearance.spacing(10.0))
                     .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
-                    .child("Interactive material over patterned content")
+                    .child("Interactive material over backdrop content")
                     .child(self.interaction_probe.clone()),
             );
         div()
@@ -411,7 +461,7 @@ impl Render for FloatingFixtures {
                         div()
                             .relative()
                             .h(px(432.0))
-                            .when(self.patterned_backdrop, |backing| backing.child(pattern))
+                            .when_some(backdrop, |backing, backdrop| backing.child(backdrop))
                             .child(backdrop_probe)
                             .child(interaction_probe),
                     ),
