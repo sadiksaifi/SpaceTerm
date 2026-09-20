@@ -57,10 +57,11 @@ fn highlighted_row_materializes_against_its_card_host() {
         )
         .expect("built-in appearance should resolve");
     let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     let expected = appearance.materials.paint(
         SurfaceRole::Surface,
         appearance.colors.elevated_surface_background,
-        appearance.colors.row_selected_background,
+        colors.row_selected_background,
     );
 
     assert_eq!(
@@ -128,17 +129,33 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
         window.toggle_inspector(cx);
     });
     cx.run_until_parked();
-    let bounds = cx
-        .debug_bounds("host-stepper")
-        .expect("Stepper must render in the card");
-    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    assert!(
+        cx.debug_bounds("host-stepper").is_some(),
+        "Stepper must render in the card"
+    );
+    let value = cx
+        .debug_bounds("host-stepper-value")
+        .expect("Stepper must render its leading readout");
+    let buttons = cx
+        .debug_bounds("host-stepper-buttons")
+        .expect("Stepper must render one joined button unit");
+    assert!(
+        value.size.width >= px(44.0),
+        "the Compact readout must reserve at least 44 points, got {value:?}"
+    );
+    assert_eq!(
+        buttons.size.width,
+        buttons.size.height * 2.0,
+        "the two Stepper buttons must divide one two-cell control-height unit"
+    );
+    cx.simulate_mouse_move(buttons.center(), None, Modifiers::none());
     cx.run_until_parked();
     for _ in 0..16 {
         if let Some(background) = observed
             .borrow()
             .iter()
             .rev()
-            .find(|style| style.bounds == bounds)
+            .find(|style| style.bounds == buttons)
             .map(|style| style.base_style.background.clone())
         {
             assert_eq!(
@@ -149,7 +166,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
             return;
         }
         cx.simulate_event(ScrollWheelEvent {
-            position: bounds.center(),
+            position: buttons.center(),
             delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,

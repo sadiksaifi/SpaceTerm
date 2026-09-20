@@ -4,6 +4,9 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::{ChromeIcons, IconRole, InteractiveIconRole};
+use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTypography, TextRole};
 
 /// The horizontal padding a compact button paints around its label.
 pub(crate) const COMPACT_HORIZONTAL_PADDING: f32 = 4.0;
@@ -13,9 +16,28 @@ pub(crate) const COMPACT_HORIZONTAL_PADDING: f32 = 4.0;
 /// It is separate from the padding because it scales differently: padding follows the density
 /// scale and this does not, so a surface aligning a button's label to a text column has to remove
 /// each of them in its own scale rather than one combined figure.
-pub(crate) const CONTROL_BORDER_WIDTH: f32 = 1.0;
+pub(crate) const CONTROL_BORDER_WIDTH: f32 = HAIRLINE;
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
+    prepared(
+        colors,
+        &ChromeTypography::default(),
+        &ChromeIcons::default(),
+        false,
+    )
+}
+
+pub(super) fn prepared(
+    colors: &ChromeColors,
+    typography: &ChromeTypography,
+    icons: &ChromeIcons,
+    show_borders: bool,
+) -> ButtonTheme {
+    let body = typography.style(TextRole::Body);
+    let with_target = |metrics: ButtonMetrics, role| {
+        metrics.icon_button_size(icons.interactive_target_size(role))
+    };
     ButtonTheme::new(
         ButtonVariants::new(
             primary(colors),
@@ -72,7 +94,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
                     colors.ghost_element_disabled_border,
                 ),
             ),
-            bare(colors),
+            bare(colors, show_borders),
             destructive(colors),
             variant(
                 paint(
@@ -102,30 +124,49 @@ pub(super) fn theme(colors: &ChromeColors) -> ButtonTheme {
             ),
         ),
         ButtonSizes::new(
-            ButtonMetrics::new(px(20.0))
-                .horizontal_padding(px(COMPACT_HORIZONTAL_PADDING))
-                .border_width(px(CONTROL_BORDER_WIDTH))
-                .gap(px(4.0))
-                .corner_radius(px(4.0))
-                .font_size(px(11.0)),
-            ButtonMetrics::new(px(24.0))
-                .horizontal_padding(px(8.0))
-                .gap(px(6.0))
-                .corner_radius(px(5.0))
-                .font_size(px(12.0)),
-            ButtonMetrics::new(px(28.0))
-                .horizontal_padding(px(10.0))
-                .gap(px(6.0))
-                .corner_radius(px(6.0))
-                .font_size(px(12.0)),
-            ButtonMetrics::new(px(40.0))
+            body_metrics(
+                with_target(ButtonMetrics::new(px(20.0)), InteractiveIconRole::Control),
+                body,
+            )
+            .icon_baseline_center(icons.metrics(IconRole::Control).baseline_center)
+            .horizontal_padding(px(COMPACT_HORIZONTAL_PADDING))
+            .border_width(px(CONTROL_BORDER_WIDTH))
+            .gap(px(4.0))
+            .corner_radius(RadiusRole::ControlSmall.pixels()),
+            body_metrics(
+                with_target(ButtonMetrics::new(px(24.0)), InteractiveIconRole::Row),
+                body,
+            )
+            .icon_baseline_center(icons.metrics(IconRole::Control).baseline_center)
+            .horizontal_padding(px(8.0))
+            .gap(px(6.0))
+            .corner_radius(RadiusRole::Control.pixels()),
+            body_metrics(
+                with_target(ButtonMetrics::new(px(28.0)), InteractiveIconRole::Chrome),
+                body,
+            )
+            .icon_baseline_center(icons.metrics(IconRole::Control).baseline_center)
+            .horizontal_padding(px(10.0))
+            .gap(px(6.0))
+            .corner_radius(RadiusRole::Control.pixels()),
+            body_metrics(ButtonMetrics::new(px(40.0)), body)
+                .icon_baseline_center(icons.metrics(IconRole::Control).baseline_center)
                 .horizontal_padding(px(12.0))
                 .gap(px(8.0))
-                .corner_radius(px(6.0))
-                .font_size(px(12.0)),
+                .corner_radius(RadiusRole::Control.pixels()),
         ),
-        gpui_color(colors.border_focused),
+        // The ring is its own role. A control's focused border, where it has one, says the control
+        // is ready; the ring says the keyboard is here. Sharing one value made every family that
+        // wanted to retune one of those move the other.
+        gpui_color(colors.focus_ring),
     )
+}
+
+fn body_metrics(metrics: ButtonMetrics, body: &ChromeTextStyle) -> ButtonMetrics {
+    let line_height = f32::from(body.line_height) / f32::from(body.size);
+    metrics
+        .font_size(body.size)
+        .line_heights(line_height, line_height)
 }
 
 fn primary(colors: &ChromeColors) -> ButtonVariantStyle {
@@ -186,26 +227,32 @@ fn destructive(colors: &ChromeColors) -> ButtonVariantStyle {
     )
 }
 
-fn bare(colors: &ChromeColors) -> ButtonVariantStyle {
+fn bare(colors: &ChromeColors, show_borders: bool) -> ButtonVariantStyle {
+    let border = |border| if show_borders { border } else { transparent() };
     variant(
         paint(
             transparent(),
             colors.text_muted,
             colors.text_muted,
-            transparent(),
+            border(colors.ghost_element_border),
         ),
-        paint(transparent(), colors.text, colors.text, transparent()),
+        paint(
+            transparent(),
+            colors.text,
+            colors.text,
+            border(colors.ghost_element_hover_border),
+        ),
         paint(
             transparent(),
             colors.text_accent,
             colors.text_accent,
-            transparent(),
+            border(colors.ghost_element_active_border),
         ),
         paint(
             transparent(),
             colors.text_disabled,
             colors.icon_disabled,
-            transparent(),
+            border(colors.ghost_element_disabled_border),
         ),
     )
 }
@@ -270,6 +317,20 @@ fn gpui_color(color: Color) -> Rgba {
 mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
+
+    #[test]
+    fn button_metrics_project_the_prepared_body_line_height() {
+        let typography = ChromeTypography::default();
+        let body = typography.style(TextRole::Body);
+        let line_height = f32::from(body.line_height) / f32::from(body.size);
+
+        assert_eq!(
+            body_metrics(ButtonMetrics::new(px(28.0)), body),
+            ButtonMetrics::new(px(28.0))
+                .font_size(body.size)
+                .line_heights(line_height, line_height)
+        );
+    }
 
     #[test]
     fn primary_and_destructive_consume_complete_independent_state_tuples() {
@@ -414,7 +475,7 @@ mod tests {
 
     #[test]
     fn bare_controls_should_paint_no_surface_in_any_state() {
-        let bare = bare(&ChromeColors::default());
+        let bare = bare(&ChromeColors::default(), false);
 
         for paint in [
             bare.normal(),
@@ -425,5 +486,34 @@ mod tests {
             assert_eq!(paint.background().a, 0.0);
             assert_eq!(paint.border().a, 0.0);
         }
+    }
+
+    #[test]
+    fn bare_controls_only_admit_ghost_borders_for_show_borders() {
+        let colors = ChromeColors {
+            ghost_element_border: Color::rgb(0x112233),
+            ghost_element_hover_border: Color::rgb(0x223344),
+            ghost_element_active_border: Color::rgb(0x334455),
+            ghost_element_disabled_border: Color::rgb(0x445566),
+            ..ChromeColors::default()
+        };
+
+        assert_eq!(bare(&colors, false).normal().border().a, 0.0);
+        assert_eq!(
+            bare(&colors, true).normal().border(),
+            gpui_color(colors.ghost_element_border)
+        );
+        assert_eq!(
+            bare(&colors, true).hovered().border(),
+            gpui_color(colors.ghost_element_hover_border)
+        );
+        assert_eq!(
+            bare(&colors, true).pressed().border(),
+            gpui_color(colors.ghost_element_active_border)
+        );
+        assert_eq!(
+            bare(&colors, true).disabled().border(),
+            gpui_color(colors.ghost_element_disabled_border)
+        );
     }
 }

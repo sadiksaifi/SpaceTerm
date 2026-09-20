@@ -234,11 +234,8 @@ fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x5599ffff),
-            rgba(0x5599ff22),
             rgba(0xffbb55ff),
-            rgba(0xffbb5522),
             rgba(0xff6677ff),
-            rgba(0xff667722),
         ),
         metrics,
     )
@@ -250,11 +247,8 @@ fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x5599ffff),
-            rgba(0x5599ff22),
             rgba(0xffbb55ff),
-            rgba(0xffbb5522),
             rgba(0xff6677ff),
-            rgba(0xff667722),
         ),
         metrics,
     )

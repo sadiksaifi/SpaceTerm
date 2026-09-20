@@ -287,7 +287,7 @@ impl ResizeHandleTheme {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             metrics: ResizeHandleMetrics {
-                visible_thickness: self.metrics.visible_thickness * spacing_scale,
+                visible_thickness: self.metrics.visible_thickness,
                 hitbox_thickness: self.metrics.hitbox_thickness * spacing_scale,
                 hover_thickness: self.metrics.hover_thickness * spacing_scale,
                 active_thickness: self.metrics.active_thickness * spacing_scale,
@@ -453,7 +453,10 @@ impl ResizeHandle {
 
 impl RenderOnce for ResizeHandle {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = *cx.global::<ResizeHandleTheme>();
+        let theme = *crate::control_theme_catalog(cx).map_or_else(
+            || cx.global::<ResizeHandleTheme>(),
+            |catalog| &catalog.resize_handle,
+        );
         let enabled = !self.disabled && self.on_event.is_some();
         let state = window.use_keyed_state(self.id.clone(), cx, ResizeHandleState::new);
         let cancelled = state.update(cx, |state, cx| {
@@ -1140,6 +1143,18 @@ mod tests {
         assert_eq!(metrics.visible_thickness, px(MINIMUM_METRIC));
         assert_eq!(metrics.active_thickness, px(MAXIMUM_METRIC));
         assert_eq!(metrics.hitbox_thickness, px(MAXIMUM_METRIC));
+    }
+
+    #[test]
+    fn density_scales_resize_target_but_not_visible_hairline() {
+        let original = test_theme();
+        let comfortable = original.scaled_metrics(1.0, 1.25);
+
+        assert!(comfortable.metrics.hitbox_thickness > original.metrics.hitbox_thickness);
+        assert_eq!(
+            comfortable.metrics.visible_thickness,
+            original.metrics.visible_thickness
+        );
     }
 
     #[test]

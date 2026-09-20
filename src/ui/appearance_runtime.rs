@@ -200,16 +200,21 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             || changes.window_composition
     });
     if chrome_changed || progress_motion_changed {
-        let prepared = ChromeAppearance::prepare(&resolved.chrome);
+        let (prepared, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let controls = super::control_theme_catalog::catalog(&prepared, progress_motion)
             .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
+        let inactive_controls = super::control_theme_catalog::catalog(&inactive, progress_motion)
+            .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
         if cx.has_global::<InstalledAppearance>() {
-            spaceterm_ui::replace_control_theme_catalog(cx, controls)
+            spaceterm_ui::replace_control_theme_catalogs(cx, controls, inactive_controls)
                 .map_err(|_| SettingsError::Invalid)?;
         }
 
         if chrome_changed {
-            cx.set_global(InstalledChrome(Arc::new(prepared)));
+            cx.set_global(InstalledChrome {
+                active: Arc::new(prepared),
+                inactive: Arc::new(inactive),
+            });
         }
     }
     if changes.is_none_or(|changes| changes.native_appearance) {

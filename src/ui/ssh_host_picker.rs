@@ -149,6 +149,52 @@ struct HostPickerRow {
     subtitle_matched_indices: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostPickerSource {
+    Entered,
+    Config,
+    Saved,
+}
+
+impl HostPickerSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Entered => "Entered host",
+            Self::Config => "SSH config",
+            Self::Saved => "Saved hosts",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostPickerSourcePresentation {
+    Heading(HostPickerSource),
+    Trailing(HostPickerSource),
+}
+
+fn source_run_presentations(
+    sources: impl IntoIterator<Item = HostPickerSource>,
+) -> Vec<HostPickerSourcePresentation> {
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let mut presentations = Vec::with_capacity(sources.len());
+    let mut start = 0;
+    while start < sources.len() {
+        let source = sources[start];
+        let mut end = start + 1;
+        while end < sources.len() && sources[end] == source {
+            end += 1;
+        }
+        let presentation = if end - start >= 2 {
+            HostPickerSourcePresentation::Heading(source)
+        } else {
+            HostPickerSourcePresentation::Trailing(source)
+        };
+        presentations.extend(std::iter::repeat_n(presentation, end - start));
+        start = end;
+    }
+    presentations
+}
+
 impl fmt::Debug for HostPickerRow {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("HostPickerRow(<redacted>)")
@@ -161,23 +207,31 @@ impl HostPickerRow {
         &self.label
     }
 
-    fn into_palette_item(self) -> CommandPaletteItem<SshHostPickerItemId> {
-        let status = if self.synthetic {
-            "Entered host"
+    const fn source(&self) -> HostPickerSource {
+        if self.synthetic {
+            HostPickerSource::Entered
         } else if self.managed {
-            "Saved host"
+            HostPickerSource::Saved
         } else {
-            "SSH config"
-        };
-        CommandPaletteItem::new(self.id, self.label)
+            HostPickerSource::Config
+        }
+    }
+
+    fn into_palette_item(
+        self,
+        source_presentation: HostPickerSourcePresentation,
+    ) -> CommandPaletteItem<SshHostPickerItemId> {
+        let item = CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
             .matched_indices(self.label_matched_indices)
             .matched_description_indices(self.subtitle_matched_indices)
-            .leading_icon(|foreground, size| {
-                Icon::new(IconName::Server, size, foreground).into_any_element()
-            })
-            .trailing(CommandPaletteAccessory::Status(status.into()))
-            .debug_selector(HOST_ROW_SELECTOR)
+            .debug_selector(HOST_ROW_SELECTOR);
+        match source_presentation {
+            HostPickerSourcePresentation::Heading(source) => item.section(source.label()),
+            HostPickerSourcePresentation::Trailing(source) => {
+                item.trailing(CommandPaletteAccessory::Status(source.label().into()))
+            }
+        }
     }
 }
 
@@ -489,11 +543,14 @@ impl SshHostPicker {
         if let Some(diagnostic) = HostDiscoveryDiagnostic::for_discovery(&self.discovery) {
             items.push(diagnostic.into_palette_item());
         }
+        let source_presentations =
+            source_run_presentations(self.rows.iter().map(HostPickerRow::source));
         items.extend(
             self.rows
                 .iter()
                 .cloned()
-                .map(HostPickerRow::into_palette_item),
+                .zip(source_presentations)
+                .map(|(row, source)| row.into_palette_item(source)),
         );
         self.palette.update(cx, |palette, cx| {
             palette.set_no_results_text(no_results_text(&self.discovery, &self.retained_query), cx);
@@ -667,6 +724,25 @@ mod tests {
         let debug = format!("{row:?} {event:?}");
         assert!(!debug.contains("sensitive"));
         assert_eq!(HOST_ROW_SELECTOR, "ssh-host-picker-row");
+    }
+
+    #[test]
+    fn source_annotations_follow_ranked_contiguous_runs_without_reordering() {
+        use HostPickerSource::{Config, Entered, Saved};
+        use HostPickerSourcePresentation::{Heading, Trailing};
+
+        let sources = [Config, Config, Saved, Config, Entered, Entered];
+        assert_eq!(
+            source_run_presentations(sources),
+            vec![
+                Heading(Config),
+                Heading(Config),
+                Trailing(Saved),
+                Trailing(Config),
+                Heading(Entered),
+                Heading(Entered),
+            ],
+        );
     }
 
     struct MemoryHostConfigFilesystem {

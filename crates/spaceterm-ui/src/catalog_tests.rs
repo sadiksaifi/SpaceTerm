@@ -117,9 +117,7 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
             TooltipMetrics::new(px(320.0)),
         ),
         ModalTheme::new(
-            ModalPaint::new(
-                text, muted, accent, surface, accent, surface, accent, surface,
-            ),
+            ModalPaint::new(text, muted, accent, accent, accent),
             ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
         ),
     )
@@ -131,7 +129,8 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
         catalog.segmented_control,
         catalog.search_field,
         catalog.text_input,
-    );
+    )
+    .triggers(catalog.menu, catalog.combo_box);
     catalog.floating(FloatingSurfaceTheme::default(), floating_controls)
 }
 
@@ -179,6 +178,58 @@ fn replacement_should_require_initialization(cx: &mut TestAppContext) {
     assert_eq!(
         cx.update(|cx| replace_control_theme_catalog(cx, catalog(1))),
         Err(ControlThemeReplacementError)
+    );
+}
+
+#[gpui::test]
+fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppContext) {
+    let initial = catalog(1);
+    cx.update(|cx| init(cx, initial.clone()))
+        .expect("control initialization should succeed");
+
+    assert_eq!(
+        cx.update(|cx| replace_control_theme_catalogs(cx, catalog(2), catalog(3))),
+        Err(ControlThemeCatalogPairError::GenerationMismatch)
+    );
+    cx.read(|cx| {
+        let installed = cx.global::<InstalledControlThemeCatalogs>();
+        assert_eq!(installed.active, initial);
+        assert_eq!(installed.inactive, initial);
+    });
+
+    let active = catalog(2);
+    let inactive = catalog(2).focus_ring_width(px(2.0));
+    assert_eq!(
+        cx.update(|cx| replace_control_theme_catalogs(cx, active.clone(), inactive.clone())),
+        Ok(ControlThemeReplacement::Applied)
+    );
+    cx.read(|cx| {
+        let installed = cx.global::<InstalledControlThemeCatalogs>();
+        assert_eq!(installed.active, active);
+        assert_eq!(installed.inactive, inactive);
+    });
+}
+
+#[test]
+fn focus_ring_width_does_not_scale_with_control_density() {
+    let catalog = catalog(1).focus_ring_width(px(2.0)).scale_metrics(1.5, 1.5);
+
+    assert_eq!(catalog.button.resolved_focus_ring_width(), px(2.0));
+    assert_eq!(catalog.menu.resolved_focus_ring_width(), px(2.0));
+    assert_eq!(catalog.combo_box.resolved_focus_ring_width(), px(2.0));
+    assert_eq!(
+        catalog
+            .hosted_controls(ControlHost::Floating)
+            .expect("catalog should include floating controls")
+            .button_focus_ring_width_for_test(),
+        px(2.0)
+    );
+    assert_eq!(
+        catalog
+            .hosted_controls(ControlHost::Floating)
+            .expect("catalog should include floating controls")
+            .trigger_focus_ring_widths_for_test(),
+        (Some(px(2.0)), Some(px(2.0)))
     );
 }
 
@@ -236,9 +287,9 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
         .floating
         .expect("catalog should include floating presentation")
         .shell(FloatingRole::Popover);
-    assert_eq!(expanded_shell.corner_radius(), px(22.5));
+    assert_eq!(expanded_shell.corner_radius(), px(10.0));
     assert_eq!(expanded_shell.content_inset(), px(9.0));
-    assert_eq!(contracted_shell.corner_radius(), px(2.5));
+    assert_eq!(contracted_shell.corner_radius(), px(10.0));
     assert_eq!(contracted_shell.content_inset(), px(1.0));
 }
 

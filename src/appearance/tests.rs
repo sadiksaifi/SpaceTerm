@@ -534,8 +534,14 @@ fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
     assert_eq!(typography.caption.size, 12.65 * (24.0 / 13.0));
     assert_eq!(typography.navigation.weight, 700);
     let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-    assert_eq!(prepared.caption.weight, gpui::FontWeight::NORMAL);
-    assert_eq!(prepared.caption.family, prepared.regular.family);
+    let caption = prepared
+        .typography
+        .style(crate::ui::chrome_typography::TextRole::Caption);
+    let body = prepared
+        .typography
+        .style(crate::ui::chrome_typography::TextRole::Body);
+    assert_eq!(caption.font.weight, gpui::FontWeight::NORMAL);
+    assert_eq!(caption.font.family, body.font.family);
 }
 
 #[test]

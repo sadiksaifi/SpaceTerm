@@ -25,13 +25,18 @@ initial colors match. Complete interactive paints own foreground, icon/mark, sur
 Disabled suppresses interaction; pressed precedes hover; selected/checked value selects its own
 state family. Keyboard focus is orthogonal and never erases selected or invalid meaning. Shared
 controls and application presentation own state composition, while framework Adapters convert the
-result without inventing colors.
+result without inventing colors. Product-owned preparation supplies immutable active and inactive
+variants of the complete control catalog. Each window selects its variant without changing a
+process-global theme, so activating one window cannot restyle another window's retained controls.
 
 Pane Captions retain their Terminal surface, including program changes. One contextual presentation
 operation resolves caption content, controls, focus and attention against that actual surface. It
 may adapt foreground contrast without modifying the authored theme or terminal protocol colors.
-Custom theme roles otherwise retain explicitly authored colors; completion is a fallback, not an
-unrequested rewrite of author decisions.
+Compilation retains explicitly authored colors; completion only fills missing roles. Prepared
+presentation may adapt those resolved paints for the actual material host, window activity, and
+accessibility requirements. These adjustments leave authored definitions, role provenance, and
+effective exports unchanged. Keeping the two stages separate permits readable custom controls
+without turning a rendering fallback into a saved theme edit.
 
 Window background appearance is distinct from Light/Dark and from each straight RGBA color.
 Application Settings own transparency and blur independently of scheme authorship. Native and
@@ -68,8 +73,12 @@ window backdrop. It does not affect the scrim outside the shell or background in
 Opaque native windows keep captured coverage because they have no translucent backing to reveal.
 At full coverage the alpha cap is idempotent. Repeating the color treatment leaves already-admitted
 colors unchanged, so nested surfaces do not repeatedly tint the same content. Blur off skips
-spatial filtering but retains the same color treatment and alpha limit. Reduce Transparency and Increase Contrast
-make both native and in-window materials opaque without erasing the user's Settings. A platform's
+spatial filtering but retains the same color treatment and alpha limit. Reduce Transparency makes
+both native and in-window materials opaque without erasing the user's Settings. Increase Contrast
+strengthens prepared content, boundaries, and floating tones while retaining eligible transmission
+and blur. Show Borders adds interactive-control edges independently. These capabilities remain
+separate because a request for stronger contrast or boundaries is not a request to remove
+transparency. A platform's
 lack of native desktop transparency does not disable GPUI floating-surface translucency or blur.
 The compiled floating tone bounds opaque GPUI content to a range with readable foregrounds. If a
 custom tone admits no readable neutral foreground, its floating-only RGB moves minimally toward

@@ -2,8 +2,9 @@ use gpui::{Pixels, Rgba, px, rgba};
 use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme};
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::HAIRLINE;
 
-pub(super) const VISIBLE_THICKNESS: f32 = 1.0;
+pub(super) const VISIBLE_THICKNESS: f32 = HAIRLINE;
 
 pub(super) fn theme(colors: &ChromeColors) -> ResizeHandleTheme {
     ResizeHandleTheme::new(

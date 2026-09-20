@@ -39,7 +39,7 @@ impl CompositionCapabilities {
     }
 
     const fn accessibility_allows_transparency(self) -> bool {
-        !self.reduce_transparency && !self.increase_contrast
+        !self.reduce_transparency
     }
 }
 
@@ -635,6 +635,36 @@ impl ChromeColors {
 mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
+
+    #[test]
+    fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
+        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let capabilities = CompositionCapabilities {
+            increase_contrast: true,
+            ..CompositionCapabilities::new(true, true)
+        };
+        let increased = ResolvedWindowComposition::resolve(&preferences, capabilities);
+        let ordinary = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities::new(true, true),
+        );
+        assert_eq!(increased.effective, ordinary.effective);
+        assert_eq!(increased.materials, ordinary.materials);
+        assert_eq!(increased.floating_materials, ordinary.floating_materials);
+        assert!(increased.floating_blur);
+
+        let reduced = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities {
+                reduce_transparency: true,
+                ..capabilities
+            },
+        );
+        assert_eq!(reduced.effective, WindowBackgroundAppearance::Opaque);
+        assert!(reduced.materials.is_opaque());
+        assert!(reduced.floating_materials.is_opaque());
+        assert!(!reduced.floating_blur);
+    }
 
     #[test]
     fn non_transparency_accessibility_capabilities_do_not_change_composition() {

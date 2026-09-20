@@ -6,12 +6,12 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Bounds, Corner, ElementId, Entity, FocusHandle, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, RenderOnce,
-    Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _, Styled as _, Task,
-    WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div, point,
-    prelude::FluentBuilder as _, px, size,
+    AnyElement, App, BorrowAppContext as _, Bounds, Corner, ElementId, Entity, FocusHandle, Font,
+    Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+    RenderOnce, Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Task, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
+    div, point, prelude::FluentBuilder as _, px, size,
 };
 
 pub use crate::anchored_placement::{
@@ -330,9 +330,15 @@ pub struct MenuMetrics {
     border_width: Pixels,
     font_size: Pixels,
     shortcut_font_size: Pixels,
+    section_font_size: Pixels,
+    label_line_height: Pixels,
+    shortcut_line_height: Pixels,
+    section_line_height: Pixels,
     panel_padding: Pixels,
     submenu_gap: Pixels,
     icon_size: Pixels,
+    trigger_icon_size: Pixels,
+    icon_baseline_center: Pixels,
     separator_thickness: Pixels,
 }
 
@@ -354,9 +360,15 @@ impl MenuMetrics {
             border_width: shell.hairline(),
             font_size: px(12.0),
             shortcut_font_size: px(11.0),
+            section_font_size: px(13.0),
+            label_line_height: px(16.0),
+            shortcut_line_height: px(15.0),
+            section_line_height: px(17.0),
             panel_padding: shell.content_inset(),
             submenu_gap: px(2.0),
             icon_size: px(12.0),
+            trigger_icon_size: px(12.0),
+            icon_baseline_center: px(4.0),
             separator_thickness: px(1.0),
         }
     }
@@ -398,6 +410,12 @@ impl MenuMetrics {
         self
     }
 
+    /// Sets the font size for group headings independently from shortcut columns.
+    pub fn section_font_size(mut self, size: Pixels) -> Self {
+        self.section_font_size = size;
+        self
+    }
+
     /// Sets the horizontal gap between a panel and the submenu it opens.
     pub fn submenu_gap(mut self, gap: Pixels) -> Self {
         self.submenu_gap = gap;
@@ -411,28 +429,50 @@ impl MenuMetrics {
         self
     }
 
+    /// Sets disclosure glyph size for the interactive trigger independently from row glyphs.
+    pub fn trigger_icon_size(mut self, size: Pixels) -> Self {
+        self.trigger_icon_size = size.max(px(0.0));
+        self
+    }
+
+    /// Sets each text role's line box and aligns icons to the label's cap-height band.
+    pub fn text_geometry(
+        mut self,
+        label_line_height: Pixels,
+        shortcut_line_height: Pixels,
+        section_line_height: Pixels,
+        baseline_center: Pixels,
+    ) -> Self {
+        self.label_line_height = label_line_height;
+        self.shortcut_line_height = shortcut_line_height;
+        self.section_line_height = section_line_height;
+        self.icon_baseline_center = baseline_center;
+        self
+    }
+
     fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
         let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
         Self {
             panel_width: self.panel_width * width_scale,
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
-                self.font_size,
+                self.label_line_height.max(self.shortcut_line_height),
                 text_scale,
                 spacing_scale,
             ),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
-                self.shortcut_font_size,
+                self.section_line_height,
                 text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
             trigger_height: crate::appearance::scale_line_box(
                 self.trigger_height,
-                self.font_size,
+                self.label_line_height,
                 text_scale,
                 spacing_scale,
             ),
@@ -443,10 +483,7 @@ impl MenuMetrics {
             indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale)
                 .max(icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            trigger_corner_radius: crate::appearance::scale_metric(
-                self.trigger_corner_radius,
-                spacing_scale,
-            ),
+            trigger_corner_radius: self.trigger_corner_radius,
             corner_radius: self.corner_radius,
             border_width: self.border_width,
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
@@ -454,9 +491,24 @@ impl MenuMetrics {
                 self.shortcut_font_size,
                 text_scale,
             ),
+            section_font_size: crate::appearance::scale_metric(self.section_font_size, text_scale),
+            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
+            shortcut_line_height: crate::appearance::scale_metric(
+                self.shortcut_line_height,
+                text_scale,
+            ),
+            section_line_height: crate::appearance::scale_metric(
+                self.section_line_height,
+                text_scale,
+            ),
             panel_padding: self.panel_padding,
             submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
             icon_size,
+            trigger_icon_size,
+            icon_baseline_center: crate::appearance::scale_metric(
+                self.icon_baseline_center,
+                text_scale,
+            ),
             separator_thickness: self.separator_thickness,
         }
     }
@@ -505,12 +557,28 @@ impl MenuSizes {
 pub struct MenuTheme {
     paint: MenuPaint,
     sizes: MenuSizes,
+    focus_ring_width: Pixels,
 }
 
 impl MenuTheme {
     /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
-        Self { paint, sizes }
+        Self {
+            paint,
+            sizes,
+            focus_ring_width: px(1.0),
+        }
+    }
+
+    /// Sets the focus-ring width independently of the trigger border and radius.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
+        self.focus_ring_width
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -529,6 +597,7 @@ impl MenuTheme {
             paint: self.paint,
             metrics,
             shell,
+            focus_ring_width: self.focus_ring_width,
         }
     }
 }
@@ -537,14 +606,38 @@ impl Global for MenuTheme {}
 
 fn menu_trigger_paint(cx: &App) -> MenuPaint {
     crate::floating_surface::hosted_menu_theme(cx)
-        .unwrap_or_else(|| cx.global::<MenuTheme>())
+        .unwrap_or_else(|| {
+            crate::control_theme_catalog(cx).map_or_else(|| cx.global::<MenuTheme>(), |c| &c.menu)
+        })
         .paint
+}
+
+fn trigger_edges(paint: MenuPaint, enabled: bool, focused: bool) -> (Rgba, Option<Rgba>) {
+    (
+        paint.trigger_border,
+        (enabled && focused && paint.focus_border.a > 0.0).then_some(paint.focus_border),
+    )
 }
 
 /// Resolves the installed menu theme against the shared anchored-popup surface.
 fn menu_style(size: MenuSize, cx: &App) -> MenuStyle {
-    cx.global::<MenuTheme>()
+    crate::control_theme_catalog(cx)
+        .map_or_else(|| cx.global::<MenuTheme>(), |catalog| &catalog.menu)
         .resolve(size, crate::floating_surface::shell(MENU_ROLE, cx))
+}
+
+fn menu_icon_offset(style: MenuStyle, window: &Window, cx: &App) -> Pixels {
+    crate::icon::text_alignment_offset(
+        crate::control_typography(cx).regular(),
+        style.metrics.font_size,
+        style.metrics.label_line_height,
+        style.metrics.icon_baseline_center,
+        window,
+    )
+}
+
+fn menu_shortcut_font(typography: &crate::ControlTypography) -> &Font {
+    typography.shortcut()
 }
 
 #[derive(Clone, Copy)]
@@ -552,6 +645,7 @@ struct MenuStyle {
     paint: MenuPaint,
     metrics: MenuMetrics,
     shell: FloatingShell,
+    focus_ring_width: Pixels,
 }
 
 type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
@@ -890,19 +984,26 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
         let enabled = self.core.is_enabled();
         let (foreground, disclosure_foreground) =
             trigger_foregrounds(menu_trigger_paint(cx), enabled);
+        let icon_offset = menu_icon_offset(style, window, cx);
+        let icon_trigger = self.icon_trigger;
         let content = div()
             .flex()
             .items_center()
             .gap(style.metrics.gap)
             .when_some(self.leading_icon, |content, icon| {
-                content.child(icon(foreground))
+                content.child(
+                    div()
+                        .relative()
+                        .when(!icon_trigger, |icon| icon.top(icon_offset))
+                        .child(icon(foreground)),
+                )
             })
             .when(!self.icon_trigger, |content| {
                 content
                     .child(self.label)
-                    .child(div().ml_auto().child(Icon::new(
+                    .child(div().ml_auto().relative().top(icon_offset).child(Icon::new(
                         IconName::ChevronDown,
-                        style.metrics.icon_size,
+                        style.metrics.trigger_icon_size,
                         disclosure_foreground,
                     )))
             })
@@ -1151,19 +1252,20 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
         let enabled = self.core.is_enabled();
         let (foreground, disclosure_foreground) =
             trigger_foregrounds(menu_trigger_paint(cx), enabled);
+        let icon_offset = menu_icon_offset(style, window, cx);
         let content = div()
             .flex()
             .items_center()
             .gap(style.metrics.gap)
             .when_some(self.leading_icon, |content, icon| {
-                content.child(icon(foreground))
+                content.child(div().relative().top(icon_offset).child(icon(foreground)))
             })
             .child(div().flex_grow().child(self.selected_label))
-            .child(Icon::new(
+            .child(div().relative().top(icon_offset).child(Icon::new(
                 IconName::ChevronDown,
-                style.metrics.icon_size,
+                style.metrics.trigger_icon_size,
                 disclosure_foreground,
-            ))
+            )))
             .into_any_element();
         self.core.render(content, window, cx)
     }
@@ -1416,6 +1518,10 @@ impl<A: Clone + 'static> MenuControl<A> {
         let fill_parent_width = self.fill_parent_width;
         let preserve_trigger_cursor = self.preserve_trigger_cursor;
         let debug_selector = self.debug_selector;
+        let focus_selector = debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-keyboard-focus"))
+            .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
         let mut trigger = div()
             .id(self.id)
@@ -1484,6 +1590,7 @@ impl<A: Clone + 'static> MenuControl<A> {
 
         if self.kind != TriggerKind::Context {
             let paint = menu_trigger_paint(cx);
+            let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
             trigger = trigger
                 .flex()
                 .items_center()
@@ -1501,11 +1608,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 })
                 .rounded(style.metrics.trigger_corner_radius)
                 .border(style.metrics.border_width)
-                .border_color(if focused {
-                    paint.focus_border
-                } else {
-                    paint.trigger_border
-                })
+                .border_color(trigger_border)
                 .bg(if open {
                     paint.trigger_hover_background
                 } else {
@@ -1517,9 +1620,26 @@ impl<A: Clone + 'static> MenuControl<A> {
                     paint.disabled
                 })
                 .text_size(style.metrics.font_size)
+                .line_height(style.metrics.label_line_height)
                 .font(font)
                 .when(enabled && !open, |trigger| {
                     trigger.hover(move |style| style.bg(paint.trigger_hover_background))
+                })
+                .when_some(focus_ring, |trigger, ring_color| {
+                    let gap = px(2.0);
+                    let position = gap + style.focus_ring_width;
+                    trigger.child(
+                        div()
+                            .debug_selector(move || focus_selector.clone())
+                            .absolute()
+                            .top(-position)
+                            .right(-position)
+                            .bottom(-position)
+                            .left(-position)
+                            .rounded(style.metrics.trigger_corner_radius + gap)
+                            .border(style.focus_ring_width)
+                            .border_color(ring_color),
+                    )
                 });
         }
 
@@ -1945,6 +2065,7 @@ impl MenuState {
                 ),
                 metrics: MenuMetrics::new(px(0.0), px(0.0)),
                 shell: crate::FloatingSurfaceTheme::default().shell(MENU_ROLE),
+                focus_ring_width: px(1.0),
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
@@ -2724,6 +2845,13 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         viewport,
         placement.viewport_margin,
     );
+    let icon_offset = crate::icon::text_alignment_offset(
+        typography.regular(),
+        style.metrics.font_size,
+        style.metrics.label_line_height,
+        style.metrics.icon_baseline_center,
+        window,
+    );
     let root_bounds = place_root(anchor, root_size, viewport, placement);
     let root_highlighted = highlighted.first().copied().flatten();
     let root_scroll = state.update(cx, |state, _| {
@@ -2827,6 +2955,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             style,
             scroll,
             &typography,
+            icon_offset,
         ));
     }
 
@@ -2924,6 +3053,7 @@ fn render_panel(
     style: MenuStyle,
     scroll: ScrollHandle,
     typography: &crate::ControlTypography,
+    icon_offset: Pixels,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -2936,6 +3066,7 @@ fn render_panel(
         .w(bounds.size.width)
         .h(bounds.size.height)
         .text_size(style.metrics.font_size)
+        .line_height(style.metrics.label_line_height)
         .block_mouse_except_scroll()
         .cursor_default();
     let mut content = div()
@@ -2974,8 +3105,9 @@ fn render_panel(
                         .flex()
                         .items_center()
                         .text_color(style.paint.muted)
-                        .text_size(style.metrics.shortcut_font_size)
-                        .font(typography.emphasis().clone())
+                        .text_size(style.metrics.section_font_size)
+                        .line_height(style.metrics.section_line_height)
+                        .font(typography.section_font().clone())
                         .child(label),
                 );
             }
@@ -3005,6 +3137,8 @@ fn render_panel(
                     highlighted == Some(index),
                     hovered == Some(index),
                     style,
+                    typography,
+                    icon_offset,
                 ));
             }
             InternalEntryKind::Submenu {
@@ -3032,6 +3166,8 @@ fn render_panel(
                     highlighted == Some(index),
                     hovered == Some(index),
                     style,
+                    typography,
+                    icon_offset,
                 ));
             }
         }
@@ -3059,6 +3195,8 @@ fn render_row(
     highlighted: bool,
     hovered: bool,
     style: MenuStyle,
+    typography: &crate::ControlTypography,
+    icon_offset: Pixels,
 ) -> AnyElement {
     let rows = if destructive {
         style.paint.destructive_rows
@@ -3093,6 +3231,7 @@ fn render_row(
         .items_center()
         .gap(style.metrics.gap)
         .rounded(row_corner_radius(style.metrics))
+        .font(crate::list_row::label_font(typography, highlighted))
         .text_color(foreground)
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))
@@ -3116,7 +3255,9 @@ fn render_row(
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center();
+        .justify_center()
+        .relative()
+        .top(icon_offset);
     if let Some(indicator) = mark_icon(mark) {
         leading = leading.child(Icon::new(
             indicator,
@@ -3133,16 +3274,18 @@ fn render_row(
             row.child(
                 div()
                     .text_size(style.metrics.shortcut_font_size)
+                    .line_height(style.metrics.shortcut_line_height)
+                    .font(menu_shortcut_font(typography).clone())
                     .text_color(secondary_foreground)
                     .child(shortcut),
             )
         })
         .when(submenu, |row| {
-            row.child(Icon::new(
+            row.child(div().relative().top(icon_offset).child(Icon::new(
                 IconName::ChevronRight,
                 style.metrics.icon_size,
                 icon_foreground,
-            ))
+            )))
         });
     if !disabled {
         let hover_state = pointer_state.clone();
@@ -3390,6 +3533,88 @@ mod tests {
             rgba(0x00000099),
         )
         .shell(crate::FloatingRole::Popover)
+    }
+
+    #[test]
+    fn focused_trigger_keeps_its_ordinary_border_below_the_focus_ring() {
+        let border = rgba(0x112233ff);
+        let focus = rgba(0x445566ff);
+        let paint = test_theme()
+            .paint
+            .trigger(rgba(0), rgba(0), border)
+            .focus_border(focus);
+
+        assert_eq!(trigger_edges(paint, true, false), (border, None));
+        assert_eq!(trigger_edges(paint, true, true), (border, Some(focus)));
+        assert_eq!(trigger_edges(paint, false, true), (border, None));
+        assert_eq!(
+            trigger_edges(paint.focus_border(rgba(0)), true, true),
+            (border, None),
+            "an inactive presentation must not submit a transparent focus primitive"
+        );
+    }
+
+    #[gpui::test]
+    fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
+        struct InsetTrigger;
+        impl Render for InsetTrigger {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().p(px(16.0)).child(
+                    div().w(px(180.0)).child(
+                        Menu::new("ring-menu", "Actions", vec![MenuEntry::action("Open", ())])
+                            .debug_selector("menu-trigger")
+                            .on_activate(|_, _, _| {}),
+                    ),
+                )
+            }
+        }
+        cx.update(super::init);
+        let ordinary = rgba(0x123456ff);
+        let focus = rgba(0xabcdefef);
+        let mut theme = test_theme().focus_ring_width(px(2.0));
+        theme.paint = theme
+            .paint
+            .trigger(rgba(0), rgba(0), ordinary)
+            .focus_border(focus);
+        cx.set_global(theme);
+        let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("menu-trigger")
+            .expect("menu trigger should reach the scene");
+        let ring = cx
+            .debug_bounds("menu-trigger-keyboard-focus")
+            .expect("focused menu trigger should submit its outline");
+        let outset = px(3.0);
+        assert!(
+            ring.left() == trigger.left() - outset
+                && ring.top() == trigger.top() - outset
+                && ring.right() == trigger.right() + outset
+                && ring.bottom() == trigger.bottom() + outset,
+            "trigger={trigger:?}; ring={ring:?}"
+        );
+        assert!(
+            cx.update(|_, cx| crate::floating_surface::shell(MENU_ROLE, cx).content_inset())
+                > px(0.0),
+            "the regression must exercise the ordinary nonzero popover content inset"
+        );
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let quads = window.painted_quads_for_test();
+            let visible = |color: Rgba| {
+                quads
+                    .iter()
+                    .filter(|quad| quad.border_color == color.into())
+                    .map(|quad| quad.visible_bounds)
+                    .reduce(|bounds, next| bounds.union(&next))
+            };
+            assert_eq!(visible(ordinary), Some(trigger.scale(scale)));
+            assert_eq!(visible(focus), Some(ring.scale(scale)));
+        });
     }
 
     fn row_paint(seed: u32) -> crate::ListRowPaint {
@@ -3743,6 +3968,32 @@ mod tests {
     }
 
     #[test]
+    fn role_line_boxes_scale_independently_from_fixed_menu_extents() {
+        let metrics = MenuMetrics::new(px(196.0), px(26.0))
+            .trigger_height(px(28.0))
+            .text_geometry(px(18.0), px(15.0), px(21.0), px(4.0))
+            .scaled(1.5, 1.0);
+
+        assert_eq!(metrics.label_line_height, px(27.0));
+        assert_eq!(metrics.shortcut_line_height, px(22.5));
+        assert_eq!(metrics.section_line_height, px(31.5));
+        assert_eq!(metrics.row_height, px(35.0));
+        assert_eq!(metrics.section_height, px(32.5));
+        assert_eq!(metrics.trigger_height, px(37.0));
+    }
+
+    #[test]
+    fn menu_shortcuts_use_the_shortcut_font_slot() {
+        let regular = gpui::font("Regular");
+        let shortcut = gpui::font("Shortcut");
+        let typography =
+            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
+                .semantic_fonts(shortcut.clone(), regular.clone(), regular);
+
+        assert_eq!(menu_shortcut_font(&typography), &shortcut);
+    }
+
+    #[test]
     fn picker_should_normalize_duplicate_current_values_to_one_selected_option() {
         let picker = Picker::new(
             "picker",
@@ -3948,6 +4199,23 @@ mod tests {
             .expect("the open custom row icon was not refreshed");
         assert_eq!(default_icon.size, size(default_size, default_size));
         assert_eq!(scaled_icon.size, size(expected_size, expected_size));
+    }
+
+    #[test]
+    fn density_scales_menu_bounds_but_not_trigger_radius() {
+        let original = test_theme()
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics;
+        let comfortable = test_theme()
+            .scaled_metrics(1.0, 1.25)
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics;
+
+        assert!(comfortable.trigger_height > original.trigger_height);
+        assert_eq!(
+            comfortable.trigger_corner_radius,
+            original.trigger_corner_radius
+        );
     }
 
     struct ScrollTestRoot {

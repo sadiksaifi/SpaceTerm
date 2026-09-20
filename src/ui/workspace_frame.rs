@@ -1,6 +1,6 @@
 //! Geometry of the floating Workspace frame: the one negative-space measurement the composition
-//! breathes with, the corner radius family its surfaces share, and the top chrome height that
-//! absorbs the frame's top edge.
+//! breathes with, fixed selection geometry, the Pane corner derived from its native container, and
+//! the top chrome height that absorbs the frame's top edge.
 //!
 //! Every visible gap in the Workspace is that one measurement: the Pane stage's perimeter, the
 //! space between Split Panes at any nesting depth, and the margin on both sides of a sidebar item's
@@ -11,13 +11,14 @@
 //! and the Pane starts at the chrome's lower edge.
 //!
 //! These are layout metrics, not color roles. Every consumer reads one resolved [`WorkspaceFrame`]
-//! so the space, the radii, and the chrome height cannot drift apart across WorkspaceManager,
-//! TabManager, WorkspaceSidebar, and PaneHost.
+//! so the space, fixed selection radius, derived Pane radius, and chrome height cannot drift apart
+//! across WorkspaceManager, TabManager, WorkspaceSidebar, and PaneHost.
 
 use gpui::{App, Pixels, px};
 
 use crate::appearance::{ChromeColors, Color};
 use crate::platform::window_frame::WindowFrameGeometry;
+use crate::ui::chrome_geometry::RadiusRole;
 
 /// The one continuous Chrome surface beneath the Workspace: the sidebar region, the content stage
 /// insets, and the gaps between Panes.
@@ -29,12 +30,9 @@ pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
 }
 
 /// The Compact-density measurement of every visible gap in the Workspace.
-///
-/// It is the selection chip's radius, so the frame's negative space and the smallest shape in the
-/// Chrome hierarchy are one measurement rather than two that happen to agree.
-const SPACE: f32 = super::selection_chip::CHIP_RADIUS;
+const SPACE: f32 = RadiusRole::Control.points();
 /// The smallest Pane radius that still reads as a rounded surface at every density.
-const MINIMUM_PANE_RADIUS: f32 = super::selection_chip::CHIP_RADIUS;
+const MINIMUM_PANE_RADIUS: f32 = RadiusRole::Control.points();
 
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
@@ -60,16 +58,15 @@ impl WorkspaceFrame {
             1.0
         };
         let space = (SPACE * scale).round();
-        // One radius family: the chip is the smallest shape, and a Pane is the window's own corner
-        // carried inward by the frame's space, so both grow from the same two facts.
-        let chip_radius = (super::selection_chip::CHIP_RADIUS * scale).round();
+        // Selection is a fixed semantic control radius. A Pane is the native window corner carried
+        // inward by the density-scaled frame space, so its radius follows the changing inset
+        // instead of selecting an independent density-scaled value.
+        let chip_radius = RadiusRole::Control.points();
         let window_radius = match window.outer_corner_radius() {
             Some(radius) if radius.is_finite() && radius >= 0.0 => radius,
             Some(_) | None => FALLBACK_WINDOW_RADIUS,
         };
-        let pane_radius = (window_radius - space)
-            .round()
-            .max(chip_radius.min(MINIMUM_PANE_RADIUS));
+        let pane_radius = (window_radius - space).round().max(MINIMUM_PANE_RADIUS);
         Self {
             space: px(space),
             half_space: px((space / 2.0).round()),
@@ -253,13 +250,16 @@ mod tests {
         }
     }
 
-    /// Pane corners and selection chips are one family: every radius grows from the chip baseline
-    /// and the window corner, so no surface can drift into a shape of its own.
+    /// Pane corners stay concentric with the native window while selection uses one fixed role.
     #[test]
-    fn pane_and_chip_radii_should_stay_in_one_family_at_every_density() {
+    fn pane_radius_follows_its_inset_while_selection_radius_stays_fixed() {
         let window = window(Some(STANDARD_WINDOW_RADIUS));
-        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let frame = frame(density, window);
+        let compact = frame(ChromeDensity::Compact, window);
+        let comfortable = frame(ChromeDensity::Comfortable, window);
+        for (density, frame) in [
+            (ChromeDensity::Compact, compact),
+            (ChromeDensity::Comfortable, comfortable),
+        ] {
             assert_eq!(
                 frame.pane_radius() + frame.space(),
                 px(STANDARD_WINDOW_RADIUS),
@@ -269,8 +269,16 @@ mod tests {
                 frame.chip_radius() <= frame.pane_radius(),
                 "{density:?} a chip is the smallest shape in the family, got {frame:?}"
             );
-            assert_eq!(frame.space(), frame.chip_radius());
         }
+        assert_eq!(
+            (compact.chip_radius(), comfortable.chip_radius()),
+            (RadiusRole::Control.pixels(), RadiusRole::Control.pixels())
+        );
+        assert_eq!(
+            (compact.pane_radius(), comfortable.pane_radius()),
+            (px(10.0), px(8.0)),
+            "the Pane radius must derive from each density's actual inset"
+        );
     }
 
     #[test]

@@ -14,15 +14,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Pixels, div, px, rgba};
 
 use crate::appearance::Color;
-
-/// The hairline every chip and focus ring is drawn with.
-const CHIP_HAIRLINE: f32 = 1.0;
-
-/// The corner radius of every selection chip, before density scaling.
-///
-/// The Workspace sidebar, the Settings navigation, and the Tab bar present one selection shape, so
-/// the radius has one owner rather than three constants that merely happen to agree.
-pub(crate) const CHIP_RADIUS: f32 = 6.0;
+use crate::ui::chrome_geometry::HAIRLINE;
 
 /// Where a chip sits inside the item that owns it.
 ///
@@ -129,8 +121,7 @@ impl SelectionChip {
             .debug_selector(move || selector.clone())
             .when_some(self.paint.fill, |chip, fill| {
                 chip.bg(rgba(fill.rgba_hex())).when_some(rim, |chip, rim| {
-                    chip.border(px(CHIP_HAIRLINE))
-                        .border_color(rgba(rim.rgba_hex()))
+                    chip.border(px(HAIRLINE)).border_color(rgba(rim.rgba_hex()))
                 })
             })
             .group_hover(group.to_owned(), move |style| {
@@ -140,7 +131,7 @@ impl SelectionChip {
                 };
                 match hover_rim {
                     Some(rim) => style
-                        .border(px(CHIP_HAIRLINE))
+                        .border(px(HAIRLINE))
                         .border_color(rgba(rim.rgba_hex())),
                     None => style,
                 }
@@ -160,7 +151,7 @@ impl SelectionChip {
             inset_y: self.shape.inset_y - gap,
             radius: self.shape.radius + gap,
         })
-        .border(px(CHIP_HAIRLINE))
+        .border(px(HAIRLINE))
         .border_color(rgba(color.rgba_hex()))
         .debug_selector(move || selector.to_owned())
         .into_any_element()

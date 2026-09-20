@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+use super::chrome_icons::IconRole;
+use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
@@ -77,7 +79,6 @@ pub(super) const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 /// Close keeps the same air to the chip's right edge as it keeps above and below.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
-const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
 /// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
 ///
 /// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
@@ -101,7 +102,6 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
 }
 
 /// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
-const TAB_ORIGIN_ICON_SIZE: f32 = 12.0;
 const TAB_ORIGIN_GAP: f32 = 6.0;
 /// The air after the status glyph, and before the close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
@@ -128,6 +128,7 @@ const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
     window_active: bool,
+    show_borders: bool,
     background: Color,
     active_tab_background: Color,
     active_tab_border: Color,
@@ -147,10 +148,11 @@ struct TabChromePresentation {
 }
 
 impl TabChromePresentation {
-    fn resolve(window_active: bool, colors: &ChromeColors) -> Self {
+    fn resolve(window_active: bool, show_borders: bool, colors: &ChromeColors) -> Self {
         if window_active {
             Self {
                 window_active,
+                show_borders,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 active_tab_border: colors.tab_active_border,
@@ -171,19 +173,20 @@ impl TabChromePresentation {
         } else {
             Self {
                 window_active,
+                show_borders,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.tab_inactive_selected_background,
-                active_tab_border: colors.tab_inactive_selected_border,
-                // Only the resting identity steps back with the window. A pointer over the Active
-                // Tab gets the same answer as in a focused window, just as an inactive Tab does.
+                // ChromeAppearance has already prepared the common active-state roles for an
+                // inactive window. Keep the legacy inactive-selected aliases out of rendering.
+                active_tab_background: colors.tab_active_background,
+                active_tab_border: colors.tab_active_border,
                 active_tab_hover_background: colors.tab_active_hover_background,
                 active_tab_hover_border: colors.tab_active_border,
                 active_tab_hover_foreground: colors.tab_active_hover_foreground,
                 active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                active_tab_foreground: colors.tab_active_foreground,
                 inactive_tab_foreground: colors.tab_inactive_foreground,
-                active_tab_icon: colors.tab_inactive_selected_icon,
+                active_tab_icon: colors.tab_active_icon,
                 inactive_tab_icon: colors.tab_inactive_icon,
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
@@ -217,7 +220,7 @@ impl TabChromePresentation {
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
-        if active {
+        let mut paint = if active {
             ChipPaint {
                 fill: Some(self.active_tab_background),
                 rim: Some(self.active_tab_border),
@@ -228,11 +231,16 @@ impl TabChromePresentation {
             ChipPaint {
                 fill: (self.inactive_tab_background != self.background)
                     .then_some(self.inactive_tab_background),
-                rim: None,
+                rim: self.show_borders.then_some(self.active_tab_border),
                 hover_fill: Some(self.hover_background),
-                hover_rim: None,
+                hover_rim: self.show_borders.then_some(self.active_tab_border),
             }
+        };
+        if !self.window_active {
+            paint.hover_fill = None;
+            paint.hover_rim = None;
         }
+        paint
     }
 
     fn tab_foreground(&self, active: bool) -> Color {
@@ -259,13 +267,17 @@ impl TabChromePresentation {
         hovered: bool,
         colors: &ChromeColors,
     ) -> crate::appearance::StatusPaint {
-        let surface = match (active, hovered) {
+        colors.status(self.tab_surface(active, hovered))
+    }
+
+    fn tab_surface(&self, active: bool, hovered: bool) -> Color {
+        match (active, hovered) {
             (true, true) => self.active_tab_hover_background,
             (true, false) => self.active_tab_background,
             (false, true) => self.hover_background,
             (false, false) => self.inactive_tab_background,
-        };
-        colors.status(surface.source_over(self.background))
+        }
+        .source_over(self.background)
     }
 
     fn close_control_style(
@@ -324,7 +336,8 @@ impl TabChromePresentation {
         );
         let disabled =
             spaceterm_ui::ButtonPaint::new(clear, gpui_color(colors.text_disabled), clear);
-        spaceterm_ui::ButtonVariantStyle::new(normal, hover, hover, disabled)
+        let hovered = if self.window_active { hover } else { normal };
+        spaceterm_ui::ButtonVariantStyle::new(normal, hovered, hover, disabled)
     }
 }
 
@@ -369,6 +382,8 @@ pub(crate) struct TabManager {
     rendered_active_close_icon: Rc<Cell<gpui::Rgba>>,
     #[cfg(test)]
     rendered_inactive_close_icon: Rc<Cell<gpui::Rgba>>,
+    #[cfg(test)]
+    rendered_create_tab_icon: Rc<Cell<gpui::Rgba>>,
 }
 
 impl TabManager {
@@ -451,6 +466,8 @@ impl TabManager {
             rendered_active_close_icon: Rc::new(Cell::new(rgba(0))),
             #[cfg(test)]
             rendered_inactive_close_icon: Rc::new(Cell::new(rgba(0))),
+            #[cfg(test)]
+            rendered_create_tab_icon: Rc::new(Cell::new(rgba(0))),
         }
     }
 
@@ -1242,7 +1259,8 @@ impl TabManager {
         let close_manager = manager;
         let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
-        let ancestor_hovered = self.hovered_tab == Some(tab_id);
+        let hover_active = appearance.active && presentation.window_active;
+        let ancestor_hovered = hover_active && self.hovered_tab == Some(tab_id);
         let control_style = presentation.close_control_style(
             active,
             ancestor_hovered,
@@ -1251,28 +1269,30 @@ impl TabManager {
         );
         let hover_foreground = presentation.tab_hover_foreground(active);
         let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
+        let status_host = presentation.tab_surface(active, ancestor_hovered);
         let close_clearance = (active || ancestor_hovered).then(|| {
             cx.global::<ButtonTheme>()
                 .icon_button_size(ButtonSize::Compact)
                 + appearance.spacing(TAB_TRAILING_GAP)
         });
-        let close_icon_size = appearance.spacing(TAB_CLOSE_ICON_SIZE);
+        let close_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         #[cfg(test)]
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
         #[cfg(test)]
         let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
-        let font = if active {
-            &appearance.emphasis
+        let text_role = if active {
+            TextRole::BodyEmphasis
         } else {
-            &appearance.regular
+            TextRole::Navigation
         };
+        let text_style = appearance.typography.style(text_role);
         let mut identity = identity;
         identity.glyph =
             super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
                 super::terminal_status::reported_glyph_is_drawable(
                     glyph,
-                    font,
-                    appearance.text_size(12.0),
+                    &text_style.font,
+                    text_style.size,
                     window,
                 )
             });
@@ -1313,11 +1333,12 @@ impl TabManager {
                 });
             })
             // Weight marks the Active Tab exactly as it marks the current Settings section.
-            .font(font.clone())
-            .text_size(appearance.text_size(12.0))
+            .chrome_text(text_style)
             .text_color(gpui_color(foreground))
             // Content follows the chip's paired hover paint, preserving selected identity.
-            .hover(move |item| item.text_color(gpui_color(hover_foreground)))
+            .when(hover_active, |item| {
+                item.hover(move |item| item.text_color(gpui_color(hover_foreground)))
+            })
             .child(chip.render(format!("tab-item-{}-chip", tab_id.get()), &tab_group))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
@@ -1340,6 +1361,7 @@ impl TabManager {
                 tab_id,
                 identity,
                 status,
+                status_host,
                 close_clearance,
                 appearance,
             ))
@@ -1352,9 +1374,9 @@ impl TabManager {
                     .flex()
                     .items_center()
                     .when(!active, |button| {
-                        button
-                            .opacity(0.0)
-                            .group_hover(tab_group, |button| button.opacity(1.0))
+                        button.opacity(0.0).when(hover_active, |button| {
+                            button.group_hover(tab_group, |button| button.opacity(1.0))
+                        })
                     })
                     .child(
                         IconButton::new(
@@ -1374,7 +1396,7 @@ impl TabManager {
                         .variant(ButtonVariant::Ghost)
                         .contextual_style(
                             control_style,
-                            gpui_color(appearance.colors.border_focused),
+                            gpui_color(title_bar_control_focus_ring(appearance)),
                         )
                         .size(ButtonSize::Compact)
                         .preserve_ancestor_hover()
@@ -1402,7 +1424,7 @@ impl TabManager {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
-        let create_icon_size = appearance.spacing(14.0);
+        let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         // A chip is inset inside its item, which would add to the gap the Workspace identity before
         // the strip already leaves. The strip pulls that inset back, so the visible distance from
         // the identity to the first Tab is one frame space and the first Tab's paint lines up with
@@ -1447,6 +1469,8 @@ impl TabManager {
 
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
+        #[cfg(test)]
+        let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
         let content = div()
             .relative()
             .size_full()
@@ -1466,6 +1490,8 @@ impl TabManager {
                     .justify_center()
                     .child(
                         IconButton::new("create-tab-button", "Create Tab", move |foreground| {
+                            #[cfg(test)]
+                            rendered_create_tab_icon.set(foreground);
                             Icon::custom(CustomIconName::Plus, create_icon_size, foreground)
                                 .into_any_element()
                         })
@@ -1473,7 +1499,7 @@ impl TabManager {
                         .contextual_style(
                             presentation
                                 .bar_control_style(&appearance.colors, appearance.materials),
-                            gpui_color(appearance.colors.border_focused),
+                            gpui_color(title_bar_control_focus_ring(appearance)),
                         )
                         .size(ButtonSize::Regular)
                         .debug_selector("create-tab-button")
@@ -1541,8 +1567,11 @@ impl Render for TabManager {
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
         let appearance = super::appearance::chrome(cx);
-        let presentation =
-            TabChromePresentation::resolve(window.is_window_active(), &appearance.colors);
+        let presentation = TabChromePresentation::resolve(
+            window.is_window_active(),
+            appearance.capabilities.show_borders,
+            &appearance.colors,
+        );
         let tab_bar = self.render_tab_bar(&presentation, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
@@ -1558,7 +1587,13 @@ impl Render for TabManager {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .font(appearance.regular.clone())
+            .font(
+                appearance
+                    .typography
+                    .style(TextRole::Navigation)
+                    .font
+                    .clone(),
+            )
             .on_action(cx.listener(Self::on_create_tab))
             .on_action(cx.listener(Self::on_activate_tab_1))
             .on_action(cx.listener(Self::on_activate_tab_2))
@@ -1680,11 +1715,12 @@ fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
     status: crate::appearance::StatusPaint,
+    status_host: crate::appearance::Color,
     close_clearance: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let origin_location = if identity.remote { "remote" } else { "local" };
-    let icon_size = appearance.spacing(TAB_ORIGIN_ICON_SIZE);
+    let icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
     let has_place = !identity.place.is_empty();
     let mut words = div()
         .id(("tab-identity", tab_id.get()))
@@ -1749,7 +1785,7 @@ fn render_tab_identity(
                 .items_center()
                 .child(
                     StatusGlyph {
-                        icon: IconName::Terminal,
+                        icon: tab_origin_icon(identity.remote),
                         reported: identity.glyph,
                         size: icon_size,
                         progress: identity.progress,
@@ -1757,6 +1793,7 @@ fn render_tab_identity(
                         id: ("tab-status", tab_id.get()).into(),
                         selector_prefix: format!("tab-status-{}", tab_id.get()),
                         colors: StatusColors {
+                            host: gpui_color(status_host),
                             attention: gpui_color(status.attention),
                             busy: gpui_color(status.busy),
                             error: gpui_color(status.error),
@@ -1770,8 +1807,20 @@ fn render_tab_identity(
         .into_any_element()
 }
 
+const fn tab_origin_icon(remote: bool) -> IconName {
+    if remote {
+        IconName::Globe
+    } else {
+        IconName::Terminal
+    }
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
+}
+
+fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance) -> Color {
+    appearance.title_bar_controls.colors.focus_ring
 }
 
 fn create_tab_shortcut(presentation: &crate::desktop_profile::DesktopPresentation) -> &'static str {
@@ -1787,9 +1836,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use gpui::{
-        DivInspectorState, Hsla, Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent,
-        ScrollDelta, ScrollWheelEvent, SharedString, TestAppContext, TouchPhase, VisualTestContext,
-        point,
+        Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
@@ -1802,15 +1850,92 @@ mod tests {
         );
     }
 
+    fn prepared_opposing_title_bar(
+        root: Color,
+        title_bar: Color,
+        increase_contrast: bool,
+        show_borders: bool,
+    ) -> super::super::appearance::ChromeAppearance {
+        use crate::appearance::{
+            AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+            SchemeCatalog, SystemAppearance,
+        };
+
+        let mut resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &AppearancePreferences::default(),
+                SystemAppearance::unavailable().with_composition(CompositionCapabilities {
+                    increase_contrast,
+                    show_borders,
+                    ..CompositionCapabilities::new(true, true)
+                }),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let chrome = Arc::make_mut(&mut resolved.chrome);
+        chrome.colors.background = root;
+        chrome.colors.title_bar_background = title_bar;
+        chrome.colors.title_bar_inactive_background = title_bar;
+        chrome.colors.tab_inactive_background = title_bar;
+        chrome.colors.focus_ring = title_bar;
+        chrome.colors.tab_active_border = title_bar;
+        super::super::appearance::ChromeAppearance::prepare(&resolved.chrome)
+    }
+
+    #[test]
+    fn title_bar_controls_use_focus_paint_prepared_for_their_actual_host() {
+        let appearance =
+            prepared_opposing_title_bar(Color::rgb(0x000000), Color::rgb(0xffffff), true, false);
+        let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+        let focus = title_bar_control_focus_ring(&appearance).source_over(host);
+        assert!(
+            focus.contrast_ratio(host) >= 4.5,
+            "TitleBar focus {focus:?} must reach 4.5:1 on its final host {host:?}"
+        );
+
+        let presentation = TabChromePresentation::resolve(true, false, &appearance.colors);
+        let selected = appearance
+            .materials
+            .paint(
+                crate::appearance::SurfaceRole::Surface,
+                presentation.background,
+                presentation.active_tab_background,
+            )
+            .source_over(host);
+        assert!(selected.contrast_ratio(host) >= 1.4);
+    }
+
+    #[test]
+    fn show_borders_prepares_tab_edges_for_the_title_bar_host() {
+        let appearance =
+            prepared_opposing_title_bar(Color::rgb(0xffffff), Color::rgb(0x000000), false, true);
+        let presentation = TabChromePresentation::resolve(true, true, &appearance.colors);
+        let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+        let chip = presentation
+            .tab_chip_paint(false)
+            .raised_on(&appearance, presentation.background);
+        let background = chip.fill.unwrap_or(Color::rgba(0)).source_over(host);
+        let edge = chip
+            .rim
+            .expect("Show Borders must retain an unselected Tab edge");
+        let rendered_edge = edge.source_over(background);
+        assert!(
+            rendered_edge.contrast_ratio(background) >= 3.0,
+            "unselected Tab edge {rendered_edge:?} must reach 3:1 on its final TitleBar background {background:?}"
+        );
+    }
+
     #[test]
     fn active_window_tab_chrome_should_preserve_the_existing_presentation() {
         let colors = ChromeColors::default();
-        let presentation = TabChromePresentation::resolve(true, &colors);
+        let presentation = TabChromePresentation::resolve(true, false, &colors);
 
         assert_eq!(
             presentation,
             TabChromePresentation {
                 window_active: true,
+                show_borders: false,
                 background: colors.title_bar_background,
                 active_tab_background: colors.tab_active_background,
                 active_tab_border: colors.tab_active_border,
@@ -1834,23 +1959,24 @@ mod tests {
     #[test]
     fn inactive_window_preserves_selected_tab_identity() {
         let colors = ChromeColors::default();
-        let presentation = TabChromePresentation::resolve(false, &colors);
+        let presentation = TabChromePresentation::resolve(false, false, &colors);
 
         assert_eq!(
             presentation,
             TabChromePresentation {
                 window_active: false,
+                show_borders: false,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.tab_inactive_selected_background,
-                active_tab_border: colors.tab_inactive_selected_border,
+                active_tab_background: colors.tab_active_background,
+                active_tab_border: colors.tab_active_border,
                 active_tab_hover_background: colors.tab_active_hover_background,
                 active_tab_hover_border: colors.tab_active_border,
                 active_tab_hover_foreground: colors.tab_active_hover_foreground,
                 active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.tab_inactive_selected_foreground,
+                active_tab_foreground: colors.tab_active_foreground,
                 inactive_tab_foreground: colors.tab_inactive_foreground,
-                active_tab_icon: colors.tab_inactive_selected_icon,
+                active_tab_icon: colors.tab_active_icon,
                 inactive_tab_icon: colors.tab_inactive_icon,
                 hover_background: colors.tab_hover_background,
                 hover_foreground: colors.tab_hover_foreground,
@@ -1861,7 +1987,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_tab_hover_should_gain_weight_from_its_own_roles_in_both_window_states() {
+    fn tab_hover_paints_only_when_the_window_is_active() {
         let colors = ChromeColors {
             tab_active_background: Color::rgb(0x112233),
             tab_active_border: Color::rgb(0x223344),
@@ -1877,15 +2003,7 @@ mod tests {
             ..ChromeColors::default()
         };
         for window_active in [true, false] {
-            let presentation = TabChromePresentation::resolve(window_active, &colors);
-            let (fill, rim) = if window_active {
-                (colors.tab_active_background, colors.tab_active_border)
-            } else {
-                (
-                    colors.tab_inactive_selected_background,
-                    colors.tab_inactive_selected_border,
-                )
-            };
+            let presentation = TabChromePresentation::resolve(window_active, false, &colors);
             let selected = presentation.tab_chip_paint(true);
             assert_eq!(
                 (
@@ -1895,13 +2013,12 @@ mod tests {
                     selected.hover_rim
                 ),
                 (
-                    Some(fill),
-                    Some(rim),
-                    Some(colors.tab_active_hover_background),
+                    Some(colors.tab_active_background),
                     Some(colors.tab_active_border),
+                    window_active.then_some(colors.tab_active_hover_background),
+                    window_active.then_some(colors.tab_active_border),
                 ),
-                "window_active={window_active}: the Active Tab should rest on its rim and gain \
-                 weight under the pointer rather than freezing"
+                "window_active={window_active}: hover paint follows window activity"
             );
             assert_eq!(
                 presentation.tab_hover_foreground(true),
@@ -1910,7 +2027,11 @@ mod tests {
             let inactive = presentation.tab_chip_paint(false);
             assert_eq!(
                 (inactive.rim, inactive.hover_fill, inactive.hover_rim),
-                (None, Some(colors.tab_hover_background), None),
+                (
+                    None,
+                    window_active.then_some(colors.tab_hover_background),
+                    None
+                ),
                 "window_active={window_active}: only the Active Tab should carry a rim"
             );
             assert_eq!(
@@ -1925,12 +2046,20 @@ mod tests {
             );
             assert_eq!(
                 close.hovered().background(),
-                gpui_color(colors.tab_hover_background),
-                "window_active={window_active}: directly hovering Close should refine the Tab hover state"
+                if window_active {
+                    gpui_color(colors.tab_hover_background)
+                } else {
+                    gpui::rgba(0)
+                },
+                "window_active={window_active}: Close hover paint follows window activity"
             );
             assert_eq!(
                 close.hovered().foreground(),
-                gpui_color(colors.tab_hover_icon)
+                if window_active {
+                    gpui_color(colors.tab_hover_icon)
+                } else {
+                    gpui_color(colors.tab_active_hover_icon)
+                }
             );
             assert_eq!(
                 presentation
@@ -1948,6 +2077,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn show_borders_outlines_unselected_tabs_without_restoring_inactive_hover() {
+        let colors = ChromeColors {
+            tab_active_border: Color::rgb(0x223344),
+            tab_hover_background: Color::rgb(0x556677),
+            ..ChromeColors::default()
+        };
+
+        let active = TabChromePresentation::resolve(true, true, &colors).tab_chip_paint(false);
+        assert_eq!(active.rim, Some(colors.tab_active_border));
+        assert_eq!(active.hover_rim, Some(colors.tab_active_border));
+
+        let inactive = TabChromePresentation::resolve(false, true, &colors).tab_chip_paint(false);
+        assert_eq!(inactive.rim, Some(colors.tab_active_border));
+        assert_eq!(inactive.hover_fill, None);
+        assert_eq!(inactive.hover_rim, None);
+    }
+
+    #[test]
+    fn remote_tabs_use_the_remote_origin_glyph() {
+        assert_eq!(
+            std::mem::discriminant(&tab_origin_icon(false)),
+            std::mem::discriminant(&IconName::Terminal)
+        );
+        assert_eq!(
+            std::mem::discriminant(&tab_origin_icon(true)),
+            std::mem::discriminant(&IconName::Globe)
+        );
+    }
+
     /// The Active Tab carries selected-row content on a material tuned for the title bar.
     ///
     /// The Workspace sidebar and Settings navigation need a fill that works on shell and raised
@@ -1959,7 +2118,7 @@ mod tests {
 
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = builtin_chrome_base(appearance);
-            let presentation = TabChromePresentation::resolve(true, &colors);
+            let presentation = TabChromePresentation::resolve(true, false, &colors);
             let chip = presentation.tab_chip_paint(true);
 
             assert_eq!(
@@ -2024,7 +2183,7 @@ mod tests {
                 (true, colors.title_bar_background),
                 (false, colors.title_bar_inactive_background),
             ] {
-                let presentation = TabChromePresentation::resolve(window_active, &colors);
+                let presentation = TabChromePresentation::resolve(window_active, false, &colors);
                 let bar = presentation.background;
                 assert_eq!(bar, surface);
                 let separator = presentation.tab_separator.source_over(bar);
@@ -2082,7 +2241,7 @@ mod tests {
         };
         let separators = |colors: &ChromeColors| {
             [true, false].map(|window_active| {
-                TabChromePresentation::resolve(window_active, colors).tab_separator
+                TabChromePresentation::resolve(window_active, false, colors).tab_separator
             })
         };
 
@@ -2138,7 +2297,7 @@ mod tests {
         };
         let colors = colors.opaque_presentation();
         for window_active in [false, true] {
-            let presentation = TabChromePresentation::resolve(window_active, &colors);
+            let presentation = TabChromePresentation::resolve(window_active, false, &colors);
             let style = presentation.close_control_style(
                 true,
                 false,
@@ -2148,7 +2307,11 @@ mod tests {
             assert_eq!(style.normal().background(), rgba(0));
             assert_eq!(
                 style.hovered().background(),
-                gpui_color(colors.tab_hover_background)
+                if window_active {
+                    gpui_color(colors.tab_hover_background)
+                } else {
+                    rgba(0)
+                }
             );
             assert_eq!(
                 style.pressed().background(),
@@ -2156,15 +2319,15 @@ mod tests {
             );
             assert_eq!(
                 style.normal().foreground(),
-                gpui_color(if window_active {
-                    colors.tab_active_icon
-                } else {
-                    colors.tab_inactive_selected_icon
-                })
+                gpui_color(colors.tab_active_icon)
             );
             assert_eq!(
                 style.hovered().foreground(),
-                gpui_color(colors.tab_hover_icon)
+                if window_active {
+                    gpui_color(colors.tab_hover_icon)
+                } else {
+                    gpui_color(colors.tab_active_icon)
+                }
             );
             assert_eq!(
                 style.pressed().foreground(),
@@ -2185,8 +2348,12 @@ mod tests {
                 );
                 assert_eq!(
                     style.hovered().background(),
-                    gpui_color(colors.tab_hover_background),
-                    "window_active={window_active} active={active}: direct hover should still give the Close control its own state"
+                    if window_active {
+                        gpui_color(colors.tab_hover_background)
+                    } else {
+                        rgba(0)
+                    },
+                    "window_active={window_active} active={active}: direct hover should follow window activity"
                 );
             }
         }
@@ -2211,7 +2378,7 @@ mod tests {
             )
             .unwrap();
         let appearance = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let presentation = TabChromePresentation::resolve(true, &appearance.colors);
+        let presentation = TabChromePresentation::resolve(true, false, &appearance.colors);
 
         let close =
             presentation.close_control_style(true, true, &appearance.colors, appearance.materials);
@@ -2233,21 +2400,13 @@ mod tests {
         assert_eq!(create.hovered().background(), gpui_color(expected_create));
     }
 
-    struct InspectedIconStyle {
-        family: Option<SharedString>,
-        color: Option<Hsla>,
-        size: gpui::Size<Pixels>,
-    }
-
-    type InspectedGlyphStyles = Rc<RefCell<Vec<InspectedIconStyle>>>;
-
-    fn inspect_icon_foreground(
+    fn rendered_icon_foreground(
         selector: &'static str,
         pressed: bool,
-        observed: &InspectedGlyphStyles,
+        rendered: &Cell<gpui::Rgba>,
         cx: &mut VisualTestContext,
-    ) -> Hsla {
-        let mut position = cx
+    ) -> gpui::Rgba {
+        let position = cx
             .debug_bounds(selector)
             .expect("the tab IconButton was not rendered")
             .center();
@@ -2256,48 +2415,7 @@ mod tests {
             cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
         }
         cx.run_until_parked();
-
-        cx.update(|window, cx| window.toggle_inspector(cx));
-        cx.run_until_parked();
-        position = cx
-            .debug_bounds(selector)
-            .expect("the tab IconButton was not rendered with the inspector open")
-            .center();
-        observed.borrow_mut().clear();
-        cx.simulate_mouse_move(
-            position,
-            pressed.then_some(MouseButton::Left),
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-
-        let mut foreground = None;
-        for _ in 0..16 {
-            foreground = observed.borrow().iter().rev().find_map(|style| {
-                let is_icon = if selector == "create-tab-button" {
-                    style.family.is_none() && style.size == gpui::size(px(14.0), px(14.0))
-                } else {
-                    style
-                        .family
-                        .as_ref()
-                        .is_some_and(|family| family.as_ref() == "lucide")
-                };
-                is_icon.then_some(style.color).flatten()
-            });
-            if foreground.is_some() {
-                break;
-            }
-            cx.simulate_event(ScrollWheelEvent {
-                position,
-                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
-                modifiers: Modifiers::none(),
-                touch_phase: TouchPhase::Moved,
-            });
-            cx.run_until_parked();
-        }
-
-        cx.update(|window, cx| window.toggle_inspector(cx));
-        cx.run_until_parked();
+        let foreground = rendered.get();
         if pressed {
             let outside = cx
                 .debug_bounds("tab-manager-content")
@@ -2307,72 +2425,63 @@ mod tests {
             cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
             cx.run_until_parked();
         }
-
-        foreground.expect("the runtime icon style was not inspectable")
+        foreground
     }
 
     #[gpui::test]
     fn tab_icon_glyphs_should_use_hovered_and_pressed_button_foregrounds(cx: &mut TestAppContext) {
-        let (_manager, _records, cx) = tab_manager(cx);
+        let (manager, _records, cx) = tab_manager(cx);
         let normal = rgba(0x11_22_33_ff);
         let hovered = rgba(0x22_cc_44_ff);
-        let observed = Rc::new(RefCell::new(Vec::new()));
-        let observed_styles = Rc::clone(&observed);
+        let create_icon = manager.read_with(cx, |manager, _| {
+            Rc::clone(&manager.rendered_create_tab_icon)
+        });
+        let close_icon = manager.read_with(cx, |manager, _| {
+            Rc::clone(&manager.rendered_active_close_icon)
+        });
         cx.update(|window, cx| {
-            let mut appearance = crate::ui::appearance::chrome(cx).clone();
-            appearance.colors.tab_hover_icon = Color::rgb(0x22cc44);
-            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
-            cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-                observed_styles.borrow_mut().push(InspectedIconStyle {
-                    family: state
-                        .base_style
-                        .text
-                        .as_ref()
-                        .and_then(|text| text.font_family.clone()),
-                    color: state.base_style.text.as_ref().and_then(|text| text.color),
-                    size: state.bounds.size,
-                });
-                gpui::Empty
+            let mut active = crate::ui::appearance::chrome(cx).clone();
+            active.colors.tab_hover_icon = Color::rgb(0x22cc44);
+            let mut inactive = active.clone();
+            inactive.active = false;
+            inactive.colors.tab_inactive_icon = Color::rgb(0x112233);
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
             });
-            cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
-                div()
-                    .children(inspector.render_inspector_states(window, cx))
-                    .into_any_element()
-            }));
             window.refresh();
         });
         cx.run_until_parked();
 
-        for selector in ["create-tab-button", "tab-close-button-1"] {
+        for (selector, rendered) in [
+            ("create-tab-button", create_icon.as_ref()),
+            ("tab-close-button-1", close_icon.as_ref()),
+        ] {
             assert_eq!(
-                inspect_icon_foreground(selector, false, &observed, cx),
-                Hsla::from(hovered),
+                rendered_icon_foreground(selector, false, rendered, cx),
+                hovered,
                 "{selector} must paint its glyph with the hovered IconButton foreground"
             );
             assert_eq!(
-                inspect_icon_foreground(selector, true, &observed, cx),
-                Hsla::from(hovered),
+                rendered_icon_foreground(selector, true, rendered, cx),
+                hovered,
                 "{selector} must paint its glyph with the pressed IconButton foreground"
             );
         }
 
-        cx.update(|window, cx| {
-            let mut appearance = crate::ui::appearance::chrome(cx).clone();
-            appearance.colors.tab_hover_icon = Color::rgb(0x112233);
-            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
-            window.refresh();
-        });
         cx.deactivate_window();
         cx.run_until_parked();
         assert_eq!(
-            inspect_icon_foreground("create-tab-button", false, &observed, cx),
-            Hsla::from(normal),
+            rendered_icon_foreground("create-tab-button", false, &create_icon, cx),
+            normal,
             "the new-tab SVG must retain the shared icon tint in an inactive window"
         );
     }
 
     #[gpui::test]
-    fn tab_close_glyph_should_follow_parent_hover_in_both_window_states(cx: &mut TestAppContext) {
+    fn tab_close_glyph_should_suppress_hover_presentation_in_an_inactive_window(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, _records, cx) = tab_manager(cx);
         let parent_hover = rgba(0x11_22_33_ff);
         let direct_hover = rgba(0x44_55_66_ff);
@@ -2383,16 +2492,21 @@ mod tests {
             Rc::clone(&manager.rendered_inactive_close_icon)
         });
         cx.update(|window, cx| {
-            let mut appearance = crate::ui::appearance::chrome(cx).clone();
-            appearance.colors.tab_active_background = Color::rgb(0x000000);
-            appearance.colors.tab_active_icon = Color::rgb(0xffffff);
-            appearance.colors.tab_inactive_selected_background = Color::rgb(0x000000);
-            appearance.colors.tab_inactive_selected_icon = Color::rgb(0xffffff);
-            appearance.colors.tab_active_hover_background = Color::rgb(0xffffff);
-            appearance.colors.tab_active_hover_foreground = Color::rgb(0x000000);
-            appearance.colors.tab_active_hover_icon = Color::rgb(0x112233);
-            appearance.colors.tab_hover_icon = Color::rgb(0x445566);
-            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            let mut active = crate::ui::appearance::chrome(cx).clone();
+            active.colors.tab_active_background = Color::rgb(0x000000);
+            active.colors.tab_active_icon = Color::rgb(0xffffff);
+            active.colors.tab_active_hover_background = Color::rgb(0xffffff);
+            active.colors.tab_active_hover_foreground = Color::rgb(0x000000);
+            active.colors.tab_active_hover_icon = Color::rgb(0x112233);
+            active.colors.tab_hover_icon = Color::rgb(0x445566);
+            let mut inactive = active.clone();
+            inactive.active = false;
+            inactive.colors.tab_active_icon = Color::rgb(0x778899);
+            inactive.colors.tab_inactive_icon = Color::rgb(0x8899aa);
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
+            });
             window.refresh();
         });
         cx.run_until_parked();
@@ -2425,21 +2539,23 @@ mod tests {
         cx.simulate_mouse_move(title, None, Modifiers::none());
         cx.run_until_parked();
         cx.deactivate_window();
+        cx.run_until_parked();
+        let inactive_resting = rendered.get();
         cx.simulate_mouse_move(title, None, Modifiers::none());
         cx.run_until_parked();
         assert!(!manager.read_with(cx, |manager, _| manager.rendered_window_active));
         assert_eq!(
             rendered.get(),
-            parent_hover,
-            "an inactive OS window should use the same selected-hover close glyph over the selected-hover fill"
+            inactive_resting,
+            "an inactive window should retain the resting selected-Tab close glyph"
         );
 
         cx.simulate_mouse_move(close, None, Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
             rendered.get(),
-            direct_hover,
-            "direct close hover should remain independent in an inactive OS window"
+            inactive_resting,
+            "direct hover must not repaint a control in an inactive window"
         );
 
         cx.update(|window, cx| {
@@ -2455,27 +2571,22 @@ mod tests {
             .expect("the inactive Tab close button was not rendered")
             .center();
 
-        for window_active in [false, true] {
-            if window_active {
-                cx.update(|window, _| window.activate_window());
-                cx.run_until_parked();
-            }
-            cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
-            cx.run_until_parked();
-            assert_eq!(
-                rendered_inactive.get(),
-                direct_hover,
-                "window_active={window_active}: hovering an inactive Tab title should use the Tab hover icon on its revealed Close control"
-            );
+        let inactive_tab_resting = rendered_inactive.get();
+        cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rendered_inactive.get(), inactive_tab_resting);
+        cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rendered_inactive.get(), inactive_tab_resting);
 
-            cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
-            cx.run_until_parked();
-            assert_eq!(
-                rendered_inactive.get(),
-                direct_hover,
-                "window_active={window_active}: direct hover should retain the Close control's own Tab hover icon"
-            );
-        }
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rendered_inactive.get(), direct_hover);
+        cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rendered_inactive.get(), direct_hover);
     }
     use crate::domain::PaneId;
     use crate::domain::ZoomState;
@@ -2729,6 +2840,17 @@ mod tests {
         open_tab_manager(cx)
     }
 
+    struct TabManagerActivityHarness {
+        manager: Entity<TabManager>,
+    }
+
+    impl Render for TabManagerActivityHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let activity = crate::ui::appearance::window_activity(window);
+            activity.mount(activity.with_scope(|| self.manager.clone()))
+        }
+    }
+
     fn open_tab_manager(
         cx: &mut TestAppContext,
     ) -> (
@@ -2745,8 +2867,10 @@ mod tests {
                 "/tmp/spaceterm-tab-manager-test",
             )),
         );
-        let (manager, cx) =
-            cx.add_window_view(|window, cx| TabManager::new(session_factory, window, cx));
+        let (harness, cx) = cx.add_window_view(|window, cx| TabManagerActivityHarness {
+            manager: cx.new(|cx| TabManager::new(session_factory, window, cx)),
+        });
+        let manager = harness.read_with(cx, |harness, _| harness.manager.clone());
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -3055,7 +3179,9 @@ mod tests {
                 let mut appearance = crate::ui::appearance::chrome(cx).clone();
                 appearance.spacing_scale =
                     crate::ui::appearance::ChromeAppearance::density_spacing_scale(density);
-                cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+                cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+                    appearance,
+                )));
             });
             for selected in 1..=4_u64 {
                 let (manager, _records, cx) = open_tab_manager(cx);
@@ -3652,8 +3778,12 @@ mod tests {
             .expect("the Tab should carry its terminal glyph");
         let activity = cx.debug_bounds("tab-activity-1").unwrap();
         let place = cx.debug_bounds("tab-place-1").unwrap();
-        let glyph =
-            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        let glyph = cx.update(|_, cx| {
+            crate::ui::appearance::chrome(cx)
+                .icons
+                .metrics(IconRole::Status)
+                .glyph_size
+        });
         // Attention and progress are the terminal glyph itself, not separate marks beside it.
         for status in [attention, progress] {
             assert_eq!(status.size, gpui::size(glyph, glyph));
@@ -3793,8 +3923,12 @@ mod tests {
         } else {
             "tab-origin-1-local"
         };
-        let glyph =
-            cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(TAB_ORIGIN_ICON_SIZE));
+        let glyph = cx.update(|_, cx| {
+            crate::ui::appearance::chrome(cx)
+                .icons
+                .metrics(IconRole::Status)
+                .glyph_size
+        });
         assert_eq!(
             cx.debug_bounds(origin)
                 .expect("the Tab lost its glyph")

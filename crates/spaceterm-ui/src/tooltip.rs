@@ -294,7 +294,8 @@ impl Global for TooltipTheme {}
 
 /// Resolves the installed tooltip theme against the shared floating surface presentation.
 fn tooltip_theme(cx: &App) -> TooltipTheme {
-    let mut theme = *cx.global::<TooltipTheme>();
+    let mut theme = *crate::control_theme_catalog(cx)
+        .map_or_else(|| cx.global::<TooltipTheme>(), |catalog| &catalog.tooltip);
     theme.shell = crate::floating_surface::shell(TOOLTIP_ROLE, cx);
     theme
 }
@@ -456,12 +457,13 @@ impl RenderOnce for TooltipTarget {
             let state = state.read(cx);
             if state.visible && state.target_bounds.is_some() {
                 let theme = tooltip_theme(cx);
+                let typography = crate::control_typography(cx);
                 TooltipOverlay::new(
                     owner,
                     render_surface(
                         &self.tooltip,
                         &theme,
-                        crate::control_typography(cx).regular().clone(),
+                        tooltip_fonts(&typography),
                         window.viewport_size(),
                     ),
                     theme.metrics,
@@ -489,9 +491,10 @@ impl RenderOnce for TooltipTarget {
 fn render_surface(
     tooltip: &Tooltip,
     theme: &TooltipTheme,
-    font: gpui::Font,
+    fonts: [gpui::Font; 3],
     viewport: Size<Pixels>,
 ) -> AnyElement {
+    let [primary_font, detail_font, keyboard_font] = fonts;
     let paint = theme.paint;
     let metrics = theme.metrics;
     let shell = theme.shell;
@@ -520,6 +523,7 @@ fn render_surface(
                     .whitespace_nowrap()
                     .text_size(metrics.keyboard_font_size)
                     .line_height(metrics.keyboard_line_height)
+                    .font(keyboard_font)
                     .text_color(paint.keyboard)
                     .child(keyboard),
             )
@@ -538,7 +542,7 @@ fn render_surface(
         .flex()
         .flex_col()
         .gap(metrics.content_gap)
-        .font(font)
+        .font(primary_font)
         .cursor_default()
         .child(primary)
         .when_some(tooltip.detail.clone(), |surface, detail| {
@@ -557,12 +561,21 @@ fn render_surface(
                         .whitespace_normal()
                         .text_size(metrics.secondary_font_size)
                         .line_height(metrics.secondary_line_height)
+                        .font(detail_font)
                         .text_color(paint.secondary)
                         .child(detail),
                 )
         });
 
     shell.mount(surface).into_any_element()
+}
+
+fn tooltip_fonts(typography: &crate::ControlTypography) -> [gpui::Font; 3] {
+    [
+        typography.caption().clone(),
+        typography.badge().clone(),
+        typography.badge().clone(),
+    ]
 }
 
 struct TooltipLayerElement {
@@ -1474,6 +1487,18 @@ mod tests {
             TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
             TooltipMetrics::new(px(320.0)),
         )
+    }
+
+    #[test]
+    fn tooltip_text_uses_the_current_caption_badge_badge_font_mapping() {
+        let regular = gpui::font("Regular");
+        let caption = gpui::font("Caption");
+        let badge = gpui::font("Badge");
+        let typography =
+            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
+                .semantic_fonts(regular, caption.clone(), badge.clone());
+
+        assert_eq!(tooltip_fonts(&typography), [caption, badge.clone(), badge]);
     }
 
     #[test]

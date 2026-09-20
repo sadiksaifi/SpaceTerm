@@ -323,7 +323,7 @@ impl SegmentedMetrics {
                 spacing_scale,
             ),
             vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
-            radius: crate::appearance::scale_metric(self.radius, spacing_scale),
+            radius: self.radius,
             border_width: self.border_width,
             focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
             preview_gap: crate::appearance::scale_metric(self.preview_gap, spacing_scale),
@@ -369,6 +369,7 @@ pub struct SegmentedControlTheme {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
     selected_shadow: ControlShadow,
 }
 
@@ -387,8 +388,15 @@ impl SegmentedControlTheme {
             track_background,
             track_border,
             focus_border,
+            focus_ring_width: px(1.0),
             selected_shadow: ControlShadow::none(),
         }
+    }
+
+    /// Sets the focus-ring width independently of the track border and radius.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
     }
 
     /// Resolves value and interaction together, with disabled state taking precedence.
@@ -432,6 +440,7 @@ impl SegmentedControlTheme {
             track_background: self.track_background,
             track_border: self.track_border,
             focus_border: self.focus_border,
+            focus_ring_width: self.focus_ring_width,
             selected_shadow: self.selected_shadow,
         }
     }
@@ -844,6 +853,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 track.child(focus_outline(
                     metrics,
                     style.focus_border,
+                    style.focus_ring_width,
                     format!("{selector}-keyboard-focus"),
                 ))
             });
@@ -900,6 +910,7 @@ struct SegmentedStyle {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
     selected_shadow: ControlShadow,
 }
 
@@ -925,8 +936,13 @@ impl SegmentedPaintRefinement {
     }
 }
 
-fn focus_outline(metrics: SegmentedMetrics, color: Rgba, selector: String) -> impl IntoElement {
-    let offset = metrics.focus_gap + metrics.border_width;
+fn focus_outline(
+    metrics: SegmentedMetrics,
+    color: Rgba,
+    width: Pixels,
+    selector: String,
+) -> impl IntoElement {
+    let offset = metrics.focus_gap + width;
     div()
         .debug_selector(move || selector)
         .absolute()
@@ -935,7 +951,7 @@ fn focus_outline(metrics: SegmentedMetrics, color: Rgba, selector: String) -> im
         .bottom(-offset)
         .left(-offset)
         .rounded(metrics.radius + metrics.border_width + metrics.focus_gap)
-        .border(metrics.border_width)
+        .border(width)
         .border_color(color)
 }
 

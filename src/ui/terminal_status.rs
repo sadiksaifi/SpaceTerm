@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
-    Pixels, Rgba, Task, Window, div,
+    Pixels, Rgba, Task, Window, div, px,
 };
 use spaceterm_ui::{
     DeterminateProgress, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
@@ -26,10 +26,10 @@ use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMet
 
 /// How long an attention blink holds each of its two colors.
 const BLINK_STEP: Duration = Duration::from_millis(500);
-/// How many times the glyph blinks before it rests in the warning color.
+/// How many times the glyph blinks before it rests with an additive unread badge.
 ///
-/// Blinking draws the eye when attention arrives. Resting afterwards keeps an unread Tab in the
-/// background from repainting its window for as long as it stays unread.
+/// Blinking draws the eye when attention arrives. The settled badge keeps unread state present
+/// without replacing the underlying work-state shape.
 const BLINKS: u32 = 4;
 /// The smallest share of the ring a reported percentage sweeps.
 ///
@@ -51,12 +51,6 @@ const TITLE_WORD_CHARS: &str = "~/\\._-:@$#([{'\"";
 
 /// Characters that separate a program's glyph from the words after it.
 const TITLE_SEPARATOR_CHARS: &str = "-\u{2013}\u{2014}\u{00b7}|:";
-
-/// The share of the glyph's square a reported glyph is drawn at.
-///
-/// A character carries its own side bearings, so it is drawn a little smaller than a drawn icon
-/// to settle on the same visual weight beside one.
-const REPORTED_GLYPH_TEXT_SHARE: f32 = 0.86;
 
 /// What a program put at the front of the title it reported, and the words that follow it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,7 +213,7 @@ fn reported_glyph(glyph: &str, size: Pixels) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .text_size(size * REPORTED_GLYPH_TEXT_SHARE)
+        .text_size(size)
         .child(gpui::SharedString::from(glyph.to_owned()))
         .into_any_element()
 }
@@ -274,6 +268,8 @@ impl TerminalProgress {
 /// Status colors a host resolves for the surfaces its glyph rests on.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StatusColors {
+    /// Immediate host tone used to separate the additive unread badge.
+    pub(crate) host: Rgba,
     pub(crate) attention: Rgba,
     pub(crate) busy: Rgba,
     pub(crate) error: Rgba,
@@ -290,7 +286,8 @@ pub(crate) struct StatusGlyph {
     pub(crate) attention: bool,
     /// Keys the attention blink's clock so it survives across frames.
     pub(crate) id: ElementId,
-    /// Names the glyph as `{prefix}-{progress state}` and its blink as `{prefix}-attention`.
+    /// Names the glyph as `{prefix}-{progress state}`, its attention state as
+    /// `{prefix}-attention`, and the settled additive mark as `{prefix}-attention-badge`.
     pub(crate) selector_prefix: String,
     pub(crate) colors: StatusColors,
 }
@@ -301,7 +298,7 @@ impl StatusGlyph {
     /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
     /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors,
     /// with reported work drawn as the reusable ring, which inherits the status color resolved
-    /// here. Attention blinks the mark in the attention color and then leaves it in that color.
+    /// here. Attention blinks the mark, then settles as an additive badge so the work shape remains.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -340,19 +337,41 @@ impl StatusGlyph {
         let selector = format!("{selector_prefix}-attention");
         glyph
             .child(Stepped::new(id, BLINK_STEP, BLINKS * 2, move |step| {
-                // Even steps and the settled state show the attention color.
-                let blinked = step.is_none_or(|step| step % 2 == 0);
+                let state_selector = selector.clone();
+                let badge_selector = format!("{selector}-badge");
+                let settled = step.is_none();
+                let blinked = step.is_some_and(|step| step % 2 == 0);
+                let badge_size = attention_badge_size(size);
                 div()
-                    .debug_selector(move || selector)
+                    .debug_selector(move || state_selector)
+                    .relative()
                     .size_full()
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(mark.render(blinked))
+                    .when(settled, |glyph| {
+                        glyph.child(
+                            div()
+                                .debug_selector(move || badge_selector)
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .size(badge_size)
+                                .rounded(badge_size / 2.0)
+                                .border(px(super::chrome_geometry::HAIRLINE))
+                                .border_color(colors.host)
+                                .bg(colors.attention),
+                        )
+                    })
                     .into_any_element()
             }))
             .into_any_element()
     }
+}
+
+fn attention_badge_size(glyph_size: Pixels) -> Pixels {
+    (glyph_size - px(7.0)).max(px(0.0))
 }
 
 /// Which status color a glyph takes, before a host resolves it for its surface.
@@ -733,6 +752,12 @@ mod tests {
                 "{progress:?}"
             );
         }
+    }
+
+    #[test]
+    fn unread_badge_tracks_the_status_icon_catalog_step() {
+        assert_eq!(attention_badge_size(px(13.0)), px(6.0));
+        assert_eq!(attention_badge_size(px(14.0)), px(7.0));
     }
 
     #[test]

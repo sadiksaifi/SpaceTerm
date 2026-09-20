@@ -15,9 +15,12 @@ use crate::appearance::{
 };
 use crate::settings::{ImportReceipt, SchemeImport, SettingsError};
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::IconRole;
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
-use super::controls::{CARD_RADIUS, action_button, badge, gpui_color, swatch_strip, text};
+use super::controls::{action_button, badge, gpui_color, swatch_strip};
 use super::import::{ImportError as SchemeReadError, read_interchange_document};
 
 /// The column a scheme's removal takes at the end of its line in a list.
@@ -94,18 +97,18 @@ impl SettingsWindow {
                 .gap(appearance.spacing(8.0))
                 .p(appearance.spacing(10.0))
                 // The notice spans the column the cards under it span, so the page has one edge.
-                .rounded(appearance.spacing(CARD_RADIUS))
+                .rounded(RadiusRole::Card.pixels())
                 .bg(gpui_color(appearance.surface(
                     crate::appearance::SurfaceRole::Surface,
                     appearance.colors.warning_background,
                 )))
-                .border_1()
+                .border(px(HAIRLINE))
                 .border_color(gpui_color(appearance.colors.warning_border))
                 // The same glyph the window's own banner carries, at the same size: they are the
                 // same kind of warning, one about the page and one about the window.
                 .child(div().flex_none().mt(px(1.0)).child(spaceterm_ui::Icon::new(
                     spaceterm_ui::IconName::TriangleAlert,
-                    appearance.text_size(13.0),
+                    appearance.icons.metrics(IconRole::Status).glyph_size,
                     gpui_color(appearance.colors.warning),
                 )))
                 .child(
@@ -117,7 +120,7 @@ impl SettingsWindow {
                         .gap(appearance.spacing(3.0))
                         .children(diagnostics.into_iter().map(|diagnostic| {
                             div()
-                                .text_size(appearance.text_size(text::SMALL))
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(appearance.colors.warning))
                                 .whitespace_normal()
                                 .child(diagnostic_message(diagnostic))
@@ -139,6 +142,8 @@ impl SettingsWindow {
     ) -> AnyElement {
         let selected = self.selected_scheme_ids(cx).contains(&summary.id);
         let removable = !summary.builtin && self.editor.editable();
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+        let action_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let id = summary.id.clone();
         let name = summary.name.clone();
         let row_selector = format!("settings-scheme-row-{}", summary.id.as_str());
@@ -161,7 +166,7 @@ impl SettingsWindow {
             .items_center()
             .w_full()
             .gap(appearance.spacing(10.0))
-            .h(appearance.height(34.0, 12.0))
+            .h(appearance.typography.style(TextRole::Body).line_height + appearance.spacing(18.0))
             .child(swatch_strip(
                 format!("settings-scheme-swatches-{}", summary.id.as_str()),
                 &summary.swatches,
@@ -174,23 +179,27 @@ impl SettingsWindow {
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .text_size(appearance.text_size(text::BODY))
-                    .text_color(gpui_color(appearance.colors.text))
+                    .chrome_text(appearance.typography.style(if selected {
+                        TextRole::BodyEmphasis
+                    } else {
+                        TextRole::Body
+                    }))
+                    .text_color(gpui_color(colors.text))
                     .child(SharedString::from(summary.name.clone())),
             )
             .children(selected.then(|| badge("In use", appearance)))
             .child(
                 div()
                     .flex_none()
-                    .text_size(appearance.text_size(text::SMALL))
-                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(colors.text_muted))
                     .child(SharedString::from(classification)),
             )
             .child(
                 // Every scheme in a list ends with this column, so the classifications stay in
                 // one column whether a scheme can be removed or not.
                 div()
-                    .w(appearance.text_size(TRAILING_WIDTH))
+                    .w(appearance.spacing(TRAILING_WIDTH))
                     .flex_none()
                     .flex()
                     .flex_row()
@@ -203,10 +212,10 @@ impl SettingsWindow {
                                     summary.id.as_str()
                                 )),
                                 SharedString::from(format!("Remove {}", summary.name)),
-                                |foreground| {
+                                move |foreground| {
                                     spaceterm_ui::Icon::new(
                                         spaceterm_ui::IconName::Trash2,
-                                        px(12.0),
+                                        action_icon_size,
                                         foreground,
                                     )
                                     .into_any_element()
@@ -242,6 +251,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editable = self.editor.editable();
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         div()
             .flex()
             .flex_col()
@@ -289,8 +299,8 @@ impl SettingsWindow {
             .children(self.interchange_status.clone().map(|status| {
                 div()
                     .debug_selector(|| "settings-interchange-status".to_owned())
-                    .text_size(appearance.text_size(text::SMALL))
-                    .text_color(gpui_color(appearance.colors.text_secondary))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(colors.text_secondary))
                     .whitespace_normal()
                     .child(status)
             }))

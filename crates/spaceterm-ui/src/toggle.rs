@@ -278,7 +278,7 @@ impl ToggleMetrics {
             switch_width: crate::appearance::scale_metric(self.switch_width, spacing_scale),
             switch_height: crate::appearance::scale_metric(self.switch_height, spacing_scale),
             label_gap: crate::appearance::scale_metric(self.label_gap, spacing_scale),
-            checkbox_radius: crate::appearance::scale_metric(self.checkbox_radius, spacing_scale),
+            checkbox_radius: self.checkbox_radius,
             switch_inset: crate::appearance::scale_metric(self.switch_inset, spacing_scale),
             border_width: self.border_width,
             focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
@@ -322,6 +322,7 @@ pub struct ToggleTheme {
     paints: TogglePaints,
     sizes: ToggleSizes,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
 }
 
 impl ToggleTheme {
@@ -331,7 +332,14 @@ impl ToggleTheme {
             paints,
             sizes,
             focus_border,
+            focus_ring_width: px(1.0),
         }
+    }
+
+    /// Sets the focus-ring width independently of toggle borders and geometry.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
     }
 
     /// Returns a copy with text and spacing metrics scaled independently.
@@ -369,6 +377,7 @@ impl ToggleTheme {
             disabled: self.paints.disabled.resolve(on),
             metrics: self.sizes.resolve(size),
             focus_border: self.focus_border,
+            focus_ring_width: self.focus_ring_width,
         }
     }
 }
@@ -828,6 +837,7 @@ struct ToggleStyle {
     disabled: TogglePaint,
     metrics: ToggleMetrics,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
 }
 
 #[derive(Clone, Copy)]
@@ -977,6 +987,7 @@ fn checkbox_indicator(
                 metrics.checkbox_radius,
                 metrics,
                 style.focus_border,
+                style.focus_ring_width,
                 focus_selector,
             ))
         });
@@ -1058,6 +1069,7 @@ fn switch_indicator(
                 radius,
                 metrics,
                 style.focus_border,
+                style.focus_ring_width,
                 focus_selector,
             ))
         });
@@ -1068,9 +1080,10 @@ fn focus_outline(
     radius: Pixels,
     metrics: ToggleMetrics,
     color: Rgba,
+    width: Pixels,
     selector: String,
 ) -> impl IntoElement {
-    let offset = metrics.focus_gap + metrics.border_width;
+    let offset = metrics.focus_gap + width;
     div()
         .debug_selector(move || selector)
         .absolute()
@@ -1079,7 +1092,7 @@ fn focus_outline(
         .bottom(-offset)
         .left(-offset)
         .rounded(radius + metrics.focus_gap)
-        .border(metrics.border_width)
+        .border(width)
         .border_color(color)
 }
 
@@ -1196,6 +1209,16 @@ mod tests {
             CheckboxState::Checked.after_activation(),
             CheckboxState::Unchecked
         );
+    }
+
+    #[test]
+    fn density_scales_toggle_bounds_but_not_checkbox_radius() {
+        let scaled = test_theme().scaled_metrics(1.0, 1.25);
+        let original = test_theme().resolve(ToggleSize::Regular, false).metrics;
+        let comfortable = scaled.resolve(ToggleSize::Regular, false).metrics;
+
+        assert!(comfortable.checkbox_extent > original.checkbox_extent);
+        assert_eq!(comfortable.checkbox_radius, original.checkbox_radius);
     }
 
     #[test]

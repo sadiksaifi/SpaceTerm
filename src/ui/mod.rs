@@ -3,6 +3,11 @@ pub(crate) mod appearance;
 pub(crate) mod appearance_exerciser;
 pub(crate) mod appearance_runtime;
 mod button_theme;
+pub(crate) mod chrome_geometry;
+pub(crate) mod chrome_icons;
+mod chrome_semantic_pairs;
+mod chrome_state;
+pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
@@ -140,13 +145,13 @@ pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
-    spaceterm_ui::init(
-        cx,
-        control_theme_catalog::catalog(
-            appearance::chrome(cx),
-            appearance_runtime::progress_motion(cx),
-        ),
-    )
+    let installed = cx.global::<appearance::InstalledChrome>();
+    let motion = appearance_runtime::progress_motion(cx);
+    let active = control_theme_catalog::catalog(&installed.active, motion);
+    let inactive = control_theme_catalog::catalog(&installed.inactive, motion);
+    spaceterm_ui::init(cx, active.clone())?;
+    spaceterm_ui::replace_control_theme_catalogs(cx, active, inactive)?;
+    Ok(())
 }
 
 #[cfg(test)]

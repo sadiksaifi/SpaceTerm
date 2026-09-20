@@ -1,4 +1,7 @@
 use super::*;
+use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_icons::IconRole;
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 /// The chip carrying a Workspace row's hover and persistent selection.
@@ -8,22 +11,26 @@ use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 fn row_chip(
     selected: bool,
     appearance: &crate::ui::appearance::ChromeAppearance,
+    colors: &crate::appearance::ChromeColors,
     cx: &App,
 ) -> SelectionChip {
-    let colors = &appearance.colors;
     let paint = if selected {
         ChipPaint {
             fill: Some(colors.row_selected_background),
             rim: Some(colors.row_selected_border),
-            hover_fill: Some(colors.row_selected_hover_background),
-            hover_rim: Some(colors.row_selected_hover_border),
+            hover_fill: appearance
+                .active
+                .then_some(colors.row_selected_hover_background),
+            hover_rim: appearance
+                .active
+                .then_some(colors.row_selected_hover_border),
         }
     } else {
         ChipPaint {
             fill: None,
             rim: None,
-            hover_fill: Some(colors.row_hover_background),
-            hover_rim: Some(colors.row_hover_border),
+            hover_fill: appearance.active.then_some(colors.row_hover_background),
+            hover_rim: appearance.active.then_some(colors.row_hover_border),
         }
     };
     let paint = paint.raised_on(appearance, colors.row_background);
@@ -68,15 +75,13 @@ impl gpui::RenderOnce for WorkspaceRenameField {
             cx,
         )
         .debug_selector(move || format!("workspace-rename-input-{}", self.workspace_id.get()))
-        .h(self.appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
+        .h(self.appearance.spacing(22.0))
         .w_full()
         .px(self.appearance.spacing(5.0))
         .flex()
         .items_center()
-        .overflow_hidden()
-        .rounded(self.appearance.spacing(4.0))
-        .font(self.appearance.regular.clone())
-        .text_size(self.appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
+        .rounded(RadiusRole::ControlSmall.pixels())
+        .chrome_text(self.appearance.typography.style(TextRole::Navigation))
         .text_color(gpui_color(self.appearance.colors.text))
         .on_click(move |_, window, cx| {
             focus_on_click.focus(window);
@@ -89,13 +94,13 @@ impl gpui::RenderOnce for WorkspaceRenameField {
 pub(super) fn row_background(
     appearance: &crate::ui::appearance::ChromeAppearance,
 ) -> Option<Color> {
-    (appearance.colors.row_background
-        != crate::ui::workspace_frame::base_surface(&appearance.colors))
-    .then(|| {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    let base = crate::ui::workspace_frame::base_surface(&appearance.colors);
+    (colors.row_background != base).then(|| {
         appearance.materials.paint(
             crate::appearance::SurfaceRole::Surface,
-            crate::ui::workspace_frame::base_surface(&appearance.colors),
-            appearance.colors.row_background,
+            base,
+            colors.row_background,
         )
     })
 }
@@ -123,30 +128,38 @@ impl WorkspaceSidebar {
             pane_count,
             active,
         } = row;
-        let mut appearance = appearance.clone();
+        let row_background = row_background(appearance);
+        let mut row_colors = appearance
+            .host_colors(spaceterm_ui::ControlHost::Panel)
+            .clone();
         let row_group = format!("workspace-row-state-{}", workspace_id.get());
         // Hover and selection are carried by an inset chip rather than by the row's own fill, so
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected roles are promoted
         // below, because that promotion is what the row's text and icons consume.
-        let chip = row_chip(active, &appearance, cx);
+        let chip = row_chip(active, appearance, &row_colors, cx);
         if active {
-            appearance.colors.row_foreground = appearance.colors.row_selected_foreground;
-            appearance.colors.row_secondary = appearance.colors.row_selected_secondary;
-            appearance.colors.row_icon = appearance.colors.row_selected_icon;
-            appearance.colors.row_hover_foreground =
-                appearance.colors.row_selected_hover_foreground;
-            appearance.colors.row_hover_secondary = appearance.colors.row_selected_hover_secondary;
-            appearance.colors.row_hover_icon = appearance.colors.row_selected_hover_icon;
+            row_colors.row_foreground = row_colors.row_selected_foreground;
+            row_colors.row_secondary = row_colors.row_selected_secondary;
+            row_colors.row_icon = row_colors.row_selected_icon;
+            row_colors.row_hover_foreground = row_colors.row_selected_hover_foreground;
+            row_colors.row_hover_secondary = row_colors.row_selected_hover_secondary;
+            row_colors.row_hover_icon = row_colors.row_selected_hover_icon;
         }
+        // Text helpers consume no materials or surfaces. Give only those helpers the promoted
+        // Panel-host row colors while all surface composition keeps the root appearance.
+        let mut row_text_appearance = appearance.clone();
+        row_text_appearance.colors = row_colors.clone();
         let click_sidebar = sidebar.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let remote_color =
-            remote_connection_phase.map(|phase| remote_connection_color(phase, &appearance.colors));
+        let remote_color = remote_connection_phase.and_then(|phase| {
+            (phase != RemoteConnectionPhase::Connected)
+                .then(|| remote_connection_color(phase, &row_colors))
+        });
         let (detail, detail_color, detail_selector) = if !available {
             (
                 "Directory unavailable".into(),
-                Some(appearance.colors.warning),
+                Some(row_colors.warning),
                 Some(format!(
                     "workspace-row-directory-unavailable-{}",
                     workspace_id.get()
@@ -164,13 +177,12 @@ impl WorkspaceSidebar {
         } else {
             (path, None, None)
         };
-        let detail_paint = detail_color
-            .map(|color| workspace_row_status_paint(color, active, 4.5, &appearance.colors));
-        let remote_icon_paint = remote_color
-            .map(|color| workspace_row_status_paint(color, active, 3.0, &appearance.colors));
-        let unavailable_icon_paint = (!available).then(|| {
-            workspace_row_status_paint(appearance.colors.warning, active, 3.0, &appearance.colors)
-        });
+        let detail_paint =
+            detail_color.map(|color| workspace_row_status_paint(color, active, 4.5, &row_colors));
+        let remote_icon_paint =
+            remote_color.map(|color| workspace_row_status_paint(color, active, 3.0, &row_colors));
+        let unavailable_icon_paint = (!available)
+            .then(|| workspace_row_status_paint(row_colors.warning, active, 3.0, &row_colors));
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -185,20 +197,26 @@ impl WorkspaceSidebar {
                 workspace_id,
                 input: rename.input.clone(),
                 focus_handle: rename.focus_handle.clone(),
-                appearance: appearance.clone(),
+                appearance: row_text_appearance.clone(),
             }
             .into_any_element()
         } else {
+            let role = if active {
+                TextRole::BodyEmphasis
+            } else {
+                TextRole::Navigation
+            };
             div()
                 .id(("workspace-row-name", workspace_id.get()))
                 .debug_selector(move || format!("workspace-row-name-{}", workspace_id.get()))
                 .w_full()
                 .truncate()
-                .font(appearance.emphasis.clone())
-                .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-                .text_color(gpui_color(appearance.colors.row_foreground))
-                .group_hover(row_group.clone(), |style| {
-                    style.text_color(gpui_color(appearance.colors.row_hover_foreground))
+                .chrome_text(appearance.typography.style(role))
+                .text_color(gpui_color(row_colors.row_foreground))
+                .when(appearance.active, |label| {
+                    label.group_hover(row_group.clone(), |style| {
+                        style.text_color(gpui_color(row_colors.row_hover_foreground))
+                    })
                 })
                 .child(name.clone())
                 .into_any_element()
@@ -218,7 +236,7 @@ impl WorkspaceSidebar {
             "Workspace Directory"
         };
 
-        let row_padding = row_padding(&appearance, cx);
+        let row_padding = row_padding(appearance, cx);
         let row_content = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
@@ -230,7 +248,7 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(appearance.height(SIDEBAR_ROW_HEIGHT, SIDEBAR_NAME_TEXT_SIZE))
+            .h(appearance.spacing(SIDEBAR_ROW_HEIGHT))
             .flex_shrink_0()
             .px(row_padding)
             .flex()
@@ -239,7 +257,7 @@ impl WorkspaceSidebar {
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
             .group(row_group.clone())
-            .when_some(row_background(&appearance), |row, background| {
+            .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
             .child(chip.render(
@@ -266,16 +284,17 @@ impl WorkspaceSidebar {
                         div()
                             .relative()
                             .text_color(gpui_color(
-                                remote_icon_paint
-                                    .map_or(appearance.colors.row_icon, |paint| paint.normal),
+                                remote_icon_paint.map_or(row_colors.row_icon, |paint| paint.normal),
                             ))
-                            .group_hover(row_group.clone(), |style| {
-                                style.text_color(gpui_color(
-                                    remote_icon_paint
-                                        .map_or(appearance.colors.row_hover_icon, |paint| {
-                                            paint.hovered
-                                        }),
-                                ))
+                            .when(appearance.active, |icon| {
+                                icon.group_hover(row_group.clone(), |style| {
+                                    style.text_color(gpui_color(
+                                        remote_icon_paint
+                                            .map_or(row_colors.row_hover_icon, |paint| {
+                                                paint.hovered
+                                            }),
+                                    ))
+                                })
                             })
                             .child(Icon::inherited(
                                 if remote_connection_phase.is_some() {
@@ -283,7 +302,7 @@ impl WorkspaceSidebar {
                                 } else {
                                     IconName::Terminal
                                 },
-                                appearance.spacing(SIDEBAR_ROW_ICON_SIZE),
+                                appearance.icons.metrics(IconRole::Row).glyph_size,
                             ))
                             .when(!available, |icon| {
                                 icon.child(
@@ -293,21 +312,21 @@ impl WorkspaceSidebar {
                                         .bottom(px(-4.0))
                                         .text_color(gpui_color(
                                             unavailable_icon_paint
-                                                .map_or(appearance.colors.warning, |paint| {
-                                                    paint.normal
-                                                }),
+                                                .map_or(row_colors.warning, |paint| paint.normal),
                                         ))
-                                        .group_hover(row_group.clone(), |style| {
-                                            style.text_color(gpui_color(
-                                                unavailable_icon_paint
-                                                    .map_or(appearance.colors.warning, |paint| {
-                                                        paint.hovered
-                                                    }),
-                                            ))
+                                        .when(appearance.active, |badge| {
+                                            badge.group_hover(row_group.clone(), |style| {
+                                                style.text_color(gpui_color(
+                                                    unavailable_icon_paint
+                                                        .map_or(row_colors.warning, |paint| {
+                                                            paint.hovered
+                                                        }),
+                                                ))
+                                            })
                                         })
                                         .child(Icon::inherited(
                                             IconName::TriangleAlert,
-                                            appearance.spacing(10.0),
+                                            appearance.icons.metrics(IconRole::Caption).glyph_size,
                                         )),
                                 )
                             }),
@@ -325,7 +344,7 @@ impl WorkspaceSidebar {
                         first_line,
                         if renaming { None } else { machine },
                         workspace_id.get(),
-                        appearance.clone(),
+                        row_text_appearance.clone(),
                     ))
                     .child(text::detail(
                         detail,
@@ -334,7 +353,7 @@ impl WorkspaceSidebar {
                         detail_paint,
                         detail_selector,
                         workspace_id.get(),
-                        appearance.clone(),
+                        row_text_appearance,
                     )),
             )
             // Rows rest on the continuous base surface without separators; the hover and selection
@@ -345,7 +364,7 @@ impl WorkspaceSidebar {
             .when(active && self.focus.is_focused(window), |row| {
                 row.child(chip.ring(
                     appearance.spacing(SIDEBAR_ROW_SELECTION_RING_GAP),
-                    appearance.colors.sidebar_focus,
+                    row_colors.sidebar_focus,
                     "workspace-sidebar-focus-indicator",
                 ))
             });
@@ -422,7 +441,7 @@ impl WorkspaceSidebar {
     ) -> AnyElement {
         let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let footer_icon_size = appearance.spacing(SIDEBAR_FOOTER_ICON_SIZE);
+        let footer_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let new_local_shortcut = presentation.shortcut(&crate::ui::NewWorkspace);
         let new_remote_shortcut = presentation.shortcut(&NewRemoteWorkspace);
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
@@ -536,7 +555,7 @@ impl WorkspaceSidebar {
                         sidebar.update(cx, |sidebar, cx| sidebar.on_key_down(event, window, cx));
                 }
             })
-            .font(appearance.regular.clone())
+            .font(appearance.typography.style(TextRole::Body).font.clone())
             .bg(gpui_color(appearance.surface(
                 crate::appearance::SurfaceRole::Base,
                 crate::ui::workspace_frame::base_surface(&appearance.colors),
@@ -549,7 +568,7 @@ impl WorkspaceSidebar {
                     .debug_selector(|| "workspace-sidebar-footer".to_owned())
                     .relative()
                     .w_full()
-                    .h(appearance.height(NEW_WORKSPACE_BUTTON_HEIGHT, SIDEBAR_NAME_TEXT_SIZE))
+                    .h(appearance.spacing(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .flex()
                     .items_center()

@@ -4469,7 +4469,12 @@ fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &m
     let (manager, _, cx) = workspace_manager(cx);
     assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
 
-    let expected = px(super::WORKSPACE_CHROME_ICON_SIZE);
+    let expected = cx.update(|_, cx| {
+        crate::ui::appearance::chrome(cx)
+            .icons
+            .metrics(crate::ui::chrome_icons::IconRole::Chrome)
+            .glyph_size
+    });
     let opened = cx.debug_bounds("workspace-switcher-icon").unwrap();
     assert_eq!(
         opened.size,
@@ -5371,7 +5376,9 @@ fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext
                 spacing_scale,
                 ..crate::ui::appearance::ChromeAppearance::default()
             };
-            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+                appearance,
+            )));
             window.refresh();
         });
         cx.run_until_parked();
@@ -5432,7 +5439,9 @@ fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
         ..crate::ui::appearance::ChromeAppearance::default()
     };
     cx.update(|window, cx| {
-        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
         window.refresh();
     });
     cx.run_until_parked();
@@ -7391,7 +7400,9 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
             spaceterm_ui::replace_control_theme_catalog(cx, catalog),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
-        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
         window.refresh();
     });
     cx.run_until_parked();
@@ -8466,9 +8477,12 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     open_workspace_switcher(cx);
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
-    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let marker = cx.debug_bounds("combo-box-row-0-check").unwrap();
+    let identity = cx.debug_bounds("combo-box-row-0-identity-icon").unwrap();
     let first = cx.debug_bounds("workspace-switcher-result-1").unwrap();
     assert!(first.contains(&marker.center()));
+    assert!(marker.right() < identity.left());
+    assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(1)
@@ -8476,9 +8490,12 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     open_workspace_switcher(cx);
-    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let marker = cx.debug_bounds("combo-box-row-1-check").unwrap();
+    let identity = cx.debug_bounds("combo-box-row-1-identity-icon").unwrap();
     let second = cx.debug_bounds("workspace-switcher-result-2").unwrap();
     assert!(second.contains(&marker.center()));
+    assert!(marker.right() < identity.left());
+    assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(2)

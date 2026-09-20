@@ -4,14 +4,13 @@ use spaceterm_ui::{Icon, IconName};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::chrome_icons::IconRole;
+use crate::ui::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::ui::workspace_status::WorkspaceStatusPaint;
 
 use super::gpui_color;
 
-use super::SIDEBAR_NAME_TEXT_SIZE as NAME_SIZE;
-const DETAIL_SIZE: f32 = 12.0;
 const GAP: f32 = 8.0;
-const PIN_SIZE: f32 = 10.0;
 const PIN_WIDTH: f32 = 16.0;
 
 pub(super) fn title(
@@ -21,12 +20,21 @@ pub(super) fn title(
     id: u64,
     appearance: ChromeAppearance,
 ) -> AnyElement {
-    let height = appearance.height(22.0, NAME_SIZE);
+    let height = appearance
+        .typography
+        .style(TextRole::BodyEmphasis)
+        .line_height
+        + appearance.spacing(6.0);
     canvas(
         move |bounds, window, cx| {
-            let name_width = appearance.measure_emphasis(&name, NAME_SIZE, window);
+            let name_width = appearance
+                .typography
+                .measure(TextRole::BodyEmphasis, &name, window);
             let machine = machine.and_then(|machine| {
-                let full_width = appearance.measure(&machine, DETAIL_SIZE, window);
+                let full_width =
+                    appearance
+                        .typography
+                        .measure(TextRole::Secondary, &machine, window);
                 machine_width(bounds.size.width, name_width, full_width)
                     .map(|width| (machine, width))
             });
@@ -44,8 +52,7 @@ pub(super) fn title(
                             .w(width)
                             .flex_shrink_0()
                             .truncate()
-                            .font(appearance.regular.clone())
-                            .text_size(appearance.text_size(DETAIL_SIZE))
+                            .chrome_text(appearance.typography.style(TextRole::Secondary))
                             .text_color(gpui_color(appearance.colors.row_secondary))
                             .group_hover(format!("workspace-row-state-{id}"), |style| {
                                 style.text_color(gpui_color(appearance.colors.row_hover_secondary))
@@ -79,10 +86,14 @@ pub(super) fn detail(
     id: u64,
     appearance: ChromeAppearance,
 ) -> AnyElement {
-    let height = appearance.height(18.0, DETAIL_SIZE);
+    let height =
+        appearance.typography.style(TextRole::Secondary).line_height + appearance.spacing(3.0);
     canvas(
         move |bounds, window, cx| {
-            let counts_width = appearance.measure(&counts, DETAIL_SIZE, window).ceil();
+            let counts_width = appearance
+                .typography
+                .measure(TextRole::Secondary, &counts, window)
+                .ceil();
             let pin_width = if pinned {
                 appearance.spacing(PIN_WIDTH)
             } else {
@@ -95,7 +106,9 @@ pub(super) fn detail(
                 text
             } else {
                 fit_trailing_path(&text, available, |value| {
-                    appearance.measure(value, DETAIL_SIZE, window)
+                    appearance
+                        .typography
+                        .measure(TextRole::Secondary, value, window)
                 })
                 .into()
             };
@@ -117,7 +130,10 @@ pub(super) fn detail(
                             .group_hover(format!("workspace-row-state-{id}"), |style| {
                                 style.text_color(gpui_color(appearance.colors.row_hover_secondary))
                             })
-                            .child(Icon::inherited(IconName::Pin, appearance.spacing(PIN_SIZE))),
+                            .child(Icon::inherited(
+                                IconName::Pin,
+                                appearance.icons.metrics(IconRole::Caption).glyph_size,
+                            )),
                     )
                 })
                 .child(
@@ -145,8 +161,7 @@ pub(super) fn detail(
                 .flex()
                 .items_center()
                 .gap(appearance.spacing(GAP))
-                .font(appearance.regular.clone())
-                .text_size(appearance.text_size(DETAIL_SIZE))
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .child(path)
                 .child(
                     div()

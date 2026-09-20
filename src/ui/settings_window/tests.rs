@@ -1290,8 +1290,11 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
 }
 
 #[gpui::test]
-fn backdrop_guidance_distinguishes_accessibility_from_native_capability(cx: &mut TestAppContext) {
+fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
+    cx: &mut TestAppContext,
+) {
     let (window, harness, cx) = open_settings(cx);
+    let retained = document_of(&window, cx).preferences.background;
     harness
         .platform
         .set_native_window_transparency_supported(true);
@@ -1309,6 +1312,35 @@ fn backdrop_guidance_distinguishes_accessibility_from_native_capability(cx: &mut
     });
     assert!(transparency.contains("window and floating surfaces opaque"));
     assert!(blur.contains("disable window and floating-surface blur"));
+
+    harness.platform.set_reduce_transparency(false);
+    harness.platform.set_increase_contrast(true);
+    cx.run_until_parked();
+    for row in [SettingsRowId::Transparency, SettingsRowId::BackgroundBlur] {
+        let guidance = window
+            .read_with(cx, |settings, cx| settings.row_description(row, cx))
+            .unwrap();
+        assert!(!guidance.contains("currently keep"), "{row:?}: {guidance}");
+        assert!(
+            !guidance.contains("currently disable"),
+            "{row:?}: {guidance}"
+        );
+    }
+
+    harness.platform.set_increase_contrast(false);
+    harness.platform.set_show_borders(true);
+    cx.run_until_parked();
+    for row in [SettingsRowId::Transparency, SettingsRowId::BackgroundBlur] {
+        let guidance = window
+            .read_with(cx, |settings, cx| settings.row_description(row, cx))
+            .unwrap();
+        assert!(!guidance.contains("currently keep"), "{row:?}: {guidance}");
+        assert!(
+            !guidance.contains("currently disable"),
+            "{row:?}: {guidance}"
+        );
+    }
+    assert_eq!(document_of(&window, cx).preferences.background, retained);
 }
 
 #[gpui::test]
@@ -1416,17 +1448,17 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
     click("settings-chrome-density-comfortable", cx);
     settle(cx);
     assert!(matches!(status(&settings, cx), SaveStatus::Failed(_)));
-    let colors = ChromeColors {
-        background: Color::rgb(0x101010),
-        text: Color::rgb(0xfefefe),
-        text_muted: Color::rgb(0xdedede),
-        panel_background: Color::rgb(0xffffff),
-        elevated_surface_background: Color::rgb(0xffffff),
+    let authored = ChromeColors {
+        background: Color::rgb(0x777777),
+        text: Color::rgb(0x777777),
+        text_muted: Color::rgb(0x777777),
+        panel_background: Color::rgb(0xf0f0f0),
+        elevated_surface_background: Color::rgb(0x202020),
         row_background: Color::rgb(0x111122),
-        row_foreground: Color::rgb(0xeeeeff),
+        row_foreground: Color::rgb(0x777777),
         row_selected_background: Color::rgb(0xffffdd),
-        row_selected_foreground: Color::rgb(0x111111),
-        row_selected_secondary: Color::rgb(0x333333),
+        row_selected_foreground: Color::rgb(0x777777),
+        row_selected_secondary: Color::rgb(0x777777),
         info_background: Color::rgb(0xfefefe),
         error: Color::rgb(0x101010),
         error_background: Color::rgb(0xffffff),
@@ -1436,10 +1468,55 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
     };
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let observed_styles = observed.clone();
-    cx.update(|window, cx| {
-        let mut appearance = crate::ui::appearance::chrome(cx).clone();
-        appearance.colors = colors.clone();
-        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+    let expected = cx.update(|window, cx| {
+        let installed = appearance_runtime::current(cx);
+        let mut resolved = installed.chrome.as_ref().clone();
+        resolved.colors = authored;
+        resolved.composition.capabilities.increase_contrast = true;
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved);
+        let root = appearance
+            .host_colors(spaceterm_ui::ControlHost::Window)
+            .clone();
+        let panel = appearance
+            .host_colors(spaceterm_ui::ControlHost::Panel)
+            .clone();
+        let card = appearance
+            .host_colors(spaceterm_ui::ControlHost::Card)
+            .clone();
+        for (foreground, host) in [
+            (root.text, root.background),
+            (card.text, card.elevated_surface_background),
+        ] {
+            assert!(
+                foreground.contrast_ratio(host) >= 7.0,
+                "Increase Contrast must resolve {foreground:?} on its final host {host:?}"
+            );
+        }
+        let navigation_row_fill = super::navigation_chip_paint(false, true, &panel)
+            .raised_on(&appearance, panel.panel_background)
+            .fill
+            .expect("the authored idle navigation row has a fill");
+        assert!(
+            panel.row_foreground.contrast_ratio(navigation_row_fill) >= 7.0,
+            "Increase Contrast must resolve the navigation foreground on its rendered row fill"
+        );
+        let expected = [
+            appearance.surface(
+                crate::appearance::SurfaceRole::Sheet,
+                appearance.colors.background,
+            ),
+            navigation_row_fill,
+            appearance.surface(
+                crate::appearance::SurfaceRole::Surface,
+                appearance.colors.elevated_surface_background,
+            ),
+            super::controls::highlighted_row_background(&appearance),
+            card.row_selected_foreground,
+            root.text_muted,
+        ];
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
         cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
             observed_styles.borrow_mut().push(state.clone());
             gpui::Empty
@@ -1450,32 +1527,29 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
                 .into_any_element()
         }));
         window.refresh();
+        expected
     });
     cx.run_until_parked();
     set_query(&settings, "line height", cx);
     for (selector, expected_background, expected_foreground) in [
-        ("settings-window-surface", Some(colors.background), None),
+        ("settings-window-surface", Some(expected[0]), None),
         (
             "settings-navigation-chip-settings-section-interface",
-            Some(colors.row_background),
+            Some(expected[1]),
             None,
         ),
         (
             "settings-section-terminal-group-font-card",
-            Some(colors.elevated_surface_background),
+            Some(expected[2]),
             None,
         ),
-        (
-            "settings-row-terminal-line-height",
-            Some(colors.row_selected_background),
-            None,
-        ),
+        ("settings-row-terminal-line-height", Some(expected[3]), None),
         (
             "settings-row-terminal-line-height-label",
             None,
-            Some(colors.row_selected_foreground),
+            Some(expected[4]),
         ),
-        ("settings-save-status", None, Some(colors.text_muted)),
+        ("settings-save-status", None, Some(expected[5])),
     ] {
         cx.update(|window, cx| window.toggle_inspector(cx));
         cx.run_until_parked();
@@ -1521,15 +1595,15 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
                     .borrow()
                     .iter()
                     .filter(|state| state.bounds == bounds)
-                    .all(|state| {
+                    .any(|state| {
                         let widths = &state.base_style.border_widths;
                         [widths.top, widths.right, widths.bottom, widths.left]
                             .into_iter()
                             .all(|width| {
-                                width.is_none_or(|width| width.to_pixels(px(16.0)) == px(0.0))
+                                width.is_some_and(|width| width.to_pixels(px(16.0)) == px(1.0))
                             })
                     }),
-                "a Settings group must not paint an enclosing outline"
+                "a Settings card must paint its fixed one-point edge"
             );
         }
         cx.update(|window, cx| window.toggle_inspector(cx));
@@ -1573,9 +1647,9 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
     }
 }
 
-/// Removing the group outline must preserve its content inset, row alignment, and separation.
+/// Group cards keep one content column and separate runs more than adjacent rows.
 #[gpui::test]
-fn borderless_groups_preserve_content_alignment_and_spacing(cx: &mut TestAppContext) {
+fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Terminal, cx);
 
@@ -1636,6 +1710,28 @@ fn borderless_groups_preserve_content_alignment_and_spacing(cx: &mut TestAppCont
             "every card should share one left edge"
         );
     }
+}
+
+#[gpui::test]
+fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    let card = cx
+        .debug_bounds("settings-section-appearance-group-background-card")
+        .expect("the Background group must render its card");
+    let top = cx
+        .debug_bounds("settings-row-transparency")
+        .expect("the first Background row must render");
+    let bottom = cx
+        .debug_bounds("settings-row-background-blur")
+        .expect("the second Background row must render");
+    let separator = cx
+        .debug_bounds("settings-section-appearance-group-background-card-separator-1")
+        .expect("adjacent Background rows must render a separator");
+
+    assert_eq!(bottom.top(), top.bottom());
+    assert_eq!(separator.size.height, px(1.0));
+    assert_eq!(separator.left() - card.left(), px(12.0));
+    assert_eq!(separator.right(), card.right() - px(1.0));
 }
 
 fn assert_reset_all_leads_the_content_footer(document: SettingsDocument, cx: &mut TestAppContext) {
@@ -1899,9 +1995,9 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
 
 /// A run's title outranks every label inside it, and shares the labels' left edge.
 ///
-/// Nothing on a Settings page is ruled off, so rank is the only thing saying where a run begins. A
-/// title a label outweighs inverts that reading, and it is the kind of inversion that survives
-/// review because each piece looks reasonable on its own.
+/// The card edge bounds the run, while the title still establishes its name and rank. A title a
+/// label outweighs inverts that reading, and it is the kind of inversion that survives review
+/// because each piece looks reasonable on its own.
 #[gpui::test]
 fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);

@@ -48,6 +48,7 @@ pub struct SearchFieldMetrics {
     label_size: Pixels,
     line_height: Pixels,
     icon_size: Pixels,
+    icon_baseline_center: Pixels,
     clear_mark_size: Pixels,
     clear_glyph_size: Pixels,
     clear_trailing_inset: Pixels,
@@ -64,6 +65,7 @@ impl SearchFieldMetrics {
             label_size: px(12.0),
             line_height: px(16.0),
             icon_size: px(13.0),
+            icon_baseline_center: px(4.0),
             clear_mark_size: height / 2.0,
             clear_glyph_size: px(8.0),
             clear_trailing_inset: px(4.0),
@@ -94,6 +96,12 @@ impl SearchFieldMetrics {
         self.label_size = label_size;
         self.line_height = line_height;
         self.icon_size = icon_size;
+        self
+    }
+
+    /// Sets the center-above-baseline metric for the search glyph paired with the editor text.
+    pub fn icon_baseline_center(mut self, center: Pixels) -> Self {
+        self.icon_baseline_center = center;
         self
     }
 
@@ -129,10 +137,14 @@ impl SearchFieldMetrics {
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            corner_radius: self.corner_radius,
             label_size: crate::appearance::scale_metric(self.label_size, text_scale),
             line_height: crate::appearance::scale_metric(self.line_height, text_scale),
             icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
+            icon_baseline_center: crate::appearance::scale_metric(
+                self.icon_baseline_center,
+                text_scale,
+            ),
             clear_mark_size: crate::appearance::scale_metric(self.clear_mark_size, text_scale),
             clear_glyph_size: crate::appearance::scale_metric(self.clear_glyph_size, text_scale),
             clear_trailing_inset: crate::appearance::scale_metric(
@@ -164,6 +176,11 @@ impl SearchFieldTheme {
             paint,
             metrics,
         }
+    }
+
+    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.frame = self.frame.focus_ring_width(width);
+        self
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -224,9 +241,16 @@ impl SearchField {
 }
 
 impl RenderOnce for SearchField {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = *crate::floating_surface::hosted_search_field_theme(cx);
         let metrics = theme.metrics;
+        let icon_offset = crate::icon::text_alignment_offset(
+            crate::control_typography(cx).regular(),
+            metrics.label_size,
+            metrics.line_height,
+            metrics.icon_baseline_center,
+            window,
+        );
         let editor = self.input.read(cx);
         let focus = editor.focus_handle();
         let empty = editor.value().is_empty();
@@ -256,11 +280,17 @@ impl RenderOnce for SearchField {
             .rounded(metrics.corner_radius)
             .text_size(metrics.label_size)
             .line_height(metrics.line_height)
-            .child(div().flex_none().child(Icon::new(
-                IconName::Search,
-                metrics.icon_size,
-                theme.paint.icon,
-            )))
+            .child(
+                div()
+                    .flex_none()
+                    .relative()
+                    .top(icon_offset)
+                    .child(Icon::new(
+                        IconName::Search,
+                        metrics.icon_size,
+                        theme.paint.icon,
+                    )),
+            )
             .child(div().min_w_0().flex_1().child(self.input))
             .when(!empty, |field| {
                 let glyph = theme.paint.clear_glyph;
@@ -303,4 +333,18 @@ fn clear_mark(metrics: SearchFieldMetrics, fill: Rgba, glyph: Rgba) -> gpui::Any
         .bg(fill)
         .child(Icon::new(IconName::X, metrics.clear_glyph_size, glyph))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn density_scales_field_bounds_but_not_radius() {
+        let metrics = SearchFieldMetrics::new(px(28.0)).spacing(px(8.0), px(7.0), px(6.0));
+        let comfortable = metrics.scaled(1.0, 1.25);
+
+        assert!(comfortable.height > metrics.height);
+        assert_eq!(comfortable.corner_radius, metrics.corner_radius);
+    }
 }

@@ -39,11 +39,13 @@ mod tests {
 
     #[test]
     fn paint_uses_dedicated_progress_roles() {
-        let mut colors = ChromeColors::default();
-        colors.progress_track = Color::rgba(0x11223344);
-        colors.progress_indicator = Color::rgba(0x55667788);
-        colors.toggle_off_background = Color::rgb(0xaabbcc);
-        colors.text_accent = Color::rgb(0xddeeff);
+        let colors = ChromeColors {
+            progress_track: Color::rgba(0x11223344),
+            progress_indicator: Color::rgba(0x55667788),
+            toggle_off_background: Color::rgb(0xaabbcc),
+            text_accent: Color::rgb(0xddeeff),
+            ..ChromeColors::default()
+        };
 
         assert_eq!(
             paint(&colors),

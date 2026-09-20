@@ -12,7 +12,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use super::appearance::chrome;
+use super::chrome_icons::IconRole;
+use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 #[cfg(test)]
@@ -75,9 +78,9 @@ use gpui::{
 };
 use spaceterm_ui::{
     Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, FloatingRole,
-    FloatingShell, FloatingSurfaceTheme, Icon, IconButton, IconName, MenuLifecycleEvent, MenuSize,
-    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
+    FloatingShell, Icon, IconButton, IconName, MenuLifecycleEvent, MenuSize, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior,
+    TextInputVariant, Tooltip, window_modal_is_open,
 };
 
 #[cfg(test)]
@@ -3275,7 +3278,7 @@ impl TerminalPane {
     }
 
     fn render_find_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let appearance = chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
         // Find takes keyboard and pointer input over the Pane, so it is a Notice.
         let shell = floating_shell(FloatingRole::Notice, cx);
         let floating_colors = &appearance.floating_colors;
@@ -3315,14 +3318,14 @@ impl TerminalPane {
                 .mount(
                     div()
                         .id("terminal-find-bar")
-                        .font(appearance.regular.clone())
+                        .chrome_text(appearance.typography.style(TextRole::Body))
                         .debug_selector(|| "terminal-find-bar".to_owned())
                         .absolute()
                         .top(appearance.spacing(8.0))
                         .right(appearance.spacing(8.0))
-                        .w(appearance.text_size(360.0))
+                        .w(appearance.spacing(360.0))
                         .max_w(relative(0.94))
-                        .min_h(appearance.height(32.0, 13.0))
+                        .min_h(appearance.spacing(32.0))
                         .flex()
                         .flex_row()
                         .flex_wrap()
@@ -3350,11 +3353,15 @@ impl TerminalPane {
                         .child(
                             div()
                                 .debug_selector(|| "terminal-find-result-label".to_owned())
-                                .w(appearance.measure(&result_label, 11.0, window))
+                                .w(appearance.typography.measure(
+                                    TextRole::Secondary,
+                                    &result_label,
+                                    window,
+                                ))
                                 .max_w_full()
                                 .flex_shrink_0()
                                 .whitespace_normal()
-                                .text_size(appearance.text_size(11.0))
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(floating_colors.text_muted))
                                 .child(result_label),
                         )
@@ -3362,7 +3369,7 @@ impl TerminalPane {
                             "terminal-find-previous",
                             "Find Previous",
                             IconName::ChevronUp,
-                            appearance.text_size(12.0),
+                            appearance.icons.metrics(IconRole::Control).glyph_size,
                             has_results,
                             move |window, cx| {
                                 let _ = previous_pane.update(cx, |pane, cx| {
@@ -3374,7 +3381,7 @@ impl TerminalPane {
                             "terminal-find-next",
                             "Find Next",
                             IconName::ChevronDown,
-                            appearance.text_size(12.0),
+                            appearance.icons.metrics(IconRole::Control).glyph_size,
                             has_results,
                             move |window, cx| {
                                 let _ = next_pane.update(cx, |pane, cx| {
@@ -3386,7 +3393,7 @@ impl TerminalPane {
                             "terminal-find-close",
                             "Close Find",
                             IconName::X,
-                            appearance.text_size(12.0),
+                            appearance.icons.metrics(IconRole::Control).glyph_size,
                             true,
                             move |window, cx| {
                                 let _ = close_pane.update(cx, |pane, cx| {
@@ -3407,17 +3414,14 @@ impl TerminalPane {
 /// from this renderer. The bounded library fallback keeps fixtures legible before a window installs
 /// its resolved catalog.
 fn floating_shell(role: FloatingRole, cx: &App) -> FloatingShell {
-    cx.try_global::<FloatingSurfaceTheme>()
-        .copied()
-        .unwrap_or_default()
-        .shell(role)
+    spaceterm_ui::floating_surface_theme(cx).shell(role)
 }
 
 /// Resolves the field after the Notice enters its host scope during child layout.
 #[derive(IntoElement)]
 struct TerminalFindField {
     input: Entity<TextInput>,
-    appearance: super::appearance::ChromeAppearance,
+    appearance: Arc<super::appearance::ChromeAppearance>,
     corner_radius: Pixels,
 }
 
@@ -3431,18 +3435,21 @@ impl gpui::RenderOnce for TerminalFindField {
             cx,
         )
         .relative()
-        .h(appearance.height(24.0, 13.0))
-        .w(appearance.text_size(120.0))
+        .h(appearance.spacing(24.0))
+        .w(appearance.spacing(120.0))
         .max_w_full()
         .min_w(px(0.0))
         .flex_grow()
-        .overflow_hidden()
         .flex()
         .items_center()
         .px(appearance.spacing(5.0))
         .rounded(self.corner_radius)
-        .text_size(appearance.text_size(13.0))
-        .text_color(gpui_color(appearance.colors.text))
+        .chrome_text(appearance.typography.style(TextRole::Body))
+        .text_color(gpui_color(
+            appearance
+                .host_colors(spaceterm_ui::ControlHost::Floating)
+                .text,
+        ))
         .whitespace_nowrap()
         .child(self.input)
     }
@@ -3652,7 +3659,7 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
         let native_activity = self.current_activity(window, cx);
         self.update_application_activity(native_activity, cx);
         let pane = cx.entity().downgrade();
@@ -3981,7 +3988,7 @@ impl Render for TerminalPane {
             })
             .id("terminal-pane")
             .debug_selector(|| "terminal-pane".to_owned())
-            .font(appearance.regular.clone())
+            .font(appearance.typography.style(TextRole::Body).font.clone())
             .relative()
             .size_full()
             .overflow_hidden()
@@ -4049,7 +4056,7 @@ impl Render for TerminalPane {
                                 .px(appearance.spacing(6.0))
                                 .py(appearance.spacing(3.0))
                                 .text_color(gpui_color(floating_colors.preview_foreground))
-                                .text_size(appearance.text_size(13.0))
+                                .chrome_text(appearance.typography.style(TextRole::Body))
                                 .child(div().truncate().child(text)),
                         ),
                     )
@@ -4068,13 +4075,21 @@ impl Render for TerminalPane {
                 |root, status| {
                     // A definite width keeps GPUI's wrapped text measurement out of the
                     // intrinsic flex pass, which can retain a zero-width line layout.
-                    let message_width = appearance.measure(&status, 13.0, window)
-                        + appearance.text_size(14.0)
-                        + appearance.spacing(8.0);
+                    let status_icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
+                    let message_width =
+                        appearance
+                            .typography
+                            .measure(TextRole::Body, &status, window)
+                            + status_icon_size
+                            + appearance.spacing(8.0);
                     let action_width = if diagnostics_available {
-                        appearance.measure("Export Diagnostics", 13.0, window)
+                        appearance
+                            .typography
+                            .measure(TextRole::Body, "Export Diagnostics", window)
                     } else if recovery_available {
-                        appearance.measure("Retry", 13.0, window)
+                        appearance
+                            .typography
+                            .measure(TextRole::Body, "Retry", window)
                     } else {
                         px(0.0)
                     };
@@ -4091,7 +4106,7 @@ impl Render for TerminalPane {
                                 .w(width)
                                 .max_w(relative(0.94))
                                 .text_color(gpui_color(floating_colors.text))
-                                .text_size(appearance.text_size(13.0))
+                                .chrome_text(appearance.typography.style(TextRole::Body))
                                 .flex()
                                 .flex_row()
                                 // The surface edge now belongs to the shared role, so the status
@@ -4121,7 +4136,7 @@ impl Render for TerminalPane {
                                                 .gap(appearance.spacing(8.0))
                                                 .child(Icon::new(
                                                     status_icon,
-                                                    appearance.text_size(14.0),
+                                                    status_icon_size,
                                                     gpui_color(status_color),
                                                 ))
                                                 .child(
@@ -4194,7 +4209,7 @@ impl Render for TerminalPane {
 fn render_paste_confirmation(
     confirmation: PasteConfirmation,
     pane: gpui::WeakEntity<TerminalPane>,
-    appearance: super::appearance::ChromeAppearance,
+    appearance: Arc<super::appearance::ChromeAppearance>,
     shell: FloatingShell,
 ) -> impl IntoElement {
     let floating_colors = &appearance.floating_colors;
@@ -4208,7 +4223,7 @@ fn render_paste_confirmation(
     shell.mount(
         div()
             .debug_selector(|| "unsafe-paste-confirmation".to_owned())
-            .font(appearance.regular.clone())
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .absolute()
             .left(appearance.spacing(16.0))
             .right(appearance.spacing(16.0))
@@ -4216,7 +4231,6 @@ fn render_paste_confirmation(
             .flex()
             .flex_row()
             .text_color(gpui_color(floating_colors.text))
-            .text_size(appearance.text_size(13.0))
             .occlude()
             // This notice asks the reader to weigh a risk, so the warning stays visible as a
             // leading rail now that the surface edge belongs to the shared role.

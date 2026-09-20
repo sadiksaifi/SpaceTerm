@@ -809,11 +809,8 @@ fn install_modal_test_support(cx: &mut TestAppContext) {
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
                     rgba(0x5599ffff),
-                    rgba(0x5599ff22),
                     rgba(0xffbb55ff),
-                    rgba(0xffbb5522),
                     rgba(0xff6677ff),
-                    rgba(0xff667722),
                 ),
                 crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
             ),
@@ -945,6 +942,80 @@ fn focus_trigger(cx: &mut VisualTestContext) {
     cx.update(|window, _| window.focus_next());
     cx.update(|window, _| window.focus_next());
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
+    struct InsetTrigger;
+    impl Render for InsetTrigger {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            div().p(px(16.0)).child(
+                div().w(px(180.0)).child(
+                    ComboBox::new("ring-combo", "Choice", Some(1), "Choose", items())
+                        .debug_selector("combo-box-trigger")
+                        .on_accept(|_, _, _| {}),
+                ),
+            )
+        }
+    }
+    install_themes(cx);
+    let ordinary = rgba(0x123456ff);
+    let focus = rgba(0xabcdefef);
+    let theme = ComboBoxTheme::new(
+        ComboBoxPaint::new(
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x606079ff),
+            rgba(0x252530ff),
+            rgba(0xffffffff),
+            rgba(0x141415ff),
+            rgba(0x1c1c24ff),
+            ordinary,
+            focus,
+        ),
+        ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
+    )
+    .focus_ring_width(px(2.0));
+    cx.set_global(theme);
+    let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, _| window.focus_next());
+    cx.run_until_parked();
+
+    let trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("ComboBox trigger should reach the scene");
+    let ring = cx
+        .debug_bounds("combo-box-trigger-keyboard-focus")
+        .expect("focused ComboBox trigger should submit its outline");
+    let outset = px(3.0);
+    assert!(
+        ring.left() == trigger.left() - outset
+            && ring.top() == trigger.top() - outset
+            && ring.right() == trigger.right() + outset
+            && ring.bottom() == trigger.bottom() + outset,
+        "trigger={trigger:?}; ring={ring:?}"
+    );
+    assert!(
+        cx.update(|_, cx| {
+            crate::floating_surface::shell(crate::FloatingRole::Popover, cx).content_inset()
+        }) > px(0.0),
+        "the regression must exercise the ordinary nonzero popover content inset"
+    );
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quads = window.painted_quads_for_test();
+        let visible = |color: gpui::Rgba| {
+            quads
+                .iter()
+                .filter(|quad| quad.border_color == color.into())
+                .map(|quad| quad.visible_bounds)
+                .reduce(|bounds, next| bounds.union(&next))
+        };
+        assert_eq!(visible(ordinary), Some(trigger.scale(scale)));
+        assert_eq!(visible(focus), Some(ring.scale(scale)));
+    });
 }
 
 #[gpui::test]
@@ -2586,8 +2657,13 @@ fn a_marked_row_should_keep_its_own_leading_icon(cx: &mut TestAppContext) {
     let (_root, _events, _presses, cx) = combo_box_window(cx, Some(3), items(), false);
     open_by_pointer(cx);
 
-    assert!(cx.debug_bounds("combo-row-remote-icon").is_some());
-    assert_eq!(cx.debug_bounds("combo-box-row-2-check"), None);
+    let check = cx
+        .debug_bounds("combo-box-row-2-check")
+        .expect("the state gutter should keep the selected mark");
+    let identity = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the identity gutter should keep the row icon");
+    assert!(check.right() < identity.left());
 }
 
 #[gpui::test]

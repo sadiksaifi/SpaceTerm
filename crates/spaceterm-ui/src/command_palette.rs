@@ -1070,11 +1070,15 @@ pub struct CommandPaletteMetrics {
     input_size: Pixels,
     label_size: Pixels,
     secondary_size: Pixels,
+    section_size: Pixels,
     accessory_padding: Pixels,
     accessory_line_padding: Pixels,
     accessory_radius: Pixels,
-    line_height: Pixels,
+    body_line_height: Pixels,
+    secondary_line_height: Pixels,
+    section_line_height: Pixels,
     icon_size: Pixels,
+    icon_baseline_center: Pixels,
 }
 
 impl CommandPaletteMetrics {
@@ -1103,11 +1107,15 @@ impl CommandPaletteMetrics {
             input_size: px(14.0),
             label_size: px(13.0),
             secondary_size: px(11.0),
+            section_size: px(13.0),
             accessory_padding: px(5.0),
             accessory_line_padding: px(2.0),
             accessory_radius: px(4.0),
-            line_height: px(16.0),
+            body_line_height: px(16.0),
+            secondary_line_height: px(15.0),
+            section_line_height: px(17.0),
             icon_size: px(12.0),
+            icon_baseline_center: px(4.0),
         }
     }
 
@@ -1190,6 +1198,12 @@ impl CommandPaletteMetrics {
         self
     }
 
+    /// Sets the group-heading size independently from row descriptions and footer hints.
+    pub fn section_font_size(mut self, size: Pixels) -> Self {
+        self.section_size = size;
+        self
+    }
+
     /// Sets the padded status accessory shape.
     pub fn accessory_shape(
         mut self,
@@ -1203,10 +1217,24 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the shared text line height and chrome glyph size.
-    pub fn text_geometry(mut self, line_height: Pixels, icon_size: Pixels) -> Self {
-        self.line_height = line_height;
+    /// Sets each text role's line box and the chrome glyph size.
+    pub fn text_geometry(
+        mut self,
+        body_line_height: Pixels,
+        secondary_line_height: Pixels,
+        section_line_height: Pixels,
+        icon_size: Pixels,
+    ) -> Self {
+        self.body_line_height = body_line_height;
+        self.secondary_line_height = secondary_line_height;
+        self.section_line_height = section_line_height;
         self.icon_size = icon_size;
+        self
+    }
+
+    /// Sets the center-above-baseline metric for icons paired with result labels.
+    pub fn icon_baseline_center(mut self, center: Pixels) -> Self {
+        self.icon_baseline_center = center;
         self
     }
 
@@ -1222,33 +1250,33 @@ impl CommandPaletteMetrics {
             panel_padding: self.panel_padding,
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
-                self.line_height,
+                self.body_line_height,
                 text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
-                self.line_height * 2.0,
+                self.body_line_height + self.secondary_line_height,
                 text_scale,
                 spacing_scale,
             ),
             single_line_row_height: crate::appearance::scale_line_box(
                 self.single_line_row_height,
-                self.line_height,
+                self.body_line_height,
                 text_scale,
                 spacing_scale,
             ),
             row_line_gap: crate::appearance::scale_metric(self.row_line_gap, spacing_scale),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
-                self.secondary_size,
+                self.section_line_height,
                 text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
             footer_height: crate::appearance::scale_line_box(
                 self.footer_height,
-                self.secondary_size,
+                self.secondary_line_height,
                 text_scale,
                 spacing_scale,
             ),
@@ -1267,6 +1295,7 @@ impl CommandPaletteMetrics {
             input_size: crate::appearance::scale_metric(self.input_size, text_scale),
             label_size: crate::appearance::scale_metric(self.label_size, text_scale),
             secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
+            section_size: crate::appearance::scale_metric(self.section_size, text_scale),
             accessory_padding: crate::appearance::scale_metric(
                 self.accessory_padding,
                 spacing_scale,
@@ -1275,9 +1304,21 @@ impl CommandPaletteMetrics {
                 self.accessory_line_padding,
                 spacing_scale,
             ),
-            accessory_radius: crate::appearance::scale_metric(self.accessory_radius, spacing_scale),
-            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
+            accessory_radius: self.accessory_radius,
+            body_line_height: crate::appearance::scale_metric(self.body_line_height, text_scale),
+            secondary_line_height: crate::appearance::scale_metric(
+                self.secondary_line_height,
+                text_scale,
+            ),
+            section_line_height: crate::appearance::scale_metric(
+                self.section_line_height,
+                text_scale,
+            ),
             icon_size,
+            icon_baseline_center: crate::appearance::scale_metric(
+                self.icon_baseline_center,
+                text_scale,
+            ),
         }
     }
 
@@ -1330,7 +1371,10 @@ impl Global for CommandPaletteTheme {}
 
 /// Resolves the installed palette theme against the shared command surface.
 fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
-    let mut theme = *cx.global::<CommandPaletteTheme>();
+    let mut theme = *crate::control_theme_catalog(cx).map_or_else(
+        || cx.global::<CommandPaletteTheme>(),
+        |catalog| &catalog.command_palette,
+    );
     let shell = crate::floating_surface::shell(COMMAND_PALETTE_ROLE, cx);
     theme.metrics.corner_radius = shell.corner_radius();
     theme.metrics.panel_padding = shell.content_inset();
@@ -1392,6 +1436,13 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     _scrollbar_subscription: Subscription,
 }
 
+struct CommandPalettePanelLayout {
+    width: Pixels,
+    height: Pixels,
+    list_height: Pixels,
+    icon_offset: Pixels,
+}
+
 mod presented_results {
     use gpui::{Pixels, SharedString, px};
 
@@ -1443,7 +1494,7 @@ mod presented_results {
                     continue;
                 };
                 if !started || item.section != current {
-                    if started {
+                    if started && item.section.is_some() {
                         rows.push(PaletteRow::Separator);
                     }
                     if let Some(section) = item.section.clone() {
@@ -2319,13 +2370,26 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let Some(row) = self.presented_results.list_index_for_match(position) else {
             return;
         };
-        let item_is_visible = self.list.bounds_for_item(row).is_some_and(|item_bounds| {
-            let viewport = self.list.viewport_bounds();
-            item_bounds.top() >= viewport.top() && item_bounds.bottom() <= viewport.bottom()
-        });
+        let reveal_row = if position == 0
+            && row > 0
+            && matches!(
+                self.presented_results.row(row - 1),
+                Some(PaletteRow::Section(_))
+            ) {
+            row - 1
+        } else {
+            row
+        };
+        let item_is_visible = self
+            .list
+            .bounds_for_item(reveal_row)
+            .is_some_and(|item_bounds| {
+                let viewport = self.list.viewport_bounds();
+                item_bounds.top() >= viewport.top() && item_bounds.bottom() <= viewport.bottom()
+            });
         if !item_is_visible {
             self.list.scroll_to(ListOffset {
-                item_ix: row,
+                item_ix: reveal_row,
                 offset_in_item: px(0.0),
             });
         }
@@ -2713,7 +2777,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         }
         let theme = command_palette_theme(cx);
         let metrics = theme.metrics;
-        let font = crate::control_typography(cx).regular().clone();
+        let typography = crate::control_typography(cx);
+        let font = typography.regular().clone();
         if std::mem::take(&mut self.scrollbar_reveal_pending) {
             self.reveal_scrollbar(cx);
         } else {
@@ -2794,14 +2859,31 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             gpui::size(panel_width, panel_height),
         );
         let outside = self.render_outside_tracker(panel_bounds, cx);
-        let panel = self.render_panel(panel_width, panel_height, list_height, theme, cx);
+        let icon_offset = crate::icon::text_alignment_offset(
+            typography.regular(),
+            metrics.label_size,
+            metrics.body_line_height,
+            metrics.icon_baseline_center,
+            window,
+        );
+        let panel = self.render_panel(
+            CommandPalettePanelLayout {
+                width: panel_width,
+                height: panel_height,
+                list_height,
+                icon_offset,
+            },
+            theme,
+            typography,
+            cx,
+        );
         let overlay = div()
             .relative()
             .w(viewport.width)
             .h(viewport.height)
             .key_context(KEY_CONTEXT)
             .font(font)
-            .line_height(metrics.line_height)
+            .line_height(metrics.body_line_height)
             .track_focus(&self.focus_scope)
             .tab_group()
             .child(outside)
@@ -2934,12 +3016,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn render_panel(
         &self,
-        width: Pixels,
-        height: Pixels,
-        list_height: Pixels,
+        layout: CommandPalettePanelLayout,
         theme: CommandPaletteTheme,
+        typography: crate::ControlTypography,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
+        let CommandPalettePanelLayout {
+            width,
+            height,
+            list_height,
+            icon_offset,
+        } = layout;
         let paint = theme.paint;
         let metrics = theme.metrics;
         let content = if self.loading {
@@ -2953,7 +3040,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             )
             .into_any_element()
         } else {
-            self.render_results(list_height, theme, cx)
+            self.render_results(list_height, theme, typography, icon_offset, cx)
         };
 
         let panel = div()
@@ -3000,6 +3087,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .items_center()
             .gap(metrics.gap)
             .text_size(metrics.input_size)
+            .line_height(metrics.body_line_height)
             .child(div().min_w_0().flex_1().child(self.input.clone()))
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
@@ -3025,6 +3113,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         &self,
         list_height: Pixels,
         theme: CommandPaletteTheme,
+        typography: crate::ControlTypography,
+        icon_offset: Pixels,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let items = Rc::clone(&self.presented_items);
@@ -3041,14 +3131,14 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .relative()
             .size_full()
             .child(
-                list(self.list.clone(), move |index, _, cx| {
+                list(self.list.clone(), move |index, _, _| {
                     let Some(row) = presented_results.row(index) else {
                         return div().into_any_element();
                     };
                     let row_height = row.height(theme.metrics);
                     match row {
                         PaletteRow::Section(label) => {
-                            let font = crate::control_typography(cx).emphasis().clone();
+                            let font = typography.section_font().clone();
                             render_section(label.clone(), row_height, theme, font)
                                 .into_any_element()
                         }
@@ -3070,6 +3160,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         leading_reserved,
                                         row_height,
                                         theme,
+                                        crate::list_row::label_font(
+                                            &typography,
+                                            selected.as_ref() == Some(&item.id),
+                                        ),
+                                        icon_offset,
                                     )
                                 })
                             })
@@ -3177,6 +3272,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         let confirm_palette = cx.entity().downgrade();
                         let shortcut = confirm.shortcut.clone();
                         let shortcut_size = metrics.secondary_size;
+                        let shortcut_line_height = metrics.secondary_line_height;
                         trailing.child(
                             Button::new("command-palette-confirm", confirm.label.clone())
                                 .variant(ButtonVariant::Ghost)
@@ -3189,6 +3285,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                 .trailing(move |foreground| {
                                     div()
                                         .text_size(shortcut_size)
+                                        .line_height(shortcut_line_height)
                                         .text_color(foreground)
                                         .child(shortcut)
                                         .into_any_element()
@@ -3233,6 +3330,7 @@ fn render_hint(
         .items_center()
         .gap(metrics.accessory_padding)
         .text_size(metrics.secondary_size)
+        .line_height(metrics.secondary_line_height)
         .child(
             div()
                 .text_color(paint.footer_foreground)
@@ -3287,7 +3385,8 @@ fn render_section(
         .pl(metrics.content_leading_inset())
         .flex()
         .items_center()
-        .text_size(metrics.secondary_size)
+        .text_size(metrics.section_size)
+        .line_height(metrics.section_line_height)
         .font(font)
         .text_color(theme.paint.section_foreground)
         .child(label)
@@ -3323,6 +3422,7 @@ fn status_row(
         .flex()
         .items_center()
         .text_size(metrics.secondary_size)
+        .line_height(metrics.secondary_line_height)
         .text_color(paint.muted)
         .child(text.into())
 }
@@ -3361,6 +3461,8 @@ fn render_row<I: Clone + Eq + 'static>(
     leading_reserved: bool,
     height: Pixels,
     theme: CommandPaletteTheme,
+    label_font: gpui::Font,
+    icon_offset: Pixels,
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
@@ -3410,7 +3512,9 @@ fn render_row<I: Clone + Eq + 'static>(
             .flex_shrink_0()
             .flex()
             .items_center()
-            .justify_center();
+            .justify_center()
+            .relative()
+            .top(icon_offset);
         if let Some(icon) = item.leading_icon.clone() {
             leading = leading.child(icon(row_paint.icon, metrics.icon_size));
         }
@@ -3424,15 +3528,21 @@ fn render_row<I: Clone + Eq + 'static>(
         .flex_row()
         .items_center()
         .gap(metrics.gap)
-        .child(div().min_w_0().flex_1().child(highlighted_text(
-            item.label.clone(),
-            label_highlights,
-            foreground,
-            match_foreground,
-            metrics.label_size,
-        )))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .font(label_font)
+                .child(highlighted_text(
+                    item.label.clone(),
+                    label_highlights,
+                    foreground,
+                    match_foreground,
+                    metrics.label_size,
+                )),
+        )
         .when_some(item.trailing.clone(), |line, accessory| {
-            line.child(render_accessory(accessory, secondary, metrics))
+            line.child(render_accessory(accessory, secondary, metrics, icon_offset))
         });
     let text = div()
         .min_w_0()
@@ -3448,6 +3558,7 @@ fn render_row<I: Clone + Eq + 'static>(
                     .w_full()
                     .min_w_0()
                     .overflow_hidden()
+                    .line_height(metrics.secondary_line_height)
                     .child(highlighted_text(
                         description,
                         description_highlights,
@@ -3561,11 +3672,13 @@ fn render_accessory(
     accessory: CommandPaletteAccessory,
     color: Rgba,
     metrics: CommandPaletteMetrics,
+    icon_offset: Pixels,
 ) -> AnyElement {
     match accessory {
         CommandPaletteAccessory::Text(text) | CommandPaletteAccessory::Shortcut(text) => div()
             .flex_shrink_0()
             .text_size(metrics.secondary_size)
+            .line_height(metrics.secondary_line_height)
             .text_color(color)
             .child(text)
             .into_any_element(),
@@ -3575,12 +3688,15 @@ fn render_accessory(
             .py(metrics.accessory_line_padding)
             .rounded(metrics.accessory_radius)
             .text_size(metrics.secondary_size)
+            .line_height(metrics.secondary_line_height)
             .text_color(color)
             .child(text)
             .into_any_element(),
-        CommandPaletteAccessory::Checkmark => {
-            Icon::new(IconName::Check, metrics.icon_size, color).into_any_element()
-        }
+        CommandPaletteAccessory::Checkmark => div()
+            .relative()
+            .top(icon_offset)
+            .child(Icon::new(IconName::Check, metrics.icon_size, color))
+            .into_any_element(),
     }
 }
 

@@ -27,6 +27,9 @@ SOFTWARE.
 
 Lucide Icons and Feather-derived icons
 --------------------------------------
+Source SVGs: https://github.com/lucide-icons/lucide/tree/1.34.0/icons
+Version: 1.34.0, commit 1a60fd28ed7111bbf6acedc0896f3d83cd73945a
+
 ISC License
 
 Copyright (c) 2026 Lucide Icons and Contributors

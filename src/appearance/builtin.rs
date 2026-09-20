@@ -154,9 +154,11 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell_inactive: 0x161616,
             raised: 0x202020,
             field: 0x1c1c1c,
-            control_fill: None,
-            hover: 0x1d1d1d,
-            pressed: 0x242424,
+            control_fill: Some(0x272727),
+            control_hover: 0x2f2f2f,
+            control_pressed: 0x363636,
+            ghost_hover: 0x1d1d1d,
+            ghost_pressed: 0x242424,
             selected: 0x2e2e2e,
             selected_inactive: 0x1c1c1c,
             row_hover: 0x282828,
@@ -205,8 +207,10 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             raised: 0xf8f8f8,
             field: 0xffffff,
             control_fill: Some(0xededed),
-            hover: 0xe3e3e3,
-            pressed: 0xdcdcdc,
+            control_hover: 0xe3e3e3,
+            control_pressed: 0xdcdcdc,
+            ghost_hover: 0xe3e3e3,
+            ghost_pressed: 0xdcdcdc,
             selected: 0xd6d6d6,
             selected_inactive: 0xececec,
             row_hover: 0xe9e9e9,
@@ -262,10 +266,17 @@ struct ChromePalette {
     /// Menus, popovers, dialogs, tooltips, and the cards one run of Settings Rows rests on.
     raised: u32,
     field: u32,
-    /// Light controls use a dedicated fill; Dark retains the compiler's root-derived default.
+    /// The resting fill of an ordinary bordered control.
+    ///
+    /// Floating preparation may strengthen the equivalent overlay without changing this authored
+    /// composite when a transmitting host would otherwise make its content unreadable.
     control_fill: Option<u32>,
-    hover: u32,
-    pressed: u32,
+    /// Filled and unfilled controls have independent interaction steps.
+    control_hover: u32,
+    control_pressed: u32,
+    /// Interaction steps for a control with no resting fill, taken from its host surface.
+    ghost_hover: u32,
+    ghost_pressed: u32,
     /// Persistent selection: a neutral rung, never an accent.
     selected: u32,
     /// The Active Tab's chip in an unfocused window: the same shape, a shorter step off the bar.
@@ -367,11 +378,11 @@ impl ChromePalette {
             outline_disabled_border: opaque(self.separator_disabled),
 
             element_background: self.control_fill.map(Color::rgb),
-            element_hover: opaque(self.hover),
-            element_active: opaque(self.pressed),
+            element_hover: opaque(self.control_hover),
+            element_active: opaque(self.control_pressed),
             element_selected: opaque(self.selected),
-            ghost_element_hover: opaque(self.hover),
-            ghost_element_active: opaque(self.pressed),
+            ghost_element_hover: opaque(self.ghost_hover),
+            ghost_element_active: opaque(self.ghost_pressed),
             selection_background: opaque(self.selected),
             row_background: opaque(self.shell),
             // A persistent list row is authored apart from the shared selection rung. Deriving it

@@ -155,6 +155,8 @@ impl ProgressMetrics {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             bar_thickness: self.bar_thickness * spacing_scale,
+            // A progress bar is a capsule rather than a semantic rounded surface, so its radius
+            // follows the scaled bar thickness.
             bar_corner_radius: self.bar_corner_radius * spacing_scale,
             ring_diameter: self.ring_diameter * spacing_scale,
             ring_thickness: self.ring_thickness * spacing_scale,

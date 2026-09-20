@@ -63,8 +63,9 @@ pub use command_palette::{
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use floating_surface::{
-    ControlHost, ControlHostElement, FloatingLayer, FloatingRole, FloatingShell,
-    FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme, SurfaceControlThemes,
+    ControlHost, ControlHostElement, ControlWindowActivity, ControlWindowActivityElement,
+    FloatingLayer, FloatingRole, FloatingShell, FloatingSurfacePaint, FloatingSurfacePaints,
+    FloatingSurfaceTheme, SurfaceControlThemes, floating_surface_theme,
 };
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
@@ -181,11 +182,20 @@ pub struct ControlThemeCatalog {
     modal: ModalTheme,
     floating: Option<FloatingSurfaceTheme>,
     floating_controls: Option<SurfaceControlThemes>,
+    title_bar_controls: Option<SurfaceControlThemes>,
     panel_controls: Option<SurfaceControlThemes>,
     card_controls: Option<SurfaceControlThemes>,
 }
 
 impl gpui::Global for ControlThemeCatalog {}
+
+#[derive(Clone, Debug, PartialEq)]
+struct InstalledControlThemeCatalogs {
+    active: ControlThemeCatalog,
+    inactive: ControlThemeCatalog,
+}
+
+impl gpui::Global for InstalledControlThemeCatalogs {}
 
 /// The application-issued generation shared by every family in one control catalog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -224,7 +234,56 @@ impl std::fmt::Display for ControlThemeReplacementError {
 
 impl std::error::Error for ControlThemeReplacementError {}
 
+/// A paired catalog replacement did not preserve one appearance generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlThemeCatalogPairError {
+    /// Reusable controls must be initialized before their catalogs can be replaced.
+    NotInitialized,
+    /// Active and inactive variants must describe the same application appearance revision.
+    GenerationMismatch,
+}
+
+impl std::fmt::Display for ControlThemeCatalogPairError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInitialized => formatter.write_str("reusable controls are not initialized"),
+            Self::GenerationMismatch => formatter
+                .write_str("active and inactive control catalogs have different generations"),
+        }
+    }
+}
+
+impl std::error::Error for ControlThemeCatalogPairError {}
+
 impl ControlThemeCatalog {
+    /// Applies one ordinary-control elevation policy to Buttons and ComboBox triggers on every
+    /// prepared material host.
+    pub fn ordinary_control_elevation(
+        mut self,
+        shadow: ControlShadow,
+        border: Option<gpui::Rgba>,
+        bottom_edge: gpui::Rgba,
+    ) -> Self {
+        self.button = self.button.secondary_elevation(shadow, border, bottom_edge);
+        self.combo_box = self
+            .combo_box
+            .ordinary_elevation(shadow, border, bottom_edge);
+        for host in [
+            &mut self.title_bar_controls,
+            &mut self.panel_controls,
+            &mut self.card_controls,
+            &mut self.floating_controls,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *host = host
+                .clone()
+                .ordinary_control_elevation(shadow, border, bottom_edge);
+        }
+        self
+    }
+
     /// Creates the complete catalog required by [`init`].
     #[expect(
         clippy::too_many_arguments,
@@ -263,6 +322,7 @@ impl ControlThemeCatalog {
             modal,
             floating: None,
             floating_controls: None,
+            title_bar_controls: None,
             panel_controls: None,
             card_controls: None,
         }
@@ -298,6 +358,16 @@ impl ControlThemeCatalog {
         self
     }
 
+    /// Sets controls compiled against the title bar's actual material.
+    ///
+    /// The bundle changes only controls inside an explicit [`ControlHost::TitleBar`] scope. If it
+    /// is omitted, that scope uses the root Window presentation so existing applications retain
+    /// their current behavior.
+    pub fn title_bar_controls(mut self, controls: SurfaceControlThemes) -> Self {
+        self.title_bar_controls = Some(controls);
+        self
+    }
+
     /// Returns the resolved override for one material host.
     ///
     /// Window controls use the root family themes, so Window returns `None`. An omitted host
@@ -305,6 +375,7 @@ impl ControlThemeCatalog {
     pub fn hosted_controls(&self, host: ControlHost) -> Option<&SurfaceControlThemes> {
         match host {
             ControlHost::Window => None,
+            ControlHost::TitleBar => self.title_bar_controls.as_ref(),
             ControlHost::Panel => self.panel_controls.as_ref(),
             ControlHost::Card => self.card_controls.as_ref(),
             ControlHost::Floating => self.floating_controls.as_ref(),
@@ -320,6 +391,32 @@ impl ControlThemeCatalog {
     /// Sets complete resolved typography shared by every text-bearing control family.
     pub fn typography(mut self, typography: ControlTypography) -> Self {
         self.typography = typography;
+        self
+    }
+
+    /// Sets the shared focus-ring width without changing control borders, gaps, or radii.
+    ///
+    /// The width is a stable logical-point metric and does not participate in density scaling.
+    pub fn focus_ring_width(mut self, width: gpui::Pixels) -> Self {
+        self.button = self.button.focus_ring_width(width);
+        self.toggle = self.toggle.focus_ring_width(width);
+        self.segmented_control = self.segmented_control.focus_ring_width(width);
+        self.search_field = self.search_field.focus_ring_width(width);
+        self.text_input = self.text_input.focus_ring_width(width);
+        self.menu = self.menu.focus_ring_width(width);
+        self.combo_box = self.combo_box.focus_ring_width(width);
+        self.floating_controls = self
+            .floating_controls
+            .map(|themes| themes.focus_ring_width(width));
+        self.title_bar_controls = self
+            .title_bar_controls
+            .map(|themes| themes.focus_ring_width(width));
+        self.panel_controls = self
+            .panel_controls
+            .map(|themes| themes.focus_ring_width(width));
+        self.card_controls = self
+            .card_controls
+            .map(|themes| themes.focus_ring_width(width));
         self
     }
 
@@ -362,6 +459,9 @@ impl ControlThemeCatalog {
         self.floating_controls = self
             .floating_controls
             .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+        self.title_bar_controls = self
+            .title_bar_controls
+            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
         self.panel_controls = self
             .panel_controls
             .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
@@ -385,7 +485,7 @@ impl ControlThemeCatalog {
 /// [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     icon::register_font(cx)?;
-    install_control_theme_catalog(cx, catalog);
+    install_control_theme_catalogs(cx, catalog.clone(), catalog);
     button::init(cx);
     text_input::init(cx);
     menu::init(cx);
@@ -406,33 +506,65 @@ pub fn replace_control_theme_catalog(
     cx: &mut App,
     catalog: ControlThemeCatalog,
 ) -> Result<ControlThemeReplacement, ControlThemeReplacementError> {
-    if !cx.has_global::<ControlThemeCatalog>() {
+    if !cx.has_global::<InstalledControlThemeCatalogs>() {
         return Err(ControlThemeReplacementError);
     }
-    if cx.global::<ControlThemeCatalog>() == &catalog {
+    let installed = cx.global::<InstalledControlThemeCatalogs>();
+    if installed.active == catalog && installed.inactive == catalog {
         return Ok(ControlThemeReplacement::Unchanged);
     }
-    install_control_theme_catalog(cx, catalog);
+    install_control_theme_catalogs(cx, catalog.clone(), catalog);
     cx.refresh_windows();
     Ok(ControlThemeReplacement::Applied)
 }
 
-fn install_control_theme_catalog(cx: &mut App, catalog: ControlThemeCatalog) {
-    cx.set_global(catalog.button);
-    cx.set_global(catalog.toggle);
-    cx.set_global(catalog.progress);
-    cx.set_global(catalog.scrollbar);
-    cx.set_global(catalog.resize_handle);
-    cx.set_global(catalog.segmented_control);
-    cx.set_global(catalog.search_field);
-    cx.set_global(catalog.menu);
-    cx.set_global(catalog.command_palette);
-    cx.set_global(catalog.combo_box);
-    cx.set_global(catalog.text_input);
-    cx.set_global(catalog.tooltip);
-    cx.set_global(catalog.modal);
-    cx.set_global(catalog.floating.unwrap_or_default());
-    cx.set_global(catalog);
+/// Atomically replaces the active and inactive reusable-control presentation variants.
+///
+/// Both catalogs must carry the same application-issued generation. Existing entities retain
+/// their interaction state, while every Operating-System Window selects its own immutable variant
+/// through [`ControlWindowActivity`].
+pub fn replace_control_theme_catalogs(
+    cx: &mut App,
+    active: ControlThemeCatalog,
+    inactive: ControlThemeCatalog,
+) -> Result<ControlThemeReplacement, ControlThemeCatalogPairError> {
+    if active.generation != inactive.generation {
+        return Err(ControlThemeCatalogPairError::GenerationMismatch);
+    }
+    if !cx.has_global::<InstalledControlThemeCatalogs>() {
+        return Err(ControlThemeCatalogPairError::NotInitialized);
+    }
+    let installed = cx.global::<InstalledControlThemeCatalogs>();
+    if installed.active == active && installed.inactive == inactive {
+        return Ok(ControlThemeReplacement::Unchanged);
+    }
+    install_control_theme_catalogs(cx, active, inactive);
+    cx.refresh_windows();
+    Ok(ControlThemeReplacement::Applied)
+}
+
+fn install_control_theme_catalogs(
+    cx: &mut App,
+    active: ControlThemeCatalog,
+    inactive: ControlThemeCatalog,
+) {
+    debug_assert_eq!(active.generation, inactive.generation);
+    cx.set_global(active.button);
+    cx.set_global(active.toggle);
+    cx.set_global(active.progress);
+    cx.set_global(active.scrollbar);
+    cx.set_global(active.resize_handle);
+    cx.set_global(active.segmented_control);
+    cx.set_global(active.search_field);
+    cx.set_global(active.menu);
+    cx.set_global(active.command_palette);
+    cx.set_global(active.combo_box);
+    cx.set_global(active.text_input);
+    cx.set_global(active.tooltip);
+    cx.set_global(active.modal);
+    cx.set_global(active.floating.unwrap_or_default());
+    cx.set_global(active.clone());
+    cx.set_global(InstalledControlThemeCatalogs { active, inactive });
 }
 
 /// Restates a control's complete text style inside an interaction refinement.
@@ -456,8 +588,19 @@ pub(crate) fn refine_control_text(
         .text_color(color)
 }
 
+pub(crate) fn control_theme_catalog(cx: &App) -> Option<&ControlThemeCatalog> {
+    cx.try_global::<InstalledControlThemeCatalogs>()
+        .map(
+            |catalogs| match floating_surface::current_window_activity() {
+                ControlWindowActivity::Active => &catalogs.active,
+                ControlWindowActivity::Inactive => &catalogs.inactive,
+            },
+        )
+        .or_else(|| cx.try_global::<ControlThemeCatalog>())
+}
+
 fn control_typography(cx: &App) -> ControlTypography {
-    cx.try_global::<ControlThemeCatalog>()
+    control_theme_catalog(cx)
         .map(|catalog| catalog.typography.clone())
         .unwrap_or_default()
 }

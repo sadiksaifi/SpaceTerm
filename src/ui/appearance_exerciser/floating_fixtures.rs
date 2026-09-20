@@ -223,7 +223,7 @@ impl FloatingFixtures {
 
 impl Render for FloatingFixtures {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::super::appearance::chrome(cx).clone();
+        let appearance = super::super::appearance::shared_chrome(cx);
         let preview_controls = div()
             .flex()
             .flex_wrap()
@@ -507,7 +507,7 @@ impl Render for TooltipDialogBody {
                     spaceterm_ui::FieldState::default(),
                     cx,
                 )
-                .h(appearance.height(32.0, 13.0))
+                .h(appearance.spacing(32.0))
                 .child(self.input.clone()),
             )
             .child(

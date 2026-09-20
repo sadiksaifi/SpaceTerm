@@ -59,18 +59,15 @@ pub enum FloatingRole {
 }
 
 impl FloatingRole {
-    /// The unscaled corner radius and content inset of this role.
+    /// The unscaled content inset of this role.
     ///
     /// The inset is the distance from the surface edge to the rows or controls resting directly on
     /// it, and gives every nested row its concentric radius.
-    const fn geometry(self) -> (f32, f32) {
+    const fn content_inset(self) -> f32 {
         match self {
-            Self::Popover => (10.0, 4.0),
-            Self::Command => (12.0, 6.0),
-            Self::Modal => (14.0, 0.0),
-            Self::Tooltip => (7.0, 0.0),
-            Self::Notice => (10.0, 4.0),
-            Self::Readout => (8.0, 0.0),
+            Self::Popover | Self::Notice => 4.0,
+            Self::Command => 6.0,
+            Self::Modal | Self::Tooltip | Self::Readout => 0.0,
         }
     }
 
@@ -103,8 +100,11 @@ impl FloatingRole {
             Self::Popover | Self::Notice => {
                 ControlShadow::double(layer(1.0, 6.0, 16.0, -4.0), layer(0.55, 2.0, 4.0, -2.0))
             }
-            Self::Command | Self::Modal => {
+            Self::Command => {
                 ControlShadow::double(layer(1.0, 16.0, 36.0, -10.0), layer(0.65, 4.0, 10.0, -4.0))
+            }
+            Self::Modal => {
+                ControlShadow::double(layer(1.0, 20.0, 44.0, -12.0), layer(0.70, 6.0, 14.0, -5.0))
             }
         }
     }
@@ -207,6 +207,8 @@ pub struct FloatingSurfaceTheme {
     backdrop_blur: Pixels,
     backdrop_alpha_limit: f32,
     spacing_scale: f32,
+    top_highlight: Rgba,
+    corner_radii: [Pixels; 3],
 }
 
 impl FloatingSurfaceTheme {
@@ -219,12 +221,27 @@ impl FloatingSurfaceTheme {
             backdrop_blur: px(0.0),
             backdrop_alpha_limit: 1.0,
             spacing_scale: 1.0,
+            top_highlight: Rgba::default(),
+            corner_radii: [px(8.0), px(10.0), px(12.0)],
         }
     }
 
     /// Requests one logical-pixel Gaussian sigma for every shell in this catalog.
     pub fn backdrop_blur(mut self, radius: Pixels) -> Self {
         self.backdrop_blur = radius.max(px(0.0));
+        self
+    }
+
+    /// Sets the optional inset top hairline for interactive floating surfaces.
+    pub fn top_highlight(mut self, color: Rgba) -> Self {
+        self.top_highlight = color;
+        self
+    }
+
+    /// Supplies the application's quiet, raised, and large surface radii.
+    /// These logical-point values are independent of density and text scaling.
+    pub fn corner_radii(mut self, quiet: Pixels, raised: Pixels, large: Pixels) -> Self {
+        self.corner_radii = [quiet, raised, large].map(|radius| radius.max(px(0.0)));
         self
     }
 
@@ -248,7 +265,12 @@ impl FloatingSurfaceTheme {
 
     /// The complete resolved presentation of one semantic role.
     pub fn shell(&self, role: FloatingRole) -> FloatingShell {
-        let (radius, inset) = role.geometry();
+        let inset = role.content_inset();
+        let radius = match role {
+            FloatingRole::Tooltip | FloatingRole::Readout => self.corner_radii[0],
+            FloatingRole::Popover | FloatingRole::Notice => self.corner_radii[1],
+            FloatingRole::Command | FloatingRole::Modal => self.corner_radii[2],
+        };
         let scale = self.spacing_scale;
         let paint = if role.quiet_material() {
             self.paints.readout
@@ -259,10 +281,19 @@ impl FloatingSurfaceTheme {
             role,
             paint,
             elevation: role.elevation(self.shadow_ink),
-            backdrop_blur: self.backdrop_blur,
+            backdrop_blur: if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
+                self.backdrop_blur.min(px(12.0))
+            } else {
+                self.backdrop_blur
+            },
             backdrop_alpha_limit: self.backdrop_alpha_limit,
-            corner_radius: px(radius * scale),
+            corner_radius: radius,
             content_inset: px(inset * scale),
+            top_highlight: if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
+                Rgba::default()
+            } else {
+                self.top_highlight
+            },
         }
     }
 
@@ -291,16 +322,17 @@ impl Default for FloatingSurfaceTheme {
 
 impl gpui::Global for FloatingSurfaceTheme {}
 
-/// Returns the installed floating presentation, or the bounded fallback.
-pub(crate) fn floating_theme(cx: &App) -> FloatingSurfaceTheme {
-    cx.try_global::<FloatingSurfaceTheme>()
-        .copied()
+/// Returns the current window activity's installed floating presentation, or the bounded fallback.
+pub fn floating_surface_theme(cx: &App) -> FloatingSurfaceTheme {
+    crate::control_theme_catalog(cx)
+        .and_then(|catalog| catalog.floating)
+        .or_else(|| cx.try_global::<FloatingSurfaceTheme>().copied())
         .unwrap_or_default()
 }
 
 /// Returns the complete resolved presentation of one role.
 pub(crate) fn shell(role: FloatingRole, cx: &App) -> FloatingShell {
-    floating_theme(cx).shell(role)
+    floating_surface_theme(cx).shell(role)
 }
 
 /// The complete resolved presentation of one floating surface.
@@ -313,6 +345,7 @@ pub struct FloatingShell {
     backdrop_alpha_limit: f32,
     corner_radius: Pixels,
     content_inset: Pixels,
+    top_highlight: Rgba,
 }
 
 impl FloatingShell {
@@ -343,7 +376,7 @@ impl FloatingShell {
 
     /// The concentric radius of a row or control inset directly inside this surface.
     pub fn nested_radius(&self) -> Pixels {
-        (self.corner_radius - self.content_inset).max(px(0.0))
+        (self.corner_radius - self.content_inset).max(px(4.0))
     }
 
     /// The stable hairline every floating surface and its internal rules paint.
@@ -404,7 +437,11 @@ impl FloatingShell {
 
     /// Applies the surface treatment and hosts every descendant control on this surface.
     pub fn mount(&self, frame: impl Styled + IntoElement) -> ControlHostElement {
-        ControlHost::Floating.mount(self.frame(frame))
+        ControlHost::Floating.mount(FloatingHighlight {
+            content: self.frame(frame).into_any_element(),
+            color: self.top_highlight,
+            inset: self.corner_radius,
+        })
     }
 
     /// Hosts descendant controls on this surface without painting a shell.
@@ -416,16 +453,89 @@ impl FloatingShell {
     }
 }
 
+/// A decorative top edge drawn after the shell content without adding an input target.
+struct FloatingHighlight {
+    content: AnyElement,
+    color: Rgba,
+    inset: Pixels,
+}
+
+impl IntoElement for FloatingHighlight {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for FloatingHighlight {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.content.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.content.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.content.paint(window, cx);
+        let width = bounds.size.width - self.inset * 2.0;
+        if self.color.a > 0.0 && width > px(0.0) {
+            let line = Bounds::new(
+                bounds.origin + gpui::point(self.inset, px(1.0)),
+                gpui::size(width, px(1.0)),
+            );
+            window.paint_quad(gpui::fill(line, self.color));
+        }
+    }
+}
+
 /// The material host used to resolve descendant control presentation.
 ///
-/// These roles select already-compiled paints, not surface effects. Panel and Card describe
-/// resting surfaces over the window sheet; Floating describes a floating shell. The nearest
-/// explicit host wins. A deferred popup must carry its own host into the deferred draw.
+/// These roles select already-compiled paints, not surface effects. TitleBar, Panel, and Card
+/// describe resting surfaces over the window sheet; Floating describes a floating shell. The
+/// nearest explicit host wins. A deferred popup must carry its own host into the deferred draw.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ControlHost {
     /// The window sheet and its root control themes.
     #[default]
     Window,
+    /// The window's top chrome, which may use a distinct active or inactive material.
+    TitleBar,
     /// A resting navigation or supporting panel.
     Panel,
     /// A resting card above the window's page surface.
@@ -434,17 +544,65 @@ pub enum ControlHost {
     Floating,
 }
 
+/// The immutable reusable-control presentation selected by one Operating-System Window.
+///
+/// The application chooses this once at the window root. Descendant controls retain ordinary
+/// interaction state, while their theme lookups stay isolated from every other window.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ControlWindowActivity {
+    /// The key window uses the complete active presentation.
+    #[default]
+    Active,
+    /// A non-key window uses its prepared inactive presentation.
+    Inactive,
+}
+
+impl ControlWindowActivity {
+    /// Returns the activity variant entered for the current window-rendering scope.
+    pub fn current() -> Self {
+        current_window_activity()
+    }
+
+    /// Enters this activity variant while constructing window-root content.
+    ///
+    /// The prior variant is restored when `work` returns, including during unwinding. Mount the
+    /// returned root as well so retained descendants select the same variant in later phases.
+    pub fn with_scope<R>(self, work: impl FnOnce() -> R) -> R {
+        enter_window_activity(self, work)
+    }
+
+    /// Selects this activity variant for layout, prepaint, and paint without drawing a surface.
+    pub fn mount(self, content: impl IntoElement) -> ControlWindowActivityElement {
+        ControlWindowActivityElement {
+            content: content.into_any_element(),
+            activity: self,
+        }
+    }
+}
+
 impl ControlHost {
     pub(crate) fn button_theme(self, cx: &App) -> &ButtonTheme {
-        cx.try_global::<crate::ControlThemeCatalog>()
+        crate::control_theme_catalog(cx)
             .and_then(|catalog| catalog.hosted_controls(self))
-            .map_or_else(|| cx.global::<ButtonTheme>(), |themes| &themes.button)
+            .map_or_else(
+                || {
+                    crate::control_theme_catalog(cx)
+                        .map_or_else(|| cx.global::<ButtonTheme>(), |catalog| &catalog.button)
+                },
+                |themes| &themes.button,
+            )
     }
 
     pub(crate) fn toggle_theme(self, cx: &App) -> &ToggleTheme {
-        cx.try_global::<crate::ControlThemeCatalog>()
+        crate::control_theme_catalog(cx)
             .and_then(|catalog| catalog.hosted_controls(self))
-            .map_or_else(|| cx.global::<ToggleTheme>(), |themes| &themes.toggle)
+            .map_or_else(
+                || {
+                    crate::control_theme_catalog(cx)
+                        .map_or_else(|| cx.global::<ToggleTheme>(), |catalog| &catalog.toggle)
+                },
+                |themes| &themes.toggle,
+            )
     }
 
     /// Selects this host for layout, prepaint, and paint without drawing a surface.
@@ -462,6 +620,7 @@ impl ControlHost {
 
 thread_local! {
     static CURRENT_CONTROL_HOST: Cell<ControlHost> = const { Cell::new(ControlHost::Window) };
+    static CURRENT_WINDOW_ACTIVITY: Cell<ControlWindowActivity> = const { Cell::new(ControlWindowActivity::Active) };
 }
 
 struct ControlHostGuard {
@@ -480,13 +639,33 @@ fn enter_host<R>(host: ControlHost, work: impl FnOnce() -> R) -> R {
     work()
 }
 
-/// Selects descendant control paints for the current material host without adding a surface.
-pub struct ControlHostElement {
-    content: AnyElement,
-    host: ControlHost,
+struct ControlWindowActivityGuard {
+    previous: ControlWindowActivity,
 }
 
-impl IntoElement for ControlHostElement {
+impl Drop for ControlWindowActivityGuard {
+    fn drop(&mut self) {
+        CURRENT_WINDOW_ACTIVITY.with(|current| current.set(self.previous));
+    }
+}
+
+fn enter_window_activity<R>(activity: ControlWindowActivity, work: impl FnOnce() -> R) -> R {
+    let previous = CURRENT_WINDOW_ACTIVITY.with(|current| current.replace(activity));
+    let _guard = ControlWindowActivityGuard { previous };
+    work()
+}
+
+pub(crate) fn current_window_activity() -> ControlWindowActivity {
+    CURRENT_WINDOW_ACTIVITY.with(Cell::get)
+}
+
+/// Selects descendant control presentation for one Operating-System Window.
+pub struct ControlWindowActivityElement {
+    content: AnyElement,
+    activity: ControlWindowActivity,
+}
+
+impl IntoElement for ControlWindowActivityElement {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -494,7 +673,7 @@ impl IntoElement for ControlHostElement {
     }
 }
 
-impl Element for ControlHostElement {
+impl Element for ControlWindowActivityElement {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -513,9 +692,12 @@ impl Element for ControlHostElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let host = self.host;
+        let activity = self.activity;
         let content = &mut self.content;
-        (enter_host(host, || content.request_layout(window, cx)), ())
+        (
+            enter_window_activity(activity, || content.request_layout(window, cx)),
+            (),
+        )
     }
 
     fn prepaint(
@@ -527,9 +709,9 @@ impl Element for ControlHostElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let host = self.host;
+        let activity = self.activity;
         let content = &mut self.content;
-        enter_host(host, || content.prepaint(window, cx));
+        enter_window_activity(activity, || content.prepaint(window, cx));
     }
 
     fn paint(
@@ -542,9 +724,87 @@ impl Element for ControlHostElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let activity = self.activity;
+        let content = &mut self.content;
+        enter_window_activity(activity, || content.paint(window, cx));
+    }
+}
+
+/// Selects descendant control paints for the current material host without adding a surface.
+pub struct ControlHostElement {
+    content: AnyElement,
+    host: ControlHost,
+}
+
+impl IntoElement for ControlHostElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ControlHostElement {
+    type RequestLayoutState = ControlWindowActivity;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let host = self.host;
+        let activity = current_window_activity();
+        let content = &mut self.content;
+        (
+            enter_window_activity(activity, || {
+                enter_host(host, || content.request_layout(window, cx))
+            }),
+            activity,
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        activity: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let host = self.host;
         let content = &mut self.content;
-        enter_host(host, || content.paint(window, cx));
+        enter_window_activity(*activity, || {
+            enter_host(host, || content.prepaint(window, cx));
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        activity: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let host = self.host;
+        let content = &mut self.content;
+        enter_window_activity(*activity, || {
+            enter_host(host, || content.paint(window, cx));
+        });
     }
 }
 
@@ -566,6 +826,19 @@ pub struct SurfaceControlThemes {
 }
 
 impl SurfaceControlThemes {
+    pub(crate) fn ordinary_control_elevation(
+        mut self,
+        shadow: ControlShadow,
+        border: Option<Rgba>,
+        bottom_edge: Rgba,
+    ) -> Self {
+        self.button = self.button.secondary_elevation(shadow, border, bottom_edge);
+        self.combo_box = self
+            .combo_box
+            .map(|theme| theme.ordinary_elevation(shadow, border, bottom_edge));
+        self
+    }
+
     /// Creates the complete catalog of host-relative control presentation.
     pub fn new(
         button: ButtonTheme,
@@ -594,6 +867,17 @@ impl SurfaceControlThemes {
         self
     }
 
+    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.button = self.button.focus_ring_width(width);
+        self.toggle = self.toggle.focus_ring_width(width);
+        self.segmented_control = self.segmented_control.focus_ring_width(width);
+        self.search_field = self.search_field.focus_ring_width(width);
+        self.text_input = self.text_input.focus_ring_width(width);
+        self.menu = self.menu.map(|theme| theme.focus_ring_width(width));
+        self.combo_box = self.combo_box.map(|theme| theme.focus_ring_width(width));
+        self
+    }
+
     pub(crate) fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
         self.button = self.button.scaled_metrics(text_scale, spacing_scale);
         self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
@@ -618,12 +902,22 @@ impl SurfaceControlThemes {
     pub(crate) fn regular_button_extent_for_test(&self) -> Pixels {
         self.button.icon_button_size(crate::ButtonSize::Regular)
     }
+
+    pub(crate) fn button_focus_ring_width_for_test(&self) -> Pixels {
+        self.button.resolved_focus_ring_width()
+    }
+
+    pub(crate) fn trigger_focus_ring_widths_for_test(&self) -> (Option<Pixels>, Option<Pixels>) {
+        (
+            self.menu.map(MenuTheme::resolved_focus_ring_width),
+            self.combo_box.map(ComboBoxTheme::resolved_focus_ring_width),
+        )
+    }
 }
 
 fn hosted(cx: &App) -> Option<&SurfaceControlThemes> {
     let host = CURRENT_CONTROL_HOST.with(Cell::get);
-    cx.try_global::<crate::ControlThemeCatalog>()?
-        .hosted_controls(host)
+    crate::control_theme_catalog(cx)?.hosted_controls(host)
 }
 
 pub(crate) fn hosted_menu_theme(cx: &App) -> Option<&MenuTheme> {
@@ -646,13 +940,23 @@ pub(crate) fn hosted_toggle_theme(cx: &App) -> &ToggleTheme {
 
 /// The progress presentation for the surface the control currently rests on.
 pub(crate) fn hosted_progress_theme(cx: &App) -> &ProgressTheme {
-    hosted(cx).map_or_else(|| cx.global::<ProgressTheme>(), |themes| &themes.progress)
+    hosted(cx).map_or_else(
+        || {
+            crate::control_theme_catalog(cx)
+                .map_or_else(|| cx.global::<ProgressTheme>(), |catalog| &catalog.progress)
+        },
+        |themes| &themes.progress,
+    )
 }
 
 /// The Segmented Control presentation for the surface the control currently rests on.
 pub(crate) fn hosted_segmented_control_theme(cx: &App) -> Option<&SegmentedControlTheme> {
     hosted(cx).map_or_else(
-        || cx.try_global::<SegmentedControlTheme>(),
+        || {
+            crate::control_theme_catalog(cx)
+                .map(|catalog| &catalog.segmented_control)
+                .or_else(|| cx.try_global::<SegmentedControlTheme>())
+        },
         |themes| Some(&themes.segmented_control),
     )
 }
@@ -660,7 +964,12 @@ pub(crate) fn hosted_segmented_control_theme(cx: &App) -> Option<&SegmentedContr
 /// The Search Field presentation for the surface the control currently rests on.
 pub(crate) fn hosted_search_field_theme(cx: &App) -> &SearchFieldTheme {
     hosted(cx).map_or_else(
-        || cx.global::<SearchFieldTheme>(),
+        || {
+            crate::control_theme_catalog(cx).map_or_else(
+                || cx.global::<SearchFieldTheme>(),
+                |catalog| &catalog.search_field,
+            )
+        },
         |themes| &themes.search_field,
     )
 }
@@ -668,7 +977,12 @@ pub(crate) fn hosted_search_field_theme(cx: &App) -> &SearchFieldTheme {
 /// The editable-text presentation for the surface the control currently rests on.
 pub(crate) fn hosted_text_input_theme(cx: &App) -> &TextInputTheme {
     hosted(cx).map_or_else(
-        || cx.global::<TextInputTheme>(),
+        || {
+            crate::control_theme_catalog(cx).map_or_else(
+                || cx.global::<TextInputTheme>(),
+                |catalog| &catalog.text_input,
+            )
+        },
         |themes| &themes.text_input,
     )
 }
@@ -678,19 +992,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backdrop_blur_is_shared_by_every_role_and_does_not_scale_with_layout_density() {
+    fn role_geometry_and_blur_do_not_scale_with_layout_density() {
         let theme = FloatingSurfaceTheme::default().backdrop_blur(px(20.0));
         let scaled = theme.scaled_metrics(1.5, 1.25);
-        for role in [
-            FloatingRole::Popover,
-            FloatingRole::Command,
-            FloatingRole::Modal,
-            FloatingRole::Tooltip,
-            FloatingRole::Notice,
-            FloatingRole::Readout,
+        for (role, radius, blur) in [
+            (FloatingRole::Popover, 10.0, 20.0),
+            (FloatingRole::Command, 12.0, 20.0),
+            (FloatingRole::Modal, 12.0, 20.0),
+            (FloatingRole::Tooltip, 8.0, 12.0),
+            (FloatingRole::Notice, 10.0, 20.0),
+            (FloatingRole::Readout, 8.0, 12.0),
         ] {
-            assert_eq!(theme.shell(role).backdrop_blur_radius(), px(20.0));
-            assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(20.0));
+            assert_eq!(theme.shell(role).corner_radius(), px(radius));
+            assert_eq!(scaled.shell(role).corner_radius(), px(radius));
+            assert_eq!(theme.shell(role).backdrop_blur_radius(), px(blur));
+            assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(blur));
         }
     }
 

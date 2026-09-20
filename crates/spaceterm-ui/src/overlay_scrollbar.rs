@@ -470,8 +470,9 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         }
 
         let generation = self.visibility_generation;
-        let hide_delay = cx
-            .try_global::<ScrollbarTheme>()
+        let hide_delay = crate::control_theme_catalog(cx)
+            .map(|catalog| &catalog.scrollbar)
+            .or_else(|| cx.try_global::<ScrollbarTheme>())
             .map_or_else(ScrollbarMetrics::default, |theme| theme.metrics)
             .hide_delay;
         self._hide_task = Some(cx.spawn(async move |this, cx| {
@@ -542,8 +543,9 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         if !drag.offset_valid {
             return true;
         }
-        let minimum_height = cx
-            .try_global::<ScrollbarTheme>()
+        let minimum_height = crate::control_theme_catalog(cx)
+            .map(|catalog| &catalog.scrollbar)
+            .or_else(|| cx.try_global::<ScrollbarTheme>())
             .map_or_else(ScrollbarMetrics::default, |theme| theme.metrics)
             .minimum_thumb_height;
         let geometry =
@@ -613,7 +615,10 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let thumb_id: SharedString = format!("{}-thumb", self.name).into();
         let hitbox_id: SharedString = format!("{}-thumb-hitbox", self.name).into();
         let dragging = self.drag.is_some();
-        let theme = *cx.global::<ScrollbarTheme>();
+        let theme = *crate::control_theme_catalog(cx).map_or_else(
+            || cx.global::<ScrollbarTheme>(),
+            |catalog| &catalog.scrollbar,
+        );
         let (thumb_color, hover_color) = theme.resolve(dragging);
         #[cfg(feature = "appearance-exerciser")]
         let (thumb_color, hover_color) =
@@ -711,7 +716,10 @@ impl<O: ScrollOffset> EventEmitter<OverlayScrollbarEvent<O>> for OverlayScrollba
 
 impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *cx.global::<ScrollbarTheme>();
+        let theme = *crate::control_theme_catalog(cx).map_or_else(
+            || cx.global::<ScrollbarTheme>(),
+            |catalog| &catalog.scrollbar,
+        );
         match self.geometry(theme.metrics) {
             Some(geometry) => div()
                 .absolute()

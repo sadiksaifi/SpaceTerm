@@ -40,7 +40,6 @@ const FOCUS_RING_WIDTH: f32 = 1.0;
 const FOCUS_RING_GAP: f32 = 2.0;
 /// The frame border the ring has to clear.
 const FRAME_BORDER_WIDTH: f32 = 1.0;
-const FOCUS_RING_OUTSET: f32 = FOCUS_RING_GAP + FRAME_BORDER_WIDTH;
 /// The radius a field keeps when its caller states none.
 const DEFAULT_CORNER_RADIUS: f32 = 6.0;
 
@@ -54,6 +53,7 @@ pub struct FieldFrameTheme {
     disabled_background: gpui::Rgba,
     disabled_border: gpui::Rgba,
     focus_ring: Option<gpui::Rgba>,
+    focus_ring_width: gpui::Pixels,
     corner_radius: gpui::Pixels,
 }
 
@@ -78,6 +78,7 @@ impl FieldFrameTheme {
             disabled_background,
             disabled_border,
             focus_ring: None,
+            focus_ring_width: px(FOCUS_RING_WIDTH),
             corner_radius: px(DEFAULT_CORNER_RADIUS),
         }
     }
@@ -89,6 +90,12 @@ impl FieldFrameTheme {
     /// moving the other. Left unset, the ring follows the focused border.
     pub fn focus_ring(mut self, color: gpui::Rgba) -> Self {
         self.focus_ring = Some(color);
+        self
+    }
+
+    /// Sets the focus-ring width independently of the field frame border and radius.
+    pub fn focus_ring_width(mut self, width: gpui::Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
         self
     }
 
@@ -181,7 +188,7 @@ fn focus_ring(
     state: FieldState,
 ) -> impl IntoElement {
     let ring = theme.ring_color();
-    let outset = px(FOCUS_RING_OUTSET);
+    let outset = px(FOCUS_RING_GAP) + theme.focus_ring_width;
     #[cfg(not(feature = "appearance-exerciser"))]
     let pinned = false;
     #[cfg(feature = "appearance-exerciser")]
@@ -195,7 +202,7 @@ fn focus_ring(
         .bottom(-outset)
         .left(-outset)
         .rounded(theme.corner_radius + outset)
-        .border(px(FOCUS_RING_WIDTH))
+        .border(theme.focus_ring_width)
         .border_color(gpui::rgba(0))
         .when(pinned, |ring_element| ring_element.border_color(ring))
         .focus(move |style| style.border_color(ring))

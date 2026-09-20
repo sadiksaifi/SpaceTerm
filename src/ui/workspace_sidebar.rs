@@ -48,14 +48,12 @@ pub(super) enum SidebarEvent {
 }
 impl EventEmitter<SidebarEvent> for WorkspaceSidebar {}
 
-pub(super) const SIDEBAR_FOOTER_ICON_SIZE: f32 = 15.0;
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 /// The air a row's content keeps inside the chip that carries its selection.
 ///
 /// The row's own padding is this padding plus the chip inset on that side, so the content stays
 /// balanced inside the chip even though the chip's two insets differ.
 pub(super) const SIDEBAR_ROW_CHIP_PADDING: f32 = 6.0;
-pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 /// The vertical inset and focus-ring gap of the chip that carries a row's selection.
 ///
 /// The horizontal insets come from the Workspace frame, which knows what the chip rests against on
@@ -64,7 +62,6 @@ pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 /// floating Pane are one family of shapes.
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
 pub(super) const SIDEBAR_ROW_SELECTION_RING_GAP: f32 = 2.0;
-pub(super) const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 pub(super) const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
@@ -762,15 +759,16 @@ mod tests {
             .expect("built-in appearance should resolve");
         let mut appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         appearance.colors.panel_background = Color::rgb(0x202020);
-        appearance.colors.row_background = Color::rgb(0x303030);
+        appearance.panel_controls.reference.row_background = Color::rgb(0x303030);
+        let host = crate::ui::workspace_frame::base_surface(&appearance.colors);
         let expected = appearance.materials.paint(
             SurfaceRole::Surface,
-            appearance.colors.panel_background,
-            appearance.colors.row_background,
+            host,
+            appearance.panel_controls.reference.row_background,
         );
 
         assert_eq!(view::row_background(&appearance), Some(expected));
-        appearance.colors.row_background = appearance.colors.panel_background;
+        appearance.panel_controls.reference.row_background = host;
         assert_eq!(view::row_background(&appearance), None);
     }
 

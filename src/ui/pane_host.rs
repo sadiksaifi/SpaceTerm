@@ -1,3 +1,6 @@
+use super::chrome_geometry::concentric_outset;
+use super::chrome_icons::{IconRole, InteractiveIconRole};
+use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -75,35 +78,18 @@ const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
-const PANE_CAPTION_TEXT_SIZE: f32 = 12.65;
 /// Width reserved by the middle dot that separates a directory from its status.
 const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 17.25;
-const PANE_STATUS_ICON_SIZE: f32 = 13.8;
 const PANE_STATUS_ICON_GAP: f32 = 6.0;
 /// Width reserved by the chevron that separates a Pane's origin from its directory.
 const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
+#[cfg(test)]
 const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
-const PANE_CONTROL_ICON_SIZE: f32 = 13.8;
-/// The zoom glyphs' own size, drawn slightly smaller than their neighbours.
-///
-/// The arrows reach into all four corners of their em box, so they read larger at the size the
-/// caption's other controls share. This applies to the Pane Caption's zoom control alone.
-const PANE_ZOOM_ICON_SIZE: f32 = 12.45;
-/// The close glyph's own size, drawn slightly larger than its neighbours.
-///
-/// An X occupies less of its em box than the panel and zoom glyphs, so it reads smaller at the
-/// size they share. This applies to the Pane Caption's close control alone.
-const PANE_CLOSE_ICON_SIZE: f32 = 16.75;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
-const PANE_STATUS_WIDTH: f32 = PANE_STATUS_ICON_SIZE + PANE_STATUS_ICON_GAP;
-const MINIMUM_PANE_WIDTH: f32 = PANE_CAPTION_LEFT_PADDING
-    + PANE_CAPTION_RIGHT_PADDING
-    + PANE_STATUS_WIDTH
-    + PANE_CONTROL_LEADING_GAP
-    + PANE_CONTROL_SIZE * 2.0
-    + PANE_CONTROL_GAP;
+#[cfg(test)]
+const PANE_STATUS_WIDTH: f32 = 13.0 + PANE_STATUS_ICON_GAP;
 
 #[derive(Clone, Copy)]
 enum PaneCaptionAction {
@@ -111,17 +97,6 @@ enum PaneCaptionAction {
     SplitDown,
     ToggleZoom,
     Close,
-}
-
-impl PaneCaptionAction {
-    /// The glyph size this control paints at.
-    const fn icon_size(self) -> f32 {
-        match self {
-            Self::SplitRight | Self::SplitDown => PANE_CONTROL_ICON_SIZE,
-            Self::ToggleZoom => PANE_ZOOM_ICON_SIZE,
-            Self::Close => PANE_CLOSE_ICON_SIZE,
-        }
-    }
 }
 
 /// Which caption segments this frame's Pane width can hold.
@@ -206,6 +181,12 @@ impl CaptionLayout {
             width,
             CaptionMetrics::measure(&caption.text, window, appearance),
             appearance.spacing_scale,
+            f32::from(appearance.icons.metrics(IconRole::Status).glyph_size),
+            f32::from(
+                appearance
+                    .icons
+                    .interactive_target_size(InteractiveIconRole::Control),
+            ),
         )
     }
 
@@ -214,14 +195,18 @@ impl CaptionLayout {
         width: Pixels,
         metrics: CaptionMetrics,
         spacing_scale: f32,
+        status_icon_size: f32,
+        control_size: f32,
     ) -> Self {
         let full_control_count = if has_multiple_panes { 4 } else { 2 };
         let fixed_width =
-            (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_WIDTH)
-                * spacing_scale;
+            (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_ICON_GAP)
+                * spacing_scale
+                + status_icon_size;
         let show_splits = width
             >= px(fixed_width
-                + (PANE_CONTROL_LEADING_GAP + controls_width(full_control_count)) * spacing_scale);
+                + PANE_CONTROL_LEADING_GAP * spacing_scale
+                + controls_width(full_control_count, control_size, spacing_scale));
         let control_count = usize::from(show_splits) * 2 + usize::from(has_multiple_panes) * 2;
         let leading_gap = if control_count == 0 {
             0.0
@@ -229,7 +214,9 @@ impl CaptionLayout {
             PANE_CONTROL_LEADING_GAP * spacing_scale
         };
         let available = (width
-            - px(fixed_width + leading_gap + controls_width(control_count) * spacing_scale))
+            - px(fixed_width
+                + leading_gap
+                + controls_width(control_count, control_size, spacing_scale)))
         .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
@@ -265,11 +252,11 @@ fn origin_account(user: &gpui::SharedString) -> gpui::SharedString {
     format!("{user}@").into()
 }
 
-const fn controls_width(count: usize) -> f32 {
+const fn controls_width(count: usize, control_size: f32, spacing_scale: f32) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    count as f32 * PANE_CONTROL_SIZE + (count - 1) as f32 * PANE_CONTROL_GAP
+    count as f32 * control_size + (count - 1) as f32 * PANE_CONTROL_GAP * spacing_scale
 }
 
 fn measure_caption_segment(
@@ -280,23 +267,27 @@ fn measure_caption_segment(
     if text.is_empty() {
         return px(0.0);
     }
-    let run = gpui::TextRun {
-        len: text.len(),
-        font: appearance.caption.clone(),
-        color: gpui_color(appearance.colors.text).into(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(
-            text.clone(),
-            appearance.text_size(PANE_CAPTION_TEXT_SIZE),
-            &[run],
-            None,
+    appearance
+        .typography
+        .measure(TextRole::Caption, text, window)
+}
+
+fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
+    (PANE_CAPTION_LEFT_PADDING
+        + PANE_CAPTION_RIGHT_PADDING
+        + PANE_STATUS_ICON_GAP
+        + PANE_CONTROL_LEADING_GAP)
+        * appearance.spacing_scale
+        + f32::from(appearance.icons.metrics(IconRole::Status).glyph_size)
+        + controls_width(
+            2,
+            f32::from(
+                appearance
+                    .icons
+                    .interactive_target_size(InteractiveIconRole::Control),
+            ),
+            appearance.spacing_scale,
         )
-        .width
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -365,11 +356,11 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance = super::appearance::chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
         let radius =
             super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
         let minimum_pane_size = match PaneSize::new(
-            MINIMUM_PANE_WIDTH,
+            minimum_pane_width(&appearance),
             f32::from(appearance.caption_height() + radius) + 4.0,
         ) {
             Ok(size) => size,
@@ -1453,7 +1444,7 @@ impl PaneHost {
         &self,
         tree: PaneTreeRef<'_>,
         host: gpui::WeakEntity<Self>,
-        appearance: &super::appearance::ChromeAppearance,
+        appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
@@ -1472,7 +1463,7 @@ impl PaneHost {
         &self,
         pane_id: PaneId,
         host: gpui::WeakEntity<Self>,
-        appearance: &super::appearance::ChromeAppearance,
+        appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
@@ -1592,7 +1583,7 @@ impl PaneHost {
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
-        appearance: &super::appearance::ChromeAppearance,
+        appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
@@ -1694,11 +1685,11 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::appearance::chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
         let radius =
             super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
         if let Ok(minimum) = PaneSize::new(
-            MINIMUM_PANE_WIDTH,
+            minimum_pane_width(&appearance),
             f32::from(appearance.caption_height() + radius) + 4.0,
         ) {
             self.terminal_tab.set_minimum_pane_size(minimum);
@@ -1742,7 +1733,7 @@ impl Render for PaneHost {
             .min_w(px(minimum_size.width()))
             .min_h(px(minimum_size.height()))
             .overflow_hidden()
-            .font(appearance.regular.clone())
+            .font(appearance.typography.style(TextRole::Body).font.clone())
             // Leaves, corner fillets and Split spacers each own their single surface fill.
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
@@ -1911,7 +1902,7 @@ fn render_pane_caption(
     caption: PaneCaption,
     pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
-    appearance: super::appearance::ChromeAppearance,
+    appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
     let caption_height = appearance.caption_height();
     let pane_group = pane_group.to_owned();
@@ -1926,12 +1917,8 @@ fn render_pane_caption(
                     .unwrap_or(caption.text);
             }
             caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
-                reported_glyph_is_drawable(
-                    glyph,
-                    &appearance.caption,
-                    appearance.text_size(PANE_CAPTION_TEXT_SIZE),
-                    window,
-                )
+                let caption_style = appearance.typography.style(TextRole::Caption);
+                reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
             });
             let background = caption.terminal.read(cx).surface_background();
             let pane_radius =
@@ -2035,6 +2022,12 @@ fn render_pane_caption_content(
         button_paint(paint.control_pressed),
         button_paint(paint.control_disabled),
     );
+    // The native Window may become active before GPUI dispatches its accepts-first-mouse event.
+    // Retain whether the action was visible in the pre-activation frame and disable it before
+    // pointer-down so an opacity-zero unfocused Pane control cannot arm at its stale hitbox.
+    // Focused controls remain available on that same activation click, and active-window hover
+    // behavior is unchanged.
+    let caption_action_available = focused || appearance.active;
     let focus_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
@@ -2051,9 +2044,9 @@ fn render_pane_caption_content(
         .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         .when(!focused, |controls| {
-            controls
-                .opacity(0.0)
-                .group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
+            controls.opacity(0.0).when(appearance.active, |controls| {
+                controls.group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
+            })
         });
     let actions = [
         (
@@ -2099,7 +2092,7 @@ fn render_pane_caption_content(
         }
         let host = host.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
-        let icon_size = appearance.spacing(action.icon_size());
+        let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         controls = controls.child(
             IconButton::new(
                 gpui::SharedString::from(id.clone()),
@@ -2107,6 +2100,7 @@ fn render_pane_caption_content(
                 move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
             )
             .variant(ButtonVariant::Bare)
+            .disabled(!caption_action_available)
             .contextual_style(control_style, gpui_color(paint.focus))
             .size(ButtonSize::Compact)
             .preserve_ancestor_hover()
@@ -2116,6 +2110,9 @@ fn render_pane_caption_content(
                     .keyboard_equivalent(shortcut),
             )
             .on_activate(move |_, window, cx| {
+                if !caption_action_available {
+                    return;
+                }
                 let _ = host.update(cx, |host, cx| {
                     host.perform_caption_action(action, pane_id, window, cx);
                 });
@@ -2220,8 +2217,7 @@ fn render_pane_caption_content(
         .pl(appearance.spacing(PANE_CAPTION_LEFT_PADDING))
         .pr(appearance.spacing(PANE_CAPTION_RIGHT_PADDING))
         .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
-        .font(appearance.caption.clone())
-        .text_size(appearance.text_size(PANE_CAPTION_TEXT_SIZE))
+        .chrome_text(appearance.typography.style(TextRole::Caption))
         .text_color(gpui_color(color))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
@@ -2302,12 +2298,13 @@ fn render_pane_status(
             StatusGlyph {
                 icon,
                 reported,
-                size: appearance.spacing(PANE_STATUS_ICON_SIZE),
+                size: appearance.icons.metrics(IconRole::Status).glyph_size,
                 progress,
                 attention,
                 id: ("pane-status", pane_id.get()).into(),
                 selector_prefix: format!("pane-status-{}", pane_id.get()),
                 colors: StatusColors {
+                    host: gpui_color(paint.background),
                     attention: gpui_color(paint.attention),
                     busy: gpui_color(paint.busy),
                     error: gpui_color(paint.error),
@@ -2348,7 +2345,7 @@ fn render_pane_corner_surface(
         .bottom(-width)
         .border(width)
         .border_color(gpui_color(base))
-        .rounded(radius + width)
+        .rounded(px(concentric_outset(f32::from(radius), f32::from(width))))
         .into_any_element()
 }
 
@@ -3011,11 +3008,13 @@ mod tests {
     struct CaptionTestView {
         host: Entity<PaneHost>,
         width: Pixels,
+        activity: spaceterm_ui::ControlWindowActivity,
     }
 
     impl Render for CaptionTestView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(self.width).h(px(600.0)).child(self.host.clone())
+            self.activity
+                .mount(div().w(self.width).h(px(600.0)).child(self.host.clone()))
         }
     }
 
@@ -3027,7 +3026,28 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
+        caption_host_with_activity(cx, spaceterm_ui::ControlWindowActivity::Active)
+    }
+
+    fn caption_host_with_activity(
+        cx: &mut TestAppContext,
+        activity: spaceterm_ui::ControlWindowActivity,
+    ) -> (
+        Entity<CaptionTestView>,
+        Entity<PaneHost>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
         cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| {
+            let active = Arc::new(super::super::appearance::ChromeAppearance::default());
+            let mut inactive = (*active).clone();
+            inactive.active = false;
+            cx.set_global(super::super::appearance::InstalledChrome {
+                active,
+                inactive: Arc::new(inactive),
+            });
+        });
         let records = TestTerminalSessionRecords::default();
         let factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -3038,6 +3058,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| CaptionTestView {
             host: cx.new(|cx| PaneHost::new(TabId::new(1), factory, window, cx)),
             width: px(1000.0),
+            activity,
         });
         let host = view.read_with(cx, |view, _| view.host.clone());
         cx.update(|window, cx| {
@@ -3056,6 +3077,49 @@ mod tests {
         cx.simulate_mouse_move(control, None, Modifiers::none());
         cx.simulate_click(control, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    fn first_mouse_click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
+        let control = cx
+            .debug_bounds(selector)
+            .expect("caption control must exist")
+            .center();
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: control,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: true,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: control,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn inactive_first_mouse_ignores_hidden_caption_actions_but_keeps_focused_actions_available(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, host, _, cx) =
+            caption_host_with_activity(cx, spaceterm_ui::ControlWindowActivity::Inactive);
+
+        first_mouse_click_caption_control("pane-split-right-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            (2, PaneId::new(2)),
+            "the visible focused-Pane action remains available on the activation click",
+        );
+
+        first_mouse_click_caption_control("pane-split-down-1", cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            (2, PaneId::new(1)),
+            "the activation click may focus its Pane but must not invoke its opacity-zero action",
+        );
     }
 
     #[gpui::test]
@@ -3144,8 +3208,10 @@ mod tests {
     #[gpui::test]
     fn minimum_width_single_pane_should_keep_both_split_controls(cx: &mut TestAppContext) {
         let (view, host, _, cx) = caption_host(cx);
+        let minimum_width =
+            cx.update(|_, cx| minimum_pane_width(crate::ui::appearance::chrome(cx)));
         view.update(cx, |view, cx| {
-            view.width = px(MINIMUM_PANE_WIDTH);
+            view.width = px(minimum_width);
             cx.notify();
         });
         host.update(cx, |host, cx| {
@@ -3177,8 +3243,10 @@ mod tests {
     ) {
         let (view, host, _, cx) = caption_host(cx);
         click_caption_control("pane-split-down-1", cx);
+        let minimum_width =
+            cx.update(|_, cx| minimum_pane_width(crate::ui::appearance::chrome(cx)));
         view.update(cx, |view, cx| {
-            view.width = px(MINIMUM_PANE_WIDTH);
+            view.width = px(minimum_width);
             cx.notify();
         });
         host.update(cx, |host, cx| {
@@ -3428,7 +3496,7 @@ mod tests {
             let expected_height = appearance.caption_height();
             let padding = appearance.spacing(PANE_CAPTION_VERTICAL_PADDING);
             cx.update(|window, cx| {
-                cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+                cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
                     appearance,
                 )));
                 window.refresh();
@@ -3663,12 +3731,14 @@ mod tests {
             status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
             label: px(30.0),
         };
-        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
+        let resolve = |width: f32| {
+            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+        };
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
             + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
-            + controls_width(2);
+            + controls_width(2, PANE_CONTROL_SIZE, 1.0);
         let layout = |separator, host, directory, user, label| CaptionLayout {
             show_status_separator: separator,
             show_host: host,
@@ -3716,8 +3786,10 @@ mod tests {
             + PANE_CAPTION_RIGHT_PADDING
             + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
-            + controls_width(2);
-        let resolve = |width: f32| CaptionLayout::from_metrics(false, px(width), metrics, 1.0);
+            + controls_width(2, PANE_CONTROL_SIZE, 1.0);
+        let resolve = |width: f32| {
+            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+        };
 
         let narrow = resolve(controls + 10.0);
         assert!(narrow.show_splits);
@@ -4588,7 +4660,7 @@ mod tests {
             )
         });
         cx.update(|window, cx| {
-            cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+            cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
                 appearance,
             )));
             window.refresh();

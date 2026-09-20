@@ -6,6 +6,18 @@ use gpui::{
 
 use super::*;
 
+#[test]
+fn density_scales_segment_bounds_but_not_radius() {
+    let original = test_theme().resolve(SegmentedSize::Regular).metrics;
+    let comfortable = test_theme()
+        .scaled_metrics(1.0, 1.25)
+        .resolve(SegmentedSize::Regular)
+        .metrics;
+
+    assert!(comfortable.option_height > original.option_height);
+    assert_eq!(comfortable.radius, original.radius);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Light,

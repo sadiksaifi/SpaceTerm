@@ -214,7 +214,7 @@ pub(crate) use preferences::{
 };
 pub(crate) use resolution::{
     AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
-    ResolvedAppearance, ResolvedChromeAppearance, ResolvedFontDescriptor,
+    ResolvedAppearance, ResolvedChromeAppearance, ResolvedChromeTypography, ResolvedFontDescriptor,
     ResolvedTerminalAppearance, ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use scheme::{
