@@ -1574,7 +1574,7 @@ impl TerminalWorker {
                 return false;
             }
             if self.emulator.synchronized_output_deadline().is_none()
-                && !self.request_presentation()
+                && !self.request_pty_presentation()
             {
                 return false;
             }
@@ -1766,6 +1766,16 @@ impl TerminalWorker {
 
     fn request_presentation(&mut self) -> bool {
         self.request_presentation_at(Instant::now())
+    }
+
+    fn request_pty_presentation(&mut self) -> bool {
+        let now = Instant::now();
+        self.schedules.request_pty_presentation(now);
+        if self.schedules.presentation_due(now) {
+            self.publish_screen()
+        } else {
+            true
+        }
     }
 
     fn publish_metadata_changed(&mut self) -> bool {

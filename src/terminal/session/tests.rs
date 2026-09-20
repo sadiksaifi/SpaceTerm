@@ -1502,6 +1502,11 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
         b"\x1b]52;c;c2VjcmV0\x1b\\".to_vec(),
     ]));
     assert!(records.snapshot().written.is_empty());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("denied clipboard operations must only publish the ordinary screen");
     };
@@ -1556,6 +1561,12 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
 
     assert!(worker.process_reader_events());
     assert!(worker.pending_command.is_none());
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("coalesced output must publish a terminal screen")
     };
@@ -2197,6 +2208,12 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         receiver.try_recv().unwrap(),
         SessionEvent::Attention(_)
     ));
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     assert!(matches!(
         receiver.try_recv().unwrap(),
         SessionEvent::Screen(_)
