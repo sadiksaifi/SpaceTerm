@@ -11,6 +11,118 @@ mod tests {
     use crate::{Bounds, ContentMask, Corners, ScaledPixels, Shadow, hsla, point, rgba, size};
 
     #[test]
+    fn backdrop_snapshots_only_the_clipped_region_and_preserves_source_coordinates() {
+        let device = metal::Device::system_default().expect("native Metal device required");
+        #[cfg(not(feature = "runtime_shaders"))]
+        let library = device
+            .new_library_with_data(super::super::SHADERS_METALLIB)
+            .unwrap();
+        #[cfg(feature = "runtime_shaders")]
+        let library = device
+            .new_library_with_source(
+                super::super::SHADERS_SOURCE_FILE,
+                &metal::CompileOptions::new(),
+            )
+            .unwrap();
+        let mut renderer = BackdropRenderer::new(&device, &library);
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(256);
+        descriptor.set_height(192);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(if device.has_unified_memory() {
+            metal::MTLStorageMode::Shared
+        } else {
+            metal::MTLStorageMode::Managed
+        });
+        descriptor
+            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        let target = device.new_texture(&descriptor);
+        let region = metal::MTLRegion::new_2d(0, 0, 256, 192);
+        let mut original = vec![0u8; 256 * 192 * 4];
+        for y in 0..192 {
+            for x in 0..256 {
+                let stripe = if x % 2 == 0 { 0 } else { 128 };
+                let color = if x < 128 {
+                    [stripe, 32, 64, 255]
+                } else {
+                    [stripe, 64, 32, 255]
+                };
+                original[(y * 256 + x) * 4..(y * 256 + x + 1) * 4].copy_from_slice(&color);
+            }
+        }
+        let queue = device.new_command_queue();
+        for radius in [0.0, 4.0] {
+            for x in [80, 176] {
+                target.replace_region(region, 0, original.as_ptr().cast(), 256 * 4);
+                let bounds = Bounds::new(
+                    point(ScaledPixels(x as f32), ScaledPixels(64.0)),
+                    size(ScaledPixels(48.0), ScaledPixels(40.0)),
+                );
+                let filter = BackdropFilter {
+                    bounds,
+                    content_mask: ContentMask {
+                        bounds: Bounds::new(
+                            point(ScaledPixels((x + 8) as f32), ScaledPixels(72.0)),
+                            size(ScaledPixels(28.0), ScaledPixels(24.0)),
+                        ),
+                    },
+                    radius: ScaledPixels(radius),
+                    opacity: 1.0,
+                    alpha_limit: 0.5,
+                    ..Default::default()
+                };
+                let commands = queue.new_command_buffer();
+                renderer.encode(
+                    &device,
+                    commands,
+                    &target,
+                    &filter,
+                    size(DevicePixels(256), DevicePixels(192)),
+                );
+                if !device.has_unified_memory() {
+                    let sync = commands.new_blit_command_encoder();
+                    sync.synchronize_resource(&target);
+                    sync.end_encoding();
+                }
+                commands.commit();
+                commands.wait_until_completed();
+                assert_eq!(commands.status(), metal::MTLCommandBufferStatus::Completed);
+                let snapshot = &renderer.textures.as_ref().unwrap().snapshot;
+                let halo = if radius > 0.0 { 20 } else { 0 };
+                assert_eq!(
+                    (snapshot.width(), snapshot.height()),
+                    (28 + halo * 2, 24 + halo * 2),
+                    "scratch allocation must follow the clipped output and kernel halo"
+                );
+                let mut output = vec![0u8; original.len()];
+                target.get_bytes(output.as_mut_ptr().cast(), 256 * 4, region, 0);
+                for y in 0..192 {
+                    for px in 0..256 {
+                        if !(x + 8..x + 36).contains(&px) || !(72..96).contains(&y) {
+                            let offset = (y * 256 + px) * 4;
+                            assert_eq!(output[offset..offset + 4], original[offset..offset + 4]);
+                        }
+                    }
+                }
+                let offset = (80 * 256 + x + 20) * 4;
+                let expected = if x < 128 { [16, 32] } else { [32, 16] };
+                assert_eq!(
+                    &output[offset + 1..offset + 4],
+                    &[expected[0], expected[1], 128]
+                );
+                if radius > 0.0 {
+                    assert!((28..=36).contains(&output[offset]), "stripes must soften");
+                } else {
+                    assert_eq!(
+                        output[offset], 0,
+                        "unblurred sampling must preserve location"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn backdrop_should_filter_pixels_preserve_alpha_and_respect_rounded_clipping() {
         let device = metal::Device::system_default().expect("native Metal device required");
         #[cfg(not(feature = "runtime_shaders"))]
@@ -530,8 +642,11 @@ impl BackdropRenderer {
         filter: &BackdropFilter,
         viewport: Size<DevicePixels>,
     ) {
-        let width = viewport.width.0.max(1) as u64;
-        let height = viewport.height.0.max(1) as u64;
+        let Some(snapshot_bounds) = filter.snapshot_bounds(viewport) else {
+            return;
+        };
+        let width = snapshot_bounds.size.width.0 as u64;
+        let height = snapshot_bounds.size.height.0 as u64;
         if self.textures.as_ref().is_none_or(|textures| {
             textures.snapshot.width() != width || textures.snapshot.height() != height
         }) {
@@ -560,7 +675,11 @@ impl BackdropRenderer {
             drawable,
             0,
             0,
-            metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            metal::MTLOrigin {
+                x: snapshot_bounds.origin.x.0 as u64,
+                y: snapshot_bounds.origin.y.0 as u64,
+                z: 0,
+            },
             metal::MTLSize {
                 width,
                 height,
@@ -614,11 +733,17 @@ impl BackdropRenderer {
                 filter.tone.g,
                 filter.tone.b,
                 filter.tone.a,
+                snapshot_bounds.origin.x.0 as f32,
+                snapshot_bounds.origin.y.0 as f32,
             ];
             let descriptor = metal::RenderPassDescriptor::new();
             let color = descriptor.color_attachments().object_at(0).unwrap();
             color.set_texture(Some(target));
-            color.set_load_action(metal::MTLLoadAction::Load);
+            color.set_load_action(if pass_index < 2 {
+                metal::MTLLoadAction::DontCare
+            } else {
+                metal::MTLLoadAction::Load
+            });
             color.set_store_action(metal::MTLStoreAction::Store);
             let encoder = commands.new_render_command_encoder(descriptor);
             encoder.set_render_pipeline_state(&self.pipeline);
@@ -631,29 +756,17 @@ impl BackdropRenderer {
                 zfar: 1.0,
             });
             let output = filter.bounds.intersect(&filter.content_mask.bounds);
-            let halo = if pass < 2.0 {
-                (3.0 * filter.radius.0).ceil() + 8.0
+            let (x, y, right, bottom) = if pass_index < 2 {
+                // Every intermediate pixel belongs to the captured region; sampling beyond
+                // its edge clamps to the snapshot, never to uninitialized scratch contents.
+                (0, 0, target.width(), target.height())
             } else {
-                0.0
+                let x = output.origin.x.0.floor().clamp(0.0, target_width) as u64;
+                let y = output.origin.y.0.floor().clamp(0.0, target_height) as u64;
+                let right = output.right().0.ceil().clamp(x as f32, target_width) as u64;
+                let bottom = output.bottom().0.ceil().clamp(y as f32, target_height) as u64;
+                (x, y, right, bottom)
             };
-            let scale_x = target_width / width as f32;
-            let scale_y = target_height / height as f32;
-            let x = ((output.origin.x.0 - halo) * scale_x)
-                .floor()
-                .max(0.0)
-                .min(target_width) as u64;
-            let y = ((output.origin.y.0 - halo) * scale_y)
-                .floor()
-                .max(0.0)
-                .min(target_height) as u64;
-            let right = ((output.origin.x.0 + output.size.width.0 + halo) * scale_x)
-                .ceil()
-                .max(x as f32)
-                .min(target_width) as u64;
-            let bottom = ((output.origin.y.0 + output.size.height.0 + halo) * scale_y)
-                .ceil()
-                .max(y as f32)
-                .min(target_height) as u64;
             if right > x && bottom > y {
                 encoder.set_scissor_rect(metal::MTLScissorRect {
                     x,

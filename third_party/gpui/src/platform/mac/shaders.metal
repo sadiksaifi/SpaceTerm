@@ -41,6 +41,7 @@ fragment float4 backdrop_fragment(float4 position [[position]],
     }
     return sum / total;
   }
+  uv = (position.xy - float2(p[24], p[25])) / original_size;
   float2 origin(p[4], p[5]);
   float2 half_size = float2(p[6], p[7]) * 0.5;
   float2 delta = position.xy - origin - half_size;

@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
+    Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -541,6 +541,46 @@ impl Default for BackdropFilter {
     }
 }
 
+impl BackdropFilter {
+    /// The visible output plus the separable kernel and downsampling footprint.
+    pub(crate) fn snapshot_bounds(
+        &self,
+        viewport: Size<DevicePixels>,
+    ) -> Option<Bounds<DevicePixels>> {
+        let viewport_bounds = Bounds::new(
+            point(ScaledPixels(0.0), ScaledPixels(0.0)),
+            Size::new(
+                ScaledPixels(viewport.width.0 as f32),
+                ScaledPixels(viewport.height.0 as f32),
+            ),
+        );
+        let output = self
+            .bounds
+            .intersect(&self.content_mask.bounds)
+            .intersect(&viewport_bounds);
+        if output.is_empty() {
+            return None;
+        }
+        let halo = if self.radius.0 > 0.0 {
+            (3.0 * self.radius.0).ceil() + 8.0
+        } else {
+            0.0
+        };
+        let left = (output.origin.x.0 - halo).floor().max(0.0) as i32;
+        let top = (output.origin.y.0 - halo).floor().max(0.0) as i32;
+        let right = (output.right().0 + halo)
+            .ceil()
+            .min(viewport.width.0 as f32) as i32;
+        let bottom = (output.bottom().0 + halo)
+            .ceil()
+            .min(viewport.height.0 as f32) as i32;
+        Some(Bounds::new(
+            point(DevicePixels(left), DevicePixels(top)),
+            Size::new(DevicePixels(right - left), DevicePixels(bottom - top)),
+        ))
+    }
+}
+
 impl From<BackdropFilter> for Primitive {
     fn from(filter: BackdropFilter) -> Self {
         Primitive::BackdropFilter(filter)
@@ -978,6 +1018,54 @@ mod tests {
             opacity: 1.,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn backdrop_snapshot_bounds_clip_output_and_expand_only_for_spatial_filtering() {
+        let viewport = size(DevicePixels(400), DevicePixels(300));
+        let mut filter = test_filter(test_bounds(80.0, 64.0, 48.0, 40.0));
+        filter.content_mask.bounds = test_bounds(88.0, 72.0, 28.0, 24.0);
+        filter.radius = ScaledPixels(0.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(88), DevicePixels(72)),
+                size(DevicePixels(28), DevicePixels(24))
+            ))
+        );
+        filter.radius = ScaledPixels(4.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(68), DevicePixels(52)),
+                size(DevicePixels(68), DevicePixels(64))
+            ))
+        );
+    }
+
+    #[test]
+    fn backdrop_snapshot_bounds_round_outward_and_stop_at_viewport_edges() {
+        let viewport = size(DevicePixels(100), DevicePixels(80));
+        let mut filter = test_filter(test_bounds(-3.5, 65.5, 30.75, 30.0));
+        filter.radius = ScaledPixels(0.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(0), DevicePixels(65)),
+                size(DevicePixels(28), DevicePixels(15))
+            ))
+        );
+        filter.radius = ScaledPixels(4.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(0), DevicePixels(45)),
+                size(DevicePixels(48), DevicePixels(35))
+            ))
+        );
+        filter.bounds = test_bounds(101.0, 0.0, 10.0, 10.0);
+        filter.content_mask.bounds = filter.bounds;
+        assert!(filter.snapshot_bounds(viewport).is_none());
     }
 
     fn batch_orders(scene: &Scene) -> Vec<(PrimitiveKind, Vec<DrawOrder>)> {
