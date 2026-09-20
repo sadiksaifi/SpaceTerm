@@ -1044,6 +1044,109 @@ fn alert_intent_presentations_use_distinct_markers_and_semantic_paint() {
 }
 
 #[gpui::test]
+fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) {
+    let window = open_action_geometry_window(
+        cx,
+        size(px(560.0), px(700.0)),
+        TextDirection::LeftToRight,
+        ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
+        1.0,
+        vec![
+            ModalAction::new(
+                "continue",
+                "Continue to workspace",
+                ModalActionRole::Affirmative,
+                "host-continue",
+            )
+            .default_action(true),
+            ModalAction::new(
+                "cancel",
+                "Return to workspace",
+                ModalActionRole::Cancel,
+                "host-cancel",
+            ),
+        ],
+        None,
+    );
+    cx.update(|cx| {
+        let catalog = crate::catalog_tests::catalog(1);
+        let style = catalog.button.paints(ButtonVariant::Secondary);
+        let metrics = ButtonMetrics::new(px(28.0)).horizontal_padding(px(64.0));
+        let floating_button = ButtonTheme::new(
+            ButtonVariants::new(style, style, style, style, style, style, style),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
+            rgba(0x5599ffff),
+        );
+        let controls = crate::SurfaceControlThemes::new(
+            floating_button,
+            catalog.toggle,
+            catalog.progress,
+            catalog.segmented_control,
+            catalog.search_field,
+            catalog.text_input,
+        );
+        crate::init(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("host-specific catalog should install");
+    });
+    let root = window.root(cx).expect("geometry root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+    let footer = cx
+        .debug_bounds("modal-footer-1")
+        .expect("footer should render");
+    let proceed = cx
+        .debug_bounds("modal-action-host-continue")
+        .expect("continue should render");
+    let cancel = cx
+        .debug_bounds("modal-action-host-cancel")
+        .expect("cancel should render");
+    assert!(
+        bounds_contains(footer, proceed)
+            && bounds_contains(footer, cancel)
+            && (proceed.bottom() <= cancel.top() || cancel.bottom() <= proceed.top()),
+        "floating actions must stack without clipping: footer={footer:?}, continue={proceed:?}, cancel={cancel:?}"
+    );
+
+    cx.update(|_, cx| {
+        let mut catalog = crate::catalog_tests::catalog(2);
+        let controls = crate::SurfaceControlThemes::new(
+            catalog.button,
+            catalog.toggle,
+            catalog.progress,
+            catalog.segmented_control,
+            catalog.search_field,
+            catalog.text_input,
+        );
+        catalog.button = test_button_theme_scaled(3.0);
+        crate::replace_control_theme_catalog(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("open modal should accept replacement metrics");
+    });
+    cx.run_until_parked();
+    let footer = cx
+        .debug_bounds("modal-footer-1")
+        .expect("footer should remain");
+    let proceed = cx
+        .debug_bounds("modal-action-host-continue")
+        .expect("continue should remain");
+    let cancel = cx
+        .debug_bounds("modal-action-host-cancel")
+        .expect("cancel should remain");
+    assert!(
+        bounds_contains(footer, proceed)
+            && bounds_contains(footer, cancel)
+            && proceed.top() == cancel.top(),
+        "smaller floating actions must share a row despite larger Window metrics: footer={footer:?}, continue={proceed:?}, cancel={cancel:?}"
+    );
+}
+
+#[gpui::test]
 fn long_help_label_forces_one_vertical_footer_without_escaping_it(cx: &mut TestAppContext) {
     let window = open_action_geometry_window(
         cx,

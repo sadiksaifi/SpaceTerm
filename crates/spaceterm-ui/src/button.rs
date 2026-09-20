@@ -445,16 +445,13 @@ impl ButtonTheme {
 impl Global for ButtonTheme {}
 
 pub(crate) fn measure_button_intrinsic_width(
+    theme: &ButtonTheme,
     label: &SharedString,
     size: ButtonSize,
     window: &Window,
     cx: &App,
 ) -> Pixels {
-    let style = crate::floating_surface::hosted_button_theme(cx).resolve(
-        ButtonVariant::Secondary,
-        size,
-        ButtonShape::Rounded,
-    );
+    let style = theme.resolve(ButtonVariant::Secondary, size, ButtonShape::Rounded);
     let text_style = window.text_style();
     let font = crate::control_typography(cx).regular().clone();
     let run = TextRun {

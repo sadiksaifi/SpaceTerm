@@ -20,8 +20,8 @@ use super::{
     policy::{ActionArrangement, DefaultActionPresentation, is_safe_cancel, select_action_axis},
 };
 use crate::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, FloatingShell, Icon, IconName, ProgressBar,
-    ProgressSize,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ControlHost, FloatingShell, Icon, IconName,
+    ProgressBar, ProgressSize,
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -213,10 +213,20 @@ fn render_overlay(
     });
     let geometry = clamp_surface_to_viewport(viewport, size(desired_width, height_cap), metrics);
     let available_actions = (geometry.size.width - metrics.surface_padding * 2.0).max(px(1.0));
+    // Action layout is chosen before the shell mounts its Floating control host.
+    let button_theme = ControlHost::Floating.button_theme(cx);
     let measured_widths = snapshot
         .actions
         .iter()
-        .map(|action| measure_button_intrinsic_width(&action.label, ButtonSize::Small, window, cx))
+        .map(|action| {
+            measure_button_intrinsic_width(
+                button_theme,
+                &action.label,
+                ButtonSize::Small,
+                window,
+                cx,
+            )
+        })
         .collect::<Vec<_>>();
     let axis = select_action_axis(
         geometry.size.width,

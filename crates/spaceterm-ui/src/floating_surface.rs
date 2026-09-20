@@ -435,6 +435,12 @@ pub enum ControlHost {
 }
 
 impl ControlHost {
+    pub(crate) fn button_theme(self, cx: &App) -> &ButtonTheme {
+        cx.try_global::<crate::ControlThemeCatalog>()
+            .and_then(|catalog| catalog.hosted_controls(self))
+            .map_or_else(|| cx.global::<ButtonTheme>(), |themes| &themes.button)
+    }
+
     /// Selects this host for layout, prepaint, and paint without drawing a surface.
     ///
     /// The caller owns the actual host material. Controls must resolve their themes inside
@@ -617,7 +623,7 @@ pub(crate) fn hosted_combo_box_theme(cx: &App) -> Option<&ComboBoxTheme> {
 
 /// The Button presentation for the surface the control currently rests on.
 pub(crate) fn hosted_button_theme(cx: &App) -> &ButtonTheme {
-    hosted(cx).map_or_else(|| cx.global::<ButtonTheme>(), |themes| &themes.button)
+    CURRENT_CONTROL_HOST.with(Cell::get).button_theme(cx)
 }
 
 /// The Checkbox and Switch presentation for the surface the control currently rests on.
