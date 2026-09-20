@@ -182,6 +182,66 @@ fn replacement_should_require_initialization(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
+    let initial = catalog(1);
+    let scaled = initial.clone().scale_metrics(1.25, 1.25);
+    let identity_after_scale = scaled.clone().scale_metrics(1.0, 1.0);
+    let chained = scaled.clone().scale_metrics(1.2, 1.2);
+    let direct = initial.scale_metrics(1.5, 1.5);
+
+    for role in [FloatingRole::Popover, FloatingRole::Modal] {
+        assert_eq!(
+            identity_after_scale
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+            scaled
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+        );
+        assert_eq!(
+            chained
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+            direct
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+        );
+    }
+    assert_eq!(
+        identity_after_scale.hosted_controls(ControlHost::Floating),
+        scaled.hosted_controls(ControlHost::Floating),
+    );
+    let chained_button = chained
+        .hosted_controls(ControlHost::Floating)
+        .expect("catalog should include floating controls")
+        .regular_button_extent_for_test();
+    let direct_button = direct
+        .hosted_controls(ControlHost::Floating)
+        .expect("catalog should include floating controls")
+        .regular_button_extent_for_test();
+    assert!((chained_button - direct_button).abs() < px(0.001));
+
+    let expanded = catalog(1).scale_metrics(1.0, 1.5).scale_metrics(1.0, 1.5);
+    let contracted = catalog(1).scale_metrics(1.0, 0.5).scale_metrics(1.0, 0.5);
+    let expanded_shell = expanded
+        .floating
+        .expect("catalog should include floating presentation")
+        .shell(FloatingRole::Popover);
+    let contracted_shell = contracted
+        .floating
+        .expect("catalog should include floating presentation")
+        .shell(FloatingRole::Popover);
+    assert_eq!(expanded_shell.corner_radius(), px(22.5));
+    assert_eq!(expanded_shell.content_inset(), px(9.0));
+    assert_eq!(contracted_shell.corner_radius(), px(2.5));
+    assert_eq!(contracted_shell.content_inset(), px(1.0));
+}
+
 #[gpui::test]
 fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAppContext) {
     let initial = catalog(1);

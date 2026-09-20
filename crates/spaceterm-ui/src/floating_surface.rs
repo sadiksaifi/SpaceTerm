@@ -249,7 +249,7 @@ impl FloatingSurfaceTheme {
     /// The complete resolved presentation of one semantic role.
     pub fn shell(&self, role: FloatingRole) -> FloatingShell {
         let (radius, inset) = role.geometry();
-        let scale = normalized_scale(self.spacing_scale);
+        let scale = self.spacing_scale;
         let paint = if role.quiet_material() {
             self.paints.readout
         } else {
@@ -610,6 +610,13 @@ impl SurfaceControlThemes {
             .combo_box
             .map(|theme| theme.scaled_metrics(text_scale, spacing_scale));
         self
+    }
+}
+
+#[cfg(test)]
+impl SurfaceControlThemes {
+    pub(crate) fn regular_button_extent_for_test(&self) -> Pixels {
+        self.button.icon_button_size(crate::ButtonSize::Regular)
     }
 }
 
