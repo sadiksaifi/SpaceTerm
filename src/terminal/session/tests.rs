@@ -1502,6 +1502,11 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
         b"\x1b]52;c;c2VjcmV0\x1b\\".to_vec(),
     ]));
     assert!(records.snapshot().written.is_empty());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("denied clipboard operations must only publish the ordinary screen");
     };
@@ -1556,6 +1561,12 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
 
     assert!(worker.process_reader_events());
     assert!(worker.pending_command.is_none());
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("coalesced output must publish a terminal screen")
     };
@@ -1636,7 +1647,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
     };
-    worker.schedules.request_presentation();
+    worker.schedules.request_presentation(Instant::now());
     worker.schedules.update_accessibility(true);
     for _ in 0..8 {
         worker.schedules.note_normal_command();
@@ -1693,7 +1704,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         .schedules
         .mark_presented(Instant::now() + Duration::from_secs(1));
     worker.emulator.feed(b"new generation");
-    worker.schedules.request_presentation();
+    worker.schedules.request_presentation(Instant::now());
     let requested_at = Instant::now();
     assert!(schedule_input.enqueue_accessibility_demand(requested_at));
     worker.schedules.accessibility_demand_received(requested_at);
@@ -1815,6 +1826,9 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
 
     let command = worker.receive_next_command().unwrap();
     assert!(matches!(command, Command::GraphicsAnimationTick));
+    assert!(worker.process_command(command));
+    let command = worker.receive_next_command().unwrap();
+    assert!(matches!(command, Command::PublishPendingScreen));
     assert!(worker.process_command(command));
     let SessionEvent::Screen(next) = receiver.try_recv().unwrap() else {
         panic!("expected animated screen");
@@ -2067,6 +2081,11 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     assert!(
         worker.release_synchronized_output_if_due(progressed + MAX_SYNCHRONIZED_OUTPUT_DURATION)
     );
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("the synchronized-output deadline must publish a screen")
     };
@@ -2197,6 +2216,12 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         receiver.try_recv().unwrap(),
         SessionEvent::Attention(_)
     ));
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::PublishPendingScreen)
+    ));
+    assert!(worker.process_command(Command::PublishPendingScreen));
     assert!(matches!(
         receiver.try_recv().unwrap(),
         SessionEvent::Screen(_)

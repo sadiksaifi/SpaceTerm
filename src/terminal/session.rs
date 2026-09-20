@@ -1701,7 +1701,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        self.schedules.request_presentation();
+        self.schedules.request_presentation(Instant::now());
         if self.schedules.take_visible_presentation() {
             self.publish_screen()
         } else {
@@ -1779,7 +1779,7 @@ impl TerminalWorker {
     }
 
     fn request_presentation_at(&mut self, now: Instant) -> bool {
-        self.schedules.request_presentation();
+        self.schedules.request_presentation(now);
         if self.schedules.presentation_due(now) {
             self.publish_screen()
         } else {
