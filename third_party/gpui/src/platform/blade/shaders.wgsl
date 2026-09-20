@@ -100,7 +100,7 @@ struct BackdropParams {
     sigma: f32,
     opacity: f32,
     pass_index: f32,
-    pad: f32,
+    alpha_limit: f32,
     tone: vec4<f32>,
 }
 var<uniform> backdrop: BackdropParams;
@@ -188,7 +188,10 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
     let upper = (
         backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
     ) * filtered.a;
-    let treated = vec4<f32>(clamp(filtered.rgb, lower, upper), filtered.a);
+    var treated = vec4<f32>(clamp(filtered.rgb, lower, upper), filtered.a);
+    if treated.a > backdrop.alpha_limit {
+        treated *= backdrop.alpha_limit / treated.a;
+    }
     return mix(original, treated, coverage);
 }
 

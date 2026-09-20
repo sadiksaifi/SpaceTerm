@@ -470,7 +470,7 @@ struct BackdropParams {
     float sigma;
     float opacity;
     float pass_index;
-    float pad;
+    float alpha_limit;
     float4 tone;
 };
 
@@ -548,6 +548,9 @@ float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
         backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
     ) * filtered.a;
     float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+    if (treated.a > backdrop.alpha_limit) {
+        treated *= backdrop.alpha_limit / treated.a;
+    }
     return lerp(original, treated, coverage);
 }
 

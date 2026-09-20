@@ -245,6 +245,10 @@ pub struct Style {
     /// without changing the backdrop's alpha.
     pub backdrop_tone: Option<Rgba>,
 
+    /// Maximum framebuffer alpha beneath this element. Reduces premultiplied RGB with alpha
+    /// to reveal the window backing without changing the filtered content's straight color.
+    pub backdrop_alpha_limit: Option<f32>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -630,12 +634,16 @@ impl Style {
             .clamp_radii_for_quad_size(bounds.size);
 
         if self.visibility == Visibility::Visible {
-            if self.backdrop_blur.is_some() || self.backdrop_tone.is_some() {
+            if self.backdrop_blur.is_some()
+                || self.backdrop_tone.is_some()
+                || self.backdrop_alpha_limit.is_some()
+            {
                 window.paint_backdrop_filter(
                     bounds,
                     corner_radii,
                     self.backdrop_blur.unwrap_or_default(),
                     self.backdrop_tone.unwrap_or_default(),
+                    self.backdrop_alpha_limit.unwrap_or(1.0),
                 );
             }
         }
@@ -789,6 +797,7 @@ impl Default for Style {
             background: None,
             backdrop_blur: None,
             backdrop_tone: None,
+            backdrop_alpha_limit: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),

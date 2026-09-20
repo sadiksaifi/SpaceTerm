@@ -3011,19 +3011,22 @@ impl Window {
         corner_radii: Corners<Pixels>,
         radius: Pixels,
     ) {
-        self.paint_backdrop_filter(bounds, corner_radii, radius, Rgba::default());
+        self.paint_backdrop_filter(bounds, corner_radii, radius, Rgba::default(), 1.0);
     }
 
-    /// Paints an alpha-preserving backdrop filter into the current stacking context.
+    /// Paints a backdrop filter into the current stacking context.
     ///
     /// A positive `radius` filters spatial detail. `tone` constrains filtered premultiplied RGB
     /// to the range the same source-over color admits without adding framebuffer coverage.
+    /// `alpha_limit` caps coverage while preserving premultiplied color, admitting the native
+    /// backing on transparent windows. A limit of 1 preserves the captured alpha.
     pub fn paint_backdrop_filter(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
         radius: Pixels,
         mut tone: Rgba,
+        alpha_limit: f32,
     ) {
         const MAX_BACKDROP_BLUR_RADIUS: f32 = 64.;
 
@@ -3040,7 +3043,12 @@ impl Window {
                 0.0
             };
         }
-        if radius.0 == 0. && tone.a == 0. {
+        let alpha_limit = if alpha_limit.is_finite() {
+            alpha_limit.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if radius.0 == 0. && tone.a == 0. && alpha_limit == 1.0 {
             return;
         }
 
@@ -3053,6 +3061,7 @@ impl Window {
             radius: ScaledPixels((radius.0 * scale_factor).min(MAX_BACKDROP_BLUR_RADIUS)),
             opacity: opacity.min(1.),
             tone,
+            alpha_limit,
         });
     }
 

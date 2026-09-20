@@ -3,6 +3,36 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
+fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() {
+    let mut preferences = AppearancePreferences::default();
+    preferences.background.transparency = 1.0;
+
+    let supported = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, true),
+    );
+    let unsupported = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(false, true),
+    );
+    let inaccessible = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, false),
+    );
+
+    assert!((supported.materials.floating_backdrop_alpha_limit() - 0.15).abs() < f32::EPSILON);
+    assert_eq!(unsupported.materials.floating_backdrop_alpha_limit(), 1.0);
+    assert_eq!(inaccessible.materials.floating_backdrop_alpha_limit(), 1.0);
+
+    preferences.background.transparency = 0.0;
+    let opaque = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, true),
+    );
+    assert_eq!(opaque.materials.floating_backdrop_alpha_limit(), 1.0);
+}
+
+#[test]
 fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors() {
     let catalog = SchemeCatalog::default();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {

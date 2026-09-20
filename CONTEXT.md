@@ -209,4 +209,5 @@ content behind floating surfaces. Foreground controls and text remain sharp.
 
 **Surface Material**:
 The translucency and neutral shading of a background fill. Window backgrounds admit the desktop;
-floating surfaces admit application content beneath them while retaining tint for readability.
+floating surfaces combine softened application content with the same window backdrop where available,
+while retaining shading for readability.

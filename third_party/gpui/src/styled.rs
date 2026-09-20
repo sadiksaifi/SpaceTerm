@@ -393,6 +393,14 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Limits filtered framebuffer alpha to reveal the native window backing. Values are
+    /// clamped to 0..=1; 1 preserves alpha. Clear pixels stay clear. At full coverage, repeating
+    /// the same limit does not further attenuate content. Only use below 1 on transparent windows.
+    fn backdrop_alpha_limit(mut self, alpha_limit: f32) -> Self {
+        self.style().backdrop_alpha_limit = Some(alpha_limit);
+        self
+    }
+
     /// Clips box shadows out of the element's rounded interior while preserving their exterior.
     fn shadow_outside_only(mut self) -> Self {
         self.style().shadow_outside_only = Some(true);

@@ -513,7 +513,7 @@ pub(crate) enum PrimitiveBatch<'a> {
     Surfaces(&'a [PaintSurface]),
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub(crate) struct BackdropFilter {
     pub order: u32,
@@ -523,6 +523,22 @@ pub(crate) struct BackdropFilter {
     pub radius: ScaledPixels,
     pub opacity: f32,
     pub tone: Rgba,
+    pub alpha_limit: f32,
+}
+
+impl Default for BackdropFilter {
+    fn default() -> Self {
+        Self {
+            order: 0,
+            bounds: Bounds::default(),
+            content_mask: ContentMask::default(),
+            corner_radii: Corners::default(),
+            radius: ScaledPixels::default(),
+            opacity: 0.0,
+            tone: Rgba::default(),
+            alpha_limit: 1.0,
+        }
+    }
 }
 
 impl From<BackdropFilter> for Primitive {

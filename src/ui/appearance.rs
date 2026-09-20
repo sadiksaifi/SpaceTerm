@@ -419,6 +419,7 @@ impl ChromeAppearance {
             rgba(self.colors.shadow.rgba_hex()).into(),
             rgba(self.colors.modal_scrim.rgba_hex()),
         )
+        .backdrop_alpha_limit(self.materials.floating_backdrop_alpha_limit())
         .backdrop_blur(if self.floating_blur {
             px(20.0)
         } else {

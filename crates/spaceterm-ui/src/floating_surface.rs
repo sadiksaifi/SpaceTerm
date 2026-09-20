@@ -1,11 +1,12 @@
 //! One presentation system for every surface that floats over window content.
 //!
-//! A floating surface sits over content that is already painted. Its shared shell constrains the
-//! backdrop's color without increasing its alpha, filters spatial detail when requested, and adds
-//! a small host-relative elevation wash. Every floating family selects a semantic [`FloatingRole`]
-//! and receives the complete treatment for it: backdrop tone, wash, filter, outer edge, internal
-//! divider, corner geometry, content inset, elevation, clipping, and window layer. No call site
-//! chooses its own alpha, blur, radius, border, separator, or shadow.
+//! A floating surface sits over content that is already painted. Its shared shell filters spatial
+//! detail when requested, constrains the backdrop's straight color, admits the native window
+//! backing when available, and adds a small host-relative elevation wash. Every floating family
+//! selects a semantic [`FloatingRole`] and receives the complete treatment for it: backdrop tone,
+//! coverage limit, wash, filter, outer edge, internal divider, corner geometry, content inset,
+//! elevation, clipping, and window layer. No call site chooses its own alpha, blur, radius, border,
+//! separator, or shadow.
 //!
 //! Controls nested inside a floating surface resolve against that surface rather than against the
 //! window root. [`FloatingShell::mount`] enters a host scope for the complete lifetime of the
@@ -204,6 +205,7 @@ pub struct FloatingSurfaceTheme {
     shadow_ink: Hsla,
     scrim: Rgba,
     backdrop_blur: Pixels,
+    backdrop_alpha_limit: f32,
     spacing_scale: f32,
 }
 
@@ -215,6 +217,7 @@ impl FloatingSurfaceTheme {
             shadow_ink,
             scrim,
             backdrop_blur: px(0.0),
+            backdrop_alpha_limit: 1.0,
             spacing_scale: 1.0,
         }
     }
@@ -222,6 +225,19 @@ impl FloatingSurfaceTheme {
     /// Requests one logical-pixel Gaussian sigma for every shell in this catalog.
     pub fn backdrop_blur(mut self, radius: Pixels) -> Self {
         self.backdrop_blur = radius.max(px(0.0));
+        self
+    }
+
+    /// Limits already-painted framebuffer coverage beneath every floating shell.
+    ///
+    /// Reducing the limit reveals the Operating-System Window backing while retaining the
+    /// filtered content's straight color. Invalid values preserve the framebuffer.
+    pub fn backdrop_alpha_limit(mut self, limit: f32) -> Self {
+        self.backdrop_alpha_limit = if limit.is_finite() {
+            limit.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         self
     }
 
@@ -244,6 +260,7 @@ impl FloatingSurfaceTheme {
             paint,
             elevation: role.elevation(self.shadow_ink),
             backdrop_blur: self.backdrop_blur,
+            backdrop_alpha_limit: self.backdrop_alpha_limit,
             corner_radius: px(radius * scale),
             content_inset: px(inset * scale),
         }
@@ -293,6 +310,7 @@ pub struct FloatingShell {
     paint: FloatingSurfacePaint,
     elevation: ControlShadow,
     backdrop_blur: Pixels,
+    backdrop_alpha_limit: f32,
     corner_radius: Pixels,
     content_inset: Pixels,
 }
@@ -316,6 +334,11 @@ impl FloatingShell {
     /// The Gaussian sigma used to filter already-painted content beneath this shell.
     pub fn backdrop_blur_radius(&self) -> Pixels {
         self.backdrop_blur
+    }
+
+    /// Maximum framebuffer coverage retained beneath this shell.
+    pub fn backdrop_alpha_limit(&self) -> f32 {
+        self.backdrop_alpha_limit
     }
 
     /// The concentric radius of a row or control inset directly inside this surface.
@@ -365,7 +388,8 @@ impl FloatingShell {
             .overflow_hidden()
             .rounded(self.corner_radius)
             .border(self.hairline())
-            .border_color(self.edge());
+            .border_color(self.edge())
+            .backdrop_alpha_limit(self.backdrop_alpha_limit);
         let frame = frame.backdrop_tone(self.backdrop_tone());
         let frame = if self.backdrop_blur > px(0.0) {
             frame.backdrop_blur(self.backdrop_blur)

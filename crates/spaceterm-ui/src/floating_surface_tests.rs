@@ -281,6 +281,46 @@ impl Render for CachedDebugBoundsRoot {
     }
 }
 
+#[test]
+fn floating_theme_applies_one_sanitized_backdrop_alpha_limit_to_every_shell() {
+    let theme = FloatingSurfaceTheme::default().backdrop_alpha_limit(0.15);
+    for role in [
+        FloatingRole::Popover,
+        FloatingRole::Command,
+        FloatingRole::Modal,
+        FloatingRole::Tooltip,
+        FloatingRole::Notice,
+        FloatingRole::Readout,
+    ] {
+        let shell = theme.shell(role);
+        assert_eq!(shell.backdrop_alpha_limit(), 0.15);
+        let mut frame = shell.frame(div());
+        assert_eq!(frame.style().backdrop_alpha_limit, Some(0.15));
+    }
+
+    assert_eq!(
+        FloatingSurfaceTheme::default()
+            .backdrop_alpha_limit(f32::NAN)
+            .shell(FloatingRole::Popover)
+            .backdrop_alpha_limit(),
+        1.0
+    );
+    assert_eq!(
+        FloatingSurfaceTheme::default()
+            .backdrop_alpha_limit(-1.0)
+            .shell(FloatingRole::Popover)
+            .backdrop_alpha_limit(),
+        0.0
+    );
+    assert_eq!(
+        FloatingSurfaceTheme::default()
+            .backdrop_alpha_limit(2.0)
+            .shell(FloatingRole::Popover)
+            .backdrop_alpha_limit(),
+        1.0
+    );
+}
+
 #[gpui::test]
 fn cached_view_debug_bounds_should_survive_reused_paint_and_clear_after_unmount(
     cx: &mut TestAppContext,

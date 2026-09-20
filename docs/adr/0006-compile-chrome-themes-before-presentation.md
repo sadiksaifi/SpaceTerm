@@ -57,16 +57,22 @@ reference, while platform Adapters own only native window capabilities. Separate
 would split interaction, accessibility, and lifecycle ownership across platforms, so menus, palettes,
 tooltips, modals, and Pane-local overlays remain GPUI-owned. Their shared shell filters already-painted
 GPUI content and bounds its color without adding framebuffer opacity. A small host-relative wash,
-outer shadow and edge provide elevation. Repeating the color treatment leaves already-admitted
+outer shadow and edge provide elevation. When the native window is translucent, the shell also caps
+the retained framebuffer alpha according to Transparency. Preserving sampled alpha alone left dense
+Terminal backings and modal scrims hiding the native material. The cap scales premultiplied color
+with alpha, retaining a faint trace of filtered application content while revealing the existing
+window backdrop. It does not affect the scrim outside the shell or background input blocking.
+Opaque native windows keep captured coverage because they have no translucent backing to reveal.
+At full coverage the alpha cap is idempotent. Repeating the color treatment leaves already-admitted
 colors unchanged, so nested surfaces do not repeatedly tint the same content. Blur off skips
-spatial filtering but retains the same color treatment. Reduce Transparency and Increase Contrast
+spatial filtering but retains the same color treatment and alpha limit. Reduce Transparency and Increase Contrast
 make both native and in-window materials opaque without erasing the user's Settings. A platform's
 lack of native desktop transparency does not disable GPUI floating-surface translucency or blur.
 The compiled floating tone bounds opaque GPUI content to a range with readable foregrounds. If a
 custom tone admits no readable neutral foreground, its floating-only RGB moves minimally toward
 the appearance endpoint; authored and resting-surface colors remain unchanged. The native material
-is composited outside GPUI and cannot be sampled by this filter. Preserving transparent framebuffer
-pixels lets that same native material show through; it does not establish a contrast guarantee
+is composited outside GPUI and cannot be sampled by this filter. Limiting framebuffer coverage
+lets that same native material show through; it does not establish a contrast guarantee
 against arbitrary final desktop pixels. Opaque accessibility presentation remains the deterministic
 fallback. A full source-over floating tint would restore that guarantee by obscuring the native
 material, which conflicts with the shared-material presentation.

@@ -59,7 +59,7 @@ struct BackdropParams {
     sigma: f32,
     opacity: f32,
     pass_index: f32,
-    pad: f32,
+    alpha_limit: f32,
     tone: [f32; 4],
 }
 
@@ -766,7 +766,7 @@ impl BladeRenderer {
                 sigma,
                 opacity: filter.opacity,
                 pass_index: pass_index as f32,
-                pad: 0.0,
+                alpha_limit: filter.alpha_limit,
                 tone: [filter.tone.r, filter.tone.g, filter.tone.b, filter.tone.a],
             };
             let mut pass = self.command_encoder.render(

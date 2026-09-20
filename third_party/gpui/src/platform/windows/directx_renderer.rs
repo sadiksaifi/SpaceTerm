@@ -718,7 +718,7 @@ impl DirectXRenderer {
                     sigma,
                     opacity: filter.opacity,
                     pass_index: pass_index as f32,
-                    _pad: 0.0,
+                    alpha_limit: filter.alpha_limit,
                     tone: [filter.tone.r, filter.tone.g, filter.tone.b, filter.tone.a],
                 };
                 self.pipelines.backdrop.update_buffer(
@@ -1165,7 +1165,7 @@ struct BackdropParams {
     sigma: f32,
     opacity: f32,
     pass_index: f32,
-    _pad: f32,
+    alpha_limit: f32,
     tone: [f32; 4],
 }
 

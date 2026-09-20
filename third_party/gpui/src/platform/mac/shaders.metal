@@ -59,6 +59,9 @@ fragment float4 backdrop_fragment(float4 position [[position]],
   float3 lower = tone * tone_alpha * filtered.a;
   float3 upper = (tone * tone_alpha + (1.0 - tone_alpha)) * filtered.a;
   float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+  if (treated.a > p[19]) {
+    treated *= p[19] / treated.a;
+  }
   return mix(original_color, treated, coverage);
 }
 

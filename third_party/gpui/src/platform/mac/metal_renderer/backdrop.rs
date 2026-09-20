@@ -230,6 +230,113 @@ mod tests {
     }
 
     #[test]
+    fn backdrop_alpha_limit_should_reveal_window_backing_without_repeated_attenuation() {
+        let device = metal::Device::system_default().expect("native Metal device required");
+        #[cfg(not(feature = "runtime_shaders"))]
+        let library = device
+            .new_library_with_data(super::super::SHADERS_METALLIB)
+            .unwrap();
+        #[cfg(feature = "runtime_shaders")]
+        let library = device
+            .new_library_with_source(
+                super::super::SHADERS_SOURCE_FILE,
+                &metal::CompileOptions::new(),
+            )
+            .unwrap();
+        let mut renderer = BackdropRenderer::new(&device, &library);
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(32);
+        descriptor.set_height(32);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(if device.has_unified_memory() {
+            metal::MTLStorageMode::Shared
+        } else {
+            metal::MTLStorageMode::Managed
+        });
+        descriptor
+            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        let target = device.new_texture(&descriptor);
+        let region = metal::MTLRegion::new_2d(0, 0, 32, 32);
+        let mut original = [64u8, 32, 16, 255].repeat(32 * 32);
+        original[(16 * 32 + 12) * 4..(16 * 32 + 13) * 4].copy_from_slice(&[16, 8, 4, 32]);
+        original[(16 * 32 + 13) * 4..(16 * 32 + 14) * 4].fill(0);
+        let bounds = Bounds::new(
+            point(ScaledPixels(4.0), ScaledPixels(4.0)),
+            size(ScaledPixels(24.0), ScaledPixels(24.0)),
+        );
+        let mut filter = BackdropFilter {
+            bounds,
+            content_mask: ContentMask {
+                bounds: Bounds::new(bounds.origin, size(ScaledPixels(20.0), ScaledPixels(24.0))),
+            },
+            corner_radii: Corners::all(ScaledPixels(6.0)),
+            opacity: 1.0,
+            alpha_limit: 0.25,
+            ..Default::default()
+        };
+        let queue = device.new_command_queue();
+        let mut render = |input: &[u8], filter: &BackdropFilter| {
+            target.replace_region(region, 0, input.as_ptr().cast(), 32 * 4);
+            let commands = queue.new_command_buffer();
+            renderer.encode(
+                &device,
+                commands,
+                &target,
+                filter,
+                size(DevicePixels(32), DevicePixels(32)),
+            );
+            if !device.has_unified_memory() {
+                let sync = commands.new_blit_command_encoder();
+                sync.synchronize_resource(&target);
+                sync.end_encoding();
+            }
+            commands.commit();
+            commands.wait_until_completed();
+            assert_eq!(commands.status(), metal::MTLCommandBufferStatus::Completed);
+            let mut output = vec![0u8; input.len()];
+            target.get_bytes(output.as_mut_ptr().cast(), 32 * 4, region, 0);
+            output
+        };
+        let once = render(&original, &filter);
+        let pixel = |bytes: &[u8], x: usize, y: usize| -> [u8; 4] {
+            bytes[(y * 32 + x) * 4..(y * 32 + x + 1) * 4]
+                .try_into()
+                .unwrap()
+        };
+        assert_eq!(
+            pixel(&once, 16, 16),
+            [16, 8, 4, 64],
+            "dense content must admit the native backing"
+        );
+        for (x, y) in [(12, 16), (13, 16), (0, 16), (4, 4), (26, 16)] {
+            assert_eq!(
+                pixel(&once, x, y),
+                pixel(&original, x, y),
+                "clear, already-thin, rounded and masked pixels must remain unchanged"
+            );
+        }
+        let twice = render(&once, &filter);
+        // Rounded edge antialiasing is partial coverage, like element opacity below. Fully
+        // covered interior pixels must already be at the limit after the first treatment.
+        for y in 10..22 {
+            for x in 10..22 {
+                assert_eq!(
+                    pixel(&twice, x, y),
+                    pixel(&once, x, y),
+                    "nested filters must not repeatedly attenuate the same interior"
+                );
+            }
+        }
+        filter.opacity = 0.5;
+        let partial = render(&original, &filter);
+        assert_eq!(
+            pixel(&partial, 16, 16),
+            [40, 20, 10, 159],
+            "element opacity must interpolate premultiplied RGBA"
+        );
+    }
+
+    #[test]
     fn shadow_interior_exclusion_should_preserve_center_and_follow_rounded_shell() {
         let device = metal::Device::system_default().expect("native Metal device required");
         #[cfg(not(feature = "runtime_shaders"))]
@@ -502,7 +609,7 @@ impl BackdropRenderer {
                 sigma,
                 filter.opacity,
                 pass,
-                0.0,
+                filter.alpha_limit,
                 filter.tone.r,
                 filter.tone.g,
                 filter.tone.b,

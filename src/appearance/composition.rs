@@ -81,6 +81,9 @@ impl SurfaceMaterials {
     const FLOATING_RESIDUAL: f32 = 0.70;
     /// The most coverage a floating shell adds after the window's glass has engaged.
     const FLOATING_WASH_CEILING: u8 = 20;
+    /// How much already-painted in-window content a floating shell may retain at maximum
+    /// transparency. The remainder exposes the effective native window backdrop.
+    const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
     /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
     ///
     /// Panes stay close to the base, below the brighter cards and selected controls.
@@ -354,6 +357,15 @@ impl SurfaceMaterials {
 
     pub(crate) const fn is_opaque(self) -> bool {
         self.glass == 0
+    }
+
+    /// Maximum alpha that already-painted content may retain beneath a floating shell.
+    ///
+    /// This follows the effective window material, not the independently resolved floating
+    /// material. An opaque or unsupported native window has no backing to reveal and therefore
+    /// keeps the existing framebuffer intact.
+    pub(crate) fn floating_backdrop_alpha_limit(self) -> f32 {
+        1.0 - (1.0 - Self::FLOATING_BACKDROP_RETENTION) * self.admitted()
     }
 }
 

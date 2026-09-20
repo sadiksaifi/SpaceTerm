@@ -15,7 +15,11 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
     FloatingRole::Readout,
 ];
 
-/// Resolves a black or white opaque endpoint through the tone box and elevation wash.
+/// Resolves a black or white GPUI-content endpoint through the tone box and elevation wash.
+///
+/// The renderer may reduce that content's alpha afterward so the semantic native Light or Dark
+/// material contributes the final backdrop. Arbitrary native pixels are outside this helper's
+/// contrast contract.
 fn shell_endpoint_background(shell: FloatingShell, underlay: Color) -> Color {
     assert!(
         underlay == Color::rgb(0x000000) || underlay == Color::rgb(0xffffff),
@@ -76,6 +80,15 @@ fn native_window_support_does_not_disable_floating_translucency() {
                 unsupported_shell.backdrop_tone(),
                 supported_shell.backdrop_tone()
             );
+            assert!(
+                supported_shell.backdrop_alpha_limit() < 1.0,
+                "{appearance:?} {role:?} must reveal the effective native backing"
+            );
+            assert_eq!(
+                unsupported_shell.backdrop_alpha_limit(),
+                1.0,
+                "{appearance:?} {role:?} must retain content when no native backing is available"
+            );
         }
     }
 }
@@ -113,6 +126,16 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
                             assert_eq!(shell.material(), plain_shell.material());
                             assert_eq!(shell.backdrop_tone(), plain_shell.backdrop_tone());
                             assert_eq!(
+                                shell.backdrop_alpha_limit(),
+                                plain_shell.backdrop_alpha_limit(),
+                                "Blur must not control native-backing transmission"
+                            );
+                            assert_eq!(
+                                shell.backdrop_alpha_limit() < 1.0,
+                                supported && transparency > 0.0,
+                                "only effective native glass can admit the window backing"
+                            );
+                            assert_eq!(
                                 shell.backdrop_blur_radius() > gpui::px(0.0),
                                 blur && transparency > 0.0
                             );
@@ -132,6 +155,13 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
                                     prepared.floating_surfaces().shell(role).backdrop_tone().a,
                                     0.0,
                                     "{role:?} must not filter an opaque fallback"
+                                );
+                                assert_eq!(
+                                    prepared
+                                        .floating_surfaces()
+                                        .shell(role)
+                                        .backdrop_alpha_limit(),
+                                    1.0
                                 );
                             }
                         } else if supported {
