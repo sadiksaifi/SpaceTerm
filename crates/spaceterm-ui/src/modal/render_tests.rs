@@ -152,6 +152,54 @@ fn suppression_interaction_rejects_repeats_and_mismatched_releases() {
     assert!(interaction.is_idle());
 }
 
+#[gpui::test]
+fn alert_suppression_uses_floating_toggle_paint(cx: &mut TestAppContext) {
+    let root_catalog = crate::catalog_tests::catalog(1);
+    let floating_paint = crate::TogglePaint::new(
+        rgba(0x112233ff),
+        rgba(0x445566ff),
+        rgba(0x778899ff),
+        rgba(0xaabbccff),
+    );
+    let floating_values = crate::ToggleValuePaints::new(floating_paint, floating_paint);
+    let floating_metrics = crate::ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+    let floating_toggle = crate::ToggleTheme::new(
+        crate::TogglePaints::new(
+            floating_values,
+            floating_values,
+            floating_values,
+            floating_values,
+        ),
+        crate::ToggleSizes::new(floating_metrics, floating_metrics),
+        rgba(0xddeeffff),
+    );
+    let controls = crate::SurfaceControlThemes::new(
+        root_catalog.button,
+        floating_toggle,
+        root_catalog.progress,
+        root_catalog.segmented_control,
+        root_catalog.search_field,
+        root_catalog.text_input,
+    );
+    cx.update(|cx| {
+        crate::init(
+            cx,
+            root_catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("distinct root and floating themes should install");
+    });
+
+    cx.update(|cx| {
+        let resolved = modal_suppression_toggle_theme(cx);
+        assert_eq!(resolved.paint(false, true, false, false), floating_paint);
+        assert_ne!(
+            resolved.paint(false, true, false, false),
+            cx.global::<crate::ToggleTheme>()
+                .paint(false, true, false, false),
+        );
+    });
+}
+
 fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
     ModalTheme::new(
         ModalPaint::new(

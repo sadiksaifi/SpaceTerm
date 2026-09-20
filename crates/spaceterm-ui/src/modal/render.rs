@@ -951,7 +951,7 @@ fn render_alert_suppression(
         state.read(cx).interaction,
         ModalSuppressionInteraction::Space | ModalSuppressionInteraction::Pointer { inside: true }
     );
-    let toggle_theme = *cx.global::<crate::ToggleTheme>();
+    let toggle_theme = modal_suppression_toggle_theme(cx);
     let toggle_paint = toggle_theme.paint(selected, enabled, false, pressed);
     let hover_label = toggle_theme.paint(selected, enabled, true, false).label();
     let pressed_label = toggle_theme.paint(selected, enabled, false, true).label();
@@ -1064,6 +1064,10 @@ fn render_alert_suppression(
         .child(focus_anchor.bounds_tracker(shell.hairline()));
 
     div().flex().min_w_0().child(control).into_any_element()
+}
+
+fn modal_suppression_toggle_theme(cx: &App) -> crate::ToggleTheme {
+    *ControlHost::Floating.toggle_theme(cx)
 }
 
 struct ModalSuppressionState {

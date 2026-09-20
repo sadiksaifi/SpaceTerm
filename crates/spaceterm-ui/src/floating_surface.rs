@@ -441,6 +441,12 @@ impl ControlHost {
             .map_or_else(|| cx.global::<ButtonTheme>(), |themes| &themes.button)
     }
 
+    pub(crate) fn toggle_theme(self, cx: &App) -> &ToggleTheme {
+        cx.try_global::<crate::ControlThemeCatalog>()
+            .and_then(|catalog| catalog.hosted_controls(self))
+            .map_or_else(|| cx.global::<ToggleTheme>(), |themes| &themes.toggle)
+    }
+
     /// Selects this host for layout, prepaint, and paint without drawing a surface.
     ///
     /// The caller owns the actual host material. Controls must resolve their themes inside
