@@ -7980,7 +7980,7 @@ fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remot
 }
 
 #[gpui::test]
-fn workspace_switcher_should_use_displayed_directory_as_its_searchable_description(
+fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -8005,11 +8005,11 @@ fn workspace_switcher_should_use_displayed_directory_as_its_searchable_descripti
     });
 
     assert_eq!(item.label(), "Alpha");
-    assert_eq!(item.description_text(), Some("/project/Ångström"));
+    assert_eq!(item.description_text(), None);
 }
 
 #[gpui::test]
-fn workspace_switcher_should_search_the_displayed_directory(cx: &mut TestAppContext) {
+fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
@@ -8037,7 +8037,7 @@ fn workspace_switcher_should_search_the_displayed_directory(cx: &mut TestAppCont
     cx.simulate_input("project");
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
+    assert!(cx.debug_bounds("workspace-switcher-result-1").is_none());
     let switcher = manager.read_with(cx, |manager, _| manager.workspace_switcher.clone());
     assert!(!cx.update(|window, cx| switcher.accept_matching(
         |choice| {
@@ -8049,7 +8049,7 @@ fn workspace_switcher_should_search_the_displayed_directory(cx: &mut TestAppCont
         window,
         cx,
     )));
-    assert!(cx.update(|window, cx| switcher.accept_matching(
+    assert!(!cx.update(|window, cx| switcher.accept_matching(
         |choice| {
             matches!(
                 choice,
