@@ -1,5 +1,4 @@
-use gpui::prelude::*;
-use spaceterm_ui::{Icon, IconName, MenuEntry};
+use spaceterm_ui::MenuEntry;
 
 use crate::terminal::NativeContextActions;
 
@@ -27,6 +26,7 @@ fn terminal_context_presentation(
     }
 }
 
+/// Ordinary editing commands use labels and shortcuts without decorative icons.
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
     presentation: &crate::desktop_profile::DesktopPresentation,
@@ -53,25 +53,13 @@ pub(crate) fn terminal_context_menu_entries(
     ]
 }
 
-fn command_icon(command: TerminalContextMenuCommand) -> IconName {
-    match command {
-        TerminalContextMenuCommand::Copy => IconName::Copy,
-        TerminalContextMenuCommand::Paste => IconName::Clipboard,
-        TerminalContextMenuCommand::Find => IconName::Search,
-        TerminalContextMenuCommand::OpenLink => IconName::ExternalLink,
-        TerminalContextMenuCommand::FilePreview => IconName::Eye,
-    }
-}
-
 fn menu_entry(
     command: TerminalContextMenuCommand,
     label: &'static str,
     enabled: bool,
 ) -> MenuEntry<TerminalContextMenuCommand> {
-    let icon = command_icon(command);
     MenuEntry::action(label, command)
         .disabled(!enabled)
-        .icon(move |foreground, size| Icon::new(icon, size, foreground).into_any_element())
         .debug_selector(format!(
             "terminal-context-menu-row-{}-{}",
             command.debug_name(),
@@ -94,22 +82,6 @@ impl TerminalContextMenuCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_context_actions_should_use_typed_semantic_icons() {
-        assert!(matches!(
-            command_icon(TerminalContextMenuCommand::Copy),
-            IconName::Copy
-        ));
-        assert!(matches!(
-            command_icon(TerminalContextMenuCommand::OpenLink),
-            IconName::ExternalLink
-        ));
-        assert!(matches!(
-            command_icon(TerminalContextMenuCommand::FilePreview),
-            IconName::Eye
-        ));
-    }
 
     #[test]
     fn terminal_surface_should_use_host_neutral_profile_presentation() {
