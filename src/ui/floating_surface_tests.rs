@@ -885,71 +885,74 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
     use super::control_theme_catalog::OverlayRow;
 
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
-        let reference = prepared.floating_colors.clone();
-        let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-        let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
-        let mut paint = reference.clone();
-        paint.elevated_surface_background = material;
-        for pick in [
-            |c: &crate::appearance::ChromeColors| {
-                [
-                    c.elevated_surface_background,
-                    c.row_foreground,
-                    c.row_secondary,
-                    c.row_icon,
-                    c.row_match,
-                    c.row_border,
-                ]
-            },
-            |c: &crate::appearance::ChromeColors| {
-                [
-                    c.row_hover_background,
-                    c.row_hover_foreground,
-                    c.row_hover_secondary,
-                    c.row_hover_icon,
-                    c.row_hover_match,
-                    c.row_hover_border,
-                ]
-            },
-            |c: &crate::appearance::ChromeColors| {
-                [
-                    c.row_selected_background,
-                    c.row_selected_foreground,
-                    c.row_selected_secondary,
-                    c.row_selected_icon,
-                    c.row_selected_match,
-                    c.row_selected_border,
-                ]
-            },
-            |c: &crate::appearance::ChromeColors| {
-                [
-                    c.row_selected_hover_background,
-                    c.row_selected_hover_foreground,
-                    c.row_selected_hover_secondary,
-                    c.row_selected_hover_icon,
-                    c.row_selected_hover_match,
-                    c.row_selected_hover_border,
-                ]
-            },
-        ] as [fn(&crate::appearance::ChromeColors) -> [Color; 6]; 4]
-        {
-            let [fill, foreground, secondary, icon, matched, border] = pick(&reference);
-            let row = OverlayRow::resolve(
-                (fill, reference.elevated_surface_background),
-                (pick(&paint)[0], paint.elevated_surface_background),
-                [foreground, secondary, icon, matched],
-                border,
-            );
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
-                let background = row
-                    .fill
-                    .source_over(shell_endpoint_background(shell, underlay));
-                for content in row.content {
-                    assert!(
-                        content.contrast_ratio(background) >= 4.5,
-                        "{appearance:?} row content {content:?} must read over {background:?}"
-                    );
+        for transparency in [0.0, 0.15, 0.35, 0.7, 1.0] {
+            let (_, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+            let reference = prepared.floating_colors.clone();
+            let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+            let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
+            let mut paint = reference.clone();
+            paint.elevated_surface_background = material;
+            for pick in [
+                |c: &crate::appearance::ChromeColors| {
+                    [
+                        c.elevated_surface_background,
+                        c.row_foreground,
+                        c.row_secondary,
+                        c.row_icon,
+                        c.row_match,
+                        c.row_border,
+                    ]
+                },
+                |c: &crate::appearance::ChromeColors| {
+                    [
+                        c.row_hover_background,
+                        c.row_hover_foreground,
+                        c.row_hover_secondary,
+                        c.row_hover_icon,
+                        c.row_hover_match,
+                        c.row_hover_border,
+                    ]
+                },
+                |c: &crate::appearance::ChromeColors| {
+                    [
+                        c.row_selected_background,
+                        c.row_selected_foreground,
+                        c.row_selected_secondary,
+                        c.row_selected_icon,
+                        c.row_selected_match,
+                        c.row_selected_border,
+                    ]
+                },
+                |c: &crate::appearance::ChromeColors| {
+                    [
+                        c.row_selected_hover_background,
+                        c.row_selected_hover_foreground,
+                        c.row_selected_hover_secondary,
+                        c.row_selected_hover_icon,
+                        c.row_selected_hover_match,
+                        c.row_selected_hover_border,
+                    ]
+                },
+            ] as [fn(&crate::appearance::ChromeColors) -> [Color; 6]; 4]
+            {
+                let [fill, foreground, secondary, icon, matched, border] = pick(&reference);
+                let row = OverlayRow::resolve(
+                    (fill, reference.elevated_surface_background),
+                    (pick(&paint)[0], paint.elevated_surface_background),
+                    [foreground, secondary, icon, matched],
+                    border,
+                );
+                for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+                    let background = row
+                        .fill
+                        .source_over(shell_endpoint_background(shell, underlay));
+                    for content in row.content {
+                        assert!(
+                            content.contrast_ratio(background) >= 4.5,
+                            "{appearance:?} at {transparency}: row content {content:?} must read over {background:?}"
+                        );
+                    }
                 }
             }
         }

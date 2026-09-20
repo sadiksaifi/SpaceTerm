@@ -156,14 +156,34 @@ fn row_backgrounds(
     fill: crate::appearance::Color,
     surface: crate::appearance::Color,
 ) -> [crate::appearance::Color; 2] {
-    if surface.is_opaque() {
+    if surface.is_opaque() || fill.is_opaque() {
         return [fill.source_over(surface); 2];
     }
     [
         crate::appearance::Color::rgb(0x000000),
         crate::appearance::Color::rgb(0xffffff),
     ]
-    .map(|underlay| fill.source_over(surface.source_over(underlay)))
+    .map(|underlay| {
+        let background = fill.source_over(surface.source_over(underlay));
+        if fill.a == 0 {
+            return background;
+        }
+        // The catalog folds tone and wash into one material. Rendering blends them separately,
+        // so adding a row fill can move the endpoint one level beyond that folded estimate.
+        // Idle rows keep the shell's already-resolved content and do not add this extra layer.
+        let channel = |value: u8| {
+            if underlay.r == 0 {
+                value.saturating_sub(1)
+            } else {
+                value.saturating_add(1)
+            }
+        };
+        crate::appearance::Color::from_rgb_components(
+            channel(background.r),
+            channel(background.g),
+            channel(background.b),
+        )
+    })
 }
 
 fn shared_neutral(backgrounds: [crate::appearance::Color; 2]) -> Option<crate::appearance::Color> {

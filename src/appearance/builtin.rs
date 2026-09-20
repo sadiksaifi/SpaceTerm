@@ -124,7 +124,12 @@ fn spaceterm_light_chrome() -> ChromeColors {
 /// Light and dark are a paired tonal system rather than an inversion. Each appearance authors the
 /// same ladder (root, chrome shell, raised surface, field, hover, pressed, persistent selection)
 /// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
-/// alone. Every resting surface, separator, text gray, and shadow is authored with equal channels:
+/// alone.
+///
+/// Cards and floating surfaces lighten in both appearances. Interaction fills move toward text:
+/// lighter in Dark and darker in Light. Tabs and navigation rows share that selection direction.
+///
+/// Every resting surface, separator, text gray, and shadow is authored with equal channels:
 /// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
 /// only to what it communicates. Persistent selection is a neutral step on that ladder: it must
 /// never read as a call to action, so it stays out of the accent family entirely. Blue is reserved
@@ -149,6 +154,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell_inactive: 0x161616,
             raised: 0x202020,
             field: 0x1c1c1c,
+            control_fill: None,
             hover: 0x1d1d1d,
             pressed: 0x242424,
             selected: 0x2e2e2e,
@@ -193,18 +199,19 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shadow: 0x00000080,
         },
         Appearance::Light => ChromePalette {
-            root: 0xdedede,
-            shell: 0xe5e5e5,
-            shell_inactive: 0xe9e9e9,
-            raised: 0xffffff,
-            field: 0xfcfcfc,
-            hover: 0xeeeeee,
-            pressed: 0xe6e6e6,
-            selected: 0xf8f8f8,
-            selected_inactive: 0xf0f0f0,
-            row_hover: 0xdcdcdc,
-            row_selected: 0xd0d0d0,
-            tab_active: 0xfafafa,
+            root: 0xebebeb,
+            shell: 0xf1f1f1,
+            shell_inactive: 0xefefef,
+            raised: 0xf8f8f8,
+            field: 0xffffff,
+            control_fill: Some(0xededed),
+            hover: 0xe3e3e3,
+            pressed: 0xdcdcdc,
+            selected: 0xd6d6d6,
+            selected_inactive: 0xececec,
+            row_hover: 0xe9e9e9,
+            row_selected: 0xdfdfdf,
+            tab_active: 0xe4e4e4,
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
@@ -212,16 +219,16 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             text_muted: 0x6e6e6e,
             text_placeholder: 0x717171,
             text_disabled: 0xa5a5a5,
-            separator: 0xe2e2e2,
-            separator_quiet: 0xe9e9e9,
-            separator_disabled: 0xe6e6e6,
-            field_outline: 0xd6d6d6,
-            control_outline: 0xd3d3d3,
-            control_outline_strong: 0xc0c0c0,
-            tab_separator: 0xbfbfbf,
-            mark_outline: 0x878787,
+            separator: 0xe6e6e6,
+            separator_quiet: 0xeeeeee,
+            separator_disabled: 0xf2f2f2,
+            field_outline: 0xdadada,
+            control_outline: 0xd8d8d8,
+            control_outline_strong: 0xc6c6c6,
+            tab_separator: 0xcbcbcb,
+            mark_outline: 0x858585,
             mark_outline_strong: 0x6d6d6d,
-            mark_track: 0xeeeeee,
+            mark_track: 0xe8e8e8,
             mark_indicator: 0x595959,
             mark_indicator_strong: 0x474747,
             scrollbar_thumb: 0x808080,
@@ -239,7 +246,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             success: 0x22713f,
             warning: 0x8a5b12,
             error: 0xb8352f,
-            shadow: 0x00000024,
+            shadow: 0x0000002b,
         },
     };
     palette.into_definition()
@@ -255,6 +262,8 @@ struct ChromePalette {
     /// Menus, popovers, dialogs, tooltips, and the cards one run of Settings Rows rests on.
     raised: u32,
     field: u32,
+    /// Light controls use a dedicated fill; Dark retains the compiler's root-derived default.
+    control_fill: Option<u32>,
     hover: u32,
     pressed: u32,
     /// Persistent selection: a neutral rung, never an accent.
@@ -268,7 +277,8 @@ struct ChromePalette {
     row_hover: u32,
     /// Persistent row selection is stronger than hover on both hosts, without a decorative rim.
     row_selected: u32,
-    /// The Active Tab is lifted from the title bar, independently of list-row fills.
+    /// The Active Tab, authored apart from the list-row fills but stepping the same way from the
+    /// title bar that a selected row steps from its own surface.
     tab_active: u32,
     /// The label on a selected chip, which is the strongest text in a navigation list.
     row_selected_text: u32,
@@ -356,6 +366,7 @@ impl ChromePalette {
             outline_pressed_border: opaque(self.control_outline),
             outline_disabled_border: opaque(self.separator_disabled),
 
+            element_background: self.control_fill.map(Color::rgb),
             element_hover: opaque(self.hover),
             element_active: opaque(self.pressed),
             element_selected: opaque(self.selected),
@@ -375,10 +386,7 @@ impl ChromePalette {
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
             row_selected_hover_secondary: opaque(self.row_selected_secondary),
-            // The Active Tab is an inset chip resting inside the title bar rather than a
-            // full-height panel continuous with the content, so it reads as lifted out of that
-            // bar. Painting it the window root would read as a well cut into the bar in dark
-            // Chrome and as a raised card in light, which is one shape describing two things.
+            // Tabs share the row selection direction but use a smaller contrast step.
             tab_active_background: opaque(self.tab_active),
             // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
             // hover identically. The chip's shape is its fill; no hairline is drawn around it.
@@ -677,12 +685,9 @@ mod tests {
 
     /// The Active Tab and selected rows carry the same content hierarchy with distinct materials.
     ///
-    /// A Tab only rests on the title bar, so its fill can lift from that surface independently of a
-    /// row that must work on both the chrome shell and a raised menu. Both shapes are stated by fill
-    /// rather than a decorative outline. The unfocused window's Tab keeps its identity with a
-    /// shorter step off the bar.
+    /// Both move toward text without a decorative outline. An unfocused Tab uses a smaller step.
     #[test]
-    fn the_active_tab_should_lift_independently_from_borderless_selected_rows() {
+    fn the_active_tab_should_share_borderless_row_selection_direction() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance).opaque_presentation();
 
@@ -738,9 +743,10 @@ mod tests {
             let bar = weight(colors.title_bar_background);
             let focused = weight(colors.tab_active_background) - bar;
             let unfocused = weight(colors.tab_inactive_selected_background) - bar;
+            let row = weight(colors.row_selected_background) - weight(colors.panel_background);
             assert!(
-                focused > 0.0 && unfocused > 0.0,
-                "{appearance:?} should lift both Active Tab states from the title bar, got \
+                focused * row > 0.0 && unfocused * row > 0.0,
+                "{appearance:?} should keep Tab states in the row selection direction, got \
                  {unfocused} against {focused}"
             );
             assert!(

@@ -1996,11 +1996,13 @@ mod tests {
                 Some(colors.row_selected_background),
                 "{appearance:?} Active Tab should be tuned independently of navigation rows"
             );
+            let tab_step = i32::from(colors.tab_active_background.r)
+                - i32::from(colors.title_bar_background.r);
+            let row_step =
+                i32::from(colors.row_selected_background.r) - i32::from(colors.panel_background.r);
             assert!(
-                colors.tab_active_background.r > colors.title_bar_background.r
-                    && colors.tab_active_background.g > colors.title_bar_background.g
-                    && colors.tab_active_background.b > colors.title_bar_background.b,
-                "{appearance:?} Active Tab should lift from the title bar"
+                tab_step * row_step > 0,
+                "{appearance:?} Active Tab should follow the navigation selection direction"
             );
         }
     }

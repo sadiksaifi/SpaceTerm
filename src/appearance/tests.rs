@@ -114,7 +114,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
+fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
     let preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
         ..Default::default()
@@ -136,7 +136,6 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         for target in [
             resolved.terminal.colors.background,
             prepared.colors.elevated_surface_background,
-            prepared.colors.selection_background,
         ] {
             let overlay = prepared.surface(SurfaceRole::Surface, target);
             let raised = overlay.source_over(sheet);
@@ -156,6 +155,31 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
                 "a resting surface must continue to transmit most of its backing"
             );
         }
+        let selection_overlay = prepared.materials.paint(
+            SurfaceRole::Surface,
+            prepared.colors.background,
+            prepared.colors.selection_background,
+        );
+        let selection = selection_overlay.source_over(sheet);
+        assert!(
+            selection.r < sheet.r && selection.g < sheet.g && selection.b < sheet.b,
+            "Light selection should shade its sheet host: {selection:?} against {sheet:?}"
+        );
+        assert!(
+            [
+                selection.r.abs_diff(sheet.r),
+                selection.g.abs_diff(sheet.g),
+                selection.b.abs_diff(sheet.b),
+            ]
+            .into_iter()
+            .all(|delta| delta >= 5),
+            "Light selection should remain visible against its sheet host: {selection:?} against \
+             {sheet:?}"
+        );
+        assert!(
+            selection_overlay.a < 128,
+            "a selection must continue to transmit most of its sheet host"
+        );
         let shell = prepared
             .surface(SurfaceRole::Base, prepared.colors.panel_background)
             .source_over(sheet);
@@ -183,6 +207,84 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         assert!(
             selected_overlay.a < 128,
             "a selected row must continue to transmit most of its shell host"
+        );
+    }
+}
+
+#[test]
+fn light_navigation_selections_share_one_contrast_direction_across_material_settings() {
+    let catalog = SchemeCatalog::default();
+    let desktop = Color::rgb(0x808080);
+    let weight = |color: Color| i32::from(color.r) + i32::from(color.g) + i32::from(color.b);
+
+    for transparency in [0.0, 0.35, 1.0] {
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Light,
+            ..Default::default()
+        };
+        preferences.background.transparency = transparency;
+        let resolved = catalog
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let colors = &appearance.colors;
+        let sheet = appearance
+            .surface(SurfaceRole::Sheet, colors.background)
+            .source_over(desktop);
+        let tab_shell = appearance
+            .surface(SurfaceRole::Base, colors.title_bar_background)
+            .source_over(sheet);
+        let sidebar_shell = appearance
+            .surface(SurfaceRole::Base, colors.panel_background)
+            .source_over(sheet);
+        assert_eq!(
+            tab_shell, sidebar_shell,
+            "Light navigation hosts should share one shell at {transparency}"
+        );
+
+        let active_tab = appearance
+            .materials
+            .paint(
+                SurfaceRole::Surface,
+                colors.title_bar_background,
+                colors.tab_active_background,
+            )
+            .source_over(tab_shell);
+        let selected_sidebar = appearance
+            .materials
+            .paint(
+                SurfaceRole::Surface,
+                colors.panel_background,
+                colors.row_selected_background,
+            )
+            .source_over(sidebar_shell);
+        let tab_direction = (weight(active_tab) - weight(tab_shell)).signum();
+        let sidebar_direction = (weight(selected_sidebar) - weight(sidebar_shell)).signum();
+
+        assert_ne!(
+            tab_direction, 0,
+            "Active Tab should remain distinct from its Light shell at {transparency}"
+        );
+        assert_ne!(
+            sidebar_direction, 0,
+            "selected sidebar row should remain distinct from its Light shell at {transparency}"
+        );
+        assert_eq!(
+            tab_direction, sidebar_direction,
+            "Active Tab and selected sidebar row should move in the same contrast direction from \
+             their Light shell at {transparency}: tab={active_tab:?}, sidebar={selected_sidebar:?}, \
+             shell={tab_shell:?}"
+        );
+        assert_eq!(
+            (colors.tab_active_border.a, colors.row_selected_border.a),
+            (0, 0),
+            "navigation selection should not require decorative borders at {transparency}"
         );
     }
 }
@@ -325,13 +427,13 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
     }
 }
 
-/// Light is the appearance the material can flatten, because every one of its surfaces is a
-/// near-white asking for almost all the ink. Its hierarchy is checked as rendered, over a desktop.
+/// Light's hierarchy is checked as rendered over a desktop: raised surfaces lift, selections
+/// shade their host, and every material remains distinct across the transparency range.
 #[test]
 fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
     let desktop = Color::rgb(0x808080);
-    for (transparency, minimum) in [(0.15, 12_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
+    for (transparency, minimum) in [(0.15, 11_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
         let mut preferences = AppearancePreferences::default();
         preferences.background.transparency = transparency;
         let materials = ResolvedWindowComposition::resolve(
@@ -352,7 +454,13 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
                 .source_over(sheet)
         };
         let shell = rendered(SurfaceRole::Base, reference.panel_background);
-        let selected = rendered(SurfaceRole::Surface, reference.row_selected_background);
+        let selected = materials
+            .paint(
+                SurfaceRole::Surface,
+                reference.panel_background,
+                reference.row_selected_background,
+            )
+            .source_over(shell);
         let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
         for (name, surface, host) in [
             ("Pane against the sheet", pane, sheet),
