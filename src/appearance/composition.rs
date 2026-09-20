@@ -16,7 +16,11 @@ pub(crate) enum WindowBackgroundAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionCapabilities {
     pub(crate) native_window_transparency: bool,
-    pub(crate) accessibility_allows_transparency: bool,
+    pub(crate) reduce_transparency: bool,
+    pub(crate) increase_contrast: bool,
+    pub(crate) show_borders: bool,
+    pub(crate) reduce_motion: bool,
+    pub(crate) differentiate_without_color: bool,
 }
 
 impl CompositionCapabilities {
@@ -26,8 +30,16 @@ impl CompositionCapabilities {
     ) -> Self {
         Self {
             native_window_transparency,
-            accessibility_allows_transparency,
+            reduce_transparency: !accessibility_allows_transparency,
+            increase_contrast: false,
+            show_borders: false,
+            reduce_motion: false,
+            differentiate_without_color: false,
         }
+    }
+
+    const fn accessibility_allows_transparency(self) -> bool {
+        !self.reduce_transparency && !self.increase_contrast
     }
 }
 
@@ -384,6 +396,8 @@ impl SurfaceMaterials {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedWindowComposition {
+    /// Platform capabilities captured with this resolved presentation.
+    pub(crate) capabilities: CompositionCapabilities,
     pub(crate) requested: WindowBackgroundAppearance,
     /// Effective native Operating-System Window backdrop.
     pub(crate) effective: WindowBackgroundAppearance,
@@ -406,7 +420,8 @@ impl ResolvedWindowComposition {
             WindowBackgroundAppearance::Transparent
         };
         let requested_materials = SurfaceMaterials::derive(preferences.transparency);
-        let floating_materials = if capabilities.accessibility_allows_transparency {
+        let accessibility_allows_transparency = capabilities.accessibility_allows_transparency();
+        let floating_materials = if accessibility_allows_transparency {
             requested_materials
         } else {
             SurfaceMaterials::OPAQUE
@@ -414,9 +429,10 @@ impl ResolvedWindowComposition {
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
         let native_enabled = capabilities.native_window_transparency
-            && capabilities.accessibility_allows_transparency
+            && accessibility_allows_transparency
             && !requested_materials.is_opaque();
         Self {
+            capabilities,
             requested,
             effective: if native_enabled {
                 requested
@@ -617,6 +633,42 @@ impl ChromeColors {
 mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
+
+    #[test]
+    fn non_transparency_accessibility_capabilities_do_not_change_composition() {
+        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let baseline = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities::new(true, true),
+        );
+        let capabilities = CompositionCapabilities {
+            native_window_transparency: true,
+            reduce_transparency: false,
+            increase_contrast: false,
+            show_borders: true,
+            reduce_motion: true,
+            differentiate_without_color: true,
+        };
+
+        let resolved = ResolvedWindowComposition::resolve(&preferences, capabilities);
+
+        assert_eq!(
+            (
+                resolved.requested,
+                resolved.effective,
+                resolved.materials,
+                resolved.floating_materials,
+                resolved.floating_blur,
+            ),
+            (
+                baseline.requested,
+                baseline.effective,
+                baseline.materials,
+                baseline.floating_materials,
+                baseline.floating_blur,
+            )
+        );
+    }
 
     #[test]
     fn decorative_edges_keep_exact_opaque_and_transparent_authorship() {

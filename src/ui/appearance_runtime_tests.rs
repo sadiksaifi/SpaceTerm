@@ -185,12 +185,45 @@ fn accessibility_display_options_suppress_and_restore_all_translucent_presentati
             assert!(current.chrome.composition.materials.is_opaque());
             assert!(current.chrome.composition.floating_materials.is_opaque());
             assert!(!current.chrome.composition.floating_blur);
+            assert!(
+                current.chrome.composition.capabilities.reduce_transparency
+                    || current.chrome.composition.capabilities.increase_contrast
+            );
         });
         platform.set_reduce_transparency(false);
         platform.set_increase_contrast(false);
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(current(cx).chrome.composition, before.chrome.composition));
     }
+}
+
+#[gpui::test]
+fn non_material_accessibility_facts_are_retained_and_reprepare_chrome(cx: &mut TestAppContext) {
+    let (_settings, platform) = start(cx);
+    let before = cx.update(|cx| Arc::clone(&cx.global::<InstalledChrome>().0));
+
+    platform.set_show_borders(true);
+    platform.set_differentiate_without_color(true);
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        let resolved = current(cx);
+        assert_eq!(
+            (
+                resolved.chrome.composition.capabilities.reduce_transparency,
+                resolved.chrome.composition.capabilities.increase_contrast,
+                resolved.chrome.composition.capabilities.show_borders,
+                resolved.chrome.composition.capabilities.reduce_motion,
+                resolved
+                    .chrome
+                    .composition
+                    .capabilities
+                    .differentiate_without_color,
+            ),
+            (false, false, true, false, true)
+        );
+        assert!(!Arc::ptr_eq(&before, &cx.global::<InstalledChrome>().0));
+    });
 }
 
 #[gpui::test]
@@ -211,6 +244,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
                 spaceterm_ui::ProgressMotion::Reduced,
             )
         );
+        assert!(current(cx).chrome.composition.capabilities.reduce_motion);
     });
 
     platform.set_reduced_motion(false);
@@ -224,6 +258,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
                 spaceterm_ui::ProgressMotion::Standard,
             )
         );
+        assert!(!current(cx).chrome.composition.capabilities.reduce_motion);
     });
 }
 

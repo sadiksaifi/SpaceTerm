@@ -19,12 +19,6 @@ pub(crate) struct AccessibilityDisplayOptions {
     pub(crate) differentiate_without_color: bool,
 }
 
-impl AccessibilityDisplayOptions {
-    pub(crate) const fn allows_transparency(self) -> bool {
-        !self.reduce_transparency && !self.increase_contrast
-    }
-}
-
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
@@ -160,6 +154,7 @@ mod tests {
 
         assert!(options.show_borders);
         assert!(options.differentiate_without_color);
-        assert!(options.allows_transparency());
+        assert!(!options.reduce_transparency);
+        assert!(!options.increase_contrast);
     }
 }

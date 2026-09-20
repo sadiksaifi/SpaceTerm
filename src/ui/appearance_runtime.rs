@@ -41,7 +41,6 @@ pub(crate) fn install(
 ) -> Result<(), SettingsError> {
     let fonts = capture_fonts(cx);
     let observation = platform.observe();
-    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
@@ -75,7 +74,7 @@ pub(crate) fn install(
         settings,
         platform,
         fonts,
-        progress_motion,
+        progress_motion: spaceterm_ui::ProgressMotion::Standard,
         _tasks: tasks,
         _observation: observation,
     });
@@ -92,7 +91,6 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             runtime.progress_motion,
         )
     };
-    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let catalog = SchemeCatalog::from_custom_schemes(&candidate.custom_schemes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
@@ -102,19 +100,24 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         })
         .ok_or(SettingsError::RevisionExhausted)?;
     let accessibility = platform.accessibility_display_options();
+    let capabilities = CompositionCapabilities {
+        native_window_transparency: platform.supports_native_window_transparency(),
+        reduce_transparency: accessibility.reduce_transparency,
+        increase_contrast: accessibility.increase_contrast,
+        show_borders: accessibility.show_borders,
+        reduce_motion: platform.prefers_reduced_motion(),
+        differentiate_without_color: accessibility.differentiate_without_color,
+    };
     let resolved = catalog
         .resolve(
             generation,
             &candidate.preferences,
-            SystemAppearance::from(platform.system_appearance()).with_composition(
-                CompositionCapabilities::new(
-                    platform.supports_native_window_transparency(),
-                    accessibility.allows_transparency(),
-                ),
-            ),
+            SystemAppearance::from(platform.system_appearance()).with_composition(capabilities),
             &fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;
+    let progress_motion =
+        resolved_progress_motion(resolved.chrome.composition.capabilities.reduce_motion);
     let changes = cx
         .try_global::<InstalledAppearance>()
         .map(|previous| AppearanceChangeSet::between(&previous.0, &resolved));
