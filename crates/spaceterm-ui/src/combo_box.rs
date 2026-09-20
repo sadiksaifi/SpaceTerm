@@ -2227,7 +2227,6 @@ fn render_overlay<I: Clone + Eq + 'static>(
     );
     let bounds = place_anchored(target, panel_size, viewport, snapshot.placement);
     let popup_focus = snapshot.popup_focus.clone();
-    let nested_menu_open = snapshot.input_context_menu_open;
     let outside_state = state.downgrade();
     let outside = canvas(
         |_, _, _| (),
@@ -2404,6 +2403,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .track_focus(&popup_focus)
         .child(outside)
         .child(panel)
+        .child(crate::menu::combo_box_owned_overlay())
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .on_action(move |_: &MoveUp, _, cx| {
             let _ = up.update(cx, |state, cx| state.move_by(-1, cx));
@@ -2447,10 +2447,9 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .position(gpui::point(px(0.0), px(0.0)))
         .snap_to_window()
         .child(overlay);
-    // A context menu opened from the editor is itself a deferred anchored popup, and GPUI cannot
-    // enqueue one while it is already processing deferred draws. While the popup hosts that menu it
-    // draws normally instead, and the menu defers above it.
-    crate::floating_surface::present(theme.shell.layer(nested_menu_open), overlay)
+    // The ComboBox retains one deferred viewport root. A nested editor menu joins that root as a
+    // later sibling, so both surfaces escape ancestor clipping without scheduling nested defers.
+    crate::floating_surface::present(theme.shell.layer(false), overlay)
 }
 
 fn status_row(

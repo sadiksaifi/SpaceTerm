@@ -254,6 +254,29 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
     cx.simulate_click(trigger, Modifiers::none());
     cx.simulate_input("local");
     cx.run_until_parked();
+    let body = cx
+        .debug_bounds("modal-body-viewport")
+        .expect("Dialog body should render");
+    let panel_before_menu = cx
+        .debug_bounds("combo-box-panel")
+        .expect("Dialog ComboBox panel should render");
+    assert!(
+        panel_before_menu.left() < body.left()
+            || panel_before_menu.right() > body.right()
+            || panel_before_menu.top() < body.top()
+            || panel_before_menu.bottom() > body.bottom(),
+        "regression requires the popup to cross the body clip: body={body:?}, panel={panel_before_menu:?}"
+    );
+    assert!(
+        cx.update(|window, _| {
+            let expected = panel_before_menu.scale(window.scale_factor());
+            window
+                .painted_quads_for_test()
+                .iter()
+                .any(|quad| quad.visible_bounds == expected)
+        }),
+        "Dialog popup should paint its complete bounds before opening the editor menu"
+    );
     let input = cx
         .debug_bounds("combo-box-input")
         .expect("Popup input should render")
@@ -263,6 +286,65 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
     cx.run_until_parked();
     assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    let panel_during_menu = cx
+        .debug_bounds("combo-box-panel")
+        .expect("Dialog ComboBox panel should remain rendered");
+    let menu_during_combo = cx
+        .debug_bounds("menu-panel-0")
+        .expect("nested editor menu should render above the ComboBox panel");
+    assert_eq!(panel_during_menu, panel_before_menu);
+    let (combo_order, menu_order) = cx.update(|window, _| {
+        let combo = panel_during_menu.scale(window.scale_factor());
+        let menu = menu_during_combo.scale(window.scale_factor());
+        let quads = window.painted_quads_for_test();
+        (
+            quads
+                .iter()
+                .filter(|quad| quad.visible_bounds == combo)
+                .map(|quad| quad.order)
+                .max(),
+            quads
+                .iter()
+                .filter(|quad| quad.visible_bounds == menu)
+                .map(|quad| quad.order)
+                .max(),
+        )
+    });
+    assert!(
+        combo_order.is_some() && menu_order > combo_order,
+        "Dialog popup and nested menu must paint complete bounds in root order: combo={combo_order:?}, menu={menu_order:?}"
+    );
+    let select_all = cx
+        .debug_bounds("Select All")
+        .expect("nested editor menu should expose Select All")
+        .center();
+    cx.simulate_click(select_all, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    let row = cx
+        .debug_bounds("combo-row-local")
+        .expect("filtered row should remain rendered outside the Dialog body");
+    assert!(
+        !body.contains(&row.center()),
+        "regression requires a popup row beyond the Dialog body clip: body={body:?}, row={row:?}"
+    );
+    cx.simulate_click(row.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(accepted.get(), Some(1));
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.simulate_input("local");
+    cx.run_until_parked();
+    let input = cx
+        .debug_bounds("combo-box-input")
+        .expect("reopened popup input should render")
+        .center();
+    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
     let replacement = cx.update(|window, cx| {
         let replacement = root.update(cx, |_, cx| {
             crate::Alert::new(

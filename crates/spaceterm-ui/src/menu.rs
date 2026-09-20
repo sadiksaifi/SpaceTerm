@@ -1336,9 +1336,13 @@ impl<A: Clone + 'static> MenuControl<A> {
             release_window(reservation, window.window_handle().window_id(), cx);
         }
 
-        let (open, focus_handle) = {
+        let (open, combo_box_overlay_hosted, focus_handle) = {
             let state = state.read(cx);
-            (state.open, state.focus_handle.clone())
+            (
+                state.open,
+                state.combo_box_overlay_hosted,
+                state.focus_handle.clone(),
+            )
         };
         let focused = focus_handle.is_focused(window);
         let trigger_bounds_state = state.downgrade();
@@ -1523,7 +1527,9 @@ impl<A: Clone + 'static> MenuControl<A> {
             .relative()
             .when(fill_parent_width, |root| root.w_full())
             .child(trigger)
-            .when(open, |root| root.child(render_overlay(state, window, cx)))
+            .when(open && !combo_box_overlay_hosted, |root| {
+                root.child(render_overlay(state, window, cx))
+            })
             .into_any_element()
     }
 }
@@ -1876,6 +1882,7 @@ struct MenuState {
     reservation: Option<MenuReservation>,
     trigger_bounds: Option<Bounds<Pixels>>,
     context_anchor: Option<Point<Pixels>>,
+    combo_box_overlay_hosted: bool,
     restore_focus: Option<WeakFocusHandle>,
     active_path: Vec<usize>,
     highlighted: Vec<Option<usize>>,
@@ -1954,6 +1961,7 @@ impl MenuState {
             reservation: None,
             trigger_bounds: None,
             context_anchor: None,
+            combo_box_overlay_hosted: false,
             restore_focus: None,
             active_path: Vec::new(),
             highlighted: vec![None],
@@ -2043,6 +2051,7 @@ impl MenuState {
         direction: OpenDirection,
         reservation: Option<MenuReservation>,
         inherited_focus: Option<WeakFocusHandle>,
+        combo_box_overlay_hosted: bool,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
@@ -2059,6 +2068,7 @@ impl MenuState {
         });
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
+        self.combo_box_overlay_hosted = combo_box_overlay_hosted;
         self.open = true;
         self.hovered_row = None;
         self.open_generation = self.open_generation.wrapping_add(1);
@@ -2108,6 +2118,7 @@ impl MenuState {
         let reservation = self.reservation.take();
         self.window_id = None;
         self.context_anchor = None;
+        self.combo_box_overlay_hosted = false;
         self.active_path.clear();
         self.panel_scroll.clear();
         self.highlighted.clear();
@@ -2147,6 +2158,7 @@ impl MenuState {
         self.reservation = None;
         self.window_id = None;
         self.context_anchor = None;
+        self.combo_box_overlay_hosted = false;
         self.active_path.clear();
         self.panel_scroll.clear();
         self.highlighted.clear();
@@ -2577,7 +2589,8 @@ fn open_menu(
             .ok()
             .flatten()
     });
-    let combo_replacement = (!crate::combo_box::claim_window_combo_box_menu(window, cx))
+    let combo_box_overlay_hosted = crate::combo_box::claim_window_combo_box_menu(window, cx);
+    let combo_replacement = (!combo_box_overlay_hosted)
         .then(|| crate::combo_box::dismiss_active_combo_box_for_replacement(window, cx))
         .flatten();
     let combo_focus = combo_replacement
@@ -2596,6 +2609,7 @@ fn open_menu(
             direction,
             Some(reservation),
             inherited_focus,
+            combo_box_overlay_hosted,
             window,
             cx,
         );
@@ -2662,6 +2676,41 @@ fn activate_menu(
 }
 
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
+    crate::floating_surface::present(
+        MENU_ROLE.layer(false),
+        render_overlay_root(state, window, cx),
+    )
+}
+
+pub(crate) fn combo_box_owned_overlay() -> impl IntoElement {
+    ComboBoxOwnedMenuOverlay
+}
+
+#[derive(IntoElement)]
+struct ComboBoxOwnedMenuOverlay;
+
+impl RenderOnce for ComboBoxOwnedMenuOverlay {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let owner = cx
+            .try_global::<MenuCoordinator>()
+            .and_then(|coordinator| coordinator.owners.get(&window.window_handle().window_id()))
+            .map(|ownership| ownership.owner.clone())
+            .and_then(|owner| owner.upgrade());
+        let Some(owner) = owner else {
+            return div().into_any_element();
+        };
+        let hosted = {
+            let menu = owner.read(cx);
+            menu.open && menu.combo_box_overlay_hosted
+        };
+        if !hosted {
+            return div().into_any_element();
+        }
+        render_overlay_root(owner, window, cx)
+    }
+}
+
+fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
     let typography = crate::control_typography(cx);
     let viewport = window.viewport_size();
     let hovered_row = state.read(cx).hovered_row;
@@ -2863,16 +2912,12 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
             }
         });
 
-    // A menu is the innermost anchored popup: it opens from triggers inside other floating
-    // surfaces and never hosts one, so it always reaches the deferred popup layer.
-    crate::floating_surface::present(
-        MENU_ROLE.layer(false),
-        anchored()
-            .anchor(Corner::TopLeft)
-            .position(point(px(0.0), px(0.0)))
-            .snap_to_window()
-            .child(overlay),
-    )
+    anchored()
+        .anchor(Corner::TopLeft)
+        .position(point(px(0.0), px(0.0)))
+        .snap_to_window()
+        .child(overlay)
+        .into_any_element()
 }
 
 #[expect(
@@ -4686,7 +4731,7 @@ mod tests {
                     false,
                     lifecycle,
                 );
-                state.open(None, OpenDirection::First, None, None, window, cx);
+                state.open(None, OpenDirection::First, None, None, false, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4785,6 +4830,7 @@ mod tests {
                     OpenDirection::First,
                     None,
                     None,
+                    false,
                     window,
                     cx,
                 );
