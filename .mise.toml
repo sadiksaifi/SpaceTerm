@@ -175,7 +175,12 @@ run = [{ task = "check:gpui:blade:linux" }]
 
 [tasks."validate:gpui:windows"]
 description = "Validate native MSVC DirectX and compile HLSL with the Windows SDK"
-run = [{ task = "check:gpui:windows" }]
+run = [{ task = "check:gpui:release:windows" }]
+
+[tasks."check:gpui:release:windows"]
+description = "Check native MSVC DirectX with build-time HLSL compilation"
+# GPUI compiles HLSL at build time only when debug assertions are disabled.
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check --manifest-path third_party/gpui/Cargo.toml --release --target x86_64-pc-windows-msvc --no-default-features --locked"
 
 [tasks."test:vendor"]
 description = "Test terminal-library patches with the application feature set"
