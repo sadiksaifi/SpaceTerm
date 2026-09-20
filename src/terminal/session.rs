@@ -1574,7 +1574,7 @@ impl TerminalWorker {
                 return false;
             }
             if self.emulator.synchronized_output_deadline().is_none()
-                && !self.request_presentation()
+                && !self.request_pty_presentation()
             {
                 return false;
             }
@@ -1701,7 +1701,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        self.schedules.request_presentation(Instant::now());
+        self.schedules.request_presentation();
         if self.schedules.take_visible_presentation() {
             self.publish_screen()
         } else {
@@ -1768,6 +1768,16 @@ impl TerminalWorker {
         self.request_presentation_at(Instant::now())
     }
 
+    fn request_pty_presentation(&mut self) -> bool {
+        let now = Instant::now();
+        self.schedules.request_pty_presentation(now);
+        if self.schedules.presentation_due(now) {
+            self.publish_screen()
+        } else {
+            true
+        }
+    }
+
     fn publish_metadata_changed(&mut self) -> bool {
         let Some(wakeup) = self.schedules.take_metadata_presentation() else {
             return true;
@@ -1779,7 +1789,7 @@ impl TerminalWorker {
     }
 
     fn request_presentation_at(&mut self, now: Instant) -> bool {
-        self.schedules.request_presentation(now);
+        self.schedules.request_presentation();
         if self.schedules.presentation_due(now) {
             self.publish_screen()
         } else {

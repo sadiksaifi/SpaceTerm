@@ -139,8 +139,12 @@ impl WorkerSchedules {
         self.hidden_input.transition(now);
     }
 
-    pub(super) fn request_presentation(&mut self, now: Instant) {
-        self.presentation.request(now);
+    pub(super) fn request_presentation(&mut self) {
+        self.presentation.request();
+    }
+
+    pub(super) fn request_pty_presentation(&mut self, now: Instant) {
+        self.presentation.request_accumulated(now);
     }
 
     pub(super) fn note_metadata_changed(&mut self) {
@@ -195,7 +199,7 @@ impl WorkerSchedules {
             .set_presentable(presentable, now);
         if !presentable {
             if self.graphics_animation.take().is_some() {
-                self.presentation.request(now);
+                self.presentation.request();
             }
             self.accessibility_continuation.update(false);
             self.input.accessibility_demand.clear();
@@ -454,12 +458,12 @@ mod tests {
         let start = Instant::now();
         let mut schedule = PresentationSchedule::new(start);
 
-        schedule.request(start);
+        schedule.request_accumulated(start);
         let accumulation_deadline = start + PRESENTATION_ACCUMULATION_INTERVAL;
         assert_eq!(schedule.deadline(), Some(accumulation_deadline));
         assert!(!schedule.take_due(accumulation_deadline - Duration::from_micros(1)));
 
-        schedule.request(start + Duration::from_millis(1));
+        schedule.request_accumulated(start + Duration::from_millis(1));
         assert_eq!(schedule.deadline(), Some(accumulation_deadline));
         assert!(schedule.take_due(accumulation_deadline));
     }
@@ -469,13 +473,13 @@ mod tests {
         let start = Instant::now();
         let mut schedule = PresentationSchedule::new(start);
 
-        schedule.request(start);
-        let first_frame = start + PRESENTATION_ACCUMULATION_INTERVAL;
-        schedule.mark_presented(first_frame);
+        schedule.request();
+        assert!(schedule.take_due(start));
+        schedule.mark_presented(start);
 
-        schedule.request(first_frame);
-        schedule.request(first_frame + Duration::from_millis(1));
-        let next_frame = first_frame + PRESENTATION_INTERVAL;
+        schedule.request();
+        schedule.request();
+        let next_frame = start + PRESENTATION_INTERVAL;
         assert_eq!(schedule.deadline(), Some(next_frame));
         assert!(!schedule.take_due(next_frame - Duration::from_micros(1)));
         assert!(schedule.take_due(next_frame));
@@ -527,8 +531,8 @@ mod tests {
         schedule.mark_presented(start);
         schedule.set_presentable(false, start);
 
-        schedule.request(start);
-        schedule.request(start + Duration::from_millis(1));
+        schedule.request();
+        schedule.request();
         assert_eq!(schedule.deadline(), None);
         assert!(!schedule.take_due(start + Duration::from_secs(1)));
 
@@ -544,13 +548,13 @@ mod tests {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
         schedules.mark_presented(start);
-        schedules.request_presentation(start);
+        schedules.request_presentation();
 
         assert!(schedules.take_presentation_barrier());
         assert!(!schedules.take_presentation_barrier());
 
         schedules.set_presentable(false, start);
-        schedules.request_presentation(start);
+        schedules.request_presentation();
         assert!(schedules.take_presentation_barrier());
     }
 
@@ -795,7 +799,11 @@ impl PresentationSchedule {
         }
     }
 
-    fn request(&mut self, now: Instant) {
+    fn request(&mut self) {
+        self.pending = true;
+    }
+
+    fn request_accumulated(&mut self, now: Instant) {
         if self.presentable && !self.pending {
             // TUI redraws commonly erase and rewrite a row in adjacent PTY reads. Hold the first
             // read briefly so the renderer does not publish the intermediate erased state.
@@ -803,7 +811,7 @@ impl PresentationSchedule {
                 .not_before
                 .max(now + PRESENTATION_ACCUMULATION_INTERVAL);
         }
-        self.pending = true;
+        self.request();
     }
 
     fn set_presentable(&mut self, presentable: bool, now: Instant) {
