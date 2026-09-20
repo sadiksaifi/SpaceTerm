@@ -153,13 +153,18 @@ fn suppression_interaction_rejects_repeats_and_mismatched_releases() {
 }
 
 #[gpui::test]
-fn alert_suppression_uses_floating_toggle_paint(cx: &mut TestAppContext) {
+fn alert_suppression_paints_with_the_floating_toggle_theme(cx: &mut TestAppContext) {
     let root_catalog = crate::catalog_tests::catalog(1);
+    let root_background = root_catalog
+        .toggle
+        .paint(false, true, false, false)
+        .background();
+    let floating_label = rgba(0xaabbccff);
     let floating_paint = crate::TogglePaint::new(
         rgba(0x112233ff),
         rgba(0x445566ff),
         rgba(0x778899ff),
-        rgba(0xaabbccff),
+        floating_label,
     );
     let floating_values = crate::ToggleValuePaints::new(floating_paint, floating_paint);
     let floating_metrics = crate::ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
@@ -187,17 +192,40 @@ fn alert_suppression_uses_floating_toggle_paint(cx: &mut TestAppContext) {
             root_catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
         )
         .expect("distinct root and floating themes should install");
+        install_modal_policy(cx, ModalDesktopPolicy::mac_os());
     });
+    let (root, cx) = cx.add_window_view(|_, cx| AlertFixture {
+        invoker: cx.focus_handle().tab_stop(true),
+        underlay_activations: Rc::new(Cell::new(0)),
+        outcome: Rc::new(RefCell::new(None)),
+        presentation: None,
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| root.present(window, cx));
+    });
+    cx.run_until_parked();
 
-    cx.update(|cx| {
-        let resolved = modal_suppression_toggle_theme(cx);
-        assert_eq!(resolved.paint(false, true, false, false), floating_paint);
-        assert_ne!(
-            resolved.paint(false, true, false, false),
-            cx.global::<crate::ToggleTheme>()
-                .paint(false, true, false, false),
-        );
+    let indicator = cx
+        .debug_bounds("modal-alert-suppression-indicator")
+        .expect("suppression indicator should render");
+    let backgrounds = cx.update(|window, _| {
+        let indicator = indicator.scale(window.scale_factor());
+        window
+            .painted_quads_for_test()
+            .into_iter()
+            .filter(|quad| quad.visible_bounds.intersects(&indicator))
+            .map(|quad| quad.background)
+            .collect::<Vec<_>>()
     });
+    assert!(
+        backgrounds.contains(&floating_paint.background().into()),
+        "floating indicator paint was not submitted: {backgrounds:?}"
+    );
+    assert!(
+        !backgrounds.contains(&root_background.into()),
+        "root indicator paint leaked into suppression row: {backgrounds:?}"
+    );
 }
 
 fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {

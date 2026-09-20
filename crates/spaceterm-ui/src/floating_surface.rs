@@ -634,7 +634,7 @@ pub(crate) fn hosted_button_theme(cx: &App) -> &ButtonTheme {
 
 /// The Checkbox and Switch presentation for the surface the control currently rests on.
 pub(crate) fn hosted_toggle_theme(cx: &App) -> &ToggleTheme {
-    hosted(cx).map_or_else(|| cx.global::<ToggleTheme>(), |themes| &themes.toggle)
+    CURRENT_CONTROL_HOST.with(Cell::get).toggle_theme(cx)
 }
 
 /// The progress presentation for the surface the control currently rests on.
