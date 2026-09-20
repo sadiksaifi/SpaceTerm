@@ -143,7 +143,7 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
-    cx.on_action(switch_workspace_from_secondary_window);
+    cx.on_action(switch_workspace_from_global_action);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
@@ -156,19 +156,19 @@ pub(crate) fn init(
     Ok(())
 }
 
-fn switch_workspace_from_secondary_window(_: &SwitchWorkspace, cx: &mut App) {
+fn switch_workspace_from_global_action(_: &SwitchWorkspace, cx: &mut App) {
     let Some(workspace) = workspace_windows(cx).into_iter().next() else {
         return;
     };
     cx.defer(move |cx| {
         if workspace
-            .update(cx, |_, window, cx| {
+            .update(cx, |manager, window, cx| {
                 window.activate_window();
-                window.dispatch_action(Box::new(SwitchWorkspace), cx);
+                manager.open_workspace_switcher(window, cx);
             })
             .is_err()
         {
-            eprintln!("failed to open the Workspace Switcher from a secondary window");
+            eprintln!("failed to open the Workspace Switcher from a global action");
         }
     });
 }
@@ -1332,6 +1332,62 @@ mod runtime_tests {
                 vec![point(px(12.0), px(11.0)), settings_expected],
             )
         );
+    }
+
+    #[gpui::test]
+    fn switch_workspace_without_focused_content_does_not_redispatch(cx: &mut gpui::TestAppContext) {
+        assert_switch_workspace_without_focused_content(cx, false);
+    }
+
+    #[gpui::test]
+    fn switch_workspace_from_settings_without_target_focus_does_not_redispatch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        assert_switch_workspace_without_focused_content(cx, true);
+    }
+
+    fn assert_switch_workspace_without_focused_content(
+        cx: &mut gpui::TestAppContext,
+        from_settings: bool,
+    ) {
+        let host = host_with_settings();
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            workspace.update(cx, |_, window, _| window.blur()).unwrap();
+        });
+        if from_settings {
+            cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+            cx.run_until_parked();
+        }
+        let fallback_visits = Rc::new(std::cell::Cell::new(0));
+        let observed_visits = Rc::clone(&fallback_visits);
+        cx.update(|cx| {
+            // Global bubble listeners run newest first. Allow the real fallback once, but
+            // stop a second dispatch so a regression fails rather than hanging the executor.
+            cx.on_action(move |_: &SwitchWorkspace, cx| {
+                let visits = observed_visits.get() + 1;
+                observed_visits.set(visits);
+                if visits == 1 {
+                    cx.propagate();
+                }
+            });
+            cx.dispatch_action(&SwitchWorkspace);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            fallback_visits.get(),
+            1,
+            "Workspace fallback must not redispatch itself"
+        );
+        assert!(cx.update(|cx| {
+            workspace
+                .update(cx, |_, window, cx| {
+                    window.is_window_active() && spaceterm_ui::window_combo_box_is_open(window, cx)
+                })
+                .unwrap()
+        }));
     }
 
     #[gpui::test]

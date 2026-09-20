@@ -791,7 +791,7 @@ impl WorkspaceManager {
             .collect()
     }
 
-    fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window_modal_is_open(window, cx) {
             return;
         }
