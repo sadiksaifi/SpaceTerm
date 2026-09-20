@@ -159,14 +159,12 @@ impl Default for ChromeAppearance {
             floating_raised_material,
             floating_raised_wash,
         );
-        let floating_field_reference = resolve_floating_field_colors(
+        let (floating_field_reference, floating_field_colors) = resolve_floating_field_colors(
             floating_colors.clone(),
-            &floating_control_colors,
+            floating_control_colors.clone(),
             floating_raised_material,
             floating_raised_wash,
         );
-        let floating_field_colors =
-            floating_field_reference.material_presentation(floating_materials);
         Self {
             appearance: Appearance::Dark,
             control_colors,
@@ -363,30 +361,55 @@ pub(super) fn readable_on_backgrounds<const N: usize>(
 
 fn resolve_floating_field_colors(
     mut reference: ChromeColors,
-    paint: &ChromeColors,
+    mut paint: ChromeColors,
     material: Color,
     wash: Color,
-) -> ChromeColors {
+) -> (ChromeColors, ChromeColors) {
     let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
-    let field_backgrounds =
-        host_backgrounds.map(|background| paint.input_background.source_over(background));
-    let disabled_backgrounds =
-        host_backgrounds.map(|background| paint.input_disabled_background.source_over(background));
-    reference.input_text = readable_on_backgrounds(reference.input_text, field_backgrounds, 4.5);
-    reference.input_placeholder =
-        readable_on_backgrounds(reference.input_placeholder, field_backgrounds, 4.5);
-    reference.input_caret = readable_on_backgrounds(reference.input_caret, field_backgrounds, 3.0);
-    reference.input_disabled_text =
-        readable_on_backgrounds(reference.input_disabled_text, disabled_backgrounds, 4.5);
-    let selection_backgrounds = field_backgrounds
-        .map(|background| paint.input_selection_background.source_over(background));
-    reference.input_selection_foreground = readable_on_backgrounds(
-        reference.input_selection_foreground,
-        selection_backgrounds,
+    let (input_background, [input_text, input_placeholder, input_caret]) = resolve_floating_frame(
+        reference.input_background,
+        paint.input_background,
+        reference.elevated_surface_background,
+        host_backgrounds,
+        [
+            (reference.input_text, 4.5),
+            (reference.input_placeholder, 4.5),
+            (reference.input_caret, 3.0),
+        ],
+    );
+    paint.input_background = input_background;
+    reference.input_text = input_text;
+    reference.input_placeholder = input_placeholder;
+    reference.input_caret = input_caret;
+    paint.input_text = input_text;
+    paint.input_placeholder = input_placeholder;
+    paint.input_caret = input_caret;
+    let (input_disabled_background, [input_disabled_text]) = resolve_floating_state(
+        reference.input_disabled_background,
+        paint.input_disabled_background,
+        reference.elevated_surface_background,
+        host_backgrounds,
+        [reference.input_disabled_text],
         4.5,
     );
-    reference
+    paint.input_disabled_background = input_disabled_background;
+    reference.input_disabled_text = input_disabled_text;
+    paint.input_disabled_text = input_disabled_text;
+    let field_backgrounds =
+        host_backgrounds.map(|background| paint.input_background.source_over(background));
+    let (selection_background, [selection_foreground]) = resolve_floating_state(
+        reference.input_selection_background,
+        paint.input_selection_background,
+        reference.input_background,
+        field_backgrounds,
+        [reference.input_selection_foreground],
+        4.5,
+    );
+    paint.input_selection_background = selection_background;
+    reference.input_selection_foreground = selection_foreground;
+    paint.input_selection_foreground = selection_foreground;
+    (reference, paint)
 }
 
 fn resolve_floating_control_colors(
@@ -526,7 +549,6 @@ fn resolve_floating_control_colors(
         selection_disabled_foreground,
         selection_disabled_icon
     );
-    state!(toggle_off_background, 3.0, toggle_off_mark);
     state!(toggle_off_hover_background, 3.0, toggle_off_hover_mark);
     state!(toggle_off_pressed_background, 3.0, toggle_off_pressed_mark);
     state!(
@@ -586,18 +608,19 @@ fn resolve_floating_control_colors(
     ] {
         *target = readable_on_backgrounds(proposed, host_backgrounds, minimum);
     }
-    let progress_backgrounds =
-        host_backgrounds.map(|background| paint.toggle_off_background.source_over(background));
-    paint.text_accent = readable_on_backgrounds(
+    let (progress_background, text_accent) = resolve_floating_progress_accent(
+        reference.toggle_off_background,
+        paint.toggle_off_background,
+        reference.elevated_surface_background,
+        host_backgrounds,
         reference.text_accent,
-        [
-            host_backgrounds[0],
-            host_backgrounds[1],
-            progress_backgrounds[0],
-            progress_backgrounds[1],
-        ],
-        4.5,
     );
+    paint.toggle_off_background = progress_background;
+    paint.text_accent = text_accent;
+    let progress_backgrounds =
+        host_backgrounds.map(|background| progress_background.source_over(background));
+    paint.toggle_off_mark =
+        readable_on_backgrounds(reference.toggle_off_mark, progress_backgrounds, 3.0);
     paint.info = readable_on_backgrounds(reference.info, host_backgrounds, 3.0);
     paint.success = readable_on_backgrounds(reference.success, host_backgrounds, 3.0);
     paint.warning = readable_on_backgrounds(reference.warning, host_backgrounds, 3.0);
@@ -613,21 +636,92 @@ fn resolve_floating_state<const N: usize>(
     proposed: [Color; N],
     minimum_contrast: f64,
 ) -> (Color, [Color; N]) {
+    resolve_floating_frame(
+        reference_fill,
+        paint_fill,
+        reference_surface,
+        host_backgrounds,
+        proposed.map(|color| (color, minimum_contrast)),
+    )
+}
+
+fn resolve_floating_frame<const N: usize>(
+    reference_fill: Color,
+    paint_fill: Color,
+    reference_surface: Color,
+    host_backgrounds: [Color; 2],
+    proposed: [(Color, f64); N],
+) -> (Color, [Color; N]) {
     let backgrounds = host_backgrounds.map(|background| paint_fill.source_over(background));
-    let resolved =
-        proposed.map(|color| readable_on_backgrounds(color, backgrounds, minimum_contrast));
-    if resolved.iter().all(|color| {
-        backgrounds.into_iter().all(|background| {
-            color.source_over(background).contrast_ratio(background) >= minimum_contrast
-        })
-    }) {
+    if let Some(resolved) = resolve_content_on_backgrounds(proposed, backgrounds) {
         return (paint_fill, resolved);
     }
     let fallback = reference_fill.source_over(reference_surface);
     (
         fallback,
-        proposed.map(|color| readable_on_backgrounds(color, [fallback; 2], minimum_contrast)),
+        proposed.map(|(color, minimum)| readable_on_backgrounds(color, [fallback; 2], minimum)),
     )
+}
+
+fn resolve_floating_progress_accent(
+    reference_fill: Color,
+    paint_fill: Color,
+    reference_surface: Color,
+    host_backgrounds: [Color; 2],
+    proposed: Color,
+) -> (Color, Color) {
+    let progress_backgrounds =
+        host_backgrounds.map(|background| paint_fill.source_over(background));
+    let backgrounds = [
+        host_backgrounds[0],
+        host_backgrounds[1],
+        progress_backgrounds[0],
+        progress_backgrounds[1],
+    ];
+    if let Some([resolved]) = resolve_content_on_backgrounds([(proposed, 4.5)], backgrounds) {
+        return (paint_fill, resolved);
+    }
+
+    let fallback = reference_fill.source_over(reference_surface);
+    let fallback_backgrounds = [host_backgrounds[0], host_backgrounds[1], fallback, fallback];
+    if let Some([resolved]) =
+        resolve_content_on_backgrounds([(proposed, 4.5)], fallback_backgrounds)
+    {
+        return (fallback, resolved);
+    }
+
+    if let Some([resolved]) = resolve_content_on_backgrounds([(proposed, 4.5)], host_backgrounds) {
+        let frame = if resolved
+            .source_over(reference_surface)
+            .contrast_ratio(reference_surface)
+            >= 4.5
+        {
+            reference_surface
+        } else {
+            host_backgrounds[0]
+        };
+        return (frame, resolved);
+    }
+
+    let resolved = readable_on_backgrounds(proposed, [fallback; 2], 4.5);
+    (fallback, resolved)
+}
+
+fn resolve_content_on_backgrounds<const N: usize, const B: usize>(
+    proposed: [(Color, f64); N],
+    backgrounds: [Color; B],
+) -> Option<[Color; N]> {
+    let resolved =
+        proposed.map(|(color, minimum)| readable_on_backgrounds(color, backgrounds, minimum));
+    resolved
+        .iter()
+        .zip(proposed)
+        .all(|(color, (_, minimum))| {
+            backgrounds.into_iter().all(|background| {
+                color.source_over(background).contrast_ratio(background) >= minimum
+            })
+        })
+        .then_some(resolved)
 }
 
 fn compile_segmented_control_colors(
@@ -676,6 +770,19 @@ fn resolve_floating_segmented_colors(
 ) -> ChromeColors {
     let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
+    let (track, [text_secondary, text_disabled]) = resolve_floating_frame(
+        reference.element_background,
+        paint.element_background,
+        reference.elevated_surface_background,
+        host_backgrounds,
+        [
+            (reference.text_secondary, 4.5),
+            (reference.text_disabled, 3.0),
+        ],
+    );
+    paint.element_background = track;
+    paint.text_secondary = text_secondary;
+    paint.text_disabled = text_disabled;
     let track_backgrounds =
         host_backgrounds.map(|background| paint.element_background.source_over(background));
     macro_rules! state {
@@ -692,9 +799,6 @@ fn resolve_floating_segmented_colors(
             $(paint.$content = $content;)+
         }};
     }
-    paint.text_secondary =
-        readable_on_backgrounds(reference.text_secondary, track_backgrounds, 4.5);
-    paint.text_disabled = readable_on_backgrounds(reference.text_disabled, track_backgrounds, 3.0);
     state!(ghost_element_hover, 4.5, ghost_element_hover_foreground);
     state!(ghost_element_active, 4.5, ghost_element_active_foreground);
     state!(selection_background, 4.5, selection_foreground);
@@ -875,14 +979,12 @@ impl ChromeAppearance {
             floating_raised_material,
             floating_raised_wash,
         );
-        let floating_field_reference = resolve_floating_field_colors(
+        let (floating_field_reference, floating_field_colors) = resolve_floating_field_colors(
             floating_colors.clone(),
-            &floating_control_colors,
+            floating_control_colors.clone(),
             floating_raised_material,
             floating_raised_wash,
         );
-        let floating_field_colors =
-            floating_field_reference.material_presentation(resolved.composition.floating_materials);
         Self {
             appearance: resolved.appearance,
             control_colors,
@@ -984,7 +1086,105 @@ impl ChromeAppearance {
 
 #[cfg(test)]
 mod typography_tests {
-    use super::ChromeAppearance;
+    use super::{
+        ChromeAppearance, resolve_floating_control_colors, resolve_floating_field_colors,
+        resolve_floating_segmented_colors,
+    };
+
+    #[test]
+    fn floating_fields_use_the_opaque_frame_when_shifted_endpoints_have_no_readable_foreground() {
+        use crate::appearance::{ChromeColors, Color};
+
+        let reference = ChromeColors {
+            elevated_surface_background: Color::rgb(0x202020),
+            input_background: Color::rgb(0x767676),
+            input_text: Color::rgb(0xffffff),
+            input_placeholder: Color::rgb(0xffffff),
+            ..ChromeColors::default()
+        };
+        let paint = ChromeColors {
+            input_background: Color::rgba(0x737373e7),
+            ..reference.clone()
+        };
+        let (_, resolved) =
+            resolve_floating_field_colors(reference, paint, Color::rgba(0), Color::rgba(0));
+
+        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            let background = resolved.input_background.source_over(underlay);
+            assert!(
+                resolved
+                    .input_text
+                    .source_over(background)
+                    .contrast_ratio(background)
+                    >= 4.5,
+                "field text must read over {background:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn floating_segment_labels_use_the_opaque_track_when_shifted_endpoints_are_unreadable() {
+        use crate::appearance::{ChromeColors, Color};
+
+        let reference = ChromeColors {
+            elevated_surface_background: Color::rgb(0x202020),
+            element_background: Color::rgb(0x767676),
+            text_secondary: Color::rgb(0xffffff),
+            ..ChromeColors::default()
+        };
+        let paint = ChromeColors {
+            element_background: Color::rgba(0x737373e7),
+            ..reference.clone()
+        };
+        let resolved =
+            resolve_floating_segmented_colors(&reference, paint, Color::rgba(0), Color::rgba(0));
+
+        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            let background = resolved.element_background.source_over(underlay);
+            assert!(
+                resolved
+                    .text_secondary
+                    .source_over(background)
+                    .contrast_ratio(background)
+                    >= 4.5,
+                "segment label must read over {background:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn floating_progress_accent_uses_the_opaque_track_when_shifted_endpoints_are_unreadable() {
+        use crate::appearance::{ChromeColors, Color};
+
+        let reference = ChromeColors {
+            elevated_surface_background: Color::rgb(0x606060),
+            toggle_off_background: Color::rgb(0x767676),
+            toggle_off_mark: Color::rgb(0xffffff),
+            text_accent: Color::rgb(0xffffff),
+            ..ChromeColors::default()
+        };
+        let paint = ChromeColors {
+            toggle_off_background: Color::rgba(0xffffff1a),
+            ..reference.clone()
+        };
+        let material = Color::rgba(0x666666ef);
+        let resolved = resolve_floating_control_colors(&reference, paint, material, Color::rgba(0));
+
+        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            let host = material.source_over(underlay);
+            let track = resolved.toggle_off_background.source_over(host);
+            for background in [host, track] {
+                assert!(
+                    resolved
+                        .text_accent
+                        .source_over(background)
+                        .contrast_ratio(background)
+                        >= 4.5,
+                    "progress accent must read over {background:?}",
+                );
+            }
+        }
+    }
 
     #[test]
     fn prepared_field_surfaces_match_compiler_backing_without_flattening_authored_intent() {
