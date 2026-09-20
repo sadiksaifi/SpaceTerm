@@ -239,9 +239,8 @@ impl RenderOnce for SearchField {
         let clear_id = ElementId::NamedChild(Box::new(self.id.clone()), "clear".into());
         let input = self.input.clone();
         let clear_focus = focus.clone();
-        crate::field_frame::themed_field_surface(theme.frame, self.id, FieldState::default())
+        crate::field_frame::themed_field_frame(theme.frame, self.id, &focus, FieldState::default())
             .debug_selector(move || frame_selector.to_string())
-            .track_focus(&focus)
             .flex()
             .flex_row()
             .items_center()
