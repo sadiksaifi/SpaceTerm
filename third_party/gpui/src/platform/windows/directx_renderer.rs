@@ -304,6 +304,7 @@ impl DirectXRenderer {
     }
 
     pub(crate) fn draw(&mut self, scene: &Scene) -> Result<()> {
+        self.prepare_backdrop_resources(scene)?;
         self.pre_draw()?;
         for batch in scene.batches() {
             match batch {
@@ -602,9 +603,32 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn ensure_backdrop_resources(&mut self) -> Result<()> {
-        let width = self.resources.width;
-        let height = self.resources.height;
+    fn prepare_backdrop_resources(&mut self, scene: &Scene) -> Result<()> {
+        let viewport = Size {
+            width: DevicePixels(self.resources.width as i32),
+            height: DevicePixels(self.resources.height as i32),
+        };
+        let required_size = scene
+            .batches()
+            .filter_map(|batch| match batch {
+                PrimitiveBatch::BackdropFilters(filters) => Some(filters),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|filter| filter.snapshot_bounds(viewport))
+            .fold(None, |required: Option<(u32, u32)>, bounds| {
+                let width = u32::from(bounds.size.width).next_multiple_of(4);
+                let height = u32::from(bounds.size.height).next_multiple_of(4);
+                Some(match required {
+                    Some((required_width, required_height)) => {
+                        (required_width.max(width), required_height.max(height))
+                    }
+                    None => (width, height),
+                })
+            });
+        let Some((width, height)) = required_size else {
+            return Ok(());
+        };
         if self
             .resources
             .backdrop
@@ -623,22 +647,21 @@ impl DirectXRenderer {
 
     fn draw_backdrop_filter(&mut self, filter: &BackdropFilter) -> Result<()> {
         let output = filter.bounds.intersect(&filter.content_mask.bounds);
-        let full_draw_bounds = backdrop_draw_bounds(
-            &output,
-            0.0,
-            self.resources.width,
-            self.resources.height,
-            self.resources.width,
-            self.resources.height,
-        );
-        if full_draw_bounds.is_empty() {
+        let viewport_size = Size {
+            width: DevicePixels(self.resources.width as i32),
+            height: DevicePixels(self.resources.height as i32),
+        };
+        let Some(snapshot_bounds) = filter.snapshot_bounds(viewport_size) else {
             return Ok(());
-        }
+        };
 
-        self.ensure_backdrop_resources()?;
         let Some(resources) = self.resources.backdrop.as_ref() else {
             return Ok(());
         };
+        let active_width = u32::from(snapshot_bounds.size.width);
+        let active_height = u32::from(snapshot_bounds.size.height);
+        let active_quarter_width = active_width.div_ceil(4);
+        let active_quarter_height = active_height.div_ceil(4);
         let null_srvs: [Option<ID3D11ShaderResourceView>; 3] = [None, None, None];
         unsafe {
             self.devices
@@ -648,70 +671,134 @@ impl DirectXRenderer {
                 .device_context
                 .VSSetShaderResources(0, Some(&null_srvs));
             self.devices.device_context.OMSetRenderTargets(None, None);
-            self.devices
-                .device_context
-                .CopyResource(&resources.snapshot_texture, &*self.resources.render_target);
+            let source_box = D3D11_BOX {
+                left: u32::from(snapshot_bounds.origin.x),
+                top: u32::from(snapshot_bounds.origin.y),
+                front: 0,
+                right: u32::from(snapshot_bounds.origin.x) + active_width,
+                bottom: u32::from(snapshot_bounds.origin.y) + active_height,
+                back: 1,
+            };
+            self.devices.device_context.CopySubresourceRegion(
+                &resources.snapshot_texture,
+                0,
+                0,
+                0,
+                0,
+                &*self.resources.render_target,
+                0,
+                Some(&source_box),
+            );
         }
 
         let result: Result<()> = (|| {
             let first_pass = if filter.radius.0 > 0.0 { 0 } else { 2 };
             for pass_index in first_pass..3 {
-                let (target_width, target_height, target_view, source_view, viewport) =
-                    match pass_index {
-                        0 => (
-                            resources.quarter_width,
-                            resources.quarter_height,
-                            &resources.horizontal_rtv,
-                            &resources.snapshot_srv,
-                            &resources.quarter_viewport,
-                        ),
-                        1 => (
-                            resources.quarter_width,
-                            resources.quarter_height,
-                            &resources.vertical_rtv,
-                            &resources.horizontal_srv,
-                            &resources.quarter_viewport,
-                        ),
-                        _ if filter.radius.0 > 0.0 => (
-                            resources.width,
-                            resources.height,
-                            &self.resources.render_target_view,
-                            &resources.vertical_srv,
-                            &self.resources.viewport,
-                        ),
-                        _ => (
-                            resources.width,
-                            resources.height,
-                            &self.resources.render_target_view,
-                            &resources.snapshot_srv,
-                            &self.resources.viewport,
-                        ),
-                    };
-                let halo = if pass_index < 2 {
-                    (3.0 * filter.radius.0).ceil() + 8.0
-                } else {
-                    0.0
-                };
-                let draw_bounds = backdrop_draw_bounds(
-                    &output,
-                    halo,
+                let (
                     target_width,
                     target_height,
-                    resources.width,
-                    resources.height,
-                );
+                    source_width,
+                    source_height,
+                    source_active_width,
+                    source_active_height,
+                    target_view,
+                    source_view,
+                    viewport,
+                    draw_bounds,
+                ) = match pass_index {
+                    0 => (
+                        resources.quarter_width,
+                        resources.quarter_height,
+                        resources.width,
+                        resources.height,
+                        active_width,
+                        active_height,
+                        &resources.horizontal_rtv,
+                        &resources.snapshot_srv,
+                        &resources.quarter_viewport,
+                        Bounds::new(
+                            Point::default(),
+                            Size::new(
+                                ScaledPixels(active_quarter_width as f32),
+                                ScaledPixels(active_quarter_height as f32),
+                            ),
+                        ),
+                    ),
+                    1 => (
+                        resources.quarter_width,
+                        resources.quarter_height,
+                        resources.quarter_width,
+                        resources.quarter_height,
+                        active_quarter_width,
+                        active_quarter_height,
+                        &resources.vertical_rtv,
+                        &resources.horizontal_srv,
+                        &resources.quarter_viewport,
+                        Bounds::new(
+                            Point::default(),
+                            Size::new(
+                                ScaledPixels(active_quarter_width as f32),
+                                ScaledPixels(active_quarter_height as f32),
+                            ),
+                        ),
+                    ),
+                    _ if filter.radius.0 > 0.0 => (
+                        self.resources.width,
+                        self.resources.height,
+                        resources.quarter_width,
+                        resources.quarter_height,
+                        active_quarter_width,
+                        active_quarter_height,
+                        &self.resources.render_target_view,
+                        &resources.vertical_srv,
+                        &self.resources.viewport,
+                        backdrop_draw_bounds(
+                            &output,
+                            0.0,
+                            self.resources.width,
+                            self.resources.height,
+                            self.resources.width,
+                            self.resources.height,
+                        ),
+                    ),
+                    _ => (
+                        self.resources.width,
+                        self.resources.height,
+                        resources.width,
+                        resources.height,
+                        active_width,
+                        active_height,
+                        &self.resources.render_target_view,
+                        &resources.snapshot_srv,
+                        &self.resources.viewport,
+                        backdrop_draw_bounds(
+                            &output,
+                            0.0,
+                            self.resources.width,
+                            self.resources.height,
+                            self.resources.width,
+                            self.resources.height,
+                        ),
+                    ),
+                };
                 if draw_bounds.is_empty() {
                     continue;
                 }
                 let sigma = match pass_index {
-                    0 => filter.radius.0 * target_width as f32 / resources.width as f32,
-                    1 => filter.radius.0 * target_height as f32 / resources.height as f32,
+                    0 | 1 => filter.radius.0 / 4.0,
                     _ => 0.0,
                 };
                 let params = BackdropParams {
                     draw_bounds,
                     target_size: [target_width as f32, target_height as f32],
+                    source_size: [source_width as f32, source_height as f32],
+                    source_active_size: [source_active_width as f32, source_active_height as f32],
                     original_size: [resources.width as f32, resources.height as f32],
+                    original_active_size: [active_width as f32, active_height as f32],
+                    snapshot_origin: [
+                        snapshot_bounds.origin.x.0 as f32,
+                        snapshot_bounds.origin.y.0 as f32,
+                    ],
                     bounds: filter.bounds.clone(),
                     content_mask: filter.content_mask.bounds.clone(),
                     corner_radii: filter.corner_radii.clone(),
@@ -1158,7 +1245,11 @@ struct GlobalParams {
 struct BackdropParams {
     draw_bounds: Bounds<ScaledPixels>,
     target_size: [f32; 2],
+    source_size: [f32; 2],
+    source_active_size: [f32; 2],
     original_size: [f32; 2],
+    original_active_size: [f32; 2],
+    snapshot_origin: [f32; 2],
     bounds: Bounds<ScaledPixels>,
     content_mask: Bounds<ScaledPixels>,
     corner_radii: Corners<ScaledPixels>,

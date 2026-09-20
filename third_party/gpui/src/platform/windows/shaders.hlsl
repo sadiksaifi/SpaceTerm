@@ -463,7 +463,11 @@ float quarter_ellipse_sdf(float2 pt, float2 radii) {
 struct BackdropParams {
     Bounds draw_bounds;
     float2 target_size;
+    float2 source_size;
+    float2 source_active_size;
     float2 original_size;
+    float2 original_active_size;
+    float2 snapshot_origin;
     Bounds bounds;
     Bounds content_mask;
     Corners corner_radii;
@@ -481,6 +485,14 @@ struct BackdropVertexOutput {
 
 StructuredBuffer<BackdropParams> backdrop_params: register(t1);
 
+float2 clamp_backdrop_uv(float2 uv, float2 texture_size, float2 active_size) {
+    return clamp(
+        uv,
+        0.5 / texture_size,
+        max(active_size - 0.5, 0.5) / texture_size
+    );
+}
+
 BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint backdrop_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     BackdropParams backdrop = backdrop_params[backdrop_id];
@@ -496,8 +508,8 @@ BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint backdrop_
 
 float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
     BackdropParams backdrop = backdrop_params[input.backdrop_id];
-    float2 uv = input.position.xy / backdrop.target_size;
     if (backdrop.pass_index < 2.0) {
+        float2 uv = input.position.xy / backdrop.target_size;
         float sigma = max(backdrop.sigma, 0.25);
         int extent = int(ceil(3.0 * sigma));
         float4 sum = float4(0.0, 0.0, 0.0, 0.0);
@@ -512,13 +524,33 @@ float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
             if (backdrop.pass_index < 0.5) {
                 float2 pixel = 1.0 / backdrop.original_size;
                 sampled_color = (
-                    t_sprite.SampleLevel(s_sprite, uv + offset + pixel, 0.0) +
-                    t_sprite.SampleLevel(s_sprite, uv + offset - pixel, 0.0) +
-                    t_sprite.SampleLevel(s_sprite, uv + offset + float2(pixel.x, -pixel.y), 0.0) +
-                    t_sprite.SampleLevel(s_sprite, uv + offset + float2(-pixel.x, pixel.y), 0.0)
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + pixel,
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset - pixel,
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + float2(pixel.x, -pixel.y),
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + float2(-pixel.x, pixel.y),
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0)
                 ) * 0.25;
             } else {
-                sampled_color = t_sprite.SampleLevel(s_sprite, uv + offset, 0.0);
+                sampled_color = t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                    uv + offset,
+                    backdrop.source_size,
+                    backdrop.source_active_size
+                ), 0.0);
             }
             sum += sampled_color * weight;
             total += weight;
@@ -526,7 +558,19 @@ float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
         return sum / total;
     }
 
-    float4 original = t_backdrop_original.SampleLevel(s_sprite, uv, 0.0);
+    float2 local_position = input.position.xy - backdrop.snapshot_origin;
+    float2 uv = local_position / backdrop.original_size;
+    float2 source_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.source_size,
+        backdrop.source_active_size
+    );
+    float2 original_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.original_size,
+        backdrop.original_active_size
+    );
+    float4 original = t_backdrop_original.SampleLevel(s_sprite, original_uv, 0.0);
     float2 half_size = backdrop.bounds.size * 0.5;
     float2 delta = input.position.xy - backdrop.bounds.origin - half_size;
     float radius = delta.y < 0.0
@@ -542,7 +586,7 @@ float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
     float coverage = saturate(
         min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5
     ) * backdrop.opacity;
-    float4 filtered = t_sprite.SampleLevel(s_sprite, uv, 0.0);
+    float4 filtered = t_sprite.SampleLevel(s_sprite, source_uv, 0.0);
     float3 lower = backdrop.tone.rgb * backdrop.tone.a * filtered.a;
     float3 upper = (
         backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
