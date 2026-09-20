@@ -760,17 +760,10 @@ impl WorkspaceManager {
                         WorkspaceLocation::Remote { .. } => IconName::Globe,
                     }
                 };
-                let (path, _) = directory_labels(
-                    workspace.location(),
-                    workspace.local_display_directory(),
-                    workspace.remote_display_directory(),
-                    &self.local_home_directory_path,
-                );
                 let item = ComboBoxItem::new(
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
                     workspace.name().to_owned(),
                 )
-                .description(path)
                 .leading_icon(move |foreground, size| {
                     div()
                         .when(active, |icon| {
