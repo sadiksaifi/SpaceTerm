@@ -60,6 +60,7 @@ struct BackdropParams {
     opacity: f32,
     pass_index: f32,
     pad: f32,
+    tone: [f32; 4],
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -720,7 +721,8 @@ impl BladeRenderer {
             transfer.copy_texture_to_texture(frame_texture.into(), snapshot.into(), size);
         }
 
-        for pass_index in 0..3 {
+        let first_pass = if filter.radius.0 > 0.0 { 0 } else { 2 };
+        for pass_index in first_pass..3 {
             let (target_size, target_view, source_view, init_op) = match pass_index {
                 0 => (
                     quarter_size,
@@ -734,7 +736,8 @@ impl BladeRenderer {
                     horizontal_view,
                     gpu::InitOp::DontCare,
                 ),
-                _ => (size, frame_view, vertical_view, gpu::InitOp::Load),
+                _ if filter.radius.0 > 0.0 => (size, frame_view, vertical_view, gpu::InitOp::Load),
+                _ => (size, frame_view, snapshot_view, gpu::InitOp::Load),
             };
             let halo = if pass_index < 2 {
                 (3.0 * filter.radius.0).ceil() + 8.0
@@ -764,6 +767,7 @@ impl BladeRenderer {
                 opacity: filter.opacity,
                 pass_index: pass_index as f32,
                 pad: 0.0,
+                tone: [filter.tone.r, filter.tone.g, filter.tone.b, filter.tone.a],
             };
             let mut pass = self.command_encoder.render(
                 "backdrop",

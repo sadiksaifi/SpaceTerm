@@ -1,11 +1,11 @@
 //! One presentation system for every surface that floats over window content.
 //!
-//! A floating surface covers content that is already painted. Its shared shell applies the resolved
-//! tint and, when requested, filters that backdrop before content is drawn. Every floating family
-//! selects a semantic [`FloatingRole`] and receives the complete treatment for it: material,
-//! backdrop filter, outer edge, internal divider, corner geometry, content inset, elevation,
-//! clipping, and the window layer the surface reaches. No call site chooses its own alpha, blur,
-//! radius, border, separator, or shadow.
+//! A floating surface sits over content that is already painted. Its shared shell constrains the
+//! backdrop's color without increasing its alpha, filters spatial detail when requested, and adds
+//! a small host-relative elevation wash. Every floating family selects a semantic [`FloatingRole`]
+//! and receives the complete treatment for it: backdrop tone, wash, filter, outer edge, internal
+//! divider, corner geometry, content inset, elevation, clipping, and window layer. No call site
+//! chooses its own alpha, blur, radius, border, separator, or shadow.
 //!
 //! Controls nested inside a floating surface resolve against that surface rather than against the
 //! window root. [`FloatingShell::mount`] enters a host scope for the complete lifetime of the
@@ -144,7 +144,7 @@ pub(crate) fn present(layer: FloatingLayer, surface: impl IntoElement) -> AnyEle
     }
 }
 
-/// One resolved floating material and its two hairlines.
+/// One resolved floating backdrop tone, elevation wash, and pair of hairlines.
 ///
 /// `edge` bounds the surface against arbitrary content beneath it. `divider` is the quieter rule
 /// that groups content inside the surface, and is deliberately a different strength: an outer
@@ -152,25 +152,33 @@ pub(crate) fn present(layer: FloatingLayer, surface: impl IntoElement) -> AnyEle
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatingSurfacePaint {
     material: Rgba,
+    backdrop_tone: Rgba,
     edge: Rgba,
     divider: Rgba,
 }
 
 impl FloatingSurfacePaint {
-    /// Creates one complete floating material.
+    /// Creates one complete floating paint, initially without backdrop color treatment.
     pub fn new(material: Rgba, edge: Rgba, divider: Rgba) -> Self {
         Self {
             material,
+            backdrop_tone: Rgba::default(),
             edge,
             divider,
         }
     }
+
+    /// Adds alpha-preserving color treatment for already-painted content behind the surface.
+    pub fn backdrop_tone(mut self, tone: Rgba) -> Self {
+        self.backdrop_tone = tone;
+        self
+    }
 }
 
-/// The complete set of materials the window's floating surfaces paint.
+/// The complete set of treatments the window's floating surfaces apply.
 ///
-/// Interactive floating surfaces share one raised material, which is what makes them read as one
-/// system. A Pane-local readout is the single exception: it reports rather than covers, and the
+/// Interactive floating surfaces share one raised treatment, which makes them read as one system.
+/// A Pane-local readout is the single exception: it reports rather than accepts input, and the
 /// application authors it as its own quieter product color.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatingSurfacePaints {
@@ -323,9 +331,14 @@ impl FloatingShell {
         px(1.0)
     }
 
-    /// The surface's material fill.
+    /// The small host-relative wash that lifts the shell above its backdrop.
     pub fn material(&self) -> Rgba {
         self.paint.material
+    }
+
+    /// The color range applied to already-painted backdrop pixels without adding coverage.
+    pub fn backdrop_tone(&self) -> Rgba {
+        self.paint.backdrop_tone
     }
 
     /// The hairline bounding the surface against the content beneath it.
@@ -353,12 +366,16 @@ impl FloatingShell {
             .rounded(self.corner_radius)
             .border(self.hairline())
             .border_color(self.edge());
+        let frame = frame.backdrop_tone(self.backdrop_tone());
         let frame = if self.backdrop_blur > px(0.0) {
             frame.backdrop_blur(self.backdrop_blur)
         } else {
             frame
         };
-        frame.bg(self.material()).shadow(self.elevation.layers())
+        frame
+            .bg(self.material())
+            .shadow(self.elevation.layers())
+            .shadow_outside_only()
     }
 
     /// Applies the surface treatment and hosts every descendant control on this surface.

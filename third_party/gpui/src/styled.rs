@@ -1,7 +1,7 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight,
-    GridPlacement, Hsla, JustifyContent, Length, Pixels, SharedString, StrikethroughStyle,
+    GridPlacement, Hsla, JustifyContent, Length, Pixels, Rgba, SharedString, StrikethroughStyle,
     StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
     relative, rems,
 };
@@ -383,6 +383,19 @@ pub trait Styled: Sized {
     /// `radius` is the Gaussian sigma in logical pixels, capped at 64 device pixels.
     fn backdrop_blur(mut self, radius: Pixels) -> Self {
         self.style().backdrop_blur = Some(radius);
+        self
+    }
+
+    /// Constrains backdrop color to what `tone` could produce as a source-over fill while
+    /// preserving the backdrop's existing alpha. A transparent tone is a no-op.
+    fn backdrop_tone(mut self, tone: Rgba) -> Self {
+        self.style().backdrop_tone = Some(tone);
+        self
+    }
+
+    /// Clips box shadows out of the element's rounded interior while preserving their exterior.
+    fn shadow_outside_only(mut self) -> Self {
+        self.style().shadow_outside_only = Some(true);
         self
     }
 

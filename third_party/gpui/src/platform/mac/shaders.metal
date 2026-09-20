@@ -52,7 +52,14 @@ fragment float4 backdrop_fragment(float4 position [[position]],
   float2 mask_end = mask_origin + float2(p[10], p[11]);
   float2 mask_distance = min(position.xy - mask_origin, mask_end - position.xy);
   float coverage = clamp(min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5, 0.0, 1.0) * p[17];
-  return mix(original.sample(linear_sampler, uv), source.sample(linear_sampler, uv), coverage);
+  float4 original_color = original.sample(linear_sampler, uv);
+  float4 filtered = source.sample(linear_sampler, uv);
+  float3 tone = float3(p[20], p[21], p[22]);
+  float tone_alpha = p[23];
+  float3 lower = tone * tone_alpha * filtered.a;
+  float3 upper = (tone * tone_alpha + (1.0 - tone_alpha)) * filtered.a;
+  float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+  return mix(original_color, treated, coverage);
 }
 
 float4 hsla_to_rgba(Hsla hsla);
@@ -588,6 +595,12 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
                gaussian(y, shadow.blur_radius) * step;
       y += step;
     }
+  }
+
+  if (shadow.exclude_interior != 0) {
+    float distance = quad_sdf(input.position.xy, shadow.exclude_bounds,
+                              shadow.exclude_corner_radii);
+    alpha *= saturate(distance + 0.5);
   }
 
   return input.color * float4(1., 1., 1., alpha);

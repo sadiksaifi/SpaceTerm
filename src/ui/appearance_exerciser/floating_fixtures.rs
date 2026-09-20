@@ -21,6 +21,7 @@ pub(super) struct FloatingFixtures {
     combo_value: Option<u8>,
     palette: Entity<CommandPalette<u8>>,
     status: &'static str,
+    patterned_backdrop: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +127,7 @@ impl FloatingFixtures {
             combo_value: Some(1),
             palette,
             status: "All content below is synthetic. Preview changes are not saved.",
+            patterned_backdrop: true,
         }
     }
 
@@ -264,10 +266,28 @@ impl Render for FloatingFixtures {
                         let _ = weak.update(cx, |fixture, cx| handler(fixture, window, cx));
                     })
             };
+        let backdrop_weak = cx.weak_entity();
         let controls = div()
             .flex()
             .flex_wrap()
             .gap(appearance.spacing(8.0))
+            .child(
+                Button::new(
+                    "fixture-toggle-backing",
+                    if self.patterned_backdrop {
+                        "Show window backing"
+                    } else {
+                        "Show patterned backing"
+                    },
+                )
+                .size(ButtonSize::Small)
+                .on_activate(move |_, _, cx| {
+                    let _ = backdrop_weak.update(cx, |fixture, cx| {
+                        fixture.patterned_backdrop = !fixture.patterned_backdrop;
+                        cx.notify();
+                    });
+                }),
+            )
             .children(
                 [
                     ("fixture-small-menu", "Small Menu", MenuSize::Small),
@@ -346,7 +366,7 @@ impl Render for FloatingFixtures {
                     .left(px(36.0))
                     .w(px(420.0))
                     .p(appearance.spacing(14.0))
-                    .text_color(rgba(appearance.colors.text.rgba_hex()))
+                    .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
                     .debug_selector(|| "fixture-backdrop-probe".to_owned())
                     .child("Persistent floating probe: compare the fine text behind this surface with Blur off and Blur on."),
             );
@@ -372,7 +392,7 @@ impl Render for FloatingFixtures {
                         div()
                             .relative()
                             .h(px(432.0))
-                            .child(pattern)
+                            .when(self.patterned_backdrop, |backing| backing.child(pattern))
                             .child(backdrop_probe),
                     ),
             )

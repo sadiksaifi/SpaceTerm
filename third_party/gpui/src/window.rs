@@ -11,12 +11,12 @@ use crate::{
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
     Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, px, rems, size, transparent_black,
+    Rgba, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    Shadow, SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle,
+    TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -2954,6 +2954,28 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
+        self.paint_shadows_with_interior_exclusion(bounds, corner_radii, shadows, false);
+    }
+
+    /// Paint one or more drop shadows outside the element's rounded bounds.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_shadows_outside(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.paint_shadows_with_interior_exclusion(bounds, corner_radii, shadows, true);
+    }
+
+    fn paint_shadows_with_interior_exclusion(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        exclude_interior: bool,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -2968,6 +2990,10 @@ impl Window {
                 content_mask: content_mask.scale(scale_factor),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                exclude_bounds: bounds.scale(scale_factor),
+                exclude_corner_radii: corner_radii.scale(scale_factor),
+                exclude_interior: if exclude_interior { 1 } else { 0 },
+                pad: 0,
             });
         }
     }
@@ -2985,12 +3011,36 @@ impl Window {
         corner_radii: Corners<Pixels>,
         radius: Pixels,
     ) {
+        self.paint_backdrop_filter(bounds, corner_radii, radius, Rgba::default());
+    }
+
+    /// Paints an alpha-preserving backdrop filter into the current stacking context.
+    ///
+    /// A positive `radius` filters spatial detail. `tone` constrains filtered premultiplied RGB
+    /// to the range the same source-over color admits without adding framebuffer coverage.
+    pub fn paint_backdrop_filter(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        radius: Pixels,
+        mut tone: Rgba,
+    ) {
         const MAX_BACKDROP_BLUR_RADIUS: f32 = 64.;
 
         self.invalidator.debug_assert_paint();
 
         let opacity = self.element_opacity();
-        if !radius.0.is_finite() || radius.0 <= 0. || !opacity.is_finite() || opacity <= 0. {
+        if !radius.0.is_finite() || radius.0 < 0. || !opacity.is_finite() || opacity <= 0. {
+            return;
+        }
+        for channel in [&mut tone.r, &mut tone.g, &mut tone.b, &mut tone.a] {
+            *channel = if channel.is_finite() {
+                channel.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        if radius.0 == 0. && tone.a == 0. {
             return;
         }
 
@@ -3002,6 +3052,7 @@ impl Window {
             corner_radii: corner_radii.scale(scale_factor),
             radius: ScaledPixels((radius.0 * scale_factor).min(MAX_BACKDROP_BLUR_RADIUS)),
             opacity: opacity.min(1.),
+            tone,
         });
     }
 

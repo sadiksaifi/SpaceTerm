@@ -74,11 +74,13 @@ impl SurfaceMaterials {
     /// keeps enough of its color to lift several levels off a pale desktop instead.
     ///
     const RESTING_RESIDUAL: f32 = 0.42;
-    /// What a floating material still paints at maximum transparency.
+    /// How strongly a floating material constrains backdrop color at maximum transparency.
     ///
-    /// Backdrop blur now softens detailed content without replacing transmission with dense tint.
-    /// The same curve applies with blur on and off, so Blur changes filtering rather than opacity.
+    /// The treatment preserves backdrop alpha, so this strength does not cover the native window
+    /// material. The same curve applies with blur on and off.
     const FLOATING_RESIDUAL: f32 = 0.70;
+    /// The most coverage a floating shell adds after the window's glass has engaged.
+    const FLOATING_WASH_CEILING: u8 = 20;
     /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
     ///
     /// Panes stay close to the base, below the brighter cards and selected controls.
@@ -271,6 +273,37 @@ impl SurfaceMaterials {
         super::Color::rgb((u32::from(ink[0]) << 16) | (u32::from(ink[1]) << 8) | u32::from(ink[2]))
             .with_alpha((opacity.min(1.0) * f64::from(target.a)).round() as u8)
             .multiply_opacity(retention)
+    }
+
+    /// Resolves the small host-relative lift that separates a floating shell from its backdrop.
+    ///
+    /// Backdrop tone owns color legibility without changing framebuffer alpha. This wash carries
+    /// only elevation, so nested shells cannot rebuild the dense slab that the tone replaced.
+    pub(crate) fn floating_wash(self, base: super::Color, target: super::Color) -> super::Color {
+        if self.is_opaque() {
+            return target;
+        }
+        let overlay = Self { glass: u8::MAX }.paint(SurfaceRole::Surface, base, target);
+        let overlay = overlay.with_alpha(overlay.a.min(Self::FLOATING_WASH_CEILING));
+        let amount = f64::from(self.engagement());
+        let target_alpha = f64::from(target.a) / 255.0;
+        let overlay_alpha = f64::from(overlay.a) / 255.0;
+        let alpha = target_alpha * (1.0 - amount) + overlay_alpha * amount;
+        if alpha == 0.0 {
+            return super::Color::rgba(0);
+        }
+        let channel = |target: u8, overlay: u8| {
+            ((f64::from(target) * target_alpha * (1.0 - amount)
+                + f64::from(overlay) * overlay_alpha * amount)
+                / alpha)
+                .round() as u8
+        };
+        super::Color {
+            r: channel(target.r, overlay.r),
+            g: channel(target.g, overlay.g),
+            b: channel(target.b, overlay.b),
+            a: (alpha * 255.0).round() as u8,
+        }
     }
 
     /// Whether a base belongs to a bright scheme, whose surfaces lift with white ink that has
@@ -614,7 +647,7 @@ mod tests {
         );
         assert!(
             maximum.alpha(SurfaceRole::Floating) >= 96,
-            "a menu must still cover the content it is drawn over"
+            "a menu must still constrain the color of content it is drawn over"
         );
         // Nonzero is not the same as visible. A pale desktop is the hardest backing for a bright
         // scheme to lift off, because white ink has the least room to work in, so that is where

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -522,6 +522,7 @@ pub(crate) struct BackdropFilter {
     pub corner_radii: Corners<ScaledPixels>,
     pub radius: ScaledPixels,
     pub opacity: f32,
+    pub tone: Rgba,
 }
 
 impl From<BackdropFilter> for Primitive {
@@ -576,6 +577,10 @@ pub(crate) struct Shadow {
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    pub exclude_bounds: Bounds<ScaledPixels>,
+    pub exclude_corner_radii: Corners<ScaledPixels>,
+    pub exclude_interior: u32,
+    pub pad: u32,
 }
 
 impl From<Shadow> for Primitive {
@@ -942,6 +947,10 @@ mod tests {
             corner_radii: Corners::default(),
             content_mask: ContentMask { bounds },
             color: Hsla::default(),
+            exclude_bounds: Bounds::default(),
+            exclude_corner_radii: Corners::default(),
+            exclude_interior: 0,
+            pad: 0,
         }
     }
 

@@ -101,6 +101,7 @@ struct BackdropParams {
     opacity: f32,
     pass_index: f32,
     pad: f32,
+    tone: vec4<f32>,
 }
 var<uniform> backdrop: BackdropParams;
 var t_backdrop_source: texture_2d<f32>;
@@ -182,8 +183,13 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     ) * backdrop.opacity;
-    let blurred = textureSample(t_backdrop_source, s_backdrop, uv);
-    return mix(original, blurred, coverage);
+    let filtered = textureSample(t_backdrop_source, s_backdrop, uv);
+    let lower = backdrop.tone.rgb * backdrop.tone.a * filtered.a;
+    let upper = (
+        backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
+    ) * filtered.a;
+    let treated = vec4<f32>(clamp(filtered.rgb, lower, upper), filtered.a);
+    return mix(original, treated, coverage);
 }
 
 struct Hsla {
@@ -1009,6 +1015,10 @@ struct Shadow {
     corner_radii: Corners,
     content_mask: Bounds,
     color: Hsla,
+    exclude_bounds: Bounds,
+    exclude_corner_radii: Corners,
+    exclude_interior: u32,
+    pad: u32,
 }
 var<storage, read> b_shadows: array<Shadow>;
 
@@ -1068,6 +1078,15 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
             shadow.blur_radius, corner_radius, half_size);
         alpha +=  blur * gaussian(y, shadow.blur_radius) * step;
         y += step;
+    }
+
+    if (shadow.exclude_interior != 0u) {
+        let distance = quad_sdf(
+            input.position.xy,
+            shadow.exclude_bounds,
+            shadow.exclude_corner_radii,
+        );
+        alpha *= saturate(distance + 0.5);
     }
 
     return blend_color(input.color, alpha);

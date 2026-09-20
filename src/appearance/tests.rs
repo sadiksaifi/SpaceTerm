@@ -46,7 +46,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 );
                 assert!(
                     controls.elevated_surface_background.a > sheet.a,
-                    "{mode:?} at {transparency}: a floating surface stays denser than the sheet"
+                    "{mode:?} at {transparency}: an elevated resting surface retains more color than the sheet"
                 );
                 if transparency == 1.0 {
                     // The sheet clears while Panes and controls keep enough tint to retain shape.

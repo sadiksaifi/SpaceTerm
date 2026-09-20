@@ -471,6 +471,7 @@ struct BackdropParams {
     float opacity;
     float pass_index;
     float pad;
+    float4 tone;
 };
 
 struct BackdropVertexOutput {
@@ -541,8 +542,13 @@ float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
     float coverage = saturate(
         min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5
     ) * backdrop.opacity;
-    float4 blurred = t_sprite.SampleLevel(s_sprite, uv, 0.0);
-    return lerp(original, blurred, coverage);
+    float4 filtered = t_sprite.SampleLevel(s_sprite, uv, 0.0);
+    float3 lower = backdrop.tone.rgb * backdrop.tone.a * filtered.a;
+    float3 upper = (
+        backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
+    ) * filtered.a;
+    float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+    return lerp(original, treated, coverage);
 }
 
 /*
@@ -912,6 +918,10 @@ struct Shadow {
     Corners corner_radii;
     Bounds content_mask;
     Hsla color;
+    Bounds exclude_bounds;
+    Corners exclude_corner_radii;
+    uint exclude_interior;
+    uint pad;
 };
 
 struct ShadowVertexOutput {
@@ -974,6 +984,15 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
                             corner_radius, half_size) *
                 gaussian(y, shadow.blur_radius) * step;
         y += step;
+    }
+
+    if (shadow.exclude_interior != 0) {
+        float distance = quad_sdf(
+            input.position.xy,
+            shadow.exclude_bounds,
+            shadow.exclude_corner_radii
+        );
+        alpha *= saturate(distance + 0.5);
     }
 
     return input.color * float4(1., 1., 1., alpha);

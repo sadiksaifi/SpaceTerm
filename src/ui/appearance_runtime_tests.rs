@@ -117,7 +117,7 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
         let after = current(cx);
         assert!(shell(&after) > 0 && shell(&after) < shell(&before));
         assert!(floating(&after) < floating(&before));
-        // Floating surfaces covering content stay denser than the base between the endpoints.
+        // Floating tone remains stronger than the base tint between the endpoints.
         assert!(floating(&after) > shell(&after));
         assert_eq!(
             after.chrome.composition.effective,

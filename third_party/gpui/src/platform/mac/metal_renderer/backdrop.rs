@@ -8,7 +8,7 @@ pub(super) struct BackdropRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Bounds, ContentMask, Corners, ScaledPixels, point, size};
+    use crate::{Bounds, ContentMask, Corners, ScaledPixels, Shadow, hsla, point, rgba, size};
 
     #[test]
     fn backdrop_should_filter_pixels_preserve_alpha_and_respect_rounded_clipping() {
@@ -129,6 +129,256 @@ mod tests {
             "a constant fresh backdrop must stay constant"
         );
     }
+
+    #[test]
+    fn backdrop_tone_should_preserve_alpha_and_be_idempotent_without_blur() {
+        let device = metal::Device::system_default().expect("native Metal device required");
+        #[cfg(not(feature = "runtime_shaders"))]
+        let library = device
+            .new_library_with_data(super::super::SHADERS_METALLIB)
+            .unwrap();
+        #[cfg(feature = "runtime_shaders")]
+        let library = device
+            .new_library_with_source(
+                super::super::SHADERS_SOURCE_FILE,
+                &metal::CompileOptions::new(),
+            )
+            .unwrap();
+        let mut renderer = BackdropRenderer::new(&device, &library);
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(16);
+        descriptor.set_height(16);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(if device.has_unified_memory() {
+            metal::MTLStorageMode::Shared
+        } else {
+            metal::MTLStorageMode::Managed
+        });
+        descriptor
+            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        let target = device.new_texture(&descriptor);
+        let region = metal::MTLRegion::new_2d(0, 0, 16, 16);
+        let samples = [
+            [0, 0, 0, 255],
+            [64, 64, 64, 255],
+            [255, 255, 255, 255],
+            [128, 128, 128, 128],
+            [0, 0, 0, 0],
+        ];
+        let mut original = vec![0u8; 16 * 16 * 4];
+        for (index, pixel) in original.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&samples[index % samples.len()]);
+        }
+        target.replace_region(region, 0, original.as_ptr().cast(), 16 * 4);
+        let bounds = Bounds::new(
+            point(ScaledPixels(0.0), ScaledPixels(0.0)),
+            size(ScaledPixels(16.0), ScaledPixels(16.0)),
+        );
+        let filter = BackdropFilter {
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            radius: ScaledPixels(0.0),
+            opacity: 1.0,
+            tone: rgba(0x202020b3),
+            ..Default::default()
+        };
+        let queue = device.new_command_queue();
+        let render = |renderer: &mut BackdropRenderer, target: &metal::TextureRef| {
+            let commands = queue.new_command_buffer();
+            renderer.encode(
+                &device,
+                commands,
+                target,
+                &filter,
+                size(DevicePixels(16), DevicePixels(16)),
+            );
+            if !device.has_unified_memory() {
+                let sync = commands.new_blit_command_encoder();
+                sync.synchronize_resource(target);
+                sync.end_encoding();
+            }
+            commands.commit();
+            commands.wait_until_completed();
+            assert_eq!(commands.status(), metal::MTLCommandBufferStatus::Completed);
+        };
+        render(&mut renderer, &target);
+        let mut output = vec![0u8; original.len()];
+        target.get_bytes(output.as_mut_ptr().cast(), 16 * 4, region, 0);
+        let pixel = |index: usize| &output[index * 4..(index + 1) * 4];
+        for channel in 0..3 {
+            assert!((21..=24).contains(&pixel(0)[channel]));
+            assert!((62..=66).contains(&pixel(1)[channel]));
+            assert!((97..=100).contains(&pixel(2)[channel]));
+            assert!((48..=51).contains(&pixel(3)[channel]));
+            assert_eq!(pixel(4)[channel], 0);
+        }
+        assert_eq!(pixel(0)[3], 255);
+        assert_eq!(pixel(1)[3], 255);
+        assert_eq!(pixel(2)[3], 255);
+        assert_eq!(pixel(3)[3], 128);
+        assert_eq!(pixel(4)[3], 0);
+
+        let once = output;
+        render(&mut renderer, &target);
+        let mut twice = vec![0u8; once.len()];
+        target.get_bytes(twice.as_mut_ptr().cast(), 16 * 4, region, 0);
+        assert_eq!(
+            twice, once,
+            "reapplying the same tone must not flatten color again"
+        );
+    }
+
+    #[test]
+    fn shadow_interior_exclusion_should_preserve_center_and_follow_rounded_shell() {
+        let device = metal::Device::system_default().expect("native Metal device required");
+        #[cfg(not(feature = "runtime_shaders"))]
+        let library = device
+            .new_library_with_data(super::super::SHADERS_METALLIB)
+            .unwrap();
+        #[cfg(feature = "runtime_shaders")]
+        let library = device
+            .new_library_with_source(
+                super::super::SHADERS_SOURCE_FILE,
+                &metal::CompileOptions::new(),
+            )
+            .unwrap();
+        let pipeline = super::super::build_pipeline_state(
+            &device,
+            &library,
+            "shadow interior exclusion test",
+            "shadow_vertex",
+            "shadow_fragment",
+            metal::MTLPixelFormat::BGRA8Unorm,
+        );
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(64);
+        descriptor.set_height(64);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(if device.has_unified_memory() {
+            metal::MTLStorageMode::Shared
+        } else {
+            metal::MTLStorageMode::Managed
+        });
+        descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+        let target = device.new_texture(&descriptor);
+        let region = metal::MTLRegion::new_2d(0, 0, 64, 64);
+        let original = vec![255u8; 64 * 64 * 4];
+        let unit_vertices = [
+            [0.0_f32, 0.0_f32],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+        ];
+        let unit_buffer = device.new_buffer_with_data(
+            unit_vertices.as_ptr().cast(),
+            std::mem::size_of_val(&unit_vertices) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let bounds = Bounds::new(
+            point(ScaledPixels(20.0), ScaledPixels(20.0)),
+            size(ScaledPixels(24.0), ScaledPixels(24.0)),
+        );
+        let viewport = size(DevicePixels(64), DevicePixels(64));
+        let queue = device.new_command_queue();
+        let render = |exclude_interior| {
+            target.replace_region(region, 0, original.as_ptr().cast(), 64 * 4);
+            let shadow = Shadow {
+                order: 0,
+                blur_radius: ScaledPixels(4.0),
+                bounds,
+                corner_radii: Corners::all(ScaledPixels(8.0)),
+                content_mask: ContentMask {
+                    bounds: Bounds::new(
+                        point(ScaledPixels(0.0), ScaledPixels(0.0)),
+                        size(ScaledPixels(64.0), ScaledPixels(64.0)),
+                    ),
+                },
+                color: hsla(0.0, 0.0, 0.0, 1.0),
+                exclude_bounds: bounds,
+                exclude_corner_radii: Corners::all(ScaledPixels(8.0)),
+                exclude_interior,
+                pad: 0,
+            };
+            let shadow_buffer = device.new_buffer_with_data(
+                (&shadow as *const Shadow).cast(),
+                std::mem::size_of_val(&shadow) as u64,
+                metal::MTLResourceOptions::StorageModeManaged,
+            );
+            let pass_descriptor = metal::RenderPassDescriptor::new();
+            let color = pass_descriptor.color_attachments().object_at(0).unwrap();
+            color.set_texture(Some(&target));
+            color.set_load_action(metal::MTLLoadAction::Load);
+            color.set_store_action(metal::MTLStoreAction::Store);
+            let commands = queue.new_command_buffer();
+            let encoder = commands.new_render_command_encoder(pass_descriptor);
+            encoder.set_render_pipeline_state(&pipeline);
+            encoder.set_viewport(metal::MTLViewport {
+                originX: 0.0,
+                originY: 0.0,
+                width: 64.0,
+                height: 64.0,
+                znear: 0.0,
+                zfar: 1.0,
+            });
+            encoder.set_vertex_buffer(
+                super::super::ShadowInputIndex::Vertices as u64,
+                Some(&unit_buffer),
+                0,
+            );
+            encoder.set_vertex_buffer(
+                super::super::ShadowInputIndex::Shadows as u64,
+                Some(&shadow_buffer),
+                0,
+            );
+            encoder.set_fragment_buffer(
+                super::super::ShadowInputIndex::Shadows as u64,
+                Some(&shadow_buffer),
+                0,
+            );
+            encoder.set_vertex_bytes(
+                super::super::ShadowInputIndex::ViewportSize as u64,
+                std::mem::size_of_val(&viewport) as u64,
+                (&viewport as *const Size<DevicePixels>).cast(),
+            );
+            encoder.draw_primitives_instanced(metal::MTLPrimitiveType::Triangle, 0, 6, 1);
+            encoder.end_encoding();
+            if !device.has_unified_memory() {
+                let sync = commands.new_blit_command_encoder();
+                sync.synchronize_resource(&target);
+                sync.end_encoding();
+            }
+            commands.commit();
+            commands.wait_until_completed();
+            assert_eq!(commands.status(), metal::MTLCommandBufferStatus::Completed);
+            let mut output = vec![0u8; original.len()];
+            target.get_bytes(output.as_mut_ptr().cast(), 64 * 4, region, 0);
+            output
+        };
+
+        let default_shadow = render(0);
+        let outer_shadow = render(1);
+        let channel = |pixels: &[u8], x: usize, y: usize| pixels[(y * 64 + x) * 4];
+        assert!(
+            channel(&default_shadow, 32, 32) < 250,
+            "the default shadow must retain its filled center"
+        );
+        assert_eq!(
+            channel(&outer_shadow, 32, 32),
+            255,
+            "the opt-in shadow must not repaint the shell center"
+        );
+        assert!(
+            channel(&outer_shadow, 17, 32) < 250,
+            "the opt-in shadow must preserve the exterior silhouette"
+        );
+        assert!(
+            channel(&outer_shadow, 21, 21) < 250,
+            "the cutout must follow rounded corners rather than a rectangular mask"
+        );
+    }
 }
 
 struct BackdropTextures {
@@ -216,19 +466,15 @@ impl BackdropRenderer {
         );
         copy.end_encoding();
 
-        for (pass, target, source) in [
-            (
-                0.0,
-                textures.horizontal.as_ref(),
-                textures.snapshot.as_ref(),
-            ),
-            (
-                1.0,
-                textures.vertical.as_ref(),
-                textures.horizontal.as_ref(),
-            ),
-            (2.0, drawable, textures.vertical.as_ref()),
-        ] {
+        let first_pass = if filter.radius.0 > 0.0 { 0 } else { 2 };
+        for pass_index in first_pass..=2 {
+            let (target, source) = match pass_index {
+                0 => (textures.horizontal.as_ref(), textures.snapshot.as_ref()),
+                1 => (textures.vertical.as_ref(), textures.horizontal.as_ref()),
+                _ if filter.radius.0 > 0.0 => (drawable, textures.vertical.as_ref()),
+                _ => (drawable, textures.snapshot.as_ref()),
+            };
+            let pass = pass_index as f32;
             let target_width = target.width() as f32;
             let target_height = target.height() as f32;
             let sigma = if pass == 0.0 {
@@ -257,6 +503,10 @@ impl BackdropRenderer {
                 filter.opacity,
                 pass,
                 0.0,
+                filter.tone.r,
+                filter.tone.g,
+                filter.tone.b,
+                filter.tone.a,
             ];
             let descriptor = metal::RenderPassDescriptor::new();
             let color = descriptor.color_attachments().object_at(0).unwrap();

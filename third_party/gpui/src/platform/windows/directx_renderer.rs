@@ -654,7 +654,8 @@ impl DirectXRenderer {
         }
 
         let result: Result<()> = (|| {
-            for pass_index in 0..3 {
+            let first_pass = if filter.radius.0 > 0.0 { 0 } else { 2 };
+            for pass_index in first_pass..3 {
                 let (target_width, target_height, target_view, source_view, viewport) =
                     match pass_index {
                         0 => (
@@ -671,11 +672,18 @@ impl DirectXRenderer {
                             &resources.horizontal_srv,
                             &resources.quarter_viewport,
                         ),
-                        _ => (
+                        _ if filter.radius.0 > 0.0 => (
                             resources.width,
                             resources.height,
                             &self.resources.render_target_view,
                             &resources.vertical_srv,
+                            &self.resources.viewport,
+                        ),
+                        _ => (
+                            resources.width,
+                            resources.height,
+                            &self.resources.render_target_view,
+                            &resources.snapshot_srv,
                             &self.resources.viewport,
                         ),
                     };
@@ -711,6 +719,7 @@ impl DirectXRenderer {
                     opacity: filter.opacity,
                     pass_index: pass_index as f32,
                     _pad: 0.0,
+                    tone: [filter.tone.r, filter.tone.g, filter.tone.b, filter.tone.a],
                 };
                 self.pipelines.backdrop.update_buffer(
                     &self.devices.device,
@@ -1157,6 +1166,7 @@ struct BackdropParams {
     opacity: f32,
     pass_index: f32,
     _pad: f32,
+    tone: [f32; 4],
 }
 
 struct PipelineState<T> {

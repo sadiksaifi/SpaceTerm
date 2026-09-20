@@ -241,6 +241,10 @@ pub struct Style {
     /// The Gaussian sigma of the backdrop blur in logical pixels, capped at 64 device pixels.
     pub backdrop_blur: Option<Pixels>,
 
+    /// Constrains the filtered backdrop to the color range admitted by this source-over tone
+    /// without changing the backdrop's alpha.
+    pub backdrop_tone: Option<Rgba>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -253,6 +257,9 @@ pub struct Style {
 
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
+
+    /// Whether box shadows should be clipped out of the element's rounded interior.
+    pub shadow_outside_only: bool,
 
     /// The text style of this element
     pub text: TextStyleRefinement,
@@ -623,8 +630,13 @@ impl Style {
             .clamp_radii_for_quad_size(bounds.size);
 
         if self.visibility == Visibility::Visible {
-            if let Some(radius) = self.backdrop_blur {
-                window.paint_backdrop_blur(bounds, corner_radii, radius);
+            if self.backdrop_blur.is_some() || self.backdrop_tone.is_some() {
+                window.paint_backdrop_filter(
+                    bounds,
+                    corner_radii,
+                    self.backdrop_blur.unwrap_or_default(),
+                    self.backdrop_tone.unwrap_or_default(),
+                );
             }
         }
 
@@ -633,7 +645,11 @@ impl Style {
             window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
         }
 
-        window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+        if self.shadow_outside_only {
+            window.paint_shadows_outside(bounds, corner_radii, &self.box_shadow);
+        } else {
+            window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+        }
 
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
@@ -772,10 +788,12 @@ impl Default for Style {
             flex_basis: Length::Auto,
             background: None,
             backdrop_blur: None,
+            backdrop_tone: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            shadow_outside_only: false,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

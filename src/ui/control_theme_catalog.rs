@@ -16,13 +16,12 @@ pub(super) fn catalog(
     let colors = &appearance.control_colors;
     let host = &appearance.floating_colors;
     let field = &appearance.floating_field_colors;
-    // The shell paints the material once. Idle rows inherit it, while row states keep their
-    // complete host-relative paints and content contrast reference.
+    // The shell applies its backdrop tone and elevation wash once. Idle rows inherit that host,
+    // while row states keep their complete host-relative paints and content contrast reference.
     let mut popup = host.clone();
     popup.elevated_surface_background =
         appearance.floating_surface(appearance.colors.elevated_surface_background);
-    let mut row_reference = host.clone();
-    row_reference.elevated_surface_background = popup.elevated_surface_background.with_alpha(255);
+    let row_reference = host.clone();
     ControlThemeCatalog::new(
         button_theme::theme(colors),
         toggle_theme::theme(colors),
@@ -65,24 +64,49 @@ pub(super) fn catalog(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct OverlayRow {
     pub(super) fill: crate::appearance::Color,
-    /// Foreground, secondary, icon and match colors, readable against the opaque reference.
+    /// Foreground, secondary, icon and match colors, readable across the final backdrop endpoints.
     pub(super) content: [crate::appearance::Color; 4],
     pub(super) border: crate::appearance::Color,
 }
 
 impl OverlayRow {
-    /// Resolves content against the opaque `reference` row over its surface, and paints the
-    /// material `paint` row, so text never follows the window's changing fill alpha.
+    /// Resolves content against both admitted material endpoints and paints the smallest
+    /// host-relative row state that can carry that content.
     pub(super) fn resolve(
         (reference, reference_surface): (crate::appearance::Color, crate::appearance::Color),
         (paint, paint_surface): (crate::appearance::Color, crate::appearance::Color),
         content: [crate::appearance::Color; 4],
         border: crate::appearance::Color,
     ) -> Self {
-        let background = reference.source_over(reference_surface);
+        let mut fill = row_fill((reference, reference_surface), (paint, paint_surface));
+        let mut backgrounds = if paint_surface.is_opaque() {
+            let background = fill.source_over(paint_surface);
+            [background; 2]
+        } else {
+            [
+                crate::appearance::Color::rgb(0x000000),
+                crate::appearance::Color::rgb(0xffffff),
+            ]
+            .map(|underlay| fill.source_over(paint_surface.source_over(underlay)))
+        };
+        let neutral_is_readable = [
+            crate::appearance::Color::rgb(0x000000),
+            crate::appearance::Color::rgb(0xffffff),
+        ]
+        .into_iter()
+        .any(|foreground| {
+            backgrounds
+                .into_iter()
+                .all(|background| foreground.contrast_ratio(background) >= 4.5)
+        });
+        if !neutral_is_readable {
+            fill = reference.source_over(reference_surface);
+            backgrounds = [fill; 2];
+        }
         Self {
-            fill: row_fill((reference, reference_surface), (paint, paint_surface)),
-            content: content.map(|color| readable_on(color, background, 4.5)),
+            fill,
+            content: content
+                .map(|color| super::appearance::readable_on_backgrounds(color, backgrounds, 4.5)),
             border,
         }
     }
@@ -175,9 +199,9 @@ pub(super) fn overlay_list_rows(
     )
 }
 
-/// What a row paints over the surface it rests on. Without a material it paints its composite,
-/// as authored. With a material it paints only its own fill, and an idle row paints nothing, so
-/// the surface is never composited twice.
+/// What a row paints over the surface it rests on. Without a material it paints its authored
+/// composite. With a material it paints the smallest host-relative overlay that reaches the same
+/// state, and an idle row paints nothing, so the surface is never composited twice.
 pub(super) fn row_fill(
     (reference, reference_surface): (crate::appearance::Color, crate::appearance::Color),
     (paint, paint_surface): (crate::appearance::Color, crate::appearance::Color),
@@ -187,8 +211,45 @@ pub(super) fn row_fill(
     } else if reference == reference_surface {
         crate::appearance::Color::rgba(0)
     } else {
-        paint
+        let target = reference.source_over(reference_surface);
+        let base = if paint_surface.is_opaque() {
+            paint_surface
+        } else {
+            reference_surface
+        };
+        relative_overlay(base, target)
     }
+}
+
+fn relative_overlay(
+    base: crate::appearance::Color,
+    target: crate::appearance::Color,
+) -> crate::appearance::Color {
+    let b = [base.r, base.g, base.b].map(f64::from);
+    let t = [target.r, target.g, target.b].map(f64::from);
+    let alpha = b
+        .iter()
+        .zip(t)
+        .map(|(&base, target)| {
+            if target > base {
+                (target - base) / (255.0 - base)
+            } else if target < base {
+                (base - target) / base
+            } else {
+                0.0
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    if alpha == 0.0 {
+        return crate::appearance::Color::rgba(0);
+    }
+    let ink: [u8; 3] = std::array::from_fn(|index| {
+        ((t[index] - (1.0 - alpha) * b[index]) / alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    });
+    crate::appearance::Color::from_rgb_components(ink[0], ink[1], ink[2])
+        .with_alpha((alpha * 255.0).round() as u8)
 }
 
 pub(super) fn readable_on(
@@ -208,10 +269,75 @@ mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
 
-    /// Row content resolves against the opaque presentation, so a translucent window never moves
-    /// text or icons, including Light at full transparency where every fill has no alpha.
     #[test]
-    fn overlay_row_content_stays_stable_across_transparency_in_both_appearances() {
+    fn material_row_fill_reconstructs_the_authored_state_on_an_opaque_host() {
+        let surface = Color::rgb(0x202020);
+        let state = Color::rgb(0x262626);
+        let actual_host = Color::rgb(0x181818);
+        let fill = row_fill((state, surface), (state, actual_host));
+        let rendered = fill.source_over(actual_host);
+
+        assert_eq!(rendered, state);
+        assert!(
+            fill.a < 32,
+            "a small elevation step needs only a thin overlay"
+        );
+    }
+
+    #[test]
+    fn material_row_fill_preserves_a_custom_chromatic_state_as_a_relative_overlay() {
+        let surface = Color::rgb(0x202020);
+        let state = Color::rgb(0x603028);
+        let row = OverlayRow::resolve(
+            (state, surface),
+            (state, Color::rgba(0x202020b3)),
+            [Color::rgb(0xffffff); 4],
+            Color::rgba(0),
+        );
+        let fill = row.fill;
+
+        assert!(fill.a > 0 && fill.a < 128);
+        assert!(
+            fill.r > fill.g && fill.r > fill.b,
+            "the red authored direction must survive host-relative reconstruction: {fill:?}"
+        );
+    }
+
+    #[test]
+    fn dark_selected_row_lifts_from_its_semantic_host_even_when_material_rgb_is_lighter() {
+        let surface = Color::rgb(0x202020);
+        let selected = Color::rgb(0x262626);
+        let combined_material = Color::rgba(0x363636b9);
+        let fill = row_fill((selected, surface), (selected, combined_material));
+
+        assert!(fill.a > 0 && fill.a < 32);
+        assert!(
+            fill.r >= 250 && fill.g >= 250 && fill.b >= 250,
+            "selected must remain a lightening step over the native-backed host: {fill:?}"
+        );
+    }
+
+    #[test]
+    fn row_with_no_shared_readable_foreground_falls_back_once_to_opaque_state() {
+        let middle = Color::rgb(0x808080);
+        let row = OverlayRow::resolve(
+            (middle, middle),
+            (Color::rgba(0), Color::rgba(0)),
+            [Color::rgb(0x777777); 4],
+            Color::rgba(0),
+        );
+
+        assert_eq!(row.fill, middle);
+        assert!(
+            row.content
+                .into_iter()
+                .all(|content| content.contrast_ratio(middle) >= 4.5)
+        );
+    }
+
+    /// Built-in row content stays authored when possible and remains readable across materials.
+    #[test]
+    fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() {
         use crate::appearance::{
             Appearance, AppearancePreferences, ResolvedWindowComposition, builtin_chrome_base,
         };
@@ -277,19 +403,46 @@ mod tests {
                         opaque.paint(),
                         "{appearance:?} opaque rows keep their composite paint"
                     );
-                    let expected = OverlayRow {
-                        fill: row_fill(
-                            (fill, reference.elevated_surface_background),
-                            (pick(&paint)[0], paint.elevated_surface_background),
-                        ),
-                        content: opaque.content,
+                    let expected = OverlayRow::resolve(
+                        (fill, reference.elevated_surface_background),
+                        (pick(&paint)[0], paint.elevated_surface_background),
+                        [foreground, secondary, icon, matched],
                         border,
-                    };
+                    );
                     assert_eq!(
                         rows.resolve(true, selected, hovered),
                         expected.paint(),
-                        "{appearance:?} at {transparency}: row content must not follow fill alpha"
+                        "{appearance:?} at {transparency}: rows use the final material endpoints"
                     );
+                    let backgrounds = if paint.elevated_surface_background.is_opaque() {
+                        [expected.fill.source_over(paint.elevated_surface_background); 2]
+                    } else {
+                        [Color::rgb(0x000000), Color::rgb(0xffffff)].map(|underlay| {
+                            expected.fill.source_over(
+                                paint.elevated_surface_background.source_over(underlay),
+                            )
+                        })
+                    };
+                    for (authored, resolved) in [foreground, secondary, icon, matched]
+                        .into_iter()
+                        .zip(expected.content)
+                    {
+                        assert!(
+                            backgrounds.into_iter().all(|background| resolved
+                                .source_over(background)
+                                .contrast_ratio(background)
+                                >= 4.5),
+                            "{appearance:?} at {transparency}: {resolved:?} must read over {backgrounds:?}"
+                        );
+                        if backgrounds.into_iter().all(|background| {
+                            authored.source_over(background).contrast_ratio(background) >= 4.5
+                        }) {
+                            assert_eq!(
+                                resolved, authored,
+                                "{appearance:?} at {transparency}: readable authored content stays exact"
+                            );
+                        }
+                    }
                     if transparency == 1.0 {
                         // The maximum setting keeps a faint fill rather than none, so a row
                         // that states a state still states it. A row that matches the surface
@@ -361,10 +514,26 @@ mod tests {
             let background = background.source_over(colors.elevated_surface_background);
             ListRowPaint::new(
                 rgba(background.rgba_hex()),
-                rgba(readable_on(foreground, background, 4.5).rgba_hex()),
-                rgba(readable_on(secondary, background, 4.5).rgba_hex()),
-                rgba(readable_on(icon, background, 4.5).rgba_hex()),
-                rgba(readable_on(matched, background, 4.5).rgba_hex()),
+                rgba(
+                    crate::ui::appearance::readable_on_backgrounds(
+                        foreground,
+                        [background; 2],
+                        4.5,
+                    )
+                    .rgba_hex(),
+                ),
+                rgba(
+                    crate::ui::appearance::readable_on_backgrounds(secondary, [background; 2], 4.5)
+                        .rgba_hex(),
+                ),
+                rgba(
+                    crate::ui::appearance::readable_on_backgrounds(icon, [background; 2], 4.5)
+                        .rgba_hex(),
+                ),
+                rgba(
+                    crate::ui::appearance::readable_on_backgrounds(matched, [background; 2], 4.5)
+                        .rgba_hex(),
+                ),
                 rgba(border.rgba_hex()),
             )
         };

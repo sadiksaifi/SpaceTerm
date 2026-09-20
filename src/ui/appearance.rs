@@ -95,26 +95,24 @@ impl Default for ChromeAppearance {
         let authored = ChromeColors::default();
         let colors = authored.opaque_presentation();
         let floating_materials = SurfaceMaterials::OPAQUE;
-        let floating_raised_material = floating_material(
+        let (floating_raised_material, floating_raised_wash) = resolved_floating_material(
             Appearance::Dark,
-            floating_materials.paint(
-                SurfaceRole::Floating,
-                colors.background,
-                colors.elevated_surface_background,
-            ),
+            floating_materials,
+            colors.background,
+            colors.elevated_surface_background,
         );
-        let floating_readout_material = floating_material(
+        let (floating_readout_material, floating_readout_wash) = resolved_floating_material(
             Appearance::Dark,
-            floating_materials.paint(
-                SurfaceRole::Floating,
-                colors.background,
-                colors.preview_background,
-            ),
+            floating_materials,
+            colors.background,
+            colors.preview_background,
         );
         let floating_colors = floating_host_colors(
             authored.floating_presentation(),
             floating_raised_material,
+            floating_raised_wash,
             floating_readout_material,
+            floating_readout_wash,
         );
         let floating_field_colors = resolve_floating_field_colors(floating_colors.clone());
         Self {
@@ -136,59 +134,96 @@ impl Default for ChromeAppearance {
     }
 }
 
-/// Keeps the shared alpha while moving only the floating tint far enough toward its appearance
-/// endpoint for one neutral foreground to read over every admitted backdrop.
-fn floating_material(appearance: Appearance, material: Color) -> Color {
-    let (foreground, endpoint) = match appearance {
+/// Keeps the shared alpha while moving only the floating tint far enough for one neutral
+/// foreground to read over every admitted backdrop.
+fn floating_material(appearance: Appearance, material: Color, wash: Color) -> Option<Color> {
+    let preferred = match appearance {
         Appearance::Light => (Color::rgb(0x000000), Color::rgb(0xffffff)),
         Appearance::Dark => (Color::rgb(0xffffff), Color::rgb(0x000000)),
     };
-    let endpoint = endpoint.with_alpha(material.a);
-    let readable = |candidate: Color| {
-        [Color::rgb(0x000000), Color::rgb(0xffffff)]
-            .into_iter()
-            .all(|underlay| {
-                let background = candidate.source_over(underlay);
-                foreground.contrast_ratio(background) >= 4.5
-            })
-    };
-    if readable(material) {
-        return material;
-    }
-
-    assert!(
-        readable(endpoint),
-        "the floating alpha must admit the appearance's neutral foreground"
-    );
-    let mut lower = 0.0;
-    let mut upper = 1.0;
-    let mut result = endpoint;
-    for _ in 0..16 {
-        let amount = (lower + upper) / 2.0;
-        let candidate = material.mix(endpoint, amount).with_alpha(material.a);
-        if readable(candidate) {
-            result = candidate;
-            upper = amount;
-        } else {
-            lower = amount;
+    let alternate = (preferred.1, preferred.0);
+    for (foreground, endpoint) in [preferred, alternate] {
+        let endpoint = endpoint.with_alpha(material.a);
+        let readable = |candidate: Color| {
+            [Color::rgb(0x000000), Color::rgb(0xffffff)]
+                .into_iter()
+                .all(|underlay| {
+                    let background = wash.source_over(candidate.source_over(underlay));
+                    foreground.contrast_ratio(background) >= 4.5
+                })
+        };
+        if readable(material) {
+            return Some(material);
         }
+        if !readable(endpoint) {
+            continue;
+        }
+        let mut lower = 0.0;
+        let mut upper = 1.0;
+        let mut result = endpoint;
+        for _ in 0..16 {
+            let amount = (lower + upper) / 2.0;
+            let candidate = material.mix(endpoint, amount).with_alpha(material.a);
+            if readable(candidate) {
+                result = candidate;
+                upper = amount;
+            } else {
+                lower = amount;
+            }
+        }
+        return Some(result);
     }
-    result
+    None
+}
+
+fn opaque_floating_fallback(appearance: Appearance, target: Color) -> Color {
+    let target = target.with_alpha(255);
+    floating_material(appearance, target, Color::rgba(0)).unwrap_or_else(|| match appearance {
+        Appearance::Light => Color::rgb(0xffffff),
+        Appearance::Dark => Color::rgb(0x000000),
+    })
+}
+
+fn resolved_floating_material(
+    appearance: Appearance,
+    materials: SurfaceMaterials,
+    base: Color,
+    target: Color,
+) -> (Color, Color) {
+    let material = materials.paint(SurfaceRole::Floating, base, target);
+    if materials.is_opaque() {
+        return (
+            Color::rgba(0),
+            floating_material(appearance, material, Color::rgba(0))
+                .unwrap_or_else(|| opaque_floating_fallback(appearance, target)),
+        );
+    }
+    let wash = materials.floating_wash(base, target);
+    if let Some(tone) = floating_material(appearance, material, wash) {
+        (tone, wash)
+    } else {
+        (Color::rgba(0), opaque_floating_fallback(appearance, target))
+    }
 }
 
 fn floating_host_colors(
     mut colors: ChromeColors,
     raised_material: Color,
+    raised_wash: Color,
     readout_material: Color,
+    readout_wash: Color,
 ) -> ChromeColors {
-    let raised = |color| readable_on_material(color, raised_material, 4.5);
-    let readout = |color| readable_on_material(color, readout_material, 4.5);
+    let raised = |color| readable_on_material(color, raised_material, raised_wash, 4.5);
+    let raised_disabled = |color| readable_on_material(color, raised_material, raised_wash, 3.0);
+    let readout = |color| readable_on_material(color, readout_material, readout_wash, 4.5);
     colors.text = raised(colors.text);
     colors.text_secondary = raised(colors.text_secondary);
     colors.text_muted = raised(colors.text_muted);
     colors.text_placeholder = raised(colors.text_placeholder);
+    colors.text_disabled = raised_disabled(colors.text_disabled);
     colors.icon = raised(colors.icon);
     colors.icon_muted = raised(colors.icon_muted);
+    colors.icon_disabled = raised_disabled(colors.icon_disabled);
     colors.input_text = raised(colors.input_text);
     colors.input_placeholder = raised(colors.input_placeholder);
     colors.preview_foreground = readout(colors.preview_foreground);
@@ -218,11 +253,24 @@ fn floating_host_colors(
     colors
 }
 
-fn readable_on_material(proposed: Color, material: Color, minimum_contrast: f64) -> Color {
+fn readable_on_material(
+    proposed: Color,
+    material: Color,
+    wash: Color,
+    minimum_contrast: f64,
+) -> Color {
     let backgrounds = [
-        material.source_over(Color::rgb(0x000000)),
-        material.source_over(Color::rgb(0xffffff)),
+        wash.source_over(material.source_over(Color::rgb(0x000000))),
+        wash.source_over(material.source_over(Color::rgb(0xffffff))),
     ];
+    readable_on_backgrounds(proposed, backgrounds, minimum_contrast)
+}
+
+pub(super) fn readable_on_backgrounds(
+    proposed: Color,
+    backgrounds: [Color; 2],
+    minimum_contrast: f64,
+) -> Color {
     let minimum = |color: Color| {
         backgrounds
             .into_iter()
@@ -239,7 +287,6 @@ fn readable_on_material(proposed: Color, material: Color, minimum_contrast: f64)
     } else {
         light
     };
-    assert!(minimum(target) >= minimum_contrast);
     let mut lower = 0.0;
     let mut upper = 1.0;
     let mut readable = target;
@@ -315,12 +362,15 @@ impl ChromeAppearance {
         self.materials.paint(role, self.colors.background, color)
     }
 
-    /// Applies the portable in-window material independently of native-window capability.
+    /// Returns the combined tone and wash used to evaluate content over a floating surface.
     pub(crate) fn floating_surface(&self, color: Color) -> Color {
-        let material =
-            self.floating_materials
-                .paint(SurfaceRole::Floating, self.colors.background, color);
-        floating_material(self.appearance, material)
+        let (tone, wash) = resolved_floating_material(
+            self.appearance,
+            self.floating_materials,
+            self.colors.background,
+            color,
+        );
+        wash.source_over(tone)
     }
 
     /// The backdrop a Pane paints beneath its Terminal.
@@ -348,11 +398,18 @@ impl ChromeAppearance {
         use spaceterm_ui::{FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme};
 
         let paint = |color: Color| {
+            let (tone, wash) = resolved_floating_material(
+                self.appearance,
+                self.floating_materials,
+                self.colors.background,
+                color,
+            );
             FloatingSurfacePaint::new(
-                rgba(self.floating_surface(color).rgba_hex()),
+                rgba(wash.rgba_hex()),
                 rgba(self.colors.border.rgba_hex()),
                 rgba(self.colors.border_variant.rgba_hex()),
             )
+            .backdrop_tone(rgba(tone.rgba_hex()))
         };
         FloatingSurfaceTheme::new(
             FloatingSurfacePaints::new(
@@ -371,26 +428,24 @@ impl ChromeAppearance {
 
     pub(crate) fn prepare(resolved: &ResolvedChromeAppearance) -> Self {
         let colors = resolved.colors.opaque_presentation();
-        let floating_raised_material = floating_material(
+        let (floating_raised_material, floating_raised_wash) = resolved_floating_material(
             resolved.appearance,
-            resolved.composition.floating_materials.paint(
-                SurfaceRole::Floating,
-                colors.background,
-                colors.elevated_surface_background,
-            ),
+            resolved.composition.floating_materials,
+            colors.background,
+            colors.elevated_surface_background,
         );
-        let floating_readout_material = floating_material(
+        let (floating_readout_material, floating_readout_wash) = resolved_floating_material(
             resolved.appearance,
-            resolved.composition.floating_materials.paint(
-                SurfaceRole::Floating,
-                colors.background,
-                colors.preview_background,
-            ),
+            resolved.composition.floating_materials,
+            colors.background,
+            colors.preview_background,
         );
         let floating_colors = floating_host_colors(
             resolved.colors.floating_presentation(),
             floating_raised_material,
+            floating_raised_wash,
             floating_readout_material,
+            floating_readout_wash,
         );
         let floating_field_colors = resolve_floating_field_colors(floating_colors.clone());
         Self {
