@@ -81,8 +81,8 @@ use spaceterm_ui::{
     ComboBoxFallback, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
     ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, Tooltip, TooltipLayer,
-    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, Tooltip, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
     window_combo_box_is_open, window_modal_is_open,
 };
 
@@ -791,7 +791,7 @@ impl WorkspaceManager {
             .collect()
     }
 
-    fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window_modal_is_open(window, cx) {
             return;
         }
@@ -2934,6 +2934,11 @@ impl WorkspaceManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
+        let top_chrome_background = if window.is_window_active() {
+            appearance.colors.title_bar_background
+        } else {
+            appearance.colors.title_bar_inactive_background
+        };
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let chip_inset = frame.sidebar_chip_inset();
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
@@ -3042,6 +3047,7 @@ impl WorkspaceManager {
                 .custom_trigger(identity.render(
                     gpui_color(appearance.colors.row_selected_foreground),
                     appearance,
+                    top_chrome_background,
                 ))
                 .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)
@@ -3127,11 +3133,7 @@ impl WorkspaceManager {
             .h(top_chrome_height)
             .bg(gpui_color(appearance.surface(
                 crate::appearance::SurfaceRole::Base,
-                if window.is_window_active() {
-                    appearance.colors.title_bar_background
-                } else {
-                    appearance.colors.title_bar_inactive_background
-                },
+                top_chrome_background,
             )))
             .child(drag_region)
             .into_any_element()
@@ -3219,20 +3221,52 @@ impl Render for WorkspaceManager {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_rows(rows, remote_unavailable, cx)
         });
-        let content = div()
+        let content = Self::workspace_action_scope(cx)
             .id("workspace-manager")
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
                 super::appearance::chrome(cx).colors.background,
             )))
             .debug_selector(|| "workspace-manager".to_owned())
-            .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .font(super::appearance::chrome(cx).regular.clone())
+            .child(active_tab_manager)
+            .when(self.sidebar.read(cx).layout().visible, |root| {
+                root.child(self.sidebar.clone())
+            })
+            .child(
+                self.sidebar.read(cx).render_resize_handle(
+                    self.sidebar.downgrade(),
+                    chrome.width,
+                    super::workspace_frame::WorkspaceFrame::for_appearance(
+                        super::appearance::chrome(cx),
+                        cx,
+                    )
+                    .top_chrome_height(super::appearance::chrome(cx).top_height()),
+                ),
+            )
+            .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
+        let transients = Self::workspace_action_scope(cx)
+            .absolute()
+            .inset_0()
+            .children(self.remote_workspace_flow.iter().cloned())
+            .children(self.remote_pin_picker.iter().cloned())
+            .child(self.transient.picker.clone());
+        ModalLayer::new(content).transient(transients)
+    }
+}
+
+impl WorkspaceManager {
+    /// Keeps ordinary content and complete transient owners on the same action routes while
+    /// leaving the active modal outside those routes. Picker-owned capture handlers still decide
+    /// which hierarchy actions may reach the Workspace.
+    fn workspace_action_scope(cx: &Context<Self>) -> gpui::Div {
+        div()
+            .key_context(TERMINAL_KEY_CONTEXT)
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))
@@ -3274,26 +3308,6 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
-            .child(active_tab_manager)
-            .children(self.remote_workspace_flow.iter().cloned())
-            .children(self.remote_pin_picker.iter().cloned())
-            .when(self.sidebar.read(cx).layout().visible, |root| {
-                root.child(self.sidebar.clone())
-            })
-            .child(
-                self.sidebar.read(cx).render_resize_handle(
-                    self.sidebar.downgrade(),
-                    chrome.width,
-                    super::workspace_frame::WorkspaceFrame::for_appearance(
-                        super::appearance::chrome(cx),
-                        cx,
-                    )
-                    .top_chrome_height(super::appearance::chrome(cx).top_height()),
-                ),
-            )
-            .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
-        let content = content.child(self.transient.picker.clone());
-        ModalLayer::new(TooltipLayer::new(content))
     }
 }
 

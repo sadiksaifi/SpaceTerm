@@ -548,6 +548,7 @@ struct FocusChain {
     successor: Option<FocusHandle>,
     root_scope: Option<WeakFocusHandle>,
     modal_scope: Option<WeakFocusHandle>,
+    modal_scope_presentation: Option<ModalPresentationId>,
     retired_owned_transient: Option<WeakFocusHandle>,
     restoration_pending: bool,
 }
@@ -845,7 +846,9 @@ impl ModalWindowOwner {
                 crate::command_palette::discard_window_command_palette_suspension(suspension, cx);
             }
             if let Some(parent) = state.active_modal_parent() {
+                crate::tooltip::dismiss_modal_tooltip(parent, cx);
                 crate::menu::dismiss_menu_owned_by_modal_parent(parent, cx);
+                crate::combo_box::dismiss_combo_box_owned_by_modal_parent(parent, cx);
             }
             let effects = state.drain_all(ModalCloseReason::OwnerRemoved);
             defer_released_owner_effects(effects, cx);
@@ -1553,6 +1556,7 @@ impl ModalWindowOwner {
     ) {
         if self.focus_chain.generation == Some(presentation) {
             self.focus_chain.modal_scope = Some(focus.downgrade());
+            self.focus_chain.modal_scope_presentation = Some(presentation);
         }
     }
 
@@ -1601,6 +1605,7 @@ impl ModalWindowOwner {
         self.focus_chain.predecessor = None;
         self.focus_chain.successor = None;
         self.focus_chain.modal_scope = None;
+        self.focus_chain.modal_scope_presentation = None;
         self.focus_chain.retired_owned_transient = None;
     }
 
@@ -1956,7 +1961,7 @@ fn remove_coordinator_owner(window_id: WindowId, entity_id: EntityId, cx: &mut A
 pub(super) fn retire_window_owner(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
     let (window_id, entity_id) = (owner.read(cx).window_id, owner.entity_id());
     disarm_modal_controls(owner, cx);
-    dismiss_owned_menu_before_any_active_close(owner, cx);
+    dismiss_owned_popups_before_any_active_close(owner, cx);
     remove_coordinator_owner(window_id, entity_id, cx);
     let (effects, suspension, had_transients) = owner.update(cx, |state, _| {
         state.window_available = false;
@@ -2074,7 +2079,7 @@ pub(super) fn replace_active<T: 'static>(
     let caller_id = request.caller_owner.entity_id();
     let completion = request.completion.clone();
     disarm_modal_controls(&owner, cx);
-    dismiss_owned_menu_before_any_active_close(&owner, cx);
+    dismiss_owned_popups_before_any_active_close(&owner, cx);
     let owner_weak = owner.downgrade();
     let release_owner = owner_weak.clone();
     request._caller_release = Some(cx.on_release(move |_, cx| {
@@ -2124,7 +2129,7 @@ fn caller_released(
     });
     if closes_active {
         disarm_modal_controls(&owner, cx);
-        dismiss_owned_menu_before_any_active_close(&owner, cx);
+        dismiss_owned_popups_before_any_active_close(&owner, cx);
     }
     let effects = owner.update(cx, |state, _| state.remove_caller(caller));
     settle_owner(&owner, effects, cx);
@@ -2140,7 +2145,7 @@ fn expire_programmatic_deadline(
         return;
     };
     disarm_modal_controls_for_presentation(&owner, presentation, cx);
-    dismiss_owned_menu_before_close(&owner, presentation, cx);
+    dismiss_owned_popups_before_close(&owner, presentation, cx);
     let effects = owner.update(cx, |state, _| {
         if state.window_id != window_id {
             return Vec::new();
@@ -2177,26 +2182,29 @@ fn disarm_modal_controls_for_presentation(
     }
 }
 
-fn dismiss_owned_menu_before_any_active_close(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
+fn dismiss_owned_popups_before_any_active_close(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
     let parent = owner.read_with(cx, |state, _| state.active_modal_parent());
-    if let Some(parent) = parent
-        && let Some(retired_focus) = crate::menu::dismiss_menu_owned_by_modal_parent(parent, cx)
-    {
-        owner.update(cx, |state, _| {
-            state.focus_chain.retired_owned_transient = Some(retired_focus);
-        });
+    if let Some(parent) = parent {
+        dismiss_owned_popups(owner, parent, cx);
     }
 }
 
-fn dismiss_owned_menu_before_close(
+fn dismiss_owned_popups_before_close(
     owner: &Entity<ModalWindowOwner>,
     presentation: ModalPresentationId,
     cx: &mut App,
 ) {
     let parent = owner.read_with(cx, |state, _| state.active_modal_parent_for(presentation));
-    if let Some(parent) = parent
-        && let Some(retired_focus) = crate::menu::dismiss_menu_owned_by_modal_parent(parent, cx)
-    {
+    if let Some(parent) = parent {
+        dismiss_owned_popups(owner, parent, cx);
+    }
+}
+
+fn dismiss_owned_popups(owner: &Entity<ModalWindowOwner>, parent: ModalParentToken, cx: &mut App) {
+    crate::tooltip::dismiss_modal_tooltip(parent, cx);
+    let menu_focus = crate::menu::dismiss_menu_owned_by_modal_parent(parent, cx);
+    let combo_focus = crate::combo_box::dismiss_combo_box_owned_by_modal_parent(parent, cx);
+    if let Some(retired_focus) = menu_focus.or(combo_focus) {
         owner.update(cx, |state, _| {
             state.focus_chain.retired_owned_transient = Some(retired_focus);
         });
@@ -2379,7 +2387,7 @@ impl ModalPresentationHandle {
         }
         let owner = self.owner.clone();
         disarm_modal_controls_for_presentation(&owner, self.presentation, cx);
-        dismiss_owned_menu_before_close(&owner, self.presentation, cx);
+        dismiss_owned_popups_before_close(&owner, self.presentation, cx);
         let effects = owner.update(cx, |state, _| {
             state.dismiss(self.presentation, ModalCloseReason::Programmatic)
         })?;
@@ -2446,7 +2454,7 @@ impl DialogCompletion {
         )?;
         let owner = self.presentation.owner.clone();
         disarm_modal_controls_for_presentation(&owner, self.presentation.presentation, cx);
-        dismiss_owned_menu_before_close(&owner, self.presentation.presentation, cx);
+        dismiss_owned_popups_before_close(&owner, self.presentation.presentation, cx);
         let effects = owner.update(cx, |state, _| {
             state.finish_dialog(self.presentation.presentation, successor_focus)
         })?;
@@ -2561,7 +2569,7 @@ impl DialogPendingCompletion {
             .ok_or(ModalTerminalOutcomeError::OwnerRemoved)?;
         if matches!(&decision, DialogCloseDecision::Allow) {
             disarm_modal_controls_for_presentation(&owner, self.presentation, cx);
-            dismiss_owned_menu_before_close(&owner, self.presentation, cx);
+            dismiss_owned_popups_before_close(&owner, self.presentation, cx);
         }
         let effects = owner.update(cx, |state, _| {
             state.apply_dialog_decision(self.presentation, self.attempt, decision, successor_focus)
@@ -2641,7 +2649,7 @@ impl ProgressCancellationCompletion {
             .ok_or(ModalTerminalOutcomeError::OwnerRemoved)?;
         if decision == ProgressCancelDecision::Allow {
             disarm_modal_controls_for_presentation(&owner, self.presentation, cx);
-            dismiss_owned_menu_before_close(&owner, self.presentation, cx);
+            dismiss_owned_popups_before_close(&owner, self.presentation, cx);
         }
         let effects = owner.update(cx, |state, _| {
             state.apply_progress_cancel_decision(self.presentation, self.attempt, decision)
@@ -2768,7 +2776,7 @@ impl ProgressDialogHandle {
         )?;
         let owner = self.presentation.owner.clone();
         disarm_modal_controls_for_presentation(&owner, self.presentation.presentation, cx);
-        dismiss_owned_menu_before_close(&owner, self.presentation.presentation, cx);
+        dismiss_owned_popups_before_close(&owner, self.presentation.presentation, cx);
         let effects = owner.update(cx, |state, _| {
             state.finish_progress(self.presentation.presentation, outcome)
         })?;
@@ -2788,7 +2796,7 @@ fn apply_dialog_decision(
     };
     if matches!(&decision, DialogCloseDecision::Allow) {
         disarm_modal_controls_for_presentation(&owner, completion.presentation, cx);
-        dismiss_owned_menu_before_close(&owner, completion.presentation, cx);
+        dismiss_owned_popups_before_close(&owner, completion.presentation, cx);
     }
     let effects = owner.update(cx, |state, _| {
         state.apply_dialog_decision(
@@ -2812,7 +2820,7 @@ fn apply_progress_cancel_decision(
     };
     if decision == ProgressCancelDecision::Allow {
         disarm_modal_controls_for_presentation(&owner, completion.presentation, cx);
-        dismiss_owned_menu_before_close(&owner, completion.presentation, cx);
+        dismiss_owned_popups_before_close(&owner, completion.presentation, cx);
     }
     let effects = owner.update(cx, |state, _| {
         state.apply_progress_cancel_decision(completion.presentation, completion.attempt, decision)
@@ -2898,21 +2906,30 @@ pub(crate) fn current_modal_parent(window: &Window, cx: &App) -> Option<ModalPar
 }
 
 pub(crate) fn focused_modal_parent(window: &Window, cx: &App) -> Option<ModalParentToken> {
+    modal_parent_for_focus(&window.focused(cx)?, window, cx)
+        .or_else(|| crate::combo_box::focused_combo_box_modal_parent(window, cx))
+}
+
+pub(crate) fn modal_parent_for_focus(
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> Option<ModalParentToken> {
     let owner = modal_owner_for_render(window, cx)?;
     let state = owner.read(cx);
     let presentation = state.active.as_ref()?.id;
+    if state.focus_chain.modal_scope_presentation != Some(presentation) {
+        return None;
+    }
     let scope = state
         .focus_chain
         .modal_scope
         .as_ref()
         .and_then(WeakFocusHandle::upgrade)?;
-    let focused = window.focused(cx)?;
-    scope
-        .contains(&focused, window)
-        .then_some(ModalParentToken {
-            window_id: window.window_handle().window_id(),
-            presentation,
-        })
+    scope.contains(focus, window).then_some(ModalParentToken {
+        window_id: window.window_handle().window_id(),
+        presentation,
+    })
 }
 
 pub(crate) fn focus_allows_transient_resume(window: &Window, cx: &App) -> bool {

@@ -11,7 +11,7 @@ use spaceterm_ui::{
     CommandPalette, CommandPaletteItem, ControlPreviewState, DeterminateProgress, FieldState, Icon,
     IconButton, IconName, ModalLayer, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize,
     ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption,
-    Switch, TextInput, TooltipLayer,
+    Switch, TextInput,
 };
 
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
@@ -282,15 +282,9 @@ impl Gallery {
         };
         cx.notify();
     }
-}
 
-impl Render for Gallery {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::super::appearance::chrome(cx).clone();
-        let weak = cx.weak_entity();
-        let cell = |label: &'static str| div().w(px(170.0)).flex_none().child(label);
-        let mut content = div()
-            .id("gallery-scroll")
+    fn action_scope(cx: &Context<Self>) -> gpui::Div {
+        div()
             .key_context("AppearanceGallery")
             .on_action(cx.listener(|this, _: &NextGalleryFixture, _, cx| {
                 let index = FIXTURES
@@ -299,13 +293,30 @@ impl Render for Gallery {
                     .unwrap_or(0);
                 this.select(FIXTURES[(index + 1) % FIXTURES.len()], cx);
             }))
+    }
+}
+
+impl Render for Gallery {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = super::super::appearance::chrome(cx).clone();
+        let weak = cx.weak_entity();
+        let cell = |label: &'static str| div().w(px(170.0)).flex_none().child(label);
+        let mut content = Self::action_scope(cx)
+            .id("gallery-scroll")
             .size_full()
             .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap(px(9.0))
             .p(px(18.0))
-            .bg(rgba(appearance.colors.background.rgba_hex()))
+            .bg(rgba(
+                appearance
+                    .surface(
+                        crate::appearance::SurfaceRole::Sheet,
+                        appearance.colors.background,
+                    )
+                    .rgba_hex(),
+            ))
             .text_color(rgba(appearance.colors.text.rgba_hex()))
             .font(appearance.regular.clone())
             .text_size(px(12.0))
@@ -625,7 +636,12 @@ impl Render for Gallery {
                 ),
         );
         content=content.child(div().text_color(rgba(appearance.colors.text_muted.rgba_hex())).child("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press Ctrl+Alt+N to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-scheme Pane Captions."));
-        ModalLayer::new(TooltipLayer::new(content.child(self.palette.clone())))
+        ModalLayer::new(content).transient(
+            Self::action_scope(cx)
+                .absolute()
+                .inset_0()
+                .child(self.palette.clone()),
+        )
     }
 }
 
@@ -634,6 +650,57 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use std::{rc::Rc, sync::Arc};
+
+    #[gpui::test]
+    fn gallery_shortcut_cycles_fixture_while_palette_retains_focus_and_query(
+        cx: &mut TestAppContext,
+    ) {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+            super::super::tests::ReadOnlyExerciserStorage,
+        ));
+        let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+        platform.set_system_appearance(Some(Appearance::Dark));
+        cx.update(|cx| {
+            appearance_runtime::install(settings, changed, Rc::new(platform), cx).unwrap();
+            crate::ui::init(cx).unwrap();
+            open(cx).unwrap();
+        });
+        let window = cx
+            .windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<Gallery>())
+            .expect("the production gallery should open");
+        let gallery = window.root(cx).unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1600.0), px(2400.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("Open palette: icons, secondary text, label matches")
+            .expect("the production palette trigger should be visible");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let palette = gallery.read_with(cx, |gallery, _| gallery.palette.clone());
+        assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+
+        for fixture in [Fixture::Light, Fixture::SparseDark] {
+            cx.simulate_keystrokes("ctrl-alt-n");
+            cx.run_until_parked();
+            gallery.read_with(cx, |gallery, cx| {
+                assert_eq!(gallery.fixture, fixture, "{}", gallery.status);
+                assert_eq!(
+                    appearance_runtime::current(cx).chrome.appearance,
+                    fixture.appearance()
+                );
+                assert!(gallery.palette.read(cx).is_open());
+                assert_eq!(gallery.palette.read(cx).query(), "Open");
+            });
+            assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+        }
+    }
+
     #[gpui::test]
     fn gallery_cycles_all_production_fixtures_repeatedly_without_losing_editor_state(
         cx: &mut TestAppContext,

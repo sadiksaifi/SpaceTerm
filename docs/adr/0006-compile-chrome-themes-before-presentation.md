@@ -40,21 +40,55 @@ comes from one neutral ladder in both appearances: the base is the darkest (Dark
 Setting controls transmission through a continuous window tint. Resting Chrome surfaces use minimal-alpha
 color overlays against the opaque scheme reference. One neutral elevation ladder is compressed
 into the overlay each appearance may spend, so near-white Light surfaces neither recreate opaque
-panels nor collapse onto a shared ceiling. Floating surfaces over content use a denser curve;
-zero keeps the opaque presentation, while one clears the window tint and retains color on resting
-and floating surfaces. The separate blur Setting controls the native material.
+panels nor collapse onto a shared ceiling. Floating surfaces preserve the window's transmitted
+material instead of adding another dense sheet. Zero keeps the opaque presentation, while one
+clears the window tint and retains elevation on resting and floating surfaces. The separate blur
+Setting controls native and in-window spatial filtering without changing material transmission.
 Surface composition derives material fills from the opaque presentation,
 which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
 elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
 thin elevation tints alone transmit too much desktop variation behind muted ANSI colors.
 Readability takes precedence over keeping a Pane lighter than its surroundings on bright backdrops.
-Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency. GPUI cannot blur
-content inside the window, so floating surfaces tint rather than blur what they cover.
+Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency.
+
+The desktop behind an Operating-System Window may use its platform's native effect. Everything
+inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
+reference, while platform Adapters own only native window capabilities. Separate native popup views
+would split interaction, accessibility, and lifecycle ownership across platforms, so menus, palettes,
+tooltips, modals, and Pane-local overlays remain GPUI-owned. Their shared shell filters already-painted
+GPUI content and bounds its color without adding framebuffer opacity. A small host-relative wash,
+outer shadow and edge provide elevation. When the native window is translucent, the shell also caps
+the retained framebuffer alpha according to Transparency. Preserving sampled alpha alone left dense
+Terminal backings and modal scrims hiding the native material. The cap scales premultiplied color
+with alpha, retaining a faint trace of filtered application content while revealing the existing
+window backdrop. It does not affect the scrim outside the shell or background input blocking.
+Opaque native windows keep captured coverage because they have no translucent backing to reveal.
+At full coverage the alpha cap is idempotent. Repeating the color treatment leaves already-admitted
+colors unchanged, so nested surfaces do not repeatedly tint the same content. Blur off skips
+spatial filtering but retains the same color treatment and alpha limit. Reduce Transparency and Increase Contrast
+make both native and in-window materials opaque without erasing the user's Settings. A platform's
+lack of native desktop transparency does not disable GPUI floating-surface translucency or blur.
+The compiled floating tone bounds opaque GPUI content to a range with readable foregrounds. If a
+custom tone admits no readable neutral foreground, its floating-only RGB moves minimally toward
+the appearance endpoint; authored and resting-surface colors remain unchanged. The native material
+is composited outside GPUI and cannot be sampled by this filter. Limiting framebuffer coverage
+lets that same native material show through; it does not establish a contrast guarantee
+against arbitrary final desktop pixels. Opaque accessibility presentation remains the deterministic
+fallback. A full source-over floating tint would restore that guarantee by obscuring the native
+material, which conflicts with the shared-material presentation.
 
 The window root owns the continuous window tint. Containers and resting controls paint only their color
 difference from that reference, and nested list rows paint only their own fill. Explicit Terminal cell
 backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
 colors retain their own semantics.
+
+Controls inherit their containing surface's material. Window, Panel, Card and Floating hosts select
+prepared control themes from the same catalog. Their normal, hover, pressed, selected and disabled
+fills remain host-relative overlays; they do not introduce separate backdrop filters. Segmented
+options resolve against their track, and selection chips resolve against their actual panel or
+titlebar. Floating field and control content resolves against the composed state, while semantic
+colors and focus indicators retain their meaning. A custom trigger that owns its surface also owns
+its hover fill, so the wrapper cannot add another highlight underneath it.
 
 GPUI's rectangular descendant clipping requires terminal content to end above the Pane's bottom
 corner arcs. A small bottom inset preserves those rounded edges without an opaque overpaint.

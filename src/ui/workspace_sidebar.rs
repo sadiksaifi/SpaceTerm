@@ -741,6 +741,39 @@ impl WorkspaceSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_row_background_materializes_against_the_sidebar_host() {
+        use crate::appearance::{
+            AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+            SchemeCatalog, SurfaceRole, SystemAppearance,
+        };
+
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = 1.0;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .expect("built-in appearance should resolve");
+        let mut appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        appearance.colors.panel_background = Color::rgb(0x202020);
+        appearance.colors.row_background = Color::rgb(0x303030);
+        let expected = appearance.materials.paint(
+            SurfaceRole::Surface,
+            appearance.colors.panel_background,
+            appearance.colors.row_background,
+        );
+
+        assert_eq!(view::row_background(&appearance), Some(expected));
+        appearance.colors.row_background = appearance.colors.panel_background;
+        assert_eq!(view::row_background(&appearance), None);
+    }
+
     #[test]
     fn secondary_text_should_be_readable_on_every_row_background() {
         let colors = ChromeColors::default();

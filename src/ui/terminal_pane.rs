@@ -74,10 +74,10 @@ use gpui::{
     SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, rgba, size,
 };
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, Icon,
-    IconButton, IconName, MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
-    window_modal_is_open,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, FloatingRole,
+    FloatingShell, FloatingSurfaceTheme, Icon, IconButton, IconName, MenuLifecycleEvent, MenuSize,
+    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
 };
 
 #[cfg(test)]
@@ -3276,6 +3276,9 @@ impl TerminalPane {
 
     fn render_find_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let appearance = chrome(cx).clone();
+        // Find takes keyboard and pointer input over the Pane, so it is a Notice.
+        let shell = floating_shell(FloatingRole::Notice, cx);
+        let floating_colors = &appearance.floating_colors;
         let input = self.find_input.as_ref()?.clone();
         let snapshot = self
             .screen
@@ -3308,115 +3311,140 @@ impl TerminalPane {
         let close_pane = pane.clone();
 
         Some(
-            div()
-                .id("terminal-find-bar")
-                .font(appearance.regular.clone())
-                .debug_selector(|| "terminal-find-bar".to_owned())
-                .absolute()
-                .top(appearance.spacing(8.0))
-                .right(appearance.spacing(8.0))
-                .w(appearance.text_size(360.0))
-                .max_w(relative(0.94))
-                .min_h(appearance.height(32.0, 13.0))
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .gap(appearance.spacing(4.0))
-                .px(appearance.spacing(5.0))
-                .py(appearance.spacing(3.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(gpui_color(appearance.colors.border))
-                // Covers terminal content, so it takes the dense floating material.
-                .bg(gpui_color(appearance.surface(
-                    crate::appearance::SurfaceRole::Floating,
-                    appearance.colors.elevated_surface_background,
-                )))
-                .shadow(appearance.shadow())
-                .block_mouse_except_scroll()
-                .key_context(TERMINAL_FIND_KEY_CONTEXT)
-                .tab_group()
-                .on_action(|_: &FocusNextTerminalFindControl, window, cx| {
-                    window.focus_next();
-                    cx.stop_propagation();
-                })
-                .on_action(|_: &FocusPreviousTerminalFindControl, window, cx| {
-                    window.focus_prev();
-                    cx.stop_propagation();
-                })
-                .child(
-                    spaceterm_ui::field_frame(
-                        "terminal-find-field",
-                        &input.read(cx).focus_handle(),
-                        spaceterm_ui::FieldState::default(),
-                        cx,
-                    )
-                    .relative()
-                    .h(appearance.height(24.0, 13.0))
-                    .w(appearance.text_size(120.0))
-                    .max_w_full()
-                    .min_w(px(0.0))
-                    .flex_grow()
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .px(appearance.spacing(5.0))
-                    .rounded(px(4.0))
-                    .text_size(appearance.text_size(13.0))
-                    .text_color(gpui_color(appearance.colors.text))
-                    .whitespace_nowrap()
-                    .child(input),
-                )
-                .child(
+            shell
+                .mount(
                     div()
-                        .debug_selector(|| "terminal-find-result-label".to_owned())
-                        .w(appearance.measure(&result_label, 11.0, window))
-                        .max_w_full()
-                        .flex_shrink_0()
-                        .whitespace_normal()
-                        .text_size(appearance.text_size(11.0))
-                        .text_color(gpui_color(appearance.colors.text_muted))
-                        .child(result_label),
+                        .id("terminal-find-bar")
+                        .font(appearance.regular.clone())
+                        .debug_selector(|| "terminal-find-bar".to_owned())
+                        .absolute()
+                        .top(appearance.spacing(8.0))
+                        .right(appearance.spacing(8.0))
+                        .w(appearance.text_size(360.0))
+                        .max_w(relative(0.94))
+                        .min_h(appearance.height(32.0, 13.0))
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(appearance.spacing(4.0))
+                        // The field and the buttons rest directly on the surface, so the shared
+                        // inset places them and gives the field its concentric radius.
+                        .p(shell.content_inset())
+                        .block_mouse_except_scroll()
+                        .key_context(TERMINAL_FIND_KEY_CONTEXT)
+                        .tab_group()
+                        .on_action(|_: &FocusNextTerminalFindControl, window, cx| {
+                            window.focus_next();
+                            cx.stop_propagation();
+                        })
+                        .on_action(|_: &FocusPreviousTerminalFindControl, window, cx| {
+                            window.focus_prev();
+                            cx.stop_propagation();
+                        })
+                        .child(TerminalFindField {
+                            input,
+                            appearance: appearance.clone(),
+                            corner_radius: shell.nested_radius(),
+                        })
+                        .child(
+                            div()
+                                .debug_selector(|| "terminal-find-result-label".to_owned())
+                                .w(appearance.measure(&result_label, 11.0, window))
+                                .max_w_full()
+                                .flex_shrink_0()
+                                .whitespace_normal()
+                                .text_size(appearance.text_size(11.0))
+                                .text_color(gpui_color(floating_colors.text_muted))
+                                .child(result_label),
+                        )
+                        .child(find_icon_button(
+                            "terminal-find-previous",
+                            "Find Previous",
+                            IconName::ChevronUp,
+                            appearance.text_size(12.0),
+                            has_results,
+                            move |window, cx| {
+                                let _ = previous_pane.update(cx, |pane, cx| {
+                                    pane.find_previous(&FindPrevious, window, cx);
+                                });
+                            },
+                        ))
+                        .child(find_icon_button(
+                            "terminal-find-next",
+                            "Find Next",
+                            IconName::ChevronDown,
+                            appearance.text_size(12.0),
+                            has_results,
+                            move |window, cx| {
+                                let _ = next_pane.update(cx, |pane, cx| {
+                                    pane.find_next(&FindNext, window, cx);
+                                });
+                            },
+                        ))
+                        .child(find_icon_button(
+                            "terminal-find-close",
+                            "Close Find",
+                            IconName::X,
+                            appearance.text_size(12.0),
+                            true,
+                            move |window, cx| {
+                                let _ = close_pane.update(cx, |pane, cx| {
+                                    pane.close_find(&CloseTerminalFind, window, cx);
+                                });
+                            },
+                        )),
                 )
-                .child(find_icon_button(
-                    "terminal-find-previous",
-                    "Find Previous",
-                    IconName::ChevronUp,
-                    appearance.text_size(12.0),
-                    has_results,
-                    move |window, cx| {
-                        let _ = previous_pane.update(cx, |pane, cx| {
-                            pane.find_previous(&FindPrevious, window, cx);
-                        });
-                    },
-                ))
-                .child(find_icon_button(
-                    "terminal-find-next",
-                    "Find Next",
-                    IconName::ChevronDown,
-                    appearance.text_size(12.0),
-                    has_results,
-                    move |window, cx| {
-                        let _ = next_pane.update(cx, |pane, cx| {
-                            pane.find_next(&FindNext, window, cx);
-                        });
-                    },
-                ))
-                .child(find_icon_button(
-                    "terminal-find-close",
-                    "Close Find",
-                    IconName::X,
-                    appearance.text_size(12.0),
-                    true,
-                    move |window, cx| {
-                        let _ = close_pane.update(cx, |pane, cx| {
-                            pane.close_find(&CloseTerminalFind, window, cx);
-                        });
-                    },
-                ))
                 .into_any_element(),
         )
+    }
+}
+
+/// Resolves the shared treatment for one Pane-local floating surface.
+///
+/// Every surface a Pane raises over terminal content covers cells that are already painted, so its
+/// material, edge, corners, and elevation come from the window's one floating catalog rather than
+/// from this renderer. The bounded library fallback keeps fixtures legible before a window installs
+/// its resolved catalog.
+fn floating_shell(role: FloatingRole, cx: &App) -> FloatingShell {
+    cx.try_global::<FloatingSurfaceTheme>()
+        .copied()
+        .unwrap_or_default()
+        .shell(role)
+}
+
+/// Resolves the field after the Notice enters its host scope during child layout.
+#[derive(IntoElement)]
+struct TerminalFindField {
+    input: Entity<TextInput>,
+    appearance: super::appearance::ChromeAppearance,
+    corner_radius: Pixels,
+}
+
+impl gpui::RenderOnce for TerminalFindField {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let appearance = self.appearance;
+        spaceterm_ui::field_frame(
+            "terminal-find-field",
+            &self.input.read(cx).focus_handle(),
+            spaceterm_ui::FieldState::default(),
+            cx,
+        )
+        .relative()
+        .h(appearance.height(24.0, 13.0))
+        .w(appearance.text_size(120.0))
+        .max_w_full()
+        .min_w(px(0.0))
+        .flex_grow()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .px(appearance.spacing(5.0))
+        .rounded(self.corner_radius)
+        .text_size(appearance.text_size(13.0))
+        .text_color(gpui_color(appearance.colors.text))
+        .whitespace_nowrap()
+        .child(self.input)
     }
 }
 
@@ -3758,6 +3786,18 @@ impl Render for TerminalPane {
                 .cloned()
             })
             .flatten();
+        let link_preview_text = active_hovered_link
+            .as_ref()
+            .map(|link| link.target.value.clone());
+        #[cfg(feature = "appearance-exerciser")]
+        let link_preview_text = link_preview_text.or_else(|| {
+            // The development fixture exercises this readout without granting hover or
+            // activation authority to its synthetic text.
+            (displaying_current && self.product_focus.focused_pane)
+                .then(|| super::appearance_exerciser::link_preview_fixture(cx))
+                .flatten()
+                .map(str::to_owned)
+        });
         let native_context_actions = self.native_context_actions();
         let paste_confirmation = self.pending_paste;
         let key_context = if paste_confirmation.is_some() {
@@ -3781,15 +3821,23 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(window, cx);
+        // Every Pane-local surface below covers terminal cells. A panel that takes input is a
+        // Notice; the hovered-link preview only reports, so it is the quieter Readout.
+        let notice_shell = floating_shell(FloatingRole::Notice, cx);
+        let readout_shell = floating_shell(FloatingRole::Readout, cx);
+        let floating_colors = &appearance.floating_colors;
+        let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
         let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => (appearance.colors.error, IconName::TriangleAlert),
-            PaneTerminalState::Exited(_) => (appearance.colors.text_muted, IconName::Square),
+            PaneTerminalState::Failed { .. } => {
+                (floating_control_colors.error, IconName::TriangleAlert)
+            }
+            PaneTerminalState::Exited(_) => (floating_colors.text_muted, IconName::Square),
             PaneTerminalState::Running => match self.status_intent {
-                StatusIntent::Information => (appearance.colors.info, IconName::Info),
-                StatusIntent::Success => (appearance.colors.success, IconName::Check),
-                StatusIntent::Warning => (appearance.colors.warning, IconName::TriangleAlert),
-                StatusIntent::Error => (appearance.colors.error, IconName::TriangleAlert),
+                StatusIntent::Information => (floating_control_colors.info, IconName::Info),
+                StatusIntent::Success => (floating_control_colors.success, IconName::Check),
+                StatusIntent::Warning => (floating_control_colors.warning, IconName::TriangleAlert),
+                StatusIntent::Error => (floating_control_colors.error, IconName::TriangleAlert),
             },
         };
         let diagnostics_available =
@@ -3988,29 +4036,22 @@ impl Render for TerminalPane {
                 )
             })
             .when_some(
-                active_hovered_link.filter(|_| paste_confirmation.is_none() && status.is_none()),
-                |root, link| {
+                link_preview_text.filter(|_| paste_confirmation.is_none() && status.is_none()),
+                |root, text| {
                     root.child(
-                        div()
-                            .debug_selector(|| "terminal-link-preview".to_owned())
-                            .absolute()
-                            .left(px(8.0))
-                            .bottom(px(8.0))
-                            .max_w(px(520.0))
-                            .px(appearance.spacing(6.0))
-                            .py(appearance.spacing(3.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(gpui_color(appearance.colors.border))
-                            // Covers terminal content, so it takes the dense floating material.
-                            .bg(gpui_color(appearance.surface(
-                                crate::appearance::SurfaceRole::Floating,
-                                appearance.colors.preview_background,
-                            )))
-                            .text_color(gpui_color(appearance.colors.preview_foreground))
-                            .text_size(appearance.text_size(13.0))
-                            .overflow_hidden()
-                            .child(div().truncate().child(link.target.value)),
+                        readout_shell.mount(
+                            div()
+                                .debug_selector(|| "terminal-link-preview".to_owned())
+                                .absolute()
+                                .left(appearance.spacing(8.0))
+                                .bottom(appearance.spacing(8.0))
+                                .max_w(appearance.spacing(520.0))
+                                .px(appearance.spacing(6.0))
+                                .py(appearance.spacing(3.0))
+                                .text_color(gpui_color(floating_colors.preview_foreground))
+                                .text_size(appearance.text_size(13.0))
+                                .child(div().truncate().child(text)),
+                        ),
                     )
                 },
             )
@@ -4019,80 +4060,117 @@ impl Render for TerminalPane {
                     confirmation,
                     cx.entity().downgrade(),
                     appearance.clone(),
+                    notice_shell,
                 ))
             })
             .when_some(
                 status.filter(|_| paste_confirmation.is_none()),
                 |root, status| {
+                    // A definite width keeps GPUI's wrapped text measurement out of the
+                    // intrinsic flex pass, which can retain a zero-width line layout.
+                    let message_width = appearance.measure(&status, 13.0, window)
+                        + appearance.text_size(14.0)
+                        + appearance.spacing(8.0);
+                    let action_width = if diagnostics_available {
+                        appearance.measure("Export Diagnostics", 13.0, window)
+                    } else if recovery_available {
+                        appearance.measure("Retry", 13.0, window)
+                    } else {
+                        px(0.0)
+                    };
+                    let width = message_width.max(action_width)
+                        + appearance.spacing(20.0)
+                        + notice_shell.hairline() * 4.0;
                     root.child(
-                        div()
-                            .debug_selector(|| "terminal-status".to_owned())
-                            .absolute()
-                            .right(px(TERMINAL_SIDE_INSET))
-                            .bottom_0()
-                            .max_w(relative(0.94))
-                            .px(appearance.spacing(10.0))
-                            .py(appearance.spacing(6.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(gpui_color(status_color))
-                            // Covers terminal content, so it takes the dense floating material.
-                            .bg(gpui_color(appearance.surface(
-                                crate::appearance::SurfaceRole::Floating,
-                                appearance.colors.elevated_surface_background,
-                            )))
-                            .text_color(gpui_color(appearance.colors.text))
-                            .text_size(appearance.text_size(13.0))
-                            .flex()
-                            .flex_col()
-                            .gap(appearance.spacing(6.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_start()
-                                    .gap(appearance.spacing(8.0))
-                                    .child(Icon::new(
-                                        status_icon,
-                                        px(14.0),
-                                        gpui_color(status_color),
-                                    ))
-                                    .child(div().min_w_0().whitespace_normal().child(status)),
-                            )
-                            .when(recovery_available, |status| {
-                                status.child(
-                                    Button::new("retry-terminal-recovery", "Retry")
-                                        .variant(ButtonVariant::Link)
-                                        .size(ButtonSize::Compact)
-                                        .debug_selector("retry-terminal-recovery")
-                                        .on_activate(move |_, window, cx| {
-                                            let _ = retry_pane.update(cx, |pane, cx| {
-                                                pane.retry_recovery(window, cx);
-                                            });
+                        notice_shell.mount(
+                            div()
+                                .debug_selector(|| "terminal-status".to_owned())
+                                .absolute()
+                                .right(px(TERMINAL_SIDE_INSET))
+                                .bottom_0()
+                                .w(width)
+                                .max_w(relative(0.94))
+                                .text_color(gpui_color(floating_colors.text))
+                                .text_size(appearance.text_size(13.0))
+                                .flex()
+                                .flex_row()
+                                // The surface edge now belongs to the shared role, so the status
+                                // intent reads from a leading rail alongside its glyph rather than
+                                // from a tinted border that looked like ordinary chrome.
+                                .child(
+                                    div()
+                                        .debug_selector(|| "terminal-status-intent".to_owned())
+                                        .w(notice_shell.hairline() * 2.0)
+                                        .flex_shrink_0()
+                                        .bg(gpui_color(status_color)),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px(appearance.spacing(10.0))
+                                        .py(appearance.spacing(6.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(appearance.spacing(6.0))
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .flex()
+                                                .items_start()
+                                                .gap(appearance.spacing(8.0))
+                                                .child(Icon::new(
+                                                    status_icon,
+                                                    appearance.text_size(14.0),
+                                                    gpui_color(status_color),
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .debug_selector(|| {
+                                                            "terminal-status-message".to_owned()
+                                                        })
+                                                        .min_w_0()
+                                                        .flex_1()
+                                                        .whitespace_normal()
+                                                        .child(status),
+                                                ),
+                                        )
+                                        .when(recovery_available, |status| {
+                                            status.child(
+                                                Button::new("retry-terminal-recovery", "Retry")
+                                                    .variant(ButtonVariant::Link)
+                                                    .size(ButtonSize::Compact)
+                                                    .debug_selector("retry-terminal-recovery")
+                                                    .on_activate(move |_, window, cx| {
+                                                        let _ =
+                                                            retry_pane.update(cx, |pane, cx| {
+                                                                pane.retry_recovery(window, cx);
+                                                            });
+                                                    }),
+                                            )
+                                        })
+                                        .when(diagnostics_available, |status| {
+                                            status.child(
+                                                Button::new(
+                                                    "export-terminal-diagnostics",
+                                                    "Export Diagnostics",
+                                                )
+                                                .variant(ButtonVariant::Link)
+                                                .size(ButtonSize::Compact)
+                                                .debug_selector("export-terminal-diagnostics")
+                                                .on_activate(move |_, window, cx| {
+                                                    let _ = export_pane.update(cx, |pane, cx| {
+                                                        pane.export_diagnostics(
+                                                            &ExportTerminalDiagnostics,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                            )
                                         }),
-                                )
-                            })
-                            .when(diagnostics_available, |status| {
-                                status.child(
-                                    Button::new(
-                                        "export-terminal-diagnostics",
-                                        "Export Diagnostics",
-                                    )
-                                    .variant(ButtonVariant::Link)
-                                    .size(ButtonSize::Compact)
-                                    .debug_selector("export-terminal-diagnostics")
-                                    .on_activate(
-                                        move |_, window, cx| {
-                                            let _ = export_pane.update(cx, |pane, cx| {
-                                                pane.export_diagnostics(
-                                                    &ExportTerminalDiagnostics,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ),
-                                )
-                            }),
+                                ),
+                        ),
                     )
                 },
             )
@@ -4109,11 +4187,17 @@ impl Render for TerminalPane {
     }
 }
 
+/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface.
+///
+/// The caller resolves the shell, because this surface is raised beside the Pane's other notices and
+/// must sit at exactly their elevation.
 fn render_paste_confirmation(
     confirmation: PasteConfirmation,
     pane: gpui::WeakEntity<TerminalPane>,
     appearance: super::appearance::ChromeAppearance,
+    shell: FloatingShell,
 ) -> impl IntoElement {
+    let floating_colors = &appearance.floating_colors;
     let cancel_pane = pane.clone();
     let explanation = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
         "This text contains control sequences that may change terminal behavior or execute commands."
@@ -4121,64 +4205,84 @@ fn render_paste_confirmation(
         "Pasting multiple lines may execute commands in your shell."
     };
 
-    div()
-        .debug_selector(|| "unsafe-paste-confirmation".to_owned())
-        .font(appearance.regular.clone())
-        .absolute()
-        .left(px(16.0))
-        .right(px(16.0))
-        .bottom(px(16.0))
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(appearance.spacing(10.0))
-        .px(appearance.spacing(12.0))
-        .py(appearance.spacing(10.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(gpui_color(appearance.colors.warning_border))
-        // Covers terminal content, so it takes the dense floating material.
-        .bg(gpui_color(appearance.surface(
-            crate::appearance::SurfaceRole::Floating,
-            appearance.colors.elevated_surface_background,
-        )))
-        .text_color(gpui_color(appearance.colors.text))
-        .text_size(appearance.text_size(13.0))
-        .occlude()
-        .child(div().w_full().whitespace_normal().child(format!(
-            "Paste {} bytes across {} lines? {explanation}",
-            confirmation.byte_len, confirmation.line_count
-        )))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .gap(appearance.spacing(8.0))
-                .child(
-                    Button::new("cancel-unsafe-paste", "Cancel")
-                        .variant(ButtonVariant::Secondary)
-                        .size(ButtonSize::Small)
-                        .role(ButtonRole::Cancel)
-                        .debug_selector("cancel-unsafe-paste")
-                        .on_activate(move |_, window, cx| {
-                            let _ = cancel_pane.update(cx, |pane, cx| {
-                                pane.cancel_unsafe_paste(&CancelUnsafePaste, window, cx);
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("confirm-unsafe-paste", "Paste")
-                        .variant(ButtonVariant::Primary)
-                        .size(ButtonSize::Small)
-                        .debug_selector("confirm-unsafe-paste")
-                        .on_activate(move |_, window, cx| {
-                            let _ = pane.update(cx, |pane, cx| {
-                                pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
-                            });
-                        }),
-                ),
-        )
+    shell.mount(
+        div()
+            .debug_selector(|| "unsafe-paste-confirmation".to_owned())
+            .font(appearance.regular.clone())
+            .absolute()
+            .left(appearance.spacing(16.0))
+            .right(appearance.spacing(16.0))
+            .bottom(appearance.spacing(16.0))
+            .flex()
+            .flex_row()
+            .text_color(gpui_color(floating_colors.text))
+            .text_size(appearance.text_size(13.0))
+            .occlude()
+            // This notice asks the reader to weigh a risk, so the warning stays visible as a
+            // leading rail now that the surface edge belongs to the shared role.
+            .child(
+                div()
+                    .debug_selector(|| "unsafe-paste-confirmation-warning".to_owned())
+                    .w(shell.hairline() * 2.0)
+                    .flex_shrink_0()
+                    .bg(gpui_color(
+                        appearance.floating_control_colors.warning_border,
+                    )),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(appearance.spacing(10.0))
+                    .px(appearance.spacing(12.0))
+                    .py(appearance.spacing(10.0))
+                    .child(div().w_full().whitespace_normal().child(format!(
+                        "Paste {} bytes across {} lines? {explanation}",
+                        confirmation.byte_len, confirmation.line_count
+                    )))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_end()
+                            .gap(appearance.spacing(8.0))
+                            .child(
+                                Button::new("cancel-unsafe-paste", "Cancel")
+                                    .variant(ButtonVariant::Secondary)
+                                    .size(ButtonSize::Small)
+                                    .role(ButtonRole::Cancel)
+                                    .debug_selector("cancel-unsafe-paste")
+                                    .on_activate(move |_, window, cx| {
+                                        let _ = cancel_pane.update(cx, |pane, cx| {
+                                            pane.cancel_unsafe_paste(
+                                                &CancelUnsafePaste,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("confirm-unsafe-paste", "Paste")
+                                    .variant(ButtonVariant::Primary)
+                                    .size(ButtonSize::Small)
+                                    .debug_selector("confirm-unsafe-paste")
+                                    .on_activate(move |_, window, cx| {
+                                        let _ = pane.update(cx, |pane, cx| {
+                                            pane.confirm_unsafe_paste(
+                                                &ConfirmUnsafePaste,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            ),
+                    ),
+            ),
+    )
 }
 
 #[cfg(test)]

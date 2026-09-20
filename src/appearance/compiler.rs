@@ -1133,7 +1133,8 @@ mod tests {
 
     #[test]
     fn semantic_selection_and_row_overrides_drive_their_missing_hover_states() {
-        let authored = super::super::builtin::chrome_definition(Appearance::Dark);
+        let mut authored = super::super::builtin::chrome_definition(Appearance::Dark);
+        authored.row_hover_background = None;
         let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default());
         let overrides = ChromeColorOverrides {
             selection_background: Some(Color::rgb(0xff0000)),
@@ -1165,6 +1166,7 @@ mod tests {
         let authored = ChromeColorOverrides {
             selection_hover_background: Some(Color::rgb(0x123456)),
             row_selected_hover_background: Some(Color::rgb(0x654321)),
+            row_hover_background: Some(Color::rgb(0x246813)),
             ..authored
         };
         let preserved = compile_chrome(Appearance::Dark, &authored, &overrides);
@@ -1176,6 +1178,7 @@ mod tests {
             preserved.colors.row_selected_hover_background,
             Color::rgb(0x654321)
         );
+        assert_eq!(preserved.colors.row_hover_background, Color::rgb(0x246813));
     }
 
     #[test]

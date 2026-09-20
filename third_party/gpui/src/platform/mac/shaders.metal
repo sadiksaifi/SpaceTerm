@@ -3,6 +3,69 @@
 
 using namespace metal;
 
+vertex float4 backdrop_vertex(uint id [[vertex_id]]) {
+  const float2 vertices[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+  return float4(vertices[id], 0, 1);
+}
+
+fragment float4 backdrop_fragment(float4 position [[position]],
+                                  constant float *p [[buffer(0)]],
+                                  texture2d<float> source [[texture(0)]],
+                                  texture2d<float> original [[texture(1)]]) {
+  constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+  float2 target_size(p[0], p[1]);
+  float2 original_size(p[2], p[3]);
+  float2 uv = position.xy / target_size;
+  if (p[18] < 2.0) {
+    float sigma = max(p[16], 0.25);
+    int extent = int(ceil(3.0 * sigma));
+    float4 sum = float4(0);
+    float total = 0;
+    for (int i = -extent; i <= extent; ++i) {
+      float weight = exp(-0.5 * float(i * i) / (sigma * sigma));
+      float2 offset = p[18] < 0.5 ? float2(float(i) / target_size.x, 0)
+                                 : float2(0, float(i) / target_size.y);
+      float4 sample;
+      if (p[18] < 0.5) {
+        // Four bilinear samples form a 4x4 box before downsampling, avoiding aliasing.
+        float2 pixel = 1.0 / original_size;
+        sample = (source.sample(linear_sampler, uv + offset + pixel) +
+                  source.sample(linear_sampler, uv + offset - pixel) +
+                  source.sample(linear_sampler, uv + offset + float2(pixel.x, -pixel.y)) +
+                  source.sample(linear_sampler, uv + offset + float2(-pixel.x, pixel.y))) * 0.25;
+      } else {
+        sample = source.sample(linear_sampler, uv + offset);
+      }
+      sum += sample * weight;
+      total += weight;
+    }
+    return sum / total;
+  }
+  uv = (position.xy - float2(p[24], p[25])) / original_size;
+  float2 origin(p[4], p[5]);
+  float2 half_size = float2(p[6], p[7]) * 0.5;
+  float2 delta = position.xy - origin - half_size;
+  float radius = delta.y < 0 ? (delta.x < 0 ? p[12] : p[13])
+                            : (delta.x < 0 ? p[15] : p[14]);
+  float2 q = abs(delta) - half_size + radius;
+  float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+  float2 mask_origin(p[8], p[9]);
+  float2 mask_end = mask_origin + float2(p[10], p[11]);
+  float2 mask_distance = min(position.xy - mask_origin, mask_end - position.xy);
+  float coverage = clamp(min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5, 0.0, 1.0) * p[17];
+  float4 original_color = original.sample(linear_sampler, uv);
+  float4 filtered = source.sample(linear_sampler, uv);
+  float3 tone = float3(p[20], p[21], p[22]);
+  float tone_alpha = p[23];
+  float3 lower = tone * tone_alpha * filtered.a;
+  float3 upper = (tone * tone_alpha + (1.0 - tone_alpha)) * filtered.a;
+  float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+  if (treated.a > p[19]) {
+    treated *= p[19] / treated.a;
+  }
+  return mix(original_color, treated, coverage);
+}
+
 float4 hsla_to_rgba(Hsla hsla);
 float3 srgb_to_linear(float3 color);
 float3 linear_to_srgb(float3 color);
@@ -536,6 +599,12 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
                gaussian(y, shadow.blur_radius) * step;
       y += step;
     }
+  }
+
+  if (shadow.exclude_interior != 0) {
+    float distance = quad_sdf(input.position.xy, shadow.exclude_bounds,
+                              shadow.exclude_corner_radii);
+    alpha *= saturate(distance + 0.5);
   }
 
   return input.color * float4(1., 1., 1., alpha);

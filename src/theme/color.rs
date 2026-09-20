@@ -123,6 +123,38 @@ impl Color {
         }
     }
 
+    /// Express this opaque semantic target as the smallest straight-alpha overlay over `base`.
+    ///
+    /// The result preserves the target's direction away from its semantic host without retaining
+    /// the opaque ink used to author that target. Callers must composite authored alpha into the
+    /// target before invoking this operation.
+    pub(crate) fn relative_overlay(self, base: Self) -> Self {
+        let base_channels = [base.r, base.g, base.b].map(f64::from);
+        let target_channels = [self.r, self.g, self.b].map(f64::from);
+        let alpha = base_channels
+            .iter()
+            .zip(target_channels)
+            .map(|(&base, target)| {
+                if target > base {
+                    (target - base) / (255.0 - base)
+                } else if target < base {
+                    (base - target) / base
+                } else {
+                    0.0
+                }
+            })
+            .fold(0.0_f64, f64::max);
+        if alpha == 0.0 {
+            return Self::rgba(0);
+        }
+        let ink: [u8; 3] = std::array::from_fn(|index| {
+            ((target_channels[index] - (1.0 - alpha) * base_channels[index]) / alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        });
+        Self::from_rgb_components(ink[0], ink[1], ink[2]).with_alpha((alpha * 255.0).round() as u8)
+    }
+
     /// Interpolate straight RGBA values for authored surface ramps.
     pub(crate) fn mix(self, other: Self, amount: f64) -> Self {
         let amount = amount.clamp(0.0, 1.0);
@@ -187,5 +219,23 @@ mod composition_tests {
             Color::rgb(0xbf3f7f)
         );
         assert_eq!(Color::rgb(0).contrast_ratio(Color::rgb(0xffffff)), 21.0);
+    }
+
+    #[test]
+    fn relative_overlay_reconstructs_neutral_and_chromatic_targets() {
+        for (base, target) in [
+            (Color::rgb(0x202020), Color::rgb(0x343434)),
+            (Color::rgb(0xe8e8e8), Color::rgb(0xd0d0d0)),
+            (Color::rgb(0x203040), Color::rgb(0x406020)),
+        ] {
+            let overlay = target.relative_overlay(base);
+
+            assert_eq!(overlay.source_over(base), target);
+            assert!(overlay.a < 255, "{base:?} to {target:?} used opaque ink");
+        }
+        assert_eq!(
+            Color::rgb(0x202020).relative_overlay(Color::rgb(0x202020)),
+            Color::rgba(0)
+        );
     }
 }

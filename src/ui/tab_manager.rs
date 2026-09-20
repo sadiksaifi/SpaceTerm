@@ -195,9 +195,9 @@ impl TabChromePresentation {
 
     /// The material one Tab rests on, as an inset chip within the title-bar surface.
     ///
-    /// The Active Tab is the selected row of the navigation sidebars moved into the title bar: the
-    /// same fill, the same lit rim, and the same heavier fill under the pointer. Only the Active Tab
-    /// carries a rim, so the row of Tabs never turns back into a row of boxes.
+    /// The Active Tab uses an inset selection fill tuned to the title bar, with a stronger fill
+    /// under the pointer. Built-in appearances omit decorative outlines; custom Tab edges remain
+    /// supported.
     ///
     /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
     /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
@@ -211,7 +211,8 @@ impl TabChromePresentation {
     ) -> SelectionChip {
         SelectionChip::new(
             tab_chip_shape(appearance, cx),
-            self.tab_chip_paint(active).raised(appearance),
+            self.tab_chip_paint(active)
+                .raised_on(appearance, self.background),
         )
     }
 
@@ -272,12 +273,22 @@ impl TabChromePresentation {
         active: bool,
         ancestor_hovered: bool,
         colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
     ) -> spaceterm_ui::ButtonVariantStyle {
-        self.control_style(active, ancestor_hovered, colors)
+        let host = if active {
+            self.active_tab_hover_background
+        } else {
+            self.hover_background
+        };
+        self.control_style(active, ancestor_hovered, colors, materials, host)
     }
 
-    fn bar_control_style(&self, colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
-        self.control_style(false, false, colors)
+    fn bar_control_style(
+        &self,
+        colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
+    ) -> spaceterm_ui::ButtonVariantStyle {
+        self.control_style(false, false, colors, materials, self.background)
     }
 
     fn control_style(
@@ -285,6 +296,8 @@ impl TabChromePresentation {
         active: bool,
         ancestor_hovered: bool,
         colors: &ChromeColors,
+        materials: crate::appearance::SurfaceMaterials,
+        host: Color,
     ) -> spaceterm_ui::ButtonVariantStyle {
         let clear = gpui::rgba(0);
         let icon = if ancestor_hovered {
@@ -299,8 +312,13 @@ impl TabChromePresentation {
             self.inactive_tab_icon
         };
         let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
+        let hover_background = materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            self.hover_background,
+        );
         let hover = spaceterm_ui::ButtonPaint::new(
-            gpui_color(self.hover_background),
+            gpui_color(hover_background),
             gpui_color(self.hover_icon),
             clear,
         );
@@ -1225,8 +1243,12 @@ impl TabManager {
         let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
         let ancestor_hovered = self.hovered_tab == Some(tab_id);
-        let control_style =
-            presentation.close_control_style(active, ancestor_hovered, &appearance.colors);
+        let control_style = presentation.close_control_style(
+            active,
+            ancestor_hovered,
+            &appearance.colors,
+            appearance.materials,
+        );
         let hover_foreground = presentation.tab_hover_foreground(active);
         let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let close_clearance = (active || ancestor_hovered).then(|| {
@@ -1449,7 +1471,8 @@ impl TabManager {
                         })
                         .variant(ButtonVariant::Ghost)
                         .contextual_style(
-                            presentation.bar_control_style(&appearance.colors),
+                            presentation
+                                .bar_control_style(&appearance.colors, appearance.materials),
                             gpui_color(appearance.colors.border_focused),
                         )
                         .size(ButtonSize::Regular)
@@ -1640,7 +1663,11 @@ fn render_tab_separator(
                 })
                 .w_full()
                 .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
-                .bg(gpui_color(presentation.tab_separator)),
+                .bg(gpui_color(
+                    appearance
+                        .materials
+                        .edge(presentation.background, presentation.tab_separator),
+                )),
         )
         .into_any_element()
 }
@@ -1890,7 +1917,12 @@ mod tests {
                 presentation.tab_hover_foreground(false),
                 colors.tab_hover_foreground
             );
-            let close = presentation.close_control_style(true, true, &colors);
+            let close = presentation.close_control_style(
+                true,
+                true,
+                &colors,
+                crate::appearance::SurfaceMaterials::OPAQUE,
+            );
             assert_eq!(
                 close.hovered().background(),
                 gpui_color(colors.tab_hover_background),
@@ -1902,7 +1934,12 @@ mod tests {
             );
             assert_eq!(
                 presentation
-                    .close_control_style(false, true, &colors)
+                    .close_control_style(
+                        false,
+                        true,
+                        &colors,
+                        crate::appearance::SurfaceMaterials::OPAQUE,
+                    )
                     .normal()
                     .foreground(),
                 gpui_color(colors.tab_hover_icon),
@@ -1911,13 +1948,13 @@ mod tests {
         }
     }
 
-    /// The Active Tab is the navigation sidebars' selected row, placed in the title bar.
+    /// The Active Tab carries selected-row content on a material tuned for the title bar.
     ///
-    /// The Workspace sidebar and the Settings navigation paint their current item from the
-    /// selected-row roles. A focused window's Active Tab must resolve to exactly those paints at rest
-    /// and under the pointer, so the three surfaces cannot drift back into near-matches.
+    /// The Workspace sidebar and Settings navigation need a fill that works on shell and raised
+    /// surfaces. The Active Tab has one title-bar host, so it keeps the shared text hierarchy while
+    /// using its own borderless fill and hover response.
     #[test]
-    fn built_in_active_tab_should_paint_the_selected_row_hierarchy() {
+    fn built_in_active_tab_should_use_an_independent_borderless_chip_material() {
         use crate::appearance::{Appearance, builtin_chrome_base};
 
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1928,12 +1965,12 @@ mod tests {
             assert_eq!(
                 (chip.fill, chip.rim, chip.hover_fill, chip.hover_rim),
                 (
-                    Some(colors.row_selected_background),
-                    Some(colors.row_selected_border),
-                    Some(colors.row_selected_hover_background),
-                    Some(colors.row_selected_hover_border),
+                    Some(colors.tab_active_background),
+                    Some(colors.tab_active_border),
+                    Some(colors.tab_active_hover_background),
+                    Some(colors.tab_active_border),
                 ),
-                "{appearance:?} Active Tab chip should match a selected navigation row"
+                "{appearance:?} Active Tab chip should use its own authored states"
             );
             assert_eq!(
                 (
@@ -1946,13 +1983,26 @@ mod tests {
                 ),
                 "{appearance:?} Active Tab title should match a selected navigation label"
             );
-            assert_ne!(
-                chip.rim, chip.fill,
-                "{appearance:?} Active Tab rim should describe an edge"
+            assert_eq!(
+                colors.tab_active_border.a, 0,
+                "{appearance:?} Active Tab should state its shape without an outline"
             );
             assert_ne!(
                 chip.hover_fill, chip.fill,
                 "{appearance:?} Active Tab should answer hover"
+            );
+            assert_ne!(
+                chip.fill,
+                Some(colors.row_selected_background),
+                "{appearance:?} Active Tab should be tuned independently of navigation rows"
+            );
+            let tab_step = i32::from(colors.tab_active_background.r)
+                - i32::from(colors.title_bar_background.r);
+            let row_step =
+                i32::from(colors.row_selected_background.r) - i32::from(colors.panel_background.r);
+            assert!(
+                tab_step * row_step > 0,
+                "{appearance:?} Active Tab should follow the navigation selection direction"
             );
         }
     }
@@ -2089,7 +2139,12 @@ mod tests {
         let colors = colors.opaque_presentation();
         for window_active in [false, true] {
             let presentation = TabChromePresentation::resolve(window_active, &colors);
-            let style = presentation.close_control_style(true, false, &colors);
+            let style = presentation.close_control_style(
+                true,
+                false,
+                &colors,
+                crate::appearance::SurfaceMaterials::OPAQUE,
+            );
             assert_eq!(style.normal().background(), rgba(0));
             assert_eq!(
                 style.hovered().background(),
@@ -2117,7 +2172,12 @@ mod tests {
             );
 
             for active in [true, false] {
-                let style = presentation.close_control_style(active, true, &colors);
+                let style = presentation.close_control_style(
+                    active,
+                    true,
+                    &colors,
+                    crate::appearance::SurfaceMaterials::OPAQUE,
+                );
                 assert_eq!(
                     style.normal().background(),
                     rgba(0),
@@ -2130,6 +2190,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tab_contextual_controls_should_materialize_hover_against_their_actual_host() {
+        use crate::appearance::{
+            AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+            SchemeCatalog, SurfaceRole, SystemAppearance,
+        };
+
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = 1.0;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let presentation = TabChromePresentation::resolve(true, &appearance.colors);
+
+        let close =
+            presentation.close_control_style(true, true, &appearance.colors, appearance.materials);
+        let expected_close = appearance.materials.paint(
+            SurfaceRole::Surface,
+            presentation.active_tab_hover_background,
+            presentation.hover_background,
+        );
+        assert!(expected_close.a < 255);
+        assert_eq!(close.hovered().background(), gpui_color(expected_close));
+
+        let create = presentation.bar_control_style(&appearance.colors, appearance.materials);
+        let expected_create = appearance.materials.paint(
+            SurfaceRole::Surface,
+            presentation.background,
+            presentation.hover_background,
+        );
+        assert!(expected_create.a < 255);
+        assert_eq!(create.hovered().background(), gpui_color(expected_create));
     }
 
     struct InspectedIconStyle {

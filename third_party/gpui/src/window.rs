@@ -2,8 +2,8 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
+    AsyncWindowContext, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds, BoxShadow,
+    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
@@ -11,12 +11,12 @@ use crate::{
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
     Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, px, rems, size, transparent_black,
+    Rgba, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    Shadow, SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle,
+    TextStyleRefinement, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -680,6 +680,8 @@ pub(crate) struct Frame {
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_history: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -706,6 +708,8 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
@@ -727,6 +731,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_history: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -751,6 +757,12 @@ impl Frame {
         self.deferred_draws.clear();
         self.tab_stops.clear();
         self.focus = None;
+
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.debug_bounds.clear();
+            self.debug_bounds_history.clear();
+        }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         {
@@ -1353,7 +1365,7 @@ pub struct PaintedGlyphForTest {
     pub kind: PaintedGlyphKindForTest,
 }
 
-/// The clipped bounds and scene order of one quad primitive.
+/// The clipped bounds, resolved paint, and scene order of one quad primitive.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaintedQuadForTest {
@@ -1361,6 +1373,10 @@ pub struct PaintedQuadForTest {
     pub visible_bounds: Bounds<ScaledPixels>,
     /// The scene order used for compositing.
     pub order: u32,
+    /// The background submitted to the renderer.
+    pub background: Background,
+    /// The border color submitted to the renderer.
+    pub border_color: Hsla,
 }
 
 impl GlyphPaintRegion {
@@ -2397,7 +2413,19 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_history.len(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.next_frame
+            .debug_bounds
+            .insert(selector.clone(), bounds);
+        self.next_frame
+            .debug_bounds_history
+            .push((selector, bounds));
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
@@ -2429,6 +2457,17 @@ impl Window {
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_history
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+        {
+            self.next_frame
+                .debug_bounds
+                .insert(selector.clone(), *bounds);
+            self.next_frame
+                .debug_bounds_history
+                .push((selector.clone(), *bounds));
+        }
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
@@ -2919,6 +2958,28 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
+        self.paint_shadows_with_interior_exclusion(bounds, corner_radii, shadows, false);
+    }
+
+    /// Paint one or more drop shadows outside the element's rounded bounds.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_shadows_outside(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.paint_shadows_with_interior_exclusion(bounds, corner_radii, shadows, true);
+    }
+
+    fn paint_shadows_with_interior_exclusion(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        exclude_interior: bool,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -2933,8 +2994,63 @@ impl Window {
                 content_mask: content_mask.scale(scale_factor),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                exclude_bounds: bounds.scale(scale_factor),
+                exclude_corner_radii: corner_radii.scale(scale_factor),
+                exclude_interior: if exclude_interior { 1 } else { 0 },
+                pad: 0,
             });
         }
+    }
+
+    /// Paints a backdrop filter into the current stacking context.
+    ///
+    /// A positive `radius` filters spatial detail. `tone` constrains filtered premultiplied RGB
+    /// to the range the same source-over color admits without adding framebuffer coverage.
+    /// `alpha_limit` caps coverage while preserving premultiplied color, admitting the native
+    /// backing on transparent windows. A limit of 1 preserves the captured alpha.
+    pub fn paint_backdrop_filter(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        radius: Pixels,
+        mut tone: Rgba,
+        alpha_limit: f32,
+    ) {
+        const MAX_BACKDROP_BLUR_RADIUS: f32 = 64.;
+
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity();
+        if !radius.0.is_finite() || radius.0 < 0. || !opacity.is_finite() || opacity <= 0. {
+            return;
+        }
+        for channel in [&mut tone.r, &mut tone.g, &mut tone.b, &mut tone.a] {
+            *channel = if channel.is_finite() {
+                channel.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        let alpha_limit = if alpha_limit.is_finite() {
+            alpha_limit.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if radius.0 == 0. && tone.a == 0. && alpha_limit == 1.0 {
+            return;
+        }
+
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: bounds.scale(scale_factor),
+            content_mask: self.content_mask().scale(scale_factor),
+            corner_radii: corner_radii.scale(scale_factor),
+            radius: ScaledPixels((radius.0 * scale_factor).min(MAX_BACKDROP_BLUR_RADIUS)),
+            opacity: opacity.min(1.),
+            tone,
+            alpha_limit,
+        });
     }
 
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
@@ -4958,6 +5074,8 @@ impl Window {
             .map(|quad| PaintedQuadForTest {
                 visible_bounds: quad.bounds.intersect(&quad.content_mask.bounds),
                 order: quad.order,
+                background: quad.background,
+                border_color: quad.border_color,
             })
             .collect()
     }

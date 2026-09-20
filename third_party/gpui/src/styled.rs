@@ -1,8 +1,9 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight,
-    GridPlacement, Hsla, JustifyContent, Length, SharedString, StrikethroughStyle, StyleRefinement,
-    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    GridPlacement, Hsla, JustifyContent, Length, Pixels, Rgba, SharedString, StrikethroughStyle,
+    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
+    relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -375,6 +376,34 @@ pub trait Styled: Sized {
         Self: Sized,
     {
         self.style().background = Some(fill.into());
+        self
+    }
+
+    /// Blurs already-painted content behind the element before its fill and children are painted.
+    /// `radius` is the Gaussian sigma in logical pixels, capped at 64 device pixels.
+    fn backdrop_blur(mut self, radius: Pixels) -> Self {
+        self.style().backdrop_blur = Some(radius);
+        self
+    }
+
+    /// Constrains backdrop color to what `tone` could produce as a source-over fill while
+    /// preserving the backdrop's existing alpha. A transparent tone is a no-op.
+    fn backdrop_tone(mut self, tone: Rgba) -> Self {
+        self.style().backdrop_tone = Some(tone);
+        self
+    }
+
+    /// Limits filtered framebuffer alpha to reveal the native window backing. Values are
+    /// clamped to 0..=1; 1 preserves alpha. Clear pixels stay clear. At full coverage, repeating
+    /// the same limit does not further attenuate content. Only use below 1 on transparent windows.
+    fn backdrop_alpha_limit(mut self, alpha_limit: f32) -> Self {
+        self.style().backdrop_alpha_limit = Some(alpha_limit);
+        self
+    }
+
+    /// Clips box shadows out of the element's rounded interior while preserving their exterior.
+    fn shadow_outside_only(mut self) -> Self {
+        self.style().shadow_outside_only = Some(true);
         self
     }
 

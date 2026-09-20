@@ -238,6 +238,17 @@ pub struct Style {
     /// The fill color of this element
     pub background: Option<Fill>,
 
+    /// The Gaussian sigma of the backdrop blur in logical pixels, capped at 64 device pixels.
+    pub backdrop_blur: Option<Pixels>,
+
+    /// Constrains the filtered backdrop to the color range admitted by this source-over tone
+    /// without changing the backdrop's alpha.
+    pub backdrop_tone: Option<Rgba>,
+
+    /// Maximum framebuffer alpha beneath this element. Reduces premultiplied RGB with alpha
+    /// to reveal the window backing without changing the filtered content's straight color.
+    pub backdrop_alpha_limit: Option<f32>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -250,6 +261,9 @@ pub struct Style {
 
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
+
+    /// Whether box shadows should be clipped out of the element's rounded interior.
+    pub shadow_outside_only: bool,
 
     /// The text style of this element
     pub text: TextStyleRefinement,
@@ -613,18 +627,37 @@ impl Style {
             cx.set_global(DebugBelow)
         }
 
-        #[cfg(debug_assertions)]
-        if self.debug || cx.has_global::<DebugBelow>() {
-            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
-        }
-
         let rem_size = window.rem_size();
         let corner_radii = self
             .corner_radii
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
 
-        window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+        if self.visibility == Visibility::Visible {
+            if self.backdrop_blur.is_some()
+                || self.backdrop_tone.is_some()
+                || self.backdrop_alpha_limit.is_some()
+            {
+                window.paint_backdrop_filter(
+                    bounds,
+                    corner_radii,
+                    self.backdrop_blur.unwrap_or_default(),
+                    self.backdrop_tone.unwrap_or_default(),
+                    self.backdrop_alpha_limit.unwrap_or(1.0),
+                );
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        if self.debug || cx.has_global::<DebugBelow>() {
+            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
+        }
+
+        if self.shadow_outside_only {
+            window.paint_shadows_outside(bounds, corner_radii, &self.box_shadow);
+        } else {
+            window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+        }
 
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
@@ -762,10 +795,14 @@ impl Default for Style {
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             background: None,
+            backdrop_blur: None,
+            backdrop_tone: None,
+            backdrop_alpha_limit: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            shadow_outside_only: false,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

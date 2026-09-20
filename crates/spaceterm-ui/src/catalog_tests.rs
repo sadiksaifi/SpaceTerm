@@ -26,7 +26,7 @@ fn segmented_control_theme(
     )
 }
 
-fn catalog(generation: u64) -> ControlThemeCatalog {
+pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
     let clear = rgba(0x00000000);
     let text = rgba(0xffffffff);
     let surface = rgba(0x202024ff);
@@ -68,16 +68,14 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
         ToggleSizes::new(toggle_metrics, toggle_metrics),
         accent,
     );
-    let menu_paint = MenuPaint::new(
-        surface, surface, text, muted, muted, surface, text, accent, surface,
-    );
+    let menu_paint = MenuPaint::new(text, muted, muted, surface, text, accent);
     let menu_metrics = MenuMetrics::new(px(180.0), px(28.0));
     let menu = MenuTheme::new(
         menu_paint,
         MenuSizes::new(menu_metrics, menu_metrics, menu_metrics),
     );
     let text_input_paint = TextInputPaint::new(text, muted, accent, text, muted, accent);
-    ControlThemeCatalog::new(
+    let catalog = ControlThemeCatalog::new(
         button,
         toggle,
         ProgressTheme::new(
@@ -101,13 +99,12 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
         ),
         menu,
         CommandPaletteTheme::new(
-            CommandPalettePaint::new(surface, surface, text, muted, muted, surface, text, accent),
+            CommandPalettePaint::new(text, muted, muted, surface, text, accent),
             CommandPaletteMetrics::new(px(420.0), px(40.0)),
         ),
         ComboBoxTheme::new(
             ComboBoxPaint::new(
-                surface, surface, text, muted, muted, surface, text, surface, surface, muted,
-                accent,
+                text, muted, muted, surface, text, surface, surface, muted, accent,
             ),
             ComboBoxMetrics::new(px(240.0), px(40.0)),
         ),
@@ -116,28 +113,26 @@ fn catalog(generation: u64) -> ControlThemeCatalog {
             TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
         ),
         TooltipTheme::new(
-            TooltipPaint::new(surface, surface, text, muted, muted),
+            TooltipPaint::new(text, muted, muted),
             TooltipMetrics::new(px(320.0)),
         ),
         ModalTheme::new(
             ModalPaint::new(
-                rgba(0x00000099),
-                surface,
-                muted,
-                text,
-                muted,
-                muted,
-                accent,
-                surface,
-                accent,
-                surface,
-                accent,
-                surface,
+                text, muted, accent, surface, accent, surface, accent, surface,
             ),
             ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
         ),
     )
-    .generation(ControlThemeGeneration::new(generation))
+    .generation(ControlThemeGeneration::new(generation));
+    let floating_controls = SurfaceControlThemes::new(
+        catalog.button,
+        catalog.toggle,
+        catalog.progress,
+        catalog.segmented_control,
+        catalog.search_field,
+        catalog.text_input,
+    );
+    catalog.floating(FloatingSurfaceTheme::default(), floating_controls)
 }
 
 struct CatalogObserver {
@@ -159,6 +154,11 @@ impl Render for CatalogObserver {
         let _ = cx.global::<TextInputTheme>();
         let _ = cx.global::<TooltipTheme>();
         let _ = cx.global::<ModalTheme>();
+        let _ = cx.global::<FloatingSurfaceTheme>();
+        let _ = cx
+            .global::<ControlThemeCatalog>()
+            .hosted_controls(ControlHost::Floating)
+            .unwrap();
         let _ = cx.global::<ControlThemeCatalog>();
         self.renders.set(self.renders.get() + 1);
         div().child(
@@ -180,6 +180,66 @@ fn replacement_should_require_initialization(cx: &mut TestAppContext) {
         cx.update(|cx| replace_control_theme_catalog(cx, catalog(1))),
         Err(ControlThemeReplacementError)
     );
+}
+
+#[test]
+fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
+    let initial = catalog(1);
+    let scaled = initial.clone().scale_metrics(1.25, 1.25);
+    let identity_after_scale = scaled.clone().scale_metrics(1.0, 1.0);
+    let chained = scaled.clone().scale_metrics(1.2, 1.2);
+    let direct = initial.scale_metrics(1.5, 1.5);
+
+    for role in [FloatingRole::Popover, FloatingRole::Modal] {
+        assert_eq!(
+            identity_after_scale
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+            scaled
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+        );
+        assert_eq!(
+            chained
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+            direct
+                .floating
+                .expect("catalog should include floating presentation")
+                .shell(role),
+        );
+    }
+    assert_eq!(
+        identity_after_scale.hosted_controls(ControlHost::Floating),
+        scaled.hosted_controls(ControlHost::Floating),
+    );
+    let chained_button = chained
+        .hosted_controls(ControlHost::Floating)
+        .expect("catalog should include floating controls")
+        .regular_button_extent_for_test();
+    let direct_button = direct
+        .hosted_controls(ControlHost::Floating)
+        .expect("catalog should include floating controls")
+        .regular_button_extent_for_test();
+    assert!((chained_button - direct_button).abs() < px(0.001));
+
+    let expanded = catalog(1).scale_metrics(1.0, 1.5).scale_metrics(1.0, 1.5);
+    let contracted = catalog(1).scale_metrics(1.0, 0.5).scale_metrics(1.0, 0.5);
+    let expanded_shell = expanded
+        .floating
+        .expect("catalog should include floating presentation")
+        .shell(FloatingRole::Popover);
+    let contracted_shell = contracted
+        .floating
+        .expect("catalog should include floating presentation")
+        .shell(FloatingRole::Popover);
+    assert_eq!(expanded_shell.corner_radius(), px(22.5));
+    assert_eq!(expanded_shell.content_inset(), px(9.0));
+    assert_eq!(contracted_shell.corner_radius(), px(2.5));
+    assert_eq!(contracted_shell.content_inset(), px(1.0));
 }
 
 #[gpui::test]
@@ -233,6 +293,22 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         assert_eq!(cx.global::<TextInputTheme>(), &replacement.text_input);
         assert_eq!(cx.global::<TooltipTheme>(), &replacement.tooltip);
         assert_eq!(cx.global::<ModalTheme>(), &replacement.modal);
+        assert_eq!(
+            cx.global::<FloatingSurfaceTheme>(),
+            replacement
+                .floating
+                .as_ref()
+                .expect("floating theme is installed")
+        );
+        assert_eq!(
+            cx.global::<ControlThemeCatalog>()
+                .hosted_controls(ControlHost::Floating)
+                .unwrap(),
+            replacement
+                .floating_controls
+                .as_ref()
+                .expect("floating controls are installed")
+        );
         assert_eq!(cx.global::<ControlThemeCatalog>(), &replacement);
         assert_eq!(
             replace_control_theme_catalog(cx, replacement),

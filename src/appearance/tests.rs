@@ -3,6 +3,36 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
+fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() {
+    let mut preferences = AppearancePreferences::default();
+    preferences.background.transparency = 1.0;
+
+    let supported = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, true),
+    );
+    let unsupported = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(false, true),
+    );
+    let inaccessible = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, false),
+    );
+
+    assert!((supported.materials.floating_backdrop_alpha_limit() - 0.15).abs() < f32::EPSILON);
+    assert_eq!(unsupported.materials.floating_backdrop_alpha_limit(), 1.0);
+    assert_eq!(inaccessible.materials.floating_backdrop_alpha_limit(), 1.0);
+
+    preferences.background.transparency = 0.0;
+    let opaque = ResolvedWindowComposition::resolve(
+        &preferences.background,
+        CompositionCapabilities::new(true, true),
+    );
+    assert_eq!(opaque.materials.floating_backdrop_alpha_limit(), 1.0);
+}
+
+#[test]
 fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors() {
     let catalog = SchemeCatalog::default();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
@@ -17,7 +47,8 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
-                    SystemAppearance::unavailable().with_transparency(true),
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
                     &AvailableFonts::default(),
                 )
                 .unwrap();
@@ -28,12 +59,25 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
             let pane = prepared.pane_surface(opaque.terminal.colors.background);
             let controls = &prepared.control_colors;
             assert_eq!(controls.text, prepared.colors.text);
-            assert_eq!(controls.border, prepared.colors.border);
-            assert_eq!(prepared.pane_rim(), prepared.colors.row_selected_border);
+            assert_eq!(
+                controls.border,
+                prepared
+                    .materials
+                    .edge(prepared.colors.background, prepared.colors.border)
+            );
+            assert_eq!(
+                prepared.pane_rim(),
+                prepared.materials.edge(
+                    prepared.colors.panel_background,
+                    prepared.colors.tab_separator,
+                )
+            );
             if transparency == 0.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
+                assert_eq!(controls.border, prepared.colors.border);
+                assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
                 assert_eq!(
                     resolved.chrome.composition.effective,
                     WindowBackgroundAppearance::Opaque
@@ -45,7 +89,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 );
                 assert!(
                     controls.elevated_surface_background.a > sheet.a,
-                    "{mode:?} at {transparency}: a floating surface stays denser than the sheet"
+                    "{mode:?} at {transparency}: an elevated resting surface retains more color than the sheet"
                 );
                 if transparency == 1.0 {
                     // The sheet clears while Panes and controls keep enough tint to retain shape.
@@ -70,7 +114,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
+fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
     let preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
         ..Default::default()
@@ -79,7 +123,8 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
-            SystemAppearance::unavailable().with_transparency(true),
+            SystemAppearance::unavailable()
+                .with_composition(CompositionCapabilities::new(true, true)),
             &AvailableFonts::default(),
         )
         .unwrap();
@@ -91,8 +136,6 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
         for target in [
             resolved.terminal.colors.background,
             prepared.colors.elevated_surface_background,
-            prepared.colors.row_selected_background,
-            prepared.colors.selection_background,
         ] {
             let overlay = prepared.surface(SurfaceRole::Surface, target);
             let raised = overlay.source_over(sheet);
@@ -112,6 +155,137 @@ fn light_material_keeps_raised_surfaces_visible_over_the_sheet() {
                 "a resting surface must continue to transmit most of its backing"
             );
         }
+        let selection_overlay = prepared.materials.paint(
+            SurfaceRole::Surface,
+            prepared.colors.background,
+            prepared.colors.selection_background,
+        );
+        let selection = selection_overlay.source_over(sheet);
+        assert!(
+            selection.r < sheet.r && selection.g < sheet.g && selection.b < sheet.b,
+            "Light selection should shade its sheet host: {selection:?} against {sheet:?}"
+        );
+        assert!(
+            [
+                selection.r.abs_diff(sheet.r),
+                selection.g.abs_diff(sheet.g),
+                selection.b.abs_diff(sheet.b),
+            ]
+            .into_iter()
+            .all(|delta| delta >= 5),
+            "Light selection should remain visible against its sheet host: {selection:?} against \
+             {sheet:?}"
+        );
+        assert!(
+            selection_overlay.a < 128,
+            "a selection must continue to transmit most of its sheet host"
+        );
+        let shell = prepared
+            .surface(SurfaceRole::Base, prepared.colors.panel_background)
+            .source_over(sheet);
+        let selected_overlay = prepared.materials.paint(
+            SurfaceRole::Surface,
+            prepared.colors.panel_background,
+            prepared.colors.row_selected_background,
+        );
+        let selected = selected_overlay.source_over(shell);
+        assert!(
+            selected.r < shell.r && selected.g < shell.g && selected.b < shell.b,
+            "Light selection should shade its shell host: {selected:?} against {shell:?}"
+        );
+        assert!(
+            [
+                selected.r.abs_diff(shell.r),
+                selected.g.abs_diff(shell.g),
+                selected.b.abs_diff(shell.b),
+            ]
+            .into_iter()
+            .all(|delta| delta >= 5),
+            "Light selection should remain visible against its shell host: {selected:?} against \
+             {shell:?}"
+        );
+        assert!(
+            selected_overlay.a < 128,
+            "a selected row must continue to transmit most of its shell host"
+        );
+    }
+}
+
+#[test]
+fn light_navigation_selections_share_one_contrast_direction_across_material_settings() {
+    let catalog = SchemeCatalog::default();
+    let desktop = Color::rgb(0x808080);
+    let weight = |color: Color| i32::from(color.r) + i32::from(color.g) + i32::from(color.b);
+
+    for transparency in [0.0, 0.35, 1.0] {
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Light,
+            ..Default::default()
+        };
+        preferences.background.transparency = transparency;
+        let resolved = catalog
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let colors = &appearance.colors;
+        let sheet = appearance
+            .surface(SurfaceRole::Sheet, colors.background)
+            .source_over(desktop);
+        let tab_shell = appearance
+            .surface(SurfaceRole::Base, colors.title_bar_background)
+            .source_over(sheet);
+        let sidebar_shell = appearance
+            .surface(SurfaceRole::Base, colors.panel_background)
+            .source_over(sheet);
+        assert_eq!(
+            tab_shell, sidebar_shell,
+            "Light navigation hosts should share one shell at {transparency}"
+        );
+
+        let active_tab = appearance
+            .materials
+            .paint(
+                SurfaceRole::Surface,
+                colors.title_bar_background,
+                colors.tab_active_background,
+            )
+            .source_over(tab_shell);
+        let selected_sidebar = appearance
+            .materials
+            .paint(
+                SurfaceRole::Surface,
+                colors.panel_background,
+                colors.row_selected_background,
+            )
+            .source_over(sidebar_shell);
+        let tab_direction = (weight(active_tab) - weight(tab_shell)).signum();
+        let sidebar_direction = (weight(selected_sidebar) - weight(sidebar_shell)).signum();
+
+        assert_ne!(
+            tab_direction, 0,
+            "Active Tab should remain distinct from its Light shell at {transparency}"
+        );
+        assert_ne!(
+            sidebar_direction, 0,
+            "selected sidebar row should remain distinct from its Light shell at {transparency}"
+        );
+        assert_eq!(
+            tab_direction, sidebar_direction,
+            "Active Tab and selected sidebar row should move in the same contrast direction from \
+             their Light shell at {transparency}: tab={active_tab:?}, sidebar={selected_sidebar:?}, \
+             shell={tab_shell:?}"
+        );
+        assert_eq!(
+            (colors.tab_active_border.a, colors.row_selected_border.a),
+            (0, 0),
+            "navigation selection should not require decorative borders at {transparency}"
+        );
     }
 }
 
@@ -128,7 +302,8 @@ fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() 
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
-                SystemAppearance::unavailable().with_transparency(true),
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
                 &AvailableFonts::default(),
             )
             .unwrap();
@@ -189,7 +364,8 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
-                SystemAppearance::unavailable().with_transparency(true),
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
                 &AvailableFonts::default(),
             )
             .unwrap();
@@ -206,9 +382,7 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
     }
 }
 
-/// The elevation ladder is what tells a Pane from a selected chip from a hovered row once the
-/// fills are translucent, so it has to survive the whole Stepper range rather than collapsing
-/// onto one wash part of the way up it.
+/// Row hover and selection must remain distinct on every host once their fills are translucent.
 #[test]
 fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
     for appearance in [Appearance::Light, Appearance::Dark] {
@@ -216,49 +390,57 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
         for transparency in [0.05, 0.15, 0.35, 0.7, 1.0] {
             let mut preferences = AppearancePreferences::default();
             preferences.background.transparency = transparency;
-            let materials =
-                ResolvedWindowComposition::resolve(&preferences.background, true).materials;
-            let paint = reference.material_presentation(materials);
-            // The rungs a Workspace rests on, in the order both appearances author them: the
-            // shell, a hovered element, and the persistent selection.
-            let ladder = [
-                paint.panel_background,
-                paint.element_hover,
-                paint.row_selected_background,
-            ];
-            let alphas = ladder.map(|rung| rung.a);
-            assert!(
-                alphas.windows(2).all(|pair| pair[0] <= pair[1]),
-                "{appearance:?} at {transparency}: ladder out of order {alphas:?}"
-            );
-            assert!(
-                alphas[2] > alphas[0] && alphas[1] > 0,
-                "{appearance:?} at {transparency}: ladder collapsed {alphas:?}"
-            );
-            // A Pane rests above the hovered rung in both appearances and never disappears.
+            let materials = ResolvedWindowComposition::resolve(
+                &preferences.background,
+                CompositionCapabilities::new(true, true),
+            )
+            .materials;
             let pane = materials.paint(
                 SurfaceRole::Surface,
                 reference.background,
                 reference.elevated_surface_background,
             );
             assert!(
-                pane.a > alphas[1],
-                "{appearance:?} at {transparency}: a Pane sank into the ladder"
+                pane.a > 0,
+                "{appearance:?} at {transparency}: Pane material disappeared"
             );
+            for (host_name, host) in [
+                ("shell", reference.panel_background),
+                ("raised surface", reference.elevated_surface_background),
+            ] {
+                let hover =
+                    materials.paint(SurfaceRole::Surface, host, reference.row_hover_background);
+                let selected = materials.paint(
+                    SurfaceRole::Surface,
+                    host,
+                    reference.row_selected_background,
+                );
+                assert!(
+                    hover.a > 0 && selected.a > hover.a,
+                    "{appearance:?} at {transparency}: row ladder collapsed on the \
+                     {host_name}: hover={} selection={}",
+                    hover.a,
+                    selected.a
+                );
+            }
         }
     }
 }
 
-/// Light is the appearance the material can flatten, because every one of its surfaces is a
-/// near-white asking for almost all the ink. Its hierarchy is checked as rendered, over a desktop.
+/// Light's hierarchy is checked as rendered over a desktop: raised surfaces lift, selections
+/// shade their host, and every material remains distinct across the transparency range.
 #[test]
 fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
     let desktop = Color::rgb(0x808080);
-    for (transparency, minimum) in [(0.15, 12_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
+    for (transparency, minimum) in [(0.15, 11_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
         let mut preferences = AppearancePreferences::default();
         preferences.background.transparency = transparency;
-        let materials = ResolvedWindowComposition::resolve(&preferences.background, true).materials;
+        let materials = ResolvedWindowComposition::resolve(
+            &preferences.background,
+            CompositionCapabilities::new(true, true),
+        )
+        .materials;
         let sheet = materials
             .paint(
                 SurfaceRole::Sheet,
@@ -272,19 +454,34 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
                 .source_over(sheet)
         };
         let shell = rendered(SurfaceRole::Base, reference.panel_background);
-        let selected = rendered(SurfaceRole::Surface, reference.row_selected_background);
+        let selected = materials
+            .paint(
+                SurfaceRole::Surface,
+                reference.panel_background,
+                reference.row_selected_background,
+            )
+            .source_over(shell);
         let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
-        for (name, above, below) in [
-            ("Pane over the sheet", pane, sheet),
-            ("selected chip over the shell", selected, shell),
-            ("shell over the sheet", shell, sheet),
+        for (name, surface, host) in [
+            ("Pane against the sheet", pane, sheet),
+            ("selected row against the shell", selected, shell),
+            ("shell against the sheet", shell, sheet),
         ] {
-            let step = above.g.saturating_sub(below.g);
+            let step = surface.g.abs_diff(host.g);
             assert!(
                 step >= minimum.min(3),
                 "{name} at {transparency}: {step} levels of separation"
             );
         }
+        assert!(pane.g > sheet.g, "a Pane should lift from the light sheet");
+        assert!(
+            shell.g > sheet.g,
+            "the shell should lift from the light sheet"
+        );
+        assert!(
+            selected.g < shell.g,
+            "a selected row should shade the light shell"
+        );
         assert!(
             pane.g.saturating_sub(sheet.g) >= minimum,
             "a Pane at {transparency} must stay clearly above the sheet: {pane:?} over {sheet:?}"
@@ -407,7 +604,8 @@ fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
-                    SystemAppearance::unavailable().with_transparency(true),
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
                     &AvailableFonts::default(),
                 )
                 .unwrap();

@@ -14,8 +14,6 @@ use super::*;
 fn test_theme() -> CommandPaletteTheme {
     CommandPaletteTheme::new(
         CommandPalettePaint::new(
-            rgba(0x141415ff),
-            rgba(0x252530ff),
             rgba(0xcdcdcdff),
             rgba(0x878787ff),
             rgba(0x606079ff),
@@ -23,13 +21,12 @@ fn test_theme() -> CommandPaletteTheme {
             rgba(0xffffffff),
             rgba(0x7e98e8ff),
         )
-        .separator(rgba(0x252530ff))
         .hover_background(rgba(0x1c1c24ff))
         .section_foreground(rgba(0x878787ff))
         .footer(rgba(0x878787ff), rgba(0x606079ff)),
         CommandPaletteMetrics::new(px(420.0), px(40.0))
             .single_line_row_height(px(28.0))
-            .footer_padding(px(8.0))
+            .footer_control_padding(px(8.0))
             .panel_geometry(px(260.0), px(24.0)),
     )
 }
@@ -50,6 +47,24 @@ fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
         paint.row_paint(true, true, false).foreground,
         paint.disabled
     );
+}
+
+#[test]
+fn selected_hovered_row_should_preserve_the_complete_combined_paint() {
+    let row = |color| {
+        let color = rgba(color);
+        crate::ListRowPaint::new(color, color, color, color, color, color)
+    };
+    let selected_hovered = row(0x7351baff);
+    let paint = test_theme().paint.rows(crate::ListRowPaints::new(
+        row(0x202024ff),
+        row(0x305070ff),
+        row(0x456789ff),
+        selected_hovered,
+        row(0x808080ff),
+    ));
+
+    assert_eq!(paint.row_paint(false, true, true), selected_hovered);
 }
 
 fn items() -> Vec<CommandPaletteItem<u8>> {
@@ -323,6 +338,13 @@ type PaletteWindow<'a> = (
 );
 
 fn install_control_themes(cx: &mut TestAppContext) {
+    let surface =
+        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
+    cx.set_global(crate::FloatingSurfaceTheme::new(
+        crate::FloatingSurfacePaints::new(surface, surface),
+        rgba(0x00000048).into(),
+        rgba(0x00000099),
+    ));
     cx.set_global(crate::ProgressTheme::new(
         crate::ProgressPaint::new(rgba(0x404048ff), rgba(0x55aaffff)),
         crate::ProgressSizes::new(
@@ -351,15 +373,12 @@ fn install_control_themes(cx: &mut TestAppContext) {
         rgba(0x405065ff),
     ));
     let menu_paint = crate::menu::MenuPaint::new(
-        rgba(0x141415ff),
-        rgba(0x252530ff),
         rgba(0xcdcdcdff),
         rgba(0x878787ff),
         rgba(0x606079ff),
         rgba(0x252530ff),
         rgba(0xcdcdcdff),
         rgba(0xd8647eff),
-        rgba(0x252530ff),
     );
     let menu_metrics = crate::menu::MenuMetrics::new(px(160.0), px(26.0));
     cx.set_global(crate::menu::MenuTheme::new(
@@ -446,7 +465,7 @@ fn open_palette(
 fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut TestAppContext) {
     let (root, palette, _events, _underlay, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
-    let default_theme = test_theme();
+    let default_theme = cx.update(|_, cx| command_palette_theme(cx));
     let default_size = default_theme.metrics.icon_size;
     let default_icon = cx
         .debug_bounds("row-open-icon")
@@ -487,7 +506,7 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
     open_palette(&root, &palette, cx);
     palette.update(cx, |palette, cx| palette.set_query("Command", cx));
     cx.run_until_parked();
-    let initial_theme = test_theme();
+    let initial_theme = cx.update(|_, cx| command_palette_theme(cx));
     let initial_panel = cx.debug_bounds("command-palette-panel").unwrap();
     cx.simulate_event(ScrollWheelEvent {
         position: initial_panel.center(),
@@ -803,7 +822,7 @@ fn exact_fit_panel_height_should_include_its_outer_borders(cx: &mut TestAppConte
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
 
-    let metrics = test_theme().metrics;
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
     let content_height = palette.read_with(cx, |palette, _| {
         palette.presented_results.total_height(metrics)
     });
@@ -825,7 +844,7 @@ fn selected_row_highlight_should_span_the_panel_inset(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
 
-    let metrics = test_theme().metrics;
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
     let panel = cx
         .debug_bounds("command-palette-panel")
         .expect("the palette panel was not rendered");
@@ -845,7 +864,7 @@ fn editor_and_row_content_should_share_one_leading_edge(cx: &mut TestAppContext)
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
 
-    let metrics = test_theme().metrics;
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
     let editor = cx
         .debug_bounds("command-palette-editor")
         .expect("the palette editor was not rendered");
@@ -1008,7 +1027,7 @@ fn a_row_without_a_description_should_take_the_single_line_height(cx: &mut TestA
     });
     cx.run_until_parked();
 
-    let metrics = test_theme().metrics;
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
     let single = cx
         .debug_bounds("row-single")
         .expect("the single-line row was not rendered");
@@ -1042,7 +1061,7 @@ fn footer_control_labels_should_share_the_content_edges(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
 
-    let metrics = test_theme().metrics;
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
     // The padding install_control_themes gives a Small text button around its label.
     let label_inset = px(8.0);
     let row = cx
@@ -2345,17 +2364,12 @@ fn modal_palette_window(
     cx.update(crate::modal::init);
     cx.update(|cx| {
         crate::install_modal_policy(cx, crate::ModalDesktopPolicy::mac_os());
-        let color = rgba(0x202024ff);
         crate::install_modal_theme(
             cx,
             crate::ModalTheme::new(
                 crate::ModalPaint::new(
-                    rgba(0x00000099),
-                    color,
-                    rgba(0x606068ff),
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
-                    rgba(0x505058ff),
                     rgba(0x5599ffff),
                     rgba(0x5599ff22),
                     rgba(0xffbb55ff),

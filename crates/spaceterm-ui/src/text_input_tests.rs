@@ -53,15 +53,12 @@ fn install_theme(cx: &mut TestAppContext) {
         TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
     ));
     let menu_paint = crate::menu::MenuPaint::new(
-        rgba(0x141415ff),
-        rgba(0x252530ff),
         rgba(0xcdcdcdff),
         rgba(0x878787ff),
         rgba(0x606079ff),
         rgba(0x252530ff),
         rgba(0xcdcdcdff),
         rgba(0xd8647eff),
-        rgba(0x252530ff),
     );
     let metrics = crate::menu::MenuMetrics::new(px(160.0), px(26.0));
     cx.set_global(crate::menu::MenuTheme::new(

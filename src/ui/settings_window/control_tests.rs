@@ -38,6 +38,127 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
     assert_eq!(unavailable.hover_rim, None);
 }
 
+#[test]
+fn highlighted_row_materializes_against_its_card_host() {
+    use crate::appearance::{
+        AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+        SchemeCatalog, SurfaceRole, SystemAppearance,
+    };
+
+    let mut preferences = AppearancePreferences::default();
+    preferences.background.transparency = 1.0;
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable()
+                .with_composition(CompositionCapabilities::new(true, true)),
+            &AvailableFonts::default(),
+        )
+        .expect("built-in appearance should resolve");
+    let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    let expected = appearance.materials.paint(
+        SurfaceRole::Surface,
+        appearance.colors.elevated_surface_background,
+        appearance.colors.row_selected_background,
+    );
+
+    assert_eq!(
+        super::controls::highlighted_row_background(&appearance),
+        expected
+    );
+}
+
+#[gpui::test]
+fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext) {
+    use crate::appearance::Color;
+    use crate::ui::appearance::ChromeAppearance;
+    use gpui::{
+        Context, DivInspectorState, IntoElement as _, ParentElement as _, Render, ScrollDelta,
+        ScrollWheelEvent, Styled as _, TouchPhase, Window, div, point, px,
+    };
+    use std::cell::RefCell;
+
+    struct StepperCard(ChromeAppearance);
+    impl Render for StepperCard {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            let stepper = super::controls::Stepper::new("host-stepper", "Value", "1")
+                .render(&self.0)
+                .into_any_element();
+            div().size_full().p(px(20.0)).child(
+                super::controls::SettingsGroup::new(
+                    "stepper-card".to_owned(),
+                    "Value",
+                    vec![stepper],
+                )
+                .render(&self.0),
+            )
+        }
+    }
+
+    cx.update(crate::ui::init).unwrap();
+    let mut appearance = ChromeAppearance::default();
+    appearance.control_colors.input_background = Color::rgb(0xcc2233);
+    appearance.card_controls.colors.input_background = Color::rgb(0x228844);
+    let expected = gpui::rgba(appearance.card_controls.colors.input_background.rgba_hex());
+    cx.update(|cx| {
+        spaceterm_ui::replace_control_theme_catalog(
+            cx,
+            crate::ui::control_theme_catalog::catalog(
+                &appearance,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
+        )
+        .unwrap()
+    });
+    let (_, cx) = cx.add_window_view(|_, _| StepperCard(appearance));
+    cx.run_until_parked();
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let styles = Rc::clone(&observed);
+    cx.update(|window, cx| {
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("host-stepper")
+        .expect("Stepper must render in the card");
+    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    for _ in 0..16 {
+        if let Some(background) = observed
+            .borrow()
+            .iter()
+            .rev()
+            .find(|style| style.bounds == bounds)
+            .map(|style| style.base_style.background.clone())
+        {
+            assert_eq!(
+                background,
+                Some(expected.into()),
+                "Stepper frame must use Card input paint, not Window input paint"
+            );
+            return;
+        }
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+    panic!("inspector did not expose the rendered Stepper frame");
+}
+
 fn open_settings<'a>(
     document: &SettingsDocument,
     cx: &'a mut TestAppContext,

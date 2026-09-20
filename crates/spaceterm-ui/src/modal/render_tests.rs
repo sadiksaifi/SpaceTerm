@@ -110,15 +110,12 @@ fn test_button_theme_scaled_with_focus(factor: f32, focus_border: Rgba) -> Butto
 
 fn test_menu_theme() -> MenuTheme {
     let paint = MenuPaint::new(
-        rgba(0x202024ff),
-        rgba(0x606068ff),
         rgba(0xffffffff),
         rgba(0xb0b0b8ff),
         rgba(0x707078ff),
         rgba(0x404048ff),
         rgba(0xffffffff),
         rgba(0xff6677ff),
-        rgba(0x505058ff),
     );
     let metrics = MenuMetrics::new(px(180.0), px(26.0));
     MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
@@ -155,15 +152,87 @@ fn suppression_interaction_rejects_repeats_and_mismatched_releases() {
     assert!(interaction.is_idle());
 }
 
+#[gpui::test]
+fn alert_suppression_paints_with_the_floating_toggle_theme(cx: &mut TestAppContext) {
+    let root_catalog = crate::catalog_tests::catalog(1);
+    let root_background = root_catalog
+        .toggle
+        .paint(false, true, false, false)
+        .background();
+    let floating_label = rgba(0xaabbccff);
+    let floating_paint = crate::TogglePaint::new(
+        rgba(0x112233ff),
+        rgba(0x445566ff),
+        rgba(0x778899ff),
+        floating_label,
+    );
+    let floating_values = crate::ToggleValuePaints::new(floating_paint, floating_paint);
+    let floating_metrics = crate::ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+    let floating_toggle = crate::ToggleTheme::new(
+        crate::TogglePaints::new(
+            floating_values,
+            floating_values,
+            floating_values,
+            floating_values,
+        ),
+        crate::ToggleSizes::new(floating_metrics, floating_metrics),
+        rgba(0xddeeffff),
+    );
+    let controls = crate::SurfaceControlThemes::new(
+        root_catalog.button,
+        floating_toggle,
+        root_catalog.progress,
+        root_catalog.segmented_control,
+        root_catalog.search_field,
+        root_catalog.text_input,
+    );
+    cx.update(|cx| {
+        crate::init(
+            cx,
+            root_catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("distinct root and floating themes should install");
+        install_modal_policy(cx, ModalDesktopPolicy::mac_os());
+    });
+    let (root, cx) = cx.add_window_view(|_, cx| AlertFixture {
+        invoker: cx.focus_handle().tab_stop(true),
+        underlay_activations: Rc::new(Cell::new(0)),
+        outcome: Rc::new(RefCell::new(None)),
+        presentation: None,
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| root.present(window, cx));
+    });
+    cx.run_until_parked();
+
+    let indicator = cx
+        .debug_bounds("modal-alert-suppression-indicator")
+        .expect("suppression indicator should render");
+    let backgrounds = cx.update(|window, _| {
+        let indicator = indicator.scale(window.scale_factor());
+        window
+            .painted_quads_for_test()
+            .into_iter()
+            .filter(|quad| quad.visible_bounds.intersects(&indicator))
+            .map(|quad| quad.background)
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        backgrounds.contains(&floating_paint.background().into()),
+        "floating indicator paint was not submitted: {backgrounds:?}"
+    );
+    assert!(
+        !backgrounds.contains(&root_background.into()),
+        "root indicator paint leaked into suppression row: {backgrounds:?}"
+    );
+}
+
 fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
     ModalTheme::new(
         ModalPaint::new(
-            rgba(0x00000099),
-            rgba(0x202024ff),
-            rgba(0x606068ff),
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
-            rgba(0x505058ff),
             rgba(0x5599ffff),
             rgba(0x5599ff22),
             rgba(0xffbb55ff),
@@ -178,12 +247,8 @@ fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
 fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme {
     ModalTheme::new(
         ModalPaint::new(
-            rgba(0x00000099),
-            rgba(0x202024ff),
-            rgba(0x606068ff),
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
-            rgba(0x505058ff),
             rgba(0x5599ffff),
             rgba(0x5599ff22),
             rgba(0xffbb55ff),
@@ -1051,6 +1116,109 @@ fn alert_intent_presentations_use_distinct_markers_and_semantic_paint() {
         informational.accent != warning.accent
             && warning.accent != critical.accent
             && informational.accent != critical.accent
+    );
+}
+
+#[gpui::test]
+fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) {
+    let window = open_action_geometry_window(
+        cx,
+        size(px(560.0), px(700.0)),
+        TextDirection::LeftToRight,
+        ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
+        1.0,
+        vec![
+            ModalAction::new(
+                "continue",
+                "Continue to workspace",
+                ModalActionRole::Affirmative,
+                "host-continue",
+            )
+            .default_action(true),
+            ModalAction::new(
+                "cancel",
+                "Return to workspace",
+                ModalActionRole::Cancel,
+                "host-cancel",
+            ),
+        ],
+        None,
+    );
+    cx.update(|cx| {
+        let catalog = crate::catalog_tests::catalog(1);
+        let style = catalog.button.paints(ButtonVariant::Secondary);
+        let metrics = ButtonMetrics::new(px(28.0)).horizontal_padding(px(64.0));
+        let floating_button = ButtonTheme::new(
+            ButtonVariants::new(style, style, style, style, style, style, style),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
+            rgba(0x5599ffff),
+        );
+        let controls = crate::SurfaceControlThemes::new(
+            floating_button,
+            catalog.toggle,
+            catalog.progress,
+            catalog.segmented_control,
+            catalog.search_field,
+            catalog.text_input,
+        );
+        crate::init(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("host-specific catalog should install");
+    });
+    let root = window.root(cx).expect("geometry root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+    let footer = cx
+        .debug_bounds("modal-footer-1")
+        .expect("footer should render");
+    let proceed = cx
+        .debug_bounds("modal-action-host-continue")
+        .expect("continue should render");
+    let cancel = cx
+        .debug_bounds("modal-action-host-cancel")
+        .expect("cancel should render");
+    assert!(
+        bounds_contains(footer, proceed)
+            && bounds_contains(footer, cancel)
+            && (proceed.bottom() <= cancel.top() || cancel.bottom() <= proceed.top()),
+        "floating actions must stack without clipping: footer={footer:?}, continue={proceed:?}, cancel={cancel:?}"
+    );
+
+    cx.update(|_, cx| {
+        let mut catalog = crate::catalog_tests::catalog(2);
+        let controls = crate::SurfaceControlThemes::new(
+            catalog.button,
+            catalog.toggle,
+            catalog.progress,
+            catalog.segmented_control,
+            catalog.search_field,
+            catalog.text_input,
+        );
+        catalog.button = test_button_theme_scaled(3.0);
+        crate::replace_control_theme_catalog(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
+        .expect("open modal should accept replacement metrics");
+    });
+    cx.run_until_parked();
+    let footer = cx
+        .debug_bounds("modal-footer-1")
+        .expect("footer should remain");
+    let proceed = cx
+        .debug_bounds("modal-action-host-continue")
+        .expect("continue should remain");
+    let cancel = cx
+        .debug_bounds("modal-action-host-cancel")
+        .expect("cancel should remain");
+    assert!(
+        bounds_contains(footer, proceed)
+            && bounds_contains(footer, cancel)
+            && proceed.top() == cancel.top(),
+        "smaller floating actions must share a row despite larger Window metrics: footer={footer:?}, continue={proceed:?}, cancel={cancel:?}"
     );
 }
 
@@ -2343,6 +2511,48 @@ fn initially_disabled_progress_cancellation_is_inert_then_focuses_and_routes_aft
             && initial.2
             && !cx.update(|window, cx| super::super::window_modal_is_open(window, cx))
     );
+}
+
+#[gpui::test]
+fn programmatic_progress_should_omit_an_empty_action_footer(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|_, cx| AlertFixture {
+        invoker: cx.focus_handle().tab_stop(true),
+        underlay_activations: Rc::new(Cell::new(0)),
+        outcome: Rc::new(RefCell::new(None)),
+        presentation: None,
+    });
+    let handle = cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |_, cx| {
+            ProgressDialog::<()>::new(
+                ModalId::new("programmatic-progress-no-footer"),
+                "Completing required work",
+                "Completing Work",
+                "Working",
+                ProgressState::Indeterminate,
+                ProgressCancellation::programmatic_only(Duration::from_secs(30)),
+            )
+            .present(
+                window,
+                cx,
+                |_, _, _| ProgressCancelDecision::Deny,
+                |_, _| {},
+            )
+            .expect("programmatic ProgressDialog should present")
+        })
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("modal-surface-1").is_some());
+    assert!(
+        cx.debug_bounds("modal-footer-1").is_none(),
+        "a ProgressDialog without actions must not reserve an empty footer"
+    );
+    cx.update(|window, cx| {
+        handle
+            .complete(window, cx)
+            .expect("progress should complete");
+    });
 }
 
 #[gpui::test]
@@ -4962,6 +5172,242 @@ fn modal_queue_should_keep_tooltip_suppression_continuous_until_the_final_close(
     cx.run_until_parked();
 
     assert!(!cx.update(|window, cx| { crate::tooltip::window_tooltips_suppressed(window, cx) }));
+}
+
+struct DialogTooltipBody;
+
+impl Render for DialogTooltipBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Button::new("dialog-tooltip-target", "Dialog help")
+            .debug_selector("dialog-tooltip-target")
+            .on_activate(|_, _, _| {})
+            .tooltip(
+                crate::Tooltip::new("dialog-tooltip", "Help for this dialog")
+                    .debug_selector("dialog-owned-tooltip"),
+            )
+    }
+}
+
+struct DialogTooltipFixture;
+
+impl Render for DialogTooltipFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        ModalLayer::new(TooltipLayer::new(
+            div().size_full().child(
+                Button::new("dialog-tooltip-underlay", "Background help")
+                    .debug_selector("dialog-tooltip-underlay")
+                    .on_activate(|_, _, _| {})
+                    .tooltip(
+                        crate::Tooltip::new("underlay-tooltip", "Help behind the dialog")
+                            .debug_selector("dialog-underlay-tooltip"),
+                    ),
+            ),
+        ))
+    }
+}
+
+#[gpui::test]
+fn dialog_owned_tooltip_should_render_while_underlay_tooltip_stays_suppressed(
+    cx: &mut TestAppContext,
+) {
+    install_test_catalogs(cx);
+    cx.set_global(crate::TooltipTheme::new(
+        crate::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
+        crate::TooltipMetrics::new(px(320.0)),
+    ));
+    let (root, cx) = cx.add_window_view(|_, _| DialogTooltipFixture);
+    let completion = cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |_, cx| {
+            let body = cx.new(|_| DialogTooltipBody);
+            Dialog::new(
+                ModalId::new("dialog-tooltip-owner"),
+                "Dialog with help",
+                "Dialog Help",
+                vec![ModalAction::new(
+                    (),
+                    "Close",
+                    ModalActionRole::Cancel,
+                    "dialog-tooltip-close",
+                )],
+                DialogInitialFocus::Action(()),
+            )
+            .body(body)
+            .present(window, cx, |_, _, _| DialogCloseDecision::Allow, |_, _| {})
+            .expect("Dialog with tooltip should present")
+        })
+    });
+    cx.run_until_parked();
+    let underlay = cx
+        .debug_bounds("dialog-tooltip-underlay")
+        .expect("underlay control should render");
+    cx.simulate_mouse_move(underlay.center(), None, Modifiers::default());
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("dialog-underlay-tooltip").is_none());
+
+    let target = cx
+        .debug_bounds("dialog-tooltip-target")
+        .expect("Dialog body control should render");
+    cx.simulate_mouse_move(target.center(), None, Modifiers::default());
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("dialog-owned-tooltip").is_some(),
+        "a modal body control must retain its own hover help"
+    );
+    cx.update(|window, cx| {
+        completion
+            .complete(window, None, cx)
+            .expect("Dialog should complete");
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("dialog-owned-tooltip").is_none());
+}
+
+#[gpui::test]
+fn replacing_a_dialog_retires_pending_and_visible_tooltips(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    cx.set_global(crate::TooltipTheme::new(
+        crate::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
+        crate::TooltipMetrics::new(px(320.0)),
+    ));
+    let (root, cx) = cx.add_window_view(|_, _| DialogTooltipFixture);
+    let body = cx.update(|_, cx| cx.new(|_| DialogTooltipBody));
+    let dialog = || {
+        Dialog::new(
+            ModalId::new("replaced-tooltip-dialog"),
+            "Dialog with help",
+            "Dialog Help",
+            vec![ModalAction::new(
+                (),
+                "Close",
+                ModalActionRole::Cancel,
+                "dialog-tooltip-close",
+            )],
+            DialogInitialFocus::Action(()),
+        )
+        .body(body.clone())
+    };
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |_, cx| {
+            dialog()
+                .present(window, cx, |_, _, _| DialogCloseDecision::Allow, |_, _| {})
+                .expect("first Dialog should present");
+        });
+    });
+    cx.run_until_parked();
+    let target = cx
+        .debug_bounds("dialog-tooltip-target")
+        .expect("first Dialog target should render");
+    cx.simulate_mouse_move(target.center(), None, Modifiers::default());
+    cx.executor().advance_clock(Duration::from_millis(250));
+
+    cx.update(|window, cx| {
+        root.update(cx, |_, cx| {
+            dialog()
+                .replace_active(
+                    window,
+                    cx,
+                    |_, _, _| DialogCloseDecision::Allow,
+                    |_, _| {},
+                    |_, _| {},
+                )
+                .expect("Dialog should replace its pending tooltip owner");
+        });
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("dialog-owned-tooltip").is_none(),
+        "the predecessor's hover timer must not show help in the successor"
+    );
+
+    let successor = cx
+        .debug_bounds("dialog-tooltip-target")
+        .expect("successor Dialog should retain the same body entity");
+    cx.simulate_mouse_move(point(px(0.0), px(0.0)), None, Modifiers::default());
+    cx.simulate_mouse_move(successor.center(), None, Modifiers::default());
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("dialog-owned-tooltip").is_some());
+
+    cx.update(|window, cx| {
+        root.update(cx, |_, cx| {
+            dialog()
+                .replace_active(
+                    window,
+                    cx,
+                    |_, _, _| DialogCloseDecision::Allow,
+                    |_, _| {},
+                    |_, _| {},
+                )
+                .expect("Dialog should replace its visible tooltip owner");
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("dialog-owned-tooltip").is_none(),
+        "a visible tooltip must retire even while modal suppression stays active"
+    );
+}
+
+struct TransientMenuFixture {
+    underlay_presses: Rc<Cell<usize>>,
+    menu_activations: Rc<Cell<usize>>,
+}
+
+impl Render for TransientMenuFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let underlay_presses = self.underlay_presses.clone();
+        let menu_activations = self.menu_activations.clone();
+        ModalLayer::new(div().size_full().bg(rgba(0xffffffff)).on_mouse_down(
+            MouseButton::Left,
+            move |_, _, _| {
+                underlay_presses.set(underlay_presses.get() + 1);
+            },
+        ))
+        .transient(
+            div().absolute().top(px(40.0)).left(px(40.0)).child(
+                Menu::new(
+                    "root-transient-menu",
+                    "Transient options",
+                    vec![MenuEntry::action("Choose option", ())],
+                )
+                .debug_selector("root-transient-menu-trigger")
+                .on_activate(move |_, _, _| {
+                    menu_activations.set(menu_activations.get() + 1);
+                }),
+            ),
+        )
+    }
+}
+
+#[gpui::test]
+fn root_transient_slot_stays_above_content_and_supports_a_deferred_menu(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let underlay_presses = Rc::new(Cell::new(0));
+    let menu_activations = Rc::new(Cell::new(0));
+    let fixture_underlay = underlay_presses.clone();
+    let fixture_menu = menu_activations.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| TransientMenuFixture {
+        underlay_presses: fixture_underlay,
+        menu_activations: fixture_menu,
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds("root-transient-menu-trigger")
+        .expect("transient Menu should render above the ordinary content");
+    cx.simulate_click(trigger.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!((menu_activations.get(), underlay_presses.get()), (1, 0));
 }
 
 #[gpui::test]

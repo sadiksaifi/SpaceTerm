@@ -8,6 +8,7 @@ cbuffer GlobalParams: register(b0) {
 };
 
 Texture2D<float4> t_sprite: register(t0);
+Texture2D<float4> t_backdrop_original: register(t2);
 SamplerState s_sprite: register(s0);
 
 struct Bounds {
@@ -455,6 +456,150 @@ float quarter_ellipse_sdf(float2 pt, float2 radii) {
 
 /*
 **
+**              Backdrop filters
+**
+*/
+
+struct BackdropParams {
+    Bounds draw_bounds;
+    float2 target_size;
+    float2 source_size;
+    float2 source_active_size;
+    float2 original_size;
+    float2 original_active_size;
+    float2 snapshot_origin;
+    Bounds bounds;
+    Bounds content_mask;
+    Corners corner_radii;
+    float sigma;
+    float opacity;
+    float pass_index;
+    float alpha_limit;
+    float4 tone;
+};
+
+struct BackdropVertexOutput {
+    float4 position: SV_Position;
+    nointerpolation uint backdrop_id: TEXCOORD0;
+};
+
+StructuredBuffer<BackdropParams> backdrop_params: register(t1);
+
+float2 clamp_backdrop_uv(float2 uv, float2 texture_size, float2 active_size) {
+    return clamp(
+        uv,
+        0.5 / texture_size,
+        max(active_size - 0.5, 0.5) / texture_size
+    );
+}
+
+BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint backdrop_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    BackdropParams backdrop = backdrop_params[backdrop_id];
+    float2 position = unit_vertex * backdrop.draw_bounds.size + backdrop.draw_bounds.origin;
+    float2 device_position =
+        position / backdrop.target_size * float2(2.0, -2.0) + float2(-1.0, 1.0);
+
+    BackdropVertexOutput output;
+    output.position = float4(device_position, 0.0, 1.0);
+    output.backdrop_id = backdrop_id;
+    return output;
+}
+
+float4 backdrop_fragment(BackdropVertexOutput input): SV_Target {
+    BackdropParams backdrop = backdrop_params[input.backdrop_id];
+    if (backdrop.pass_index < 2.0) {
+        float2 uv = input.position.xy / backdrop.target_size;
+        float sigma = max(backdrop.sigma, 0.25);
+        int extent = int(ceil(3.0 * sigma));
+        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+        float total = 0.0;
+        for (int i = -extent; i <= extent; ++i) {
+            float offset_index = float(i);
+            float weight = exp(-0.5 * offset_index * offset_index / (sigma * sigma));
+            float2 offset = backdrop.pass_index < 0.5
+                ? float2(offset_index / backdrop.target_size.x, 0.0)
+                : float2(0.0, offset_index / backdrop.target_size.y);
+            float4 sampled_color;
+            if (backdrop.pass_index < 0.5) {
+                float2 pixel = 1.0 / backdrop.original_size;
+                sampled_color = (
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + pixel,
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset - pixel,
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + float2(pixel.x, -pixel.y),
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0) +
+                    t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                        uv + offset + float2(-pixel.x, pixel.y),
+                        backdrop.source_size,
+                        backdrop.source_active_size
+                    ), 0.0)
+                ) * 0.25;
+            } else {
+                sampled_color = t_sprite.SampleLevel(s_sprite, clamp_backdrop_uv(
+                    uv + offset,
+                    backdrop.source_size,
+                    backdrop.source_active_size
+                ), 0.0);
+            }
+            sum += sampled_color * weight;
+            total += weight;
+        }
+        return sum / total;
+    }
+
+    float2 local_position = input.position.xy - backdrop.snapshot_origin;
+    float2 uv = local_position / backdrop.original_size;
+    float2 source_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.source_size,
+        backdrop.source_active_size
+    );
+    float2 original_uv = clamp_backdrop_uv(
+        uv,
+        backdrop.original_size,
+        backdrop.original_active_size
+    );
+    float4 original = t_backdrop_original.SampleLevel(s_sprite, original_uv, 0.0);
+    float2 half_size = backdrop.bounds.size * 0.5;
+    float2 delta = input.position.xy - backdrop.bounds.origin - half_size;
+    float radius = delta.y < 0.0
+        ? (delta.x < 0.0 ? backdrop.corner_radii.top_left : backdrop.corner_radii.top_right)
+        : (delta.x < 0.0 ? backdrop.corner_radii.bottom_left : backdrop.corner_radii.bottom_right);
+    float2 q = abs(delta) - half_size + radius;
+    float distance = length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    float2 mask_end = backdrop.content_mask.origin + backdrop.content_mask.size;
+    float2 mask_distance = min(
+        input.position.xy - backdrop.content_mask.origin,
+        mask_end - input.position.xy
+    );
+    float coverage = saturate(
+        min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5
+    ) * backdrop.opacity;
+    float4 filtered = t_sprite.SampleLevel(s_sprite, source_uv, 0.0);
+    float3 lower = backdrop.tone.rgb * backdrop.tone.a * filtered.a;
+    float3 upper = (
+        backdrop.tone.rgb * backdrop.tone.a + (1.0 - backdrop.tone.a)
+    ) * filtered.a;
+    float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+    if (treated.a > backdrop.alpha_limit) {
+        treated *= backdrop.alpha_limit / treated.a;
+    }
+    return lerp(original, treated, coverage);
+}
+
+/*
+**
 **              Quads
 **
 */
@@ -820,6 +965,10 @@ struct Shadow {
     Corners corner_radii;
     Bounds content_mask;
     Hsla color;
+    Bounds exclude_bounds;
+    Corners exclude_corner_radii;
+    uint exclude_interior;
+    uint pad;
 };
 
 struct ShadowVertexOutput {
@@ -882,6 +1031,15 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
                             corner_radius, half_size) *
                 gaussian(y, shadow.blur_radius) * step;
         y += step;
+    }
+
+    if (shadow.exclude_interior != 0) {
+        float distance = quad_sdf(
+            input.position.xy,
+            shadow.exclude_bounds,
+            shadow.exclude_corner_radii
+        );
+        alpha *= saturate(distance + 0.5);
     }
 
     return input.color * float4(1., 1., 1., alpha);

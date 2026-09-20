@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
+    Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -24,7 +24,10 @@ pub(crate) type DrawOrder = u32;
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
-    layer_stack: Vec<DrawOrder>,
+    layer_stack: Vec<Layer>,
+    interval_start_order: DrawOrder,
+    max_order: DrawOrder,
+    pub(crate) backdrop_filters: Vec<BackdropFilter>,
     pub(crate) shadows: Vec<Shadow>,
     pub(crate) quads: Vec<Quad>,
     pub(crate) paths: Vec<Path<ScaledPixels>>,
@@ -39,6 +42,9 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.interval_start_order = 0;
+        self.max_order = 0;
+        self.backdrop_filters.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -53,8 +59,8 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
-        let order = self.primitive_bounds.insert(bounds);
-        self.layer_stack.push(order);
+        let order = self.insert_bounds(bounds);
+        self.layer_stack.push(Layer { bounds, order });
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
     }
@@ -74,11 +80,22 @@ impl Scene {
             return;
         }
 
-        let order = self
-            .layer_stack
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+        if let Primitive::BackdropFilter(filter) = &mut primitive {
+            filter.order = self.max_order + 1;
+            let filter_order = filter.order;
+            self.max_order = filter_order;
+            self.backdrop_filters.push(filter.clone());
+            self.paint_operations
+                .push(PaintOperation::Primitive(primitive));
+            self.start_interval_after(filter_order);
+            return;
+        }
+
+        let order = if let Some(layer) = self.layer_stack.last() {
+            layer.order
+        } else {
+            self.insert_bounds(clipped_bounds)
+        };
         match &mut primitive {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -109,6 +126,7 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::BackdropFilter(_) => unreachable!(),
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
@@ -125,6 +143,7 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        self.backdrop_filters.sort_by_key(|filter| filter.order);
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
@@ -166,8 +185,33 @@ impl Scene {
             surfaces: &self.surfaces,
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            backdrop_filters: &self.backdrop_filters,
+            backdrop_filters_start: 0,
+            backdrop_filters_iter: self.backdrop_filters.iter().peekable(),
         }
     }
+
+    fn insert_bounds(&mut self, bounds: Bounds<ScaledPixels>) -> DrawOrder {
+        let order = self.interval_start_order + self.primitive_bounds.insert(bounds);
+        self.max_order = self.max_order.max(order);
+        order
+    }
+
+    fn start_interval_after(&mut self, order: DrawOrder) {
+        self.primitive_bounds.clear();
+        self.interval_start_order = order;
+
+        for layer in &mut self.layer_stack {
+            layer.order = self.interval_start_order + self.primitive_bounds.insert(layer.bounds);
+            self.max_order = self.max_order.max(layer.order);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Layer {
+    bounds: Bounds<ScaledPixels>,
+    order: DrawOrder,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
@@ -179,6 +223,7 @@ impl Scene {
     allow(dead_code)
 )]
 pub(crate) enum PrimitiveKind {
+    BackdropFilter,
     Shadow,
     #[default]
     Quad,
@@ -197,6 +242,7 @@ pub(crate) enum PaintOperation {
 
 #[derive(Clone)]
 pub(crate) enum Primitive {
+    BackdropFilter(BackdropFilter),
     Shadow(Shadow),
     Quad(Quad),
     Path(Path<ScaledPixels>),
@@ -209,6 +255,7 @@ pub(crate) enum Primitive {
 impl Primitive {
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
+            Primitive::BackdropFilter(filter) => &filter.bounds,
             Primitive::Shadow(shadow) => &shadow.bounds,
             Primitive::Quad(quad) => &quad.bounds,
             Primitive::Path(path) => &path.bounds,
@@ -221,6 +268,7 @@ impl Primitive {
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
         match self {
+            Primitive::BackdropFilter(filter) => &filter.content_mask,
             Primitive::Shadow(shadow) => &shadow.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
             Primitive::Path(path) => &path.content_mask,
@@ -240,6 +288,9 @@ impl Primitive {
     allow(dead_code)
 )]
 struct BatchIterator<'a> {
+    backdrop_filters: &'a [BackdropFilter],
+    backdrop_filters_start: usize,
+    backdrop_filters_iter: Peekable<slice::Iter<'a, BackdropFilter>>,
     shadows: &'a [Shadow],
     shadows_start: usize,
     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
@@ -268,6 +319,10 @@ impl<'a> Iterator for BatchIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut orders_and_kinds = [
+            (
+                self.backdrop_filters_iter.peek().map(|filter| filter.order),
+                PrimitiveKind::BackdropFilter,
+            ),
             (
                 self.shadows_iter.peek().map(|s| s.order),
                 PrimitiveKind::Shadow,
@@ -302,6 +357,15 @@ impl<'a> Iterator for BatchIterator<'a> {
         };
 
         match batch_kind {
+            PrimitiveKind::BackdropFilter => {
+                let filter_start = self.backdrop_filters_start;
+                let filter_end = filter_start + 1;
+                self.backdrop_filters_iter.next();
+                self.backdrop_filters_start = filter_end;
+                Some(PrimitiveBatch::BackdropFilters(
+                    &self.backdrop_filters[filter_start..filter_end],
+                ))
+            }
             PrimitiveKind::Shadow => {
                 let shadows_start = self.shadows_start;
                 let mut shadows_end = shadows_start + 1;
@@ -433,6 +497,7 @@ impl<'a> Iterator for BatchIterator<'a> {
     allow(dead_code)
 )]
 pub(crate) enum PrimitiveBatch<'a> {
+    BackdropFilters(&'a [BackdropFilter]),
     Shadows(&'a [Shadow]),
     Quads(&'a [Quad]),
     Paths(&'a [Path<ScaledPixels>]),
@@ -446,6 +511,80 @@ pub(crate) enum PrimitiveBatch<'a> {
         sprites: &'a [PolychromeSprite],
     },
     Surfaces(&'a [PaintSurface]),
+}
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub(crate) struct BackdropFilter {
+    pub order: u32,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub radius: ScaledPixels,
+    pub opacity: f32,
+    pub tone: Rgba,
+    pub alpha_limit: f32,
+}
+
+impl Default for BackdropFilter {
+    fn default() -> Self {
+        Self {
+            order: 0,
+            bounds: Bounds::default(),
+            content_mask: ContentMask::default(),
+            corner_radii: Corners::default(),
+            radius: ScaledPixels::default(),
+            opacity: 0.0,
+            tone: Rgba::default(),
+            alpha_limit: 1.0,
+        }
+    }
+}
+
+impl BackdropFilter {
+    /// The visible output plus the separable kernel and downsampling footprint.
+    pub(crate) fn snapshot_bounds(
+        &self,
+        viewport: Size<DevicePixels>,
+    ) -> Option<Bounds<DevicePixels>> {
+        let viewport_bounds = Bounds::new(
+            point(ScaledPixels(0.0), ScaledPixels(0.0)),
+            Size::new(
+                ScaledPixels(viewport.width.0 as f32),
+                ScaledPixels(viewport.height.0 as f32),
+            ),
+        );
+        let output = self
+            .bounds
+            .intersect(&self.content_mask.bounds)
+            .intersect(&viewport_bounds);
+        if output.is_empty() {
+            return None;
+        }
+        let halo = if self.radius.0 > 0.0 {
+            (3.0 * self.radius.0).ceil() + 8.0
+        } else {
+            0.0
+        };
+        let left = (output.origin.x.0 - halo).floor().max(0.0) as i32;
+        let top = (output.origin.y.0 - halo).floor().max(0.0) as i32;
+        let right = (output.right().0 + halo)
+            .ceil()
+            .min(viewport.width.0 as f32) as i32;
+        let bottom = (output.bottom().0 + halo)
+            .ceil()
+            .min(viewport.height.0 as f32) as i32;
+        Some(Bounds::new(
+            point(DevicePixels(left), DevicePixels(top)),
+            Size::new(DevicePixels(right - left), DevicePixels(bottom - top)),
+        ))
+    }
+}
+
+impl From<BackdropFilter> for Primitive {
+    fn from(filter: BackdropFilter) -> Self {
+        Primitive::BackdropFilter(filter)
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -494,6 +633,10 @@ pub(crate) struct Shadow {
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    pub exclude_bounds: Bounds<ScaledPixels>,
+    pub exclude_corner_radii: Corners<ScaledPixels>,
+    pub exclude_interior: u32,
+    pub pad: u32,
 }
 
 impl From<Shadow> for Primitive {
@@ -829,5 +972,238 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{bounds, size};
+
+    fn test_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        bounds(
+            point(ScaledPixels::from(x), ScaledPixels::from(y)),
+            size(ScaledPixels::from(width), ScaledPixels::from(height)),
+        )
+    }
+
+    fn test_quad(bounds: Bounds<ScaledPixels>) -> Quad {
+        Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            ..Default::default()
+        }
+    }
+
+    fn test_shadow(bounds: Bounds<ScaledPixels>) -> Shadow {
+        Shadow {
+            order: 0,
+            blur_radius: ScaledPixels::default(),
+            bounds,
+            corner_radii: Corners::default(),
+            content_mask: ContentMask { bounds },
+            color: Hsla::default(),
+            exclude_bounds: Bounds::default(),
+            exclude_corner_radii: Corners::default(),
+            exclude_interior: 0,
+            pad: 0,
+        }
+    }
+
+    fn test_filter(bounds: Bounds<ScaledPixels>) -> BackdropFilter {
+        BackdropFilter {
+            bounds,
+            content_mask: ContentMask { bounds },
+            radius: ScaledPixels::from(8.),
+            opacity: 1.,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn backdrop_snapshot_bounds_clip_output_and_expand_only_for_spatial_filtering() {
+        let viewport = size(DevicePixels(400), DevicePixels(300));
+        let mut filter = test_filter(test_bounds(80.0, 64.0, 48.0, 40.0));
+        filter.content_mask.bounds = test_bounds(88.0, 72.0, 28.0, 24.0);
+        filter.radius = ScaledPixels(0.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(88), DevicePixels(72)),
+                size(DevicePixels(28), DevicePixels(24))
+            ))
+        );
+        filter.radius = ScaledPixels(4.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(68), DevicePixels(52)),
+                size(DevicePixels(68), DevicePixels(64))
+            ))
+        );
+    }
+
+    #[test]
+    fn backdrop_snapshot_bounds_round_outward_and_stop_at_viewport_edges() {
+        let viewport = size(DevicePixels(100), DevicePixels(80));
+        let mut filter = test_filter(test_bounds(-3.5, 65.5, 30.75, 30.0));
+        filter.radius = ScaledPixels(0.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(0), DevicePixels(65)),
+                size(DevicePixels(28), DevicePixels(15))
+            ))
+        );
+        filter.radius = ScaledPixels(4.0);
+        assert_eq!(
+            filter.snapshot_bounds(viewport),
+            Some(bounds(
+                point(DevicePixels(0), DevicePixels(45)),
+                size(DevicePixels(48), DevicePixels(35))
+            ))
+        );
+        filter.bounds = test_bounds(101.0, 0.0, 10.0, 10.0);
+        filter.content_mask.bounds = filter.bounds;
+        assert!(filter.snapshot_bounds(viewport).is_none());
+    }
+
+    fn batch_orders(scene: &Scene) -> Vec<(PrimitiveKind, Vec<DrawOrder>)> {
+        scene
+            .batches()
+            .map(|batch| match batch {
+                PrimitiveBatch::BackdropFilters(filters) => (
+                    PrimitiveKind::BackdropFilter,
+                    filters.iter().map(|filter| filter.order).collect(),
+                ),
+                PrimitiveBatch::Shadows(shadows) => (
+                    PrimitiveKind::Shadow,
+                    shadows.iter().map(|shadow| shadow.order).collect(),
+                ),
+                PrimitiveBatch::Quads(quads) => (
+                    PrimitiveKind::Quad,
+                    quads.iter().map(|quad| quad.order).collect(),
+                ),
+                PrimitiveBatch::Paths(paths) => (
+                    PrimitiveKind::Path,
+                    paths.iter().map(|path| path.order).collect(),
+                ),
+                PrimitiveBatch::Underlines(underlines) => (
+                    PrimitiveKind::Underline,
+                    underlines.iter().map(|underline| underline.order).collect(),
+                ),
+                PrimitiveBatch::MonochromeSprites { sprites, .. } => (
+                    PrimitiveKind::MonochromeSprite,
+                    sprites.iter().map(|sprite| sprite.order).collect(),
+                ),
+                PrimitiveBatch::PolychromeSprites { sprites, .. } => (
+                    PrimitiveKind::PolychromeSprite,
+                    sprites.iter().map(|sprite| sprite.order).collect(),
+                ),
+                PrimitiveBatch::Surfaces(surfaces) => (
+                    PrimitiveKind::Surface,
+                    surfaces.iter().map(|surface| surface.order).collect(),
+                ),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_filter_preserves_spatial_batch_ordering() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_quad(test_bounds(0., 0., 10., 10.)));
+        scene.insert_primitive(test_shadow(test_bounds(100., 100., 10., 10.)));
+        scene.finish();
+
+        assert_eq!(
+            batch_orders(&scene),
+            vec![
+                (PrimitiveKind::Shadow, vec![1]),
+                (PrimitiveKind::Quad, vec![1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn backdrop_filter_orders_disjoint_geometry_globally() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_quad(test_bounds(0., 0., 10., 10.)));
+        scene.insert_primitive(test_filter(test_bounds(100., 100., 10., 10.)));
+        scene.insert_primitive(test_shadow(test_bounds(200., 200., 10., 10.)));
+        scene.finish();
+
+        assert_eq!(
+            batch_orders(&scene),
+            vec![
+                (PrimitiveKind::Quad, vec![1]),
+                (PrimitiveKind::BackdropFilter, vec![2]),
+                (PrimitiveKind::Shadow, vec![3]),
+            ]
+        );
+    }
+
+    #[test]
+    fn backdrop_filter_splits_active_nested_layers() {
+        let mut scene = Scene::default();
+        scene.push_layer(test_bounds(0., 0., 100., 100.));
+        scene.insert_primitive(test_quad(test_bounds(1., 1., 5., 5.)));
+        scene.push_layer(test_bounds(10., 10., 50., 50.));
+        scene.insert_primitive(test_shadow(test_bounds(12., 12., 5., 5.)));
+        scene.insert_primitive(test_filter(test_bounds(20., 20., 10., 10.)));
+        scene.insert_primitive(test_quad(test_bounds(30., 30., 5., 5.)));
+        scene.pop_layer();
+        scene.pop_layer();
+        scene.finish();
+
+        assert_eq!(
+            batch_orders(&scene),
+            vec![
+                (PrimitiveKind::Quad, vec![1]),
+                (PrimitiveKind::Shadow, vec![2]),
+                (PrimitiveKind::BackdropFilter, vec![3]),
+                (PrimitiveKind::Quad, vec![5]),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_nested_backdrop_filters_use_individual_batches() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_filter(test_bounds(0., 0., 100., 100.)));
+        scene.insert_primitive(test_filter(test_bounds(25., 25., 50., 50.)));
+        scene.finish();
+
+        assert_eq!(
+            batch_orders(&scene),
+            vec![
+                (PrimitiveKind::BackdropFilter, vec![1]),
+                (PrimitiveKind::BackdropFilter, vec![2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn replayed_backdrop_filter_preserves_global_barriers() {
+        let mut cached_scene = Scene::default();
+        cached_scene.insert_primitive(test_quad(test_bounds(0., 0., 10., 10.)));
+        cached_scene.insert_primitive(test_filter(test_bounds(100., 100., 10., 10.)));
+        cached_scene.insert_primitive(test_shadow(test_bounds(200., 200., 10., 10.)));
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_shadow(test_bounds(300., 300., 10., 10.)));
+        scene.replay(0..cached_scene.len(), &cached_scene);
+        scene.insert_primitive(test_quad(test_bounds(400., 400., 10., 10.)));
+        scene.finish();
+
+        assert_eq!(
+            batch_orders(&scene),
+            vec![
+                (PrimitiveKind::Shadow, vec![1]),
+                (PrimitiveKind::Quad, vec![1]),
+                (PrimitiveKind::BackdropFilter, vec![2]),
+                (PrimitiveKind::Shadow, vec![3]),
+                (PrimitiveKind::Quad, vec![3]),
+            ]
+        );
     }
 }

@@ -1,4 +1,4 @@
-use gpui::{BoxShadow, Font, FontWeight, Hsla, Pixels, font, hsla, point, px};
+use gpui::{BoxShadow, Font, FontWeight, Hsla, Pixels, font, point, px};
 
 const SYSTEM_UI_FONT_FAMILY: &str = ".SystemUIFont";
 
@@ -125,22 +125,6 @@ impl ControlShadow {
             .flatten()
             .map(ControlShadowLayer::into_box_shadow)
             .collect()
-    }
-
-    pub(crate) fn medium_default() -> Self {
-        let color = hsla(0.0, 0.0, 0.0, 0.1);
-        Self::double(
-            ControlShadowLayer::new(color, px(0.0), px(4.0), px(6.0), px(-1.0)),
-            ControlShadowLayer::new(color, px(0.0), px(2.0), px(4.0), px(-2.0)),
-        )
-    }
-
-    pub(crate) fn large_default() -> Self {
-        let color = hsla(0.0, 0.0, 0.0, 0.1);
-        Self::double(
-            ControlShadowLayer::new(color, px(0.0), px(10.0), px(15.0), px(-3.0)),
-            ControlShadowLayer::new(color, px(0.0), px(4.0), px(6.0), px(-4.0)),
-        )
     }
 }
 

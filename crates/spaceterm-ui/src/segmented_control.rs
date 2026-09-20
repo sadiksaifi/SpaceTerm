@@ -583,8 +583,7 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
 
 impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = cx
-            .try_global::<SegmentedControlTheme>()
+        let style = crate::floating_surface::hosted_segmented_control_theme(cx)
             .copied()
             .unwrap_or_else(default_theme)
             .resolve(self.size);

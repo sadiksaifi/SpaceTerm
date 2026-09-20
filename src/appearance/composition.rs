@@ -12,6 +12,31 @@ pub(crate) enum WindowBackgroundAppearance {
     Blurred,
 }
 
+/// Independent facts that constrain native-window and in-window composition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CompositionCapabilities {
+    pub(crate) native_window_transparency: bool,
+    pub(crate) accessibility_allows_transparency: bool,
+}
+
+impl CompositionCapabilities {
+    pub(crate) const fn new(
+        native_window_transparency: bool,
+        accessibility_allows_transparency: bool,
+    ) -> Self {
+        Self {
+            native_window_transparency,
+            accessibility_allows_transparency,
+        }
+    }
+}
+
+impl Default for CompositionCapabilities {
+    fn default() -> Self {
+        Self::new(false, true)
+    }
+}
+
 /// The layer a painted background belongs to in the window's material hierarchy.
 ///
 /// One window sheet admits the native backdrop. Resting surfaces add only the color difference
@@ -25,8 +50,7 @@ pub(crate) enum SurfaceRole {
     /// Anything resting on the base without covering other content: Panes, Tab and sidebar
     /// chips, buttons, fields, steppers, toggles and rows.
     Surface,
-    /// Menus, popovers, dialogs and tooltips, which cover rendered content. GPUI cannot blur what
-    /// is painted beneath them, so they stay denser to keep covered text from bleeding through.
+    /// Menus, popovers, dialogs and tooltips, which filter and tint rendered content beneath them.
     Floating,
 }
 
@@ -40,8 +64,6 @@ impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
     pub(crate) const OPAQUE: Self = Self { glass: 0 };
 
-    /// Floating surfaces give their color up more slowly, because they cover rendered content.
-    const FLOATING_RETENTION: f32 = 0.3;
     /// What a resting surface still paints at the maximum setting, and what a floating one does.
     ///
     /// The sheet is the window's transmission: one continuous tint over everything, so the
@@ -49,11 +71,19 @@ impl SurfaceMaterials {
     /// its difference from that sheet, and that difference is the whole of what tells a Pane from
     /// the shell, a card from the page, or a selected chip from the row beside it. Giving it up
     /// buys a few percent more desktop and costs the window its hierarchy, so a resting surface
-    /// keeps enough of its color to lift several levels off a pale desktop instead. A floating
-    /// surface covers live content rather than resting beside it, and keeps enough to stop what
-    /// it covers from reading through.
+    /// keeps enough of its color to lift several levels off a pale desktop instead.
+    ///
     const RESTING_RESIDUAL: f32 = 0.42;
-    const FLOATING_RESIDUAL: f32 = 0.12;
+    /// How strongly a floating material constrains backdrop color at maximum transparency.
+    ///
+    /// The treatment preserves backdrop alpha, so this strength does not cover the native window
+    /// material. The same curve applies with blur on and off.
+    const FLOATING_RESIDUAL: f32 = 0.70;
+    /// The most coverage a floating shell adds after the window's glass has engaged.
+    const FLOATING_WASH_CEILING: u8 = 20;
+    /// How much already-painted in-window content a floating shell may retain at maximum
+    /// transparency. The remainder exposes the effective native window backdrop.
+    const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
     /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
     ///
     /// Panes stay close to the base, below the brighter cards and selected controls.
@@ -117,18 +147,25 @@ impl SurfaceMaterials {
         match role {
             SurfaceRole::Sheet => (0.0, 1.0),
             SurfaceRole::Base | SurfaceRole::Surface => (Self::RESTING_RESIDUAL, 1.0),
-            SurfaceRole::Floating => (Self::FLOATING_RESIDUAL, Self::FLOATING_RETENTION),
+            SurfaceRole::Floating => (Self::FLOATING_RESIDUAL, 1.0),
         }
     }
 
     /// The share of an authored color one role still holds at this setting.
     ///
-    /// The sheet fades linearly. Other roles approach their residual through a quadratic curve,
+    /// The sheet fades linearly. Resting roles approach their residual through a quadratic curve,
     /// retaining more color at high transparency with a smaller change near the default.
-    /// Residuals below a half keep the curve strictly decreasing across the whole range.
+    /// Residuals below a half keep that curve strictly decreasing across the whole range.
+    ///
+    /// Floating surfaces use a linear curve because their larger residual would make the
+    /// quadratic curve non-monotonic.
     fn presence(self, role: SurfaceRole) -> f32 {
         let admitted = self.admitted();
-        (1.0 - admitted) + Self::transmission(role).0 * admitted * admitted
+        let residual = Self::transmission(role).0;
+        if matches!(role, SurfaceRole::Floating) {
+            return 1.0 - (1.0 - residual) * admitted;
+        }
+        (1.0 - admitted) + residual * admitted * admitted
     }
 
     /// How much of an authored surface color survives over the window's backdrop.
@@ -241,6 +278,50 @@ impl SurfaceMaterials {
             .multiply_opacity(retention)
     }
 
+    /// Resolves a decorative edge as a host-relative overlay when glass is active.
+    ///
+    /// Opaque and accessibility-limited presentations retain the authored edge exactly. An
+    /// explicit transparent edge also stays absent. Otherwise authored alpha is first composed
+    /// into the semantic target, then reconstructed as the smallest overlay that preserves the
+    /// edge's direction away from its immediate host.
+    pub(crate) fn edge(self, host: super::Color, edge: super::Color) -> super::Color {
+        if self.is_opaque() || edge.a == 0 {
+            return edge;
+        }
+        edge.source_over(host).relative_overlay(host)
+    }
+
+    /// Resolves the small host-relative lift that separates a floating shell from its backdrop.
+    ///
+    /// Backdrop tone owns color legibility without changing framebuffer alpha. This wash carries
+    /// only elevation, so nested shells cannot rebuild the dense slab that the tone replaced.
+    pub(crate) fn floating_wash(self, base: super::Color, target: super::Color) -> super::Color {
+        if self.is_opaque() {
+            return target;
+        }
+        let overlay = Self { glass: u8::MAX }.paint(SurfaceRole::Surface, base, target);
+        let overlay = overlay.with_alpha(overlay.a.min(Self::FLOATING_WASH_CEILING));
+        let amount = f64::from(self.engagement());
+        let target_alpha = f64::from(target.a) / 255.0;
+        let overlay_alpha = f64::from(overlay.a) / 255.0;
+        let alpha = target_alpha * (1.0 - amount) + overlay_alpha * amount;
+        if alpha == 0.0 {
+            return super::Color::rgba(0);
+        }
+        let channel = |target: u8, overlay: u8| {
+            ((f64::from(target) * target_alpha * (1.0 - amount)
+                + f64::from(overlay) * overlay_alpha * amount)
+                / alpha)
+                .round() as u8
+        };
+        super::Color {
+            r: channel(target.r, overlay.r),
+            g: channel(target.g, overlay.g),
+            b: channel(target.b, overlay.b),
+            a: (alpha * 255.0).round() as u8,
+        }
+    }
+
     /// Whether a base belongs to a bright scheme, whose surfaces lift with white ink that has
     /// little room left to work in, rather than to a dark one.
     fn is_bright(base: super::Color) -> bool {
@@ -290,41 +371,65 @@ impl SurfaceMaterials {
     pub(crate) const fn is_opaque(self) -> bool {
         self.glass == 0
     }
+
+    /// Maximum alpha that already-painted content may retain beneath a floating shell.
+    ///
+    /// This follows the effective window material, not the independently resolved floating
+    /// material. An opaque or unsupported native window has no backing to reveal and therefore
+    /// keeps the existing framebuffer intact.
+    pub(crate) fn floating_backdrop_alpha_limit(self) -> f32 {
+        1.0 - (1.0 - Self::FLOATING_BACKDROP_RETENTION) * self.admitted()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedWindowComposition {
     pub(crate) requested: WindowBackgroundAppearance,
+    /// Effective native Operating-System Window backdrop.
     pub(crate) effective: WindowBackgroundAppearance,
+    /// Materials resting on the native window sheet.
     pub(crate) materials: SurfaceMaterials,
+    /// In-window floating materials, independent of native-window capability.
+    pub(crate) floating_materials: SurfaceMaterials,
+    /// Whether floating shells filter already-painted GPUI content.
+    pub(crate) floating_blur: bool,
 }
 
 impl ResolvedWindowComposition {
     pub(crate) fn resolve(
         preferences: &super::preferences::BackgroundPreferences,
-        supported: bool,
+        capabilities: CompositionCapabilities,
     ) -> Self {
         let requested = if preferences.blur {
             WindowBackgroundAppearance::Blurred
         } else {
             WindowBackgroundAppearance::Transparent
         };
-        let materials = SurfaceMaterials::derive(preferences.transparency);
+        let requested_materials = SurfaceMaterials::derive(preferences.transparency);
+        let floating_materials = if capabilities.accessibility_allows_transparency {
+            requested_materials
+        } else {
+            SurfaceMaterials::OPAQUE
+        };
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
-        let enabled = supported && !materials.is_opaque();
+        let native_enabled = capabilities.native_window_transparency
+            && capabilities.accessibility_allows_transparency
+            && !requested_materials.is_opaque();
         Self {
             requested,
-            effective: if enabled {
+            effective: if native_enabled {
                 requested
             } else {
                 WindowBackgroundAppearance::Opaque
             },
-            materials: if enabled {
-                materials
+            materials: if native_enabled {
+                requested_materials
             } else {
                 SurfaceMaterials::OPAQUE
             },
+            floating_materials,
+            floating_blur: preferences.blur && !floating_materials.is_opaque(),
         }
     }
 }
@@ -383,8 +488,31 @@ impl ChromeColors {
     /// Canonical surface backing for the opaque foundation. Definitions retain authored RGBA;
     /// rendering and derived foregrounds use the same known root/panel/field hierarchy.
     pub(crate) fn opaque_presentation(&self) -> Self {
-        let mut paint = self.clone();
+        self.presentation_over(self.background.with_alpha(255))
+    }
+
+    /// Resolves authored control fills against the raised host before root flattening loses
+    /// their alpha. The host material is composited once; descendants inherit that reference.
+    pub(crate) fn floating_presentation(&self) -> Self {
         let root = self.background.with_alpha(255);
+        let host = self.elevated_surface_background.source_over(root);
+        let mut paint = self.presentation_over(host);
+        paint.elevated_surface_background = host;
+        paint.input_background = self.input_background.source_over(host);
+        paint.input_disabled_background = self.input_disabled_background.source_over(host);
+        paint
+    }
+
+    /// Resolves authored control fills against one opaque semantic host.
+    pub(crate) fn host_presentation(&self, host: super::Color) -> Self {
+        let mut paint = self.presentation_over(host);
+        paint.input_background = self.input_background.source_over(host);
+        paint.input_disabled_background = self.input_disabled_background.source_over(host);
+        paint
+    }
+
+    fn presentation_over(&self, root: super::Color) -> Self {
+        let mut paint = self.clone();
         paint.background = root;
         paint.panel_background = self.panel_background.source_over(root);
         paint.elevated_surface_background = self.elevated_surface_background.source_over(root);
@@ -404,13 +532,19 @@ impl ChromeColors {
         paint
     }
 
-    /// Presentation fills for a translucent window, from an opaque presentation. Only background
-    /// fills change; text, icons, borders and marks stay opaque, and contrast decisions keep using
-    /// the opaque presentation this is derived from.
+    /// Presentation paints for a translucent window, from an opaque presentation.
+    ///
+    /// Background fills and their decorative edges become host-relative. Text, icons and semantic
+    /// signals stay opaque, and contrast decisions keep using the opaque presentation this is
+    /// derived from.
     pub(crate) fn material_presentation(&self, materials: super::SurfaceMaterials) -> Self {
         use super::SurfaceRole;
         let mut paint = self.clone();
         let surface = |role, color| materials.paint(role, self.background, color);
+        let edge = |host, color| materials.edge(host, color);
+        let filled_host = |fill: super::Color| {
+            if fill.a == 0 { self.background } else { fill }
+        };
         paint.background = surface(SurfaceRole::Base, self.background);
         paint.panel_background = surface(SurfaceRole::Base, self.panel_background);
         paint.title_bar_background = surface(SurfaceRole::Base, self.title_bar_background);
@@ -426,6 +560,55 @@ impl ChromeColors {
             ghost_element_disabled
         );
         resting_fill_roles!(resting);
+
+        paint.border = edge(self.background, self.border);
+        paint.border_variant = edge(self.background, self.border_variant);
+        paint.border_disabled = edge(self.background, self.border_disabled);
+        paint.resize_idle = edge(self.background, self.resize_idle);
+        paint.resize_disabled = edge(self.background, self.resize_disabled);
+
+        paint.input_border = edge(self.input_background, self.input_border);
+        paint.input_disabled_border =
+            edge(self.input_disabled_background, self.input_disabled_border);
+
+        paint.element_border = edge(self.element_background, self.element_border);
+        paint.element_hover_border = edge(self.element_hover, self.element_hover_border);
+        paint.element_active_border = edge(self.element_active, self.element_active_border);
+        paint.element_disabled_border = edge(self.element_disabled, self.element_disabled_border);
+
+        paint.ghost_element_border = edge(
+            filled_host(self.ghost_element_background),
+            self.ghost_element_border,
+        );
+        paint.ghost_element_hover_border = edge(
+            filled_host(self.ghost_element_hover),
+            self.ghost_element_hover_border,
+        );
+        paint.ghost_element_active_border = edge(
+            filled_host(self.ghost_element_active),
+            self.ghost_element_active_border,
+        );
+        paint.ghost_element_disabled_border = edge(
+            filled_host(self.ghost_element_disabled),
+            self.ghost_element_disabled_border,
+        );
+
+        paint.outline_border = edge(self.element_background, self.outline_border);
+        paint.outline_hover_border = edge(self.element_hover, self.outline_hover_border);
+        paint.outline_pressed_border = edge(self.element_active, self.outline_pressed_border);
+        paint.outline_disabled_border = edge(self.element_disabled, self.outline_disabled_border);
+
+        paint.selection_border = edge(self.selection_background, self.selection_border);
+        paint.selection_hover_border =
+            edge(self.selection_hover_background, self.selection_hover_border);
+        paint.selection_pressed_border = edge(
+            self.selection_pressed_background,
+            self.selection_pressed_border,
+        );
+        paint.selection_disabled_border = edge(
+            self.selection_disabled_background,
+            self.selection_disabled_border,
+        );
         paint
     }
 }
@@ -433,7 +616,130 @@ impl ChromeColors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appearance::Color;
+    use crate::appearance::{ChromeColors, Color};
+
+    #[test]
+    fn decorative_edges_keep_exact_opaque_and_transparent_authorship() {
+        let host = Color::rgb(0x202020);
+        let authored = Color::rgba(0x90a0b080);
+        let absent = Color::rgba(0x12345600);
+
+        assert_eq!(SurfaceMaterials::OPAQUE.edge(host, authored), authored);
+        assert_eq!(SurfaceMaterials::derive(1.0).edge(host, absent), absent);
+    }
+
+    #[test]
+    fn material_edges_preserve_authored_alpha_composites_and_contrast_polarity() {
+        let material = SurfaceMaterials::derive(1.0);
+        for (host, authored, rises) in [
+            (Color::rgb(0x202020), Color::rgba(0xe0e0e080), true),
+            (Color::rgb(0xe0e0e0), Color::rgba(0x20202080), false),
+        ] {
+            let edge = material.edge(host, authored);
+            let expected = authored.source_over(host);
+            let actual = edge.source_over(host);
+
+            assert_eq!(
+                actual, expected,
+                "authored alpha must survive as a composite"
+            );
+            assert!(edge.a < 255, "material edge retained opaque ink: {edge:?}");
+            assert_eq!(actual.r > host.r, rises, "edge changed contrast polarity");
+            assert_eq!(actual.g > host.g, rises, "edge changed contrast polarity");
+            assert_eq!(actual.b > host.b, rises, "edge changed contrast polarity");
+        }
+    }
+
+    #[test]
+    fn material_presentation_changes_only_decorative_edge_families() {
+        let colors = ChromeColors {
+            background: Color::rgb(0x202020),
+            input_background: Color::rgb(0x303030),
+            input_border: Color::rgba(0xd0d0d080),
+            element_background: Color::rgb(0x383838),
+            element_border: Color::rgba(0x12345600),
+            border_focused: Color::rgb(0x4080ff),
+            input_focused_border: Color::rgb(0x5090ff),
+            input_invalid_border: Color::rgb(0xff4050),
+            primary_border: Color::rgb(0x3060c0),
+            destructive_border: Color::rgb(0xc03030),
+            toggle_off_border: Color::rgb(0x808080),
+            error_border: Color::rgb(0xd04040),
+            resize_idle: Color::rgba(0xc0c0c080),
+            resize_disabled: Color::rgb(0x606060),
+            resize_hovered: Color::rgb(0x80a0ff),
+            resize_focused: Color::rgb(0x4080ff),
+            resize_dragged: Color::rgb(0x2060d0),
+            ..ChromeColors::default()
+        };
+
+        assert_eq!(
+            colors.material_presentation(SurfaceMaterials::OPAQUE),
+            colors,
+            "opaque presentation must retain every authored edge exactly"
+        );
+
+        let paint = colors.material_presentation(SurfaceMaterials::derive(1.0));
+        assert_eq!(paint.element_border, colors.element_border);
+        assert_eq!(
+            paint.input_border.source_over(colors.input_background),
+            colors.input_border.source_over(colors.input_background),
+            "custom authored alpha must retain its semantic composite"
+        );
+        assert!(paint.input_border.a < 255);
+        assert_eq!(
+            paint.resize_idle.source_over(colors.background),
+            colors.resize_idle.source_over(colors.background),
+            "idle resize structure must retain its authored composite"
+        );
+        assert_eq!(
+            paint.resize_disabled.source_over(colors.background),
+            colors.resize_disabled.source_over(colors.background),
+            "disabled resize structure must retain its authored composite"
+        );
+        assert!(paint.resize_idle.a < 255 && paint.resize_disabled.a < 255);
+        for (actual, semantic) in [
+            (paint.border_focused, colors.border_focused),
+            (paint.input_focused_border, colors.input_focused_border),
+            (paint.input_invalid_border, colors.input_invalid_border),
+            (paint.primary_border, colors.primary_border),
+            (paint.destructive_border, colors.destructive_border),
+            (paint.toggle_off_border, colors.toggle_off_border),
+            (paint.error_border, colors.error_border),
+            (paint.resize_hovered, colors.resize_hovered),
+            (paint.resize_focused, colors.resize_focused),
+            (paint.resize_dragged, colors.resize_dragged),
+        ] {
+            assert_eq!(actual, semantic, "semantic signal must stay authored");
+        }
+    }
+
+    #[test]
+    fn floating_fields_composite_directly_over_the_raised_host() {
+        let colors = ChromeColors {
+            background: Color::rgb(0x101010),
+            panel_background: Color::rgb(0x903020),
+            elevated_surface_background: Color::rgb(0x204060),
+            input_background: Color::rgba(0xc0e0a080),
+            input_disabled_background: Color::rgba(0x8060e040),
+            ..ChromeColors::default()
+        };
+        let host = colors
+            .elevated_surface_background
+            .source_over(colors.background.with_alpha(255));
+        let presentation = colors.floating_presentation();
+
+        assert_eq!(
+            (
+                presentation.input_background,
+                presentation.input_disabled_background
+            ),
+            (
+                colors.input_background.source_over(host),
+                colors.input_disabled_background.source_over(host),
+            ),
+        );
+    }
 
     #[test]
     fn overlay_reconstructs_neutral_and_chromatic_targets_without_a_full_tint() {
@@ -554,7 +860,7 @@ mod tests {
         );
         assert!(
             maximum.alpha(SurfaceRole::Floating) >= 96,
-            "a menu must still cover the content it is drawn over"
+            "a menu must still constrain the color of content it is drawn over"
         );
         // Nonzero is not the same as visible. A pale desktop is the hardest backing for a bright
         // scheme to lift off, because white ink has the least room to work in, so that is where

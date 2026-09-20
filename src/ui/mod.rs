@@ -7,6 +7,8 @@ mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
 mod directory_picker;
+#[cfg(test)]
+mod floating_surface_tests;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
@@ -179,6 +181,7 @@ mod tests {
         });
 
         assert!(cx.update(|cx| {
+            let floating = &appearance::chrome(cx).floating_colors;
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ToggleTheme>()
                 && cx.has_global::<spaceterm_ui::ProgressTheme>()
@@ -196,8 +199,7 @@ mod tests {
                         &appearance::chrome(cx).colors,
                         spaceterm_ui::ProgressMotion::Standard,
                     )
-                && *cx.global::<spaceterm_ui::ModalTheme>()
-                    == modal_theme::theme(&appearance::chrome(cx).colors)
+                && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme(floating)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
                     == spaceterm_ui::ModalDesktopPolicy::mac_os()

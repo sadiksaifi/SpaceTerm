@@ -225,7 +225,7 @@ impl SearchField {
 
 impl RenderOnce for SearchField {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = *cx.global::<SearchFieldTheme>();
+        let theme = *crate::floating_surface::hosted_search_field_theme(cx);
         let metrics = theme.metrics;
         let editor = self.input.read(cx);
         let focus = editor.focus_handle();

@@ -26,7 +26,7 @@ fn row_chip(
             hover_rim: Some(colors.row_hover_border),
         }
     };
-    let paint = paint.raised(appearance);
+    let paint = paint.raised_on(appearance, colors.row_background);
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     SelectionChip::new(
         ChipShape::symmetric(
@@ -47,6 +47,57 @@ fn row_chip(
 fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
     crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
         + appearance.spacing(SIDEBAR_ROW_CHIP_PADDING)
+}
+
+/// Resolves the rename frame after the row enters its Panel control host.
+#[derive(IntoElement)]
+struct WorkspaceRenameField {
+    workspace_id: WorkspaceId,
+    input: Entity<TextInput>,
+    focus_handle: FocusHandle,
+    appearance: crate::ui::appearance::ChromeAppearance,
+}
+
+impl gpui::RenderOnce for WorkspaceRenameField {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus_on_click = self.focus_handle.clone();
+        spaceterm_ui::field_frame(
+            ("workspace-rename-input", self.workspace_id.get()),
+            &self.focus_handle,
+            spaceterm_ui::FieldState::default(),
+            cx,
+        )
+        .debug_selector(move || format!("workspace-rename-input-{}", self.workspace_id.get()))
+        .h(self.appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
+        .w_full()
+        .px(self.appearance.spacing(5.0))
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .rounded(self.appearance.spacing(4.0))
+        .font(self.appearance.regular.clone())
+        .text_size(self.appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
+        .text_color(gpui_color(self.appearance.colors.text))
+        .on_click(move |_, window, cx| {
+            focus_on_click.focus(window);
+            cx.stop_propagation();
+        })
+        .child(self.input)
+    }
+}
+
+pub(super) fn row_background(
+    appearance: &crate::ui::appearance::ChromeAppearance,
+) -> Option<Color> {
+    (appearance.colors.row_background
+        != crate::ui::workspace_frame::base_surface(&appearance.colors))
+    .then(|| {
+        appearance.materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            crate::ui::workspace_frame::base_surface(&appearance.colors),
+            appearance.colors.row_background,
+        )
+    })
 }
 
 impl WorkspaceSidebar {
@@ -130,30 +181,12 @@ impl WorkspaceSidebar {
             .filter(|rename| rename.workspace_id == workspace_id);
         let renaming = rename.is_some();
         let first_line = if let Some(rename) = rename {
-            let input = rename.input.clone();
-            let focus_handle = rename.focus_handle.clone();
-            spaceterm_ui::field_frame(
-                ("workspace-rename-input", workspace_id.get()),
-                &focus_handle,
-                spaceterm_ui::FieldState::default(),
-                cx,
-            )
-            .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-            .h(appearance.height(22.0, SIDEBAR_NAME_TEXT_SIZE))
-            .w_full()
-            .px(appearance.spacing(5.0))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .rounded(appearance.spacing(4.0))
-            .font(appearance.regular.clone())
-            .text_size(appearance.text_size(SIDEBAR_NAME_TEXT_SIZE))
-            .text_color(gpui_color(appearance.colors.text))
-            .on_click(move |_, window, cx| {
-                focus_handle.focus(window);
-                cx.stop_propagation();
-            })
-            .child(input)
+            WorkspaceRenameField {
+                workspace_id,
+                input: rename.input.clone(),
+                focus_handle: rename.focus_handle.clone(),
+                appearance: appearance.clone(),
+            }
             .into_any_element()
         } else {
             div()
@@ -206,16 +239,9 @@ impl WorkspaceSidebar {
             .gap(appearance.spacing(10.0))
             .block_mouse_except_scroll()
             .group(row_group.clone())
-            .when(
-                appearance.colors.row_background
-                    != crate::ui::workspace_frame::base_surface(&appearance.colors),
-                |row| {
-                    row.bg(gpui_color(appearance.surface(
-                        crate::appearance::SurfaceRole::Base,
-                        appearance.colors.row_background,
-                    )))
-                },
-            )
+            .when_some(row_background(&appearance), |row, background| {
+                row.bg(gpui_color(background))
+            })
             .child(chip.render(
                 format!("workspace-row-selection-{}", workspace_id.get()),
                 &row_group,
@@ -488,7 +514,7 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
             .debug_selector("new-workspace-tooltip")
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
-        div()
+        let sidebar = div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
             .absolute()
@@ -561,6 +587,9 @@ impl WorkspaceSidebar {
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
+            .into_any_element();
+        spaceterm_ui::ControlHost::Panel
+            .mount(sidebar)
             .into_any_element()
     }
 

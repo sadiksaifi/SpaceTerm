@@ -66,16 +66,31 @@ pub(crate) struct ChipPaint {
 impl ChipPaint {
     /// Ties a chip to a translucent window without giving up what it describes.
     ///
-    /// Fills add the resting surface overlay over the shared tint. Selection comes from the
-    /// authored color difference; rims retain their quiet neutral edge.
-    pub(crate) fn raised(self, appearance: &crate::ui::appearance::ChromeAppearance) -> Self {
+    /// Each fill is relative to its host. Custom rims are relative to their state fill, so their
+    /// contrast direction survives changes in the native backing.
+    pub(crate) fn raised_on(
+        self,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        semantic_host: Color,
+    ) -> Self {
         let material = |color: Option<Color>| {
-            color.map(|color| appearance.surface(crate::appearance::SurfaceRole::Surface, color))
+            color.map(|color| {
+                appearance.materials.paint(
+                    crate::appearance::SurfaceRole::Surface,
+                    semantic_host,
+                    color,
+                )
+            })
+        };
+        let edge = |fill: Option<Color>, color: Option<Color>| {
+            let host = fill.map_or(semantic_host, |fill| fill.source_over(semantic_host));
+            color.map(|color| appearance.materials.edge(host, color))
         };
         Self {
             fill: material(self.fill),
             hover_fill: material(self.hover_fill),
-            ..self
+            rim: edge(self.fill, self.rim),
+            hover_rim: edge(self.hover_fill.or(self.fill), self.hover_rim),
         }
     }
 }
@@ -107,18 +122,16 @@ impl SelectionChip {
     /// the item lights the one shape that item presents.
     pub(crate) fn render(self, selector: String, group: &str) -> AnyElement {
         let hover_fill = self.paint.hover_fill;
-        let hover_rim = self.paint.hover_rim;
+        // The chip has no content, so omitting transparent rims does not alter layout.
+        let hover_rim = self.paint.hover_rim.filter(|rim| rim.a != 0);
+        let rim = self.paint.rim.filter(|rim| rim.a != 0);
         Self::body(self.shape)
             .debug_selector(move || selector.clone())
             .when_some(self.paint.fill, |chip, fill| {
-                chip.bg(rgba(fill.rgba_hex()))
-                    .when_some(self.paint.rim, |chip, rim| {
-                        // A rim is authored to sit darker than its fill in light Chrome and lighter
-                        // in dark, so one role describes a lit edge in both rather than an outline
-                        // drawn around a box.
-                        chip.border(px(CHIP_HAIRLINE))
-                            .border_color(rgba(rim.rgba_hex()))
-                    })
+                chip.bg(rgba(fill.rgba_hex())).when_some(rim, |chip, rim| {
+                    chip.border(px(CHIP_HAIRLINE))
+                        .border_color(rgba(rim.rgba_hex()))
+                })
             })
             .group_hover(group.to_owned(), move |style| {
                 let style = match hover_fill {
@@ -151,5 +164,110 @@ impl SelectionChip {
         .border_color(rgba(color.rgba_hex()))
         .debug_selector(move || selector.to_owned())
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appearance::{
+        AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
+        SchemeCatalog, SystemAppearance,
+    };
+
+    fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {
+        let mut preferences = AppearancePreferences::default();
+        preferences.background.transparency = transparency;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .expect("built-in appearance should resolve");
+        crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome)
+    }
+
+    fn selected(colors: &crate::appearance::ChromeColors) -> ChipPaint {
+        ChipPaint {
+            fill: Some(colors.row_selected_background),
+            rim: Some(colors.row_selected_border),
+            hover_fill: Some(colors.row_selected_hover_background),
+            hover_rim: Some(colors.row_selected_hover_border),
+        }
+    }
+
+    #[test]
+    fn raised_chip_materializes_each_state_against_its_actual_host() {
+        let appearance = appearance(1.0);
+        let colors = &appearance.colors;
+        let host = colors.panel_background;
+        let paint = selected(colors).raised_on(&appearance, host);
+        let expected_fill = appearance.materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            colors.row_selected_background,
+        );
+        let expected_hover = appearance.materials.paint(
+            crate::appearance::SurfaceRole::Surface,
+            host,
+            colors.row_selected_hover_background,
+        );
+
+        assert_eq!(paint.fill, Some(expected_fill));
+        assert_eq!(paint.hover_fill, Some(expected_hover));
+        assert_ne!(paint.fill, paint.hover_fill);
+    }
+
+    #[test]
+    fn opaque_chip_keeps_its_authored_states() {
+        let appearance = appearance(0.0);
+        let colors = &appearance.colors;
+        let authored = selected(colors);
+        let paint = authored.raised_on(&appearance, colors.panel_background);
+
+        assert_eq!(paint.fill, authored.fill);
+        assert_eq!(paint.hover_fill, authored.hover_fill);
+    }
+
+    #[test]
+    fn custom_chip_edges_follow_each_state_and_keep_opaque_authored_paints() {
+        let authored = ChipPaint {
+            fill: Some(Color::rgb(0x303030)),
+            rim: Some(Color::rgba(0x48484880)),
+            hover_fill: Some(Color::rgb(0x404040)),
+            hover_rim: Some(Color::rgba(0x606060a0)),
+        };
+        let opaque = appearance(0.0);
+        let glass = appearance(1.0);
+        let host = Color::rgb(0x202020);
+        let opaque_paint = authored.raised_on(&opaque, host);
+        assert_eq!(
+            (opaque_paint.rim, opaque_paint.hover_rim),
+            (authored.rim, authored.hover_rim)
+        );
+
+        let paint = authored.raised_on(&glass, host);
+        for (fill, edge, actual) in [
+            (
+                authored.fill.unwrap(),
+                authored.rim.unwrap(),
+                paint.rim.unwrap(),
+            ),
+            (
+                authored.hover_fill.unwrap(),
+                authored.hover_rim.unwrap(),
+                paint.hover_rim.unwrap(),
+            ),
+        ] {
+            assert!(actual.a < edge.a);
+            let actual = actual.source_over(fill);
+            let expected = edge.source_over(fill);
+            assert!(actual.r.abs_diff(expected.r) <= 1);
+            assert!(actual.g.abs_diff(expected.g) <= 1);
+            assert!(actual.b.abs_diff(expected.b) <= 1);
+        }
     }
 }

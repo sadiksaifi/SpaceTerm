@@ -2113,7 +2113,7 @@ impl TextInput {
         window: &mut Window,
         cx: &mut App,
     ) -> ShapedLine {
-        let theme = *cx.global::<TextInputTheme>();
+        let theme = *crate::floating_surface::hosted_text_input_theme(cx);
         let paint = theme.variants.paint(self.variant);
         let empty = self.buffer.text.is_empty();
         let color: gpui::Hsla = if self.enabled {
@@ -2606,7 +2606,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> TextPrepaint {
         self.input.update(cx, |input, cx| {
-            let theme = *cx.global::<TextInputTheme>();
+            let theme = *crate::floating_surface::hosted_text_input_theme(cx);
             let paint = theme.variants.paint(input.variant);
             let line = input.rebuild_geometry(bounds, window, cx);
             let empty = input.buffer.text.is_empty();

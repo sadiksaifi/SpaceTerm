@@ -1,11 +1,13 @@
 // SpaceTerm modification: use source-over destination alpha in both compositing pipelines.
 use super::metal_atlas::MetalAtlas;
+mod backdrop;
 use crate::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
     Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
     Surface, Underline, point, size,
 };
 use anyhow::Result;
+use backdrop::BackdropRenderer;
 use block::ConcreteBlock;
 use cocoa::{
     base::{NO, YES},
@@ -118,6 +120,7 @@ pub(crate) struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    backdrop: BackdropRenderer,
 }
 
 #[repr(C)]
@@ -251,6 +254,7 @@ impl MetalRenderer {
         );
 
         let command_queue = device.new_command_queue();
+        let backdrop = BackdropRenderer::new(&device, &library);
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone()));
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
@@ -275,6 +279,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            backdrop,
         }
     }
 
@@ -352,6 +357,11 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        let has_backdrop = !scene.backdrop_filters.is_empty();
+        self.layer.set_framebuffer_only(!has_backdrop);
+        if !has_backdrop {
+            self.backdrop.release();
+        }
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
@@ -441,6 +451,27 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             let ok = match batch {
+                PrimitiveBatch::BackdropFilters(filters) => {
+                    command_encoder.end_encoding();
+                    for filter in filters {
+                        self.backdrop.encode(
+                            &self.device,
+                            command_buffer,
+                            drawable.texture(),
+                            filter,
+                            viewport_size,
+                        );
+                    }
+                    command_encoder = new_command_encoder(
+                        command_buffer,
+                        drawable,
+                        viewport_size,
+                        |attachment| {
+                            attachment.set_load_action(metal::MTLLoadAction::Load);
+                        },
+                    );
+                    true
+                }
                 PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
                     shadows,
                     instance_buffer,

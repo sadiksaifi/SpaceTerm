@@ -18,7 +18,7 @@ fn floating(resolved: &ResolvedAppearance) -> u8 {
     resolved
         .chrome
         .composition
-        .materials
+        .floating_materials
         .alpha(SurfaceRole::Floating)
 }
 
@@ -58,7 +58,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
     cx: &mut TestAppContext,
 ) {
     let (_settings, platform) = start(cx);
-    platform.set_transparency_supported(true);
+    platform.set_native_window_transparency_supported(true);
     cx.run_until_parked();
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
     let mut owner = WindowAppearanceOwner::default();
@@ -73,7 +73,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
         .unwrap();
     assert_eq!(platform.backdrops.borrow().as_slice(), &[true]);
 
-    platform.set_transparency_supported(false);
+    platform.set_native_window_transparency_supported(false);
     cx.run_until_parked();
     test_window
         .update(cx, |_, window, cx| {
@@ -94,11 +94,11 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
 }
 
 #[gpui::test]
-fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_protocol_changes(
+fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protocol_changes(
     cx: &mut TestAppContext,
 ) {
     let (settings, platform) = start(cx);
-    platform.set_transparency_supported(true);
+    platform.set_native_window_transparency_supported(true);
     cx.run_until_parked();
     let before = cx.update(|cx| current(cx));
     assert!(shell(&before) > 0 && shell(&before) < 255);
@@ -117,7 +117,7 @@ fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_pro
         let after = current(cx);
         assert!(shell(&after) > 0 && shell(&after) < shell(&before));
         assert!(floating(&after) < floating(&before));
-        // Floating surfaces covering content stay denser than the base between the endpoints.
+        // Floating tone remains stronger than the base tint between the endpoints.
         assert!(floating(&after) > shell(&after));
         assert_eq!(
             after.chrome.composition.effective,
@@ -141,21 +141,56 @@ fn transparency_updates_surfaces_and_accessibility_fallback_without_terminal_pro
         assert!(!AppearanceChangeSet::between(&before, &after).terminal_protocol_colors);
     });
     let preview_shell = cx.update(|cx| shell(&current(cx)));
-    platform.set_transparency_supported(false);
+    let preview_floating = cx.update(|cx| floating(&current(cx)));
+    platform.set_native_window_transparency_supported(false);
     cx.run_until_parked();
     cx.update(|cx| {
-        assert!(current(cx).chrome.composition.materials.is_opaque());
+        let current = current(cx);
+        assert!(current.chrome.composition.materials.is_opaque());
+        assert_eq!(floating(&current), preview_floating);
         assert_eq!(
             window_background(cx),
             gpui::WindowBackgroundAppearance::Opaque
         );
     });
-    platform.set_transparency_supported(true);
+    platform.set_native_window_transparency_supported(true);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell(&current(cx)), preview_shell));
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell(&current(cx)), shell(&before)));
+}
+
+#[gpui::test]
+fn accessibility_display_options_suppress_and_restore_all_translucent_presentation(
+    cx: &mut TestAppContext,
+) {
+    let (_settings, platform) = start(cx);
+    platform.set_native_window_transparency_supported(true);
+    cx.run_until_parked();
+    let before = cx.update(|cx| current(cx));
+    assert!(!before.chrome.composition.materials.is_opaque());
+    assert!(!before.chrome.composition.floating_materials.is_opaque());
+    assert!(before.chrome.composition.floating_blur);
+
+    for suppress in [
+        |platform: &RecordingAppearancePlatform| platform.set_reduce_transparency(true),
+        |platform: &RecordingAppearancePlatform| platform.set_increase_contrast(true),
+    ] as [fn(&RecordingAppearancePlatform); 2]
+    {
+        suppress(&platform);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let current = current(cx);
+            assert!(current.chrome.composition.materials.is_opaque());
+            assert!(current.chrome.composition.floating_materials.is_opaque());
+            assert!(!current.chrome.composition.floating_blur);
+        });
+        platform.set_reduce_transparency(false);
+        platform.set_increase_contrast(false);
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(current(cx).chrome.composition, before.chrome.composition));
+    }
 }
 
 #[gpui::test]

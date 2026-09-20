@@ -38,8 +38,8 @@ use spaceterm_ui::{
     ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
     OverlayScrollbarEvent, ScrollMetrics, SearchField, SegmentedControl, SegmentedOption,
     SegmentedSize, Switch, TextInput, TextInputEscapeBehavior, TextInputEvent,
-    TextInputReturnBehavior, TextInputVariant, ToggleSize, TooltipLayer, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse,
+    TextInputReturnBehavior, TextInputVariant, ToggleSize, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse,
 };
 
 use crate::appearance::{
@@ -103,7 +103,8 @@ fn navigation_chip(
 ) -> SelectionChip {
     SelectionChip::new(
         ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
-        navigation_chip_paint(selected, available, &appearance.colors).raised(appearance),
+        navigation_chip_paint(selected, available, &appearance.colors)
+            .raised_on(appearance, appearance.colors.panel_background),
     )
 }
 
@@ -701,7 +702,7 @@ impl Render for SettingsWindow {
                     .child(self.render_detail(&appearance, window, cx)),
             )
             .child(self.render_footer(&appearance, cx));
-        ModalLayer::new(TooltipLayer::new(content))
+        ModalLayer::new(content)
     }
 }
 
@@ -845,7 +846,10 @@ impl SettingsWindow {
                         .left_0()
                         .w_full()
                         .h(appearance.spacing(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(appearance.colors.border)),
+                        .bg(gpui_color(appearance.materials.edge(
+                            appearance.colors.background,
+                            appearance.colors.border,
+                        ))),
                 )
             })
             .into_any_element()
@@ -1014,7 +1018,7 @@ impl SettingsWindow {
                     )
             })
             .collect::<Vec<_>>();
-        div()
+        let sidebar = div()
             .debug_selector(|| "settings-sidebar".to_owned())
             .flex()
             .flex_col()
@@ -1062,6 +1066,9 @@ impl SettingsWindow {
                             .children(entries),
                     ),
             )
+            .into_any_element();
+        spaceterm_ui::ControlHost::Panel
+            .mount(sidebar)
             .into_any_element()
     }
 
@@ -1260,7 +1267,7 @@ impl SettingsWindow {
             .reset(self.row_reset(row, cx))
             .matched_indices(matched_indices)
             .highlighted(highlighted);
-        if let Some(description) = self.row_description(row) {
+        if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
         rendered.render(appearance, window, cx).into_any_element()
@@ -1652,7 +1659,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1704,7 +1711,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1739,7 +1746,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -1777,7 +1784,7 @@ impl SettingsWindow {
                 );
             });
         })
-        .render(appearance, cx)
+        .render(appearance)
         .into_any_element()
     }
 
@@ -2034,13 +2041,17 @@ impl SettingsWindow {
             .w_full()
             .flex_none()
             .h(appearance.height(FOOTER_HEIGHT, text::BODY))
-            .border_t_1()
-            .border_color(gpui_color(appearance.colors.border))
             .child(
                 div()
                     .flex_none()
                     .h_full()
                     .w(appearance.text_size(SIDEBAR_WIDTH))
+                    .border_t_1()
+                    .border_color(gpui_color(
+                        appearance
+                            .materials
+                            .edge(appearance.colors.panel_background, appearance.colors.border),
+                    ))
                     .bg(gpui_color(appearance.control_colors.panel_background)),
             )
             .child(
@@ -2049,6 +2060,12 @@ impl SettingsWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .border_t_1()
+                    .border_color(gpui_color(
+                        appearance
+                            .materials
+                            .edge(appearance.colors.background, appearance.colors.border),
+                    ))
                     .bg(gpui_color(appearance.surface(
                         crate::appearance::SurfaceRole::Base,
                         appearance.colors.background,
@@ -2272,13 +2289,46 @@ fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
 impl SettingsWindow {
     /// One line of guidance for the rows that warrant it.
     ///
-    /// Microphone access explains its current status, so the guidance follows the system.
-    fn row_description(&self, row: SettingsRowId) -> Option<&'static str> {
+    /// Guidance follows effective appearance and system access without changing retained choices.
+    fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
-            SettingsRowId::Transparency => Some("0 is opaque. 1 is maximum transparency."),
-            SettingsRowId::BackgroundBlur => {
-                Some("Soften the desktop behind transparent backgrounds.")
+            SettingsRowId::Transparency | SettingsRowId::BackgroundBlur => {
+                let zero_transparency =
+                    self.editor.document().preferences.background.transparency == 0.0;
+                let composition = super::appearance_runtime::current(cx).chrome.composition;
+                let accessibility_forced_opaque =
+                    !zero_transparency && composition.floating_materials.is_opaque();
+                let native_unavailable = !zero_transparency
+                    && composition.effective
+                        == crate::appearance::WindowBackgroundAppearance::Opaque
+                    && !composition.floating_materials.is_opaque();
+                Some(match row {
+                    SettingsRowId::Transparency if zero_transparency => {
+                        "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
+                    }
+                    SettingsRowId::Transparency if accessibility_forced_opaque => {
+                        "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
+                    }
+                    SettingsRowId::Transparency if native_unavailable => {
+                        "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
+                    }
+                    SettingsRowId::Transparency => {
+                        "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
+                    }
+                    _ if zero_transparency => {
+                        "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
+                    }
+                    _ if accessibility_forced_opaque => {
+                        "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
+                    }
+                    _ if native_unavailable => {
+                        "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
+                    }
+                    _ => {
+                        "Soften the desktop behind the window and content behind floating surfaces."
+                    }
+                })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::MicrophoneAccess => {
