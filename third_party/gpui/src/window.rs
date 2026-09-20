@@ -2998,22 +2998,6 @@ impl Window {
         }
     }
 
-    /// Paints a backdrop blur into the scene at the current stacking context.
-    ///
-    /// `radius` is the Gaussian sigma in logical pixels, capped at 64 device pixels.
-    /// Non-positive and non-finite values paint no filter. The filter affects only previously
-    /// painted content inside the rounded bounds and the current content mask.
-    ///
-    /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_backdrop_blur(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        corner_radii: Corners<Pixels>,
-        radius: Pixels,
-    ) {
-        self.paint_backdrop_filter(bounds, corner_radii, radius, Rgba::default(), 1.0);
-    }
-
     /// Paints a backdrop filter into the current stacking context.
     ///
     /// A positive `radius` filters spatial detail. `tone` constrains filtered premultiplied RGB
