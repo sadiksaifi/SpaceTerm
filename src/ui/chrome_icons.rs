@@ -25,10 +25,11 @@ pub(crate) enum InteractiveIconRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MarkRole {
     Clear,
+    Reset,
 }
 
 impl MarkRole {
-    const COUNT: usize = 1;
+    const COUNT: usize = 2;
 
     const fn index(self) -> usize {
         self as usize
@@ -113,11 +114,19 @@ impl ChromeIcons {
         let body_size = f32::from(typography.style(TextRole::Body).size);
         let clear_disc = body_size.round();
         let minimum_target = interactive_target_size(InteractiveIconRole::Control, density);
-        let mark_metrics = [ChromeMarkMetrics {
-            disc_diameter: px(clear_disc),
-            glyph_size: px((clear_disc * 0.58).round()),
-            target_size: px(minimum_target.max(clear_disc)),
-        }];
+        let mark_metrics = [
+            ChromeMarkMetrics {
+                disc_diameter: px(clear_disc),
+                glyph_size: px((clear_disc * 0.58).round()),
+                target_size: px(minimum_target.max(clear_disc)),
+            },
+            ChromeMarkMetrics {
+                disc_diameter: px(0.0),
+                // An inline reset annotates the label instead of competing with it.
+                glyph_size: px((body_size - 2.0).round().max(1.0)),
+                target_size: px(minimum_target),
+            },
+        ];
         Self {
             metrics,
             interactive_target_sizes,

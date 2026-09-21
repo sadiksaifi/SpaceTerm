@@ -610,7 +610,7 @@ impl SettingsWindow {
                 row.descriptor().label,
                 appearance
                     .icons
-                    .metrics(crate::ui::chrome_icons::IconRole::Control)
+                    .mark_metrics(crate::ui::chrome_icons::MarkRole::Reset)
                     .glyph_size,
                 true,
                 move |_, cx| {
