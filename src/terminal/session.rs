@@ -765,6 +765,7 @@ enum Command {
     PublishAccessibility,
     SelectionAutoscrollTick,
     PublishPendingScreen,
+    MetadataStatusTick,
     GraphicsAnimationTick,
     GraphicsBudgetAvailable,
     SetPresentable(bool),
@@ -813,6 +814,7 @@ impl fmt::Debug for Command {
             Self::PublishAccessibility => "PublishAccessibility",
             Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
+            Self::MetadataStatusTick => "MetadataStatusTick",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
@@ -1066,7 +1068,15 @@ impl TerminalWorker {
         if self.schedules.must_continue_accessibility() {
             return self.take_accessibility_continuation();
         }
-        if let Some(command) = self.schedules.take_due(Instant::now()) {
+        let now = Instant::now();
+        if self
+            .emulator
+            .metadata_status_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Some(self.note_normal_command(Command::MetadataStatusTick));
+        }
+        if let Some(command) = self.schedules.take_due(now) {
             return Some(self.note_normal_command(command));
         }
         if self.schedules.accessibility_pending() {
@@ -1079,7 +1089,13 @@ impl TerminalWorker {
 
         loop {
             let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
-            let deadline = self.schedules.deadline(synchronized_output_deadline);
+            let deadline = [
+                self.schedules.deadline(synchronized_output_deadline),
+                self.emulator.metadata_status_deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let Some(deadline) = deadline else {
                 let command = self.commands.recv().ok()?;
                 return Some(self.note_normal_command(command));
@@ -1089,6 +1105,13 @@ impl TerminalWorker {
                 Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
+                    if self
+                        .emulator
+                        .metadata_status_deadline()
+                        .is_some_and(|deadline| now >= deadline)
+                    {
+                        return Some(self.note_normal_command(Command::MetadataStatusTick));
+                    }
                     if let Some(command) = self.schedules.take_due(now) {
                         return Some(self.note_normal_command(command));
                     }
@@ -1276,6 +1299,7 @@ impl TerminalWorker {
                 }
             }
             Command::PublishPendingScreen => self.publish_screen(),
+            Command::MetadataStatusTick => self.advance_metadata_status(),
             Command::GraphicsAnimationTick => {
                 self.emulator.synchronized_output_deadline().is_some()
                     || self.request_presentation()
@@ -1785,6 +1809,27 @@ impl TerminalWorker {
         match self.events.try_send(SessionEvent::MetadataChanged(wakeup)) {
             Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
             Err(async_channel::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    fn advance_metadata_status(&mut self) -> bool {
+        let now = Instant::now();
+        if !self.emulator.advance_metadata_status(now) {
+            return true;
+        }
+        self.metadata_state.publish(self.emulator.metadata());
+        self.schedules.note_metadata_changed();
+        if self.schedules.is_presentable() {
+            self.schedules.request_presentation();
+            if self.emulator.synchronized_output_deadline().is_none()
+                && self.schedules.presentation_due(now)
+            {
+                self.publish_screen()
+            } else {
+                true
+            }
+        } else {
+            self.publish_metadata_changed()
         }
     }
 

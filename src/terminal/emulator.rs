@@ -1214,7 +1214,7 @@ impl TerminalEmulator {
                     self.metadata.apply_semantic_prompt(&value, now);
                 }
                 MetadataEvent::Progress { state, value } => {
-                    self.metadata.apply_progress_report(state, value);
+                    self.metadata.apply_progress_report(state, value, now);
                 }
             }
         }
@@ -2596,6 +2596,14 @@ impl TerminalEmulator {
 
     pub(crate) fn mark_metadata_stale(&mut self) {
         self.metadata.mark_stale();
+    }
+
+    pub(crate) fn metadata_status_deadline(&self) -> Option<Instant> {
+        self.metadata.status_deadline()
+    }
+
+    pub(crate) fn advance_metadata_status(&mut self, now: Instant) -> bool {
+        self.metadata.advance_status(now)
     }
 
     pub(crate) fn metadata(&self) -> Arc<TerminalMetadataSnapshot> {

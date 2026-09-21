@@ -10,7 +10,7 @@
 //! operation keeps one shape from start to finish. Determinate work fills a restrained track:
 //! leading to trailing on the bar, clockwise from twelve o'clock on the ring. Indeterminate work
 //! is activity rather than extent: the bar fills end to end and animates its shade along its
-//! length, and the ring becomes a small spinner with no track behind it.
+//! length, while [`FrameSpinner`] advances a compact sequence of monochrome glyphs.
 //!
 //! Both indicators paint in the application's installed colors. A ring may instead inherit the
 //! semantic foreground of the surface it is embedded in, for a slot whose contrast the embedder
@@ -97,7 +97,7 @@ pub enum ProgressSize {
 /// Whether indeterminate activity animates.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProgressMotion {
-    /// Indeterminate activity travels across the bar and rotates around the ring.
+    /// Indeterminate activity travels across the bar and advances through spinner frames.
     #[default]
     Standard,
     /// Indeterminate activity holds one static mark, so nothing on screen moves.
@@ -115,9 +115,8 @@ impl ProgressPaint {
     /// Creates resolved track and indicator paint.
     ///
     /// The track carries the extent still to come: a bar's unfilled remainder and a determinate
-    /// ring's complete circle. The indicator carries determinate fill, the indeterminate bar's
-    /// shades, and the spinner's trail, each as a share of its own opacity. Neither color changes
-    /// with an outcome, because the primitive holds no outcome.
+    /// ring's complete circle. The indicator carries determinate fill and the indeterminate bar's
+    /// shades. Neither color changes with an outcome, because the primitive holds no outcome.
     pub const fn new(track: Rgba, indicator: Rgba) -> Self {
         Self { track, indicator }
     }
@@ -192,7 +191,7 @@ impl ProgressSizes {
     }
 }
 
-/// Application-installed presentation for every [`ProgressBar`] and [`ProgressRing`].
+/// Application-installed presentation for every progress indicator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProgressTheme {
     paint: ProgressPaint,
@@ -238,17 +237,9 @@ const BAR_RESTING_OPACITY: f32 = 0.55;
 /// along the fill rather than sliding across it as a segment.
 const BAR_CREST_LAYERS: [(f32, f32); 3] = [(0.46, 0.18), (0.56, 0.22), (0.3, 0.3)];
 
-/// One complete revolution of the indeterminate spinner.
-const SPINNER_REVOLUTION: Duration = Duration::from_millis(1_000);
-
-/// The spinner trail's share of the circle, measured back from its leading end.
-const SPINNER_TRAIL_SWEEP: f32 = 0.75;
-
-/// The strokes the spinner's trail is built from, each ending at its leading end.
-const SPINNER_TRAIL_STROKES: usize = 6;
-
-/// One trail stroke's opacity, which accumulates toward the leading end.
-const SPINNER_TRAIL_OPACITY: f32 = 0.3;
+/// Monochrome frames from the `Dots9` visual reference credited in packaged notices.
+const SPINNER_FRAMES: [&str; 8] = ["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
+const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
 
 /// An inherited ring's determinate track, as a share of the inherited color's own opacity.
 ///
@@ -354,6 +345,101 @@ impl RenderOnce for ProgressBar {
                 theme,
             ))
     }
+}
+
+/// A small GPUI-native frame spinner for indeterminate activity.
+///
+/// The spinner inherits the surrounding semantic foreground color, holds a fixed square extent,
+/// and advances only while its element remains in the tree. Reduced Motion keeps the first frame
+/// visible without installing an animation.
+#[derive(IntoElement)]
+pub struct FrameSpinner {
+    id: ElementId,
+    name: SharedString,
+    size: ProgressSize,
+    debug_selector: Option<SharedString>,
+}
+
+impl FrameSpinner {
+    /// Creates a spinner for one named operation.
+    pub fn new(id: impl Into<ElementId>, name: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            size: ProgressSize::default(),
+            debug_selector: None,
+        }
+    }
+
+    /// Selects one installed compact or regular geometry.
+    pub fn size(mut self, size: ProgressSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Overrides the stable selector prefix used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+}
+
+impl RenderOnce for FrameSpinner {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = *crate::floating_surface::hosted_progress_theme(cx);
+        let extent = theme.sizes.metrics(self.size).ring_diameter;
+        let selector = self
+            .debug_selector
+            .unwrap_or_else(|| SharedString::from(self.id.to_string()));
+        debug_assert!(
+            !self.name.is_empty(),
+            "a frame spinner needs a name for its owner's visible text"
+        );
+        let root_selector = selector.clone();
+        let root = div()
+            .debug_selector(move || root_selector.to_string())
+            .flex_none()
+            .size(extent);
+        match theme.motion {
+            ProgressMotion::Reduced => {
+                let reduced_selector = selector.clone();
+                root.debug_selector(move || format!("{reduced_selector}-reduced-motion"))
+                    .child(spinner_frame(selector, extent, 0))
+                    .into_any_element()
+            }
+            ProgressMotion::Standard => {
+                let frame_selector = selector.clone();
+                root.with_animation(
+                    ElementId::NamedChild(Box::new(self.id), "frames".into()),
+                    Animation::new(SPINNER_FRAME_INTERVAL * SPINNER_FRAMES.len() as u32).repeat(),
+                    move |spinner, delta| {
+                        spinner.child(spinner_frame(
+                            frame_selector.clone(),
+                            extent,
+                            spinner_frame_index(delta),
+                        ))
+                    },
+                )
+                .into_any_element()
+            }
+        }
+    }
+}
+
+fn spinner_frame(selector: SharedString, extent: Pixels, index: usize) -> gpui::Div {
+    div()
+        .debug_selector(move || format!("{selector}-frame"))
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(extent)
+        .child(SharedString::from(SPINNER_FRAMES[index]))
+}
+
+pub(crate) fn spinner_frame_index(delta: f32) -> usize {
+    ((delta.clamp(0.0, 1.0 - f32::EPSILON) * SPINNER_FRAMES.len() as f32) as usize)
+        .min(SPINNER_FRAMES.len() - 1)
 }
 
 /// Paints what a bar's track contains for one progress state.
@@ -469,14 +555,13 @@ fn shaded(paint: Rgba, opacity: f32) -> Rgba {
     }
 }
 
-/// A circular progress indicator for determinate and indeterminate work.
+/// A circular progress indicator for determinate work.
 ///
 /// The ring keeps the small square extent its installed size supplies and never stretches, so it
 /// sits inside rows and beside text without changing their height. Determinate progress sweeps one
-/// continuous accent arc clockwise from twelve o'clock over a complete neutral circle.
-/// Indeterminate activity is a spinner instead: one tapered trail revolving with no track behind
-/// it, held still with its leading end at twelve o'clock under reduced motion. Prefer the ring for
-/// background work and for rows too constrained for a bar.
+/// continuous accent arc clockwise from twelve o'clock over a complete neutral circle. Prefer the
+/// ring for bounded progress in rows too constrained for a bar, and use [`FrameSpinner`] when the
+/// completion value is unknown.
 ///
 /// The ring paints in the installed progress colors unless the embedding surface claims that
 /// decision with [`ProgressRing::inherited`].
@@ -484,7 +569,7 @@ fn shaded(paint: Rgba, opacity: f32) -> Rgba {
 pub struct ProgressRing {
     id: ElementId,
     name: SharedString,
-    state: ProgressState,
+    progress: DeterminateProgress,
     size: ProgressSize,
     inherited: bool,
     debug_selector: Option<SharedString>,
@@ -498,12 +583,12 @@ impl ProgressRing {
     pub fn new(
         id: impl Into<ElementId>,
         name: impl Into<SharedString>,
-        state: ProgressState,
+        progress: DeterminateProgress,
     ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            state,
+            progress,
             size: ProgressSize::default(),
             inherited: false,
             debug_selector: None,
@@ -562,28 +647,15 @@ impl RenderOnce for ProgressRing {
             .w(metrics.ring_diameter)
             .h(metrics.ring_diameter)
             // Determinate work runs against the complete circle, so the extent still to come stays
-            // visible and only the accent arc changes. Indeterminate activity is a spinner and
-            // carries no circle: a track behind a revolving trail reads as a different control.
-            .when(
-                matches!(self.state, ProgressState::Determinate(_)),
-                |ring| {
-                    ring.child(ring_arc(
-                        metrics.ring_thickness,
-                        paint,
-                        RingRole::Track,
-                        0.0,
-                        1.0,
-                    ))
-                },
-            )
-            .child(ring_figure(
-                &self.id,
-                &selector,
-                self.state,
-                metrics,
+            // visible and only the accent arc changes.
+            .child(ring_arc(
+                metrics.ring_thickness,
                 paint,
-                theme.motion,
+                RingRole::Track,
+                0.0,
+                1.0,
             ))
+            .child(ring_figure(&selector, self.progress, metrics, paint))
     }
 }
 
@@ -631,59 +703,23 @@ impl RingRole {
 
 /// Paints the accent figure a ring shows for one progress state.
 fn ring_figure(
-    id: &ElementId,
     selector: &SharedString,
-    state: ProgressState,
+    progress: DeterminateProgress,
     metrics: ProgressMetrics,
     paint: RingPaint,
-    motion: ProgressMotion,
 ) -> AnyElement {
     let thickness = metrics.ring_thickness;
-    match state {
-        ProgressState::Determinate(progress) => {
-            let indicator_selector = selector.clone();
-            ring_overlay(metrics)
-                .debug_selector(move || format!("{indicator_selector}-indicator"))
-                .child(ring_arc(
-                    thickness,
-                    paint,
-                    RingRole::Indicator,
-                    0.0,
-                    progress.value(),
-                ))
-                .into_any_element()
-        }
-        ProgressState::Indeterminate => {
-            let activity_selector = selector.clone();
-            let activity = ring_overlay(metrics)
-                .debug_selector(move || format!("{activity_selector}-activity"));
-            match motion {
-                ProgressMotion::Reduced => {
-                    let reduced_selector = selector.clone();
-                    activity
-                        .child(
-                            ring_overlay(metrics)
-                                .debug_selector(move || {
-                                    format!("{reduced_selector}-reduced-motion")
-                                })
-                                .child(spinner_trail(thickness, paint, 0.0)),
-                        )
-                        .into_any_element()
-                }
-                ProgressMotion::Standard => activity
-                    .with_animation(
-                        ElementId::NamedChild(Box::new(id.clone()), "activity".into()),
-                        Animation::new(SPINNER_REVOLUTION).repeat(),
-                        move |spinner, delta| {
-                            // The trail keeps its length and its taper and revolves at one steady
-                            // rate, so the spinner never reads as a value climbing to full.
-                            spinner.child(spinner_trail(thickness, paint, delta))
-                        },
-                    )
-                    .into_any_element(),
-            }
-        }
-    }
+    let indicator_selector = selector.clone();
+    ring_overlay(metrics)
+        .debug_selector(move || format!("{indicator_selector}-indicator"))
+        .child(ring_arc(
+            thickness,
+            paint,
+            RingRole::Indicator,
+            0.0,
+            progress.value(),
+        ))
+        .into_any_element()
 }
 
 /// Returns an overlay covering the ring exactly, so an arc shares the track's coordinates.
@@ -722,41 +758,6 @@ fn ring_arc(
     .left_0()
     .w_full()
     .h_full()
-}
-
-/// Draws the spinner's tapered trail with its leading end at one point of the revolution.
-fn spinner_trail(thickness: Pixels, paint: RingPaint, head: f32) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let indicator = paint.resolve(window).indicator;
-            paint_spinner_trail(bounds, thickness, indicator, head, window);
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .w_full()
-    .h_full()
-}
-
-/// Paints the trail as overlapping strokes that all end at its leading end.
-///
-/// Every stroke shares the circle, the width, and that leading end, so their edges align exactly
-/// and their opacity accumulates toward it. The trail fades along its length without a gradient and
-/// without the dots, spokes, or wedges that read as a different control family.
-fn paint_spinner_trail(
-    bounds: Bounds<Pixels>,
-    thickness: Pixels,
-    paint: Rgba,
-    head: f32,
-    window: &mut Window,
-) {
-    let stroke = shaded(paint, SPINNER_TRAIL_OPACITY);
-    for layer in 0..SPINNER_TRAIL_STROKES {
-        let sweep = SPINNER_TRAIL_SWEEP * (1.0 - layer as f32 / SPINNER_TRAIL_STROKES as f32);
-        paint_ring_arc(bounds, thickness, stroke, head - sweep, sweep, window);
-    }
 }
 
 /// Paints one arc as a single stroked path.

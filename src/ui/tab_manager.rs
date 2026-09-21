@@ -4007,12 +4007,12 @@ mod tests {
             ),
             (
                 ProgressMetadata::Error(10),
-                TerminalProgress::Error,
+                TerminalProgress::Error(10),
                 Some(["tab-status-1-error", "pane-status-1-error"]),
             ),
             (
                 ProgressMetadata::Paused(20),
-                TerminalProgress::Paused,
+                TerminalProgress::Paused(20),
                 Some(["tab-status-1-paused", "pane-status-1-paused"]),
             ),
             (ProgressMetadata::None, TerminalProgress::None, None),
@@ -4048,7 +4048,109 @@ mod tests {
                     "remote={remote} {selector} {progress:?}"
                 );
             }
+            if progress == ProgressMetadata::Indeterminate {
+                for selector in [
+                    "tab-status-1-progress-frame",
+                    "pane-status-1-progress-frame",
+                ] {
+                    assert!(
+                        cx.debug_bounds(selector).is_some(),
+                        "remote={remote} {selector}"
+                    );
+                }
+            }
         }
+    }
+
+    #[gpui::test]
+    fn local_running_command_should_delay_status_and_suppress_reported_glyph(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = tab_manager(cx);
+        assert_running_command_status(&manager, &records, false, cx);
+    }
+
+    #[gpui::test]
+    fn remote_running_command_should_delay_status_and_suppress_reported_glyph(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        assert_running_command_status(&manager, &records, true, cx);
+    }
+
+    fn assert_running_command_status(
+        manager: &Entity<TabManager>,
+        records: &TestTerminalSessionRecords,
+        remote: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
+
+        report_metadata(records, 1, 1, |metadata| {
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("✳ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+            metadata.command_activity = false;
+        });
+        cx.run_until_parked();
+        let delayed = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(delayed.glyph, None);
+        assert_eq!(delayed.progress, TerminalProgress::None);
+
+        report_metadata(records, 1, 2, |metadata| {
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("✳ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+            metadata.command_activity = true;
+        });
+        cx.run_until_parked();
+        let running = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(running.glyph, None);
+        assert_eq!(running.progress, TerminalProgress::Indeterminate);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+
+        report_metadata(records, 1, 3, |metadata| {
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("✳ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Finished {
+                    exit_status: Some(0),
+                    duration: std::time::Duration::from_secs(1),
+                },
+            });
+            metadata.command_activity = false;
+        });
+        cx.run_until_parked();
+        let finished = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(
+            finished.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(finished.progress, TerminalProgress::None);
     }
 
     /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.
@@ -4075,7 +4177,7 @@ mod tests {
         });
         assert_eq!(
             (identity.activity.as_ref(), identity.progress),
-            ("agent", TerminalProgress::Error)
+            ("agent", TerminalProgress::Error(0))
         );
         assert!(cx.debug_bounds("tab-item-1-inactive").is_some());
         assert!(cx.debug_bounds("tab-status-1-error").is_some());

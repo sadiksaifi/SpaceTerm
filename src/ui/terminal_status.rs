@@ -1,13 +1,13 @@
 //! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph slot carries the status: reported work takes the reusable progress ring,
-//! as an extent when a percentage is known and as a spinner when it is not, other work states use
+//! here once. The glyph slot carries the status: reported work takes the reusable progress ring
+//! when a percentage is known and the frame spinner when it is not, other work states use
 //! distinct shapes and semantic colors, and attention blinks the mark in the warning color. Each
 //! state is typed from sanitized Terminal Metadata and never from the title text: a loader a
 //! program draws in its own cells or title is not something host chrome can see or restate.
 //!
-//! The ring inherits its color rather than taking the installed progress accent, because the
+//! The progress mark inherits its color rather than taking the installed progress accent, because the
 //! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
 //! and a Pane Caption's surface can be colored by the program running in it.
 
@@ -18,9 +18,7 @@ use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
     Pixels, Rgba, Task, Window, div, px,
 };
-use spaceterm_ui::{
-    DeterminateProgress, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
-};
+use spaceterm_ui::{DeterminateProgress, FrameSpinner, Icon, IconName, ProgressRing, ProgressSize};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 
@@ -231,9 +229,9 @@ pub(crate) enum TerminalProgress {
     /// Work in progress whose completion is unknown.
     Indeterminate,
     /// Work that reported a failure.
-    Error,
+    Error(u8),
     /// Work that reported it is paused.
-    Paused,
+    Paused(u8),
 }
 
 impl TerminalProgress {
@@ -245,11 +243,12 @@ impl TerminalProgress {
             return Self::None;
         }
         match metadata.progress {
+            ProgressMetadata::None if metadata.command_activity => Self::Indeterminate,
             ProgressMetadata::None => Self::None,
             ProgressMetadata::Normal(percent) => Self::Normal(percent.min(100)),
             ProgressMetadata::Indeterminate => Self::Indeterminate,
-            ProgressMetadata::Error(_) => Self::Error,
-            ProgressMetadata::Paused(_) => Self::Paused,
+            ProgressMetadata::Error(percent) => Self::Error(percent.min(100)),
+            ProgressMetadata::Paused(percent) => Self::Paused(percent.min(100)),
         }
     }
 
@@ -259,8 +258,8 @@ impl TerminalProgress {
             Self::None => None,
             Self::Normal(_) => Some("normal"),
             Self::Indeterminate => Some("indeterminate"),
-            Self::Error => Some("error"),
-            Self::Paused => Some("paused"),
+            Self::Error(_) => Some("error"),
+            Self::Paused(_) => Some("paused"),
         }
     }
 }
@@ -326,8 +325,8 @@ impl StatusGlyph {
             size,
             progress,
             colors,
-            // The ring's clock hangs off this Session's own glyph identity, so one spinner never
-            // shares its revolution with another Session's.
+            // The animation hangs off this Session's own glyph identity, so one spinner never
+            // shares its frame state with another Session's.
             id: ElementId::NamedChild(Box::new(id.clone()), "progress".into()),
             selector: format!("{selector_prefix}-progress"),
         };
@@ -406,8 +405,8 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     match progress {
         TerminalProgress::None => (Tint::Inherited, 1.0),
         TerminalProgress::Normal(_) | TerminalProgress::Indeterminate => (Tint::Busy, 1.0),
-        TerminalProgress::Error => (Tint::Error, 1.0),
-        TerminalProgress::Paused => (Tint::Paused, 1.0),
+        TerminalProgress::Error(_) => (Tint::Error, 1.0),
+        TerminalProgress::Paused(_) => (Tint::Paused, 1.0),
     }
 }
 
@@ -422,7 +421,7 @@ struct Mark {
     size: Pixels,
     progress: TerminalProgress,
     colors: StatusColors,
-    /// Keys the progress ring's own animation, so a spinner survives across frames.
+    /// Keys the progress mark's own animation, so a spinner survives across frames.
     id: ElementId,
     /// Names the progress ring's parts as `{selector}-track`, `-indicator`, and `-activity`.
     selector: String,
@@ -443,15 +442,21 @@ impl Mark {
         } = self;
         let (tint, opacity) = treatment(progress, blinked);
         let mark = match (status_shape(progress), reported) {
-            // Reported work says more than any glyph, so the ring takes the slot.
-            (StatusShape::Progress(state), _) => ProgressRing::new(id, PROGRESS_NAME, state)
-                // The ring keeps the compact geometry and centers in the slot rather than
-                // stretching to it, which settles it on the same visual weight as the drawn icons
-                // it shares the slot with.
+            // Reported work says more than any glyph, so progress takes the slot.
+            (StatusShape::Determinate(progress), _) => {
+                ProgressRing::new(id, PROGRESS_NAME, progress)
+                    // The ring keeps the compact geometry and centers in the slot rather than
+                    // stretching to it, which settles it on the same visual weight as the drawn icons
+                    // it shares the slot with.
+                    .size(ProgressSize::Compact)
+                    // The status color below is resolved for this exact Pane Caption or Tab surface,
+                    // which the installed progress accent cannot know, so the ring takes it instead.
+                    .inherited()
+                    .debug_selector(selector)
+                    .into_any_element()
+            }
+            (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
-                // The status color below is resolved for this exact Pane Caption or Tab surface,
-                // which the installed progress accent cannot know, so the ring takes it instead.
-                .inherited()
                 .debug_selector(selector)
                 .into_any_element(),
             (StatusShape::Error, _) => {
@@ -476,8 +481,8 @@ impl Mark {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StatusShape {
     Glyph,
-    /// Reported work, with or without a known completion, drawn by the reusable ring.
-    Progress(ProgressState),
+    Determinate(DeterminateProgress),
+    Spinner,
     Error,
     Paused,
 }
@@ -485,13 +490,13 @@ enum StatusShape {
 fn status_shape(progress: TerminalProgress) -> StatusShape {
     match progress {
         TerminalProgress::None => StatusShape::Glyph,
-        TerminalProgress::Normal(percent) => StatusShape::Progress(ProgressState::Determinate(
+        TerminalProgress::Normal(percent) => StatusShape::Determinate(
             DeterminateProgress::new(progress_sweep(percent))
                 .expect("a reported percentage is a finite share of the ring"),
-        )),
-        TerminalProgress::Indeterminate => StatusShape::Progress(ProgressState::Indeterminate),
-        TerminalProgress::Error => StatusShape::Error,
-        TerminalProgress::Paused => StatusShape::Paused,
+        ),
+        TerminalProgress::Indeterminate => StatusShape::Spinner,
+        TerminalProgress::Error(_) => StatusShape::Error,
+        TerminalProgress::Paused(_) => StatusShape::Paused,
     }
 }
 
@@ -742,8 +747,8 @@ mod tests {
             (TerminalProgress::None, (Tint::Inherited, 1.0)),
             (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
             (TerminalProgress::Indeterminate, (Tint::Busy, 1.0)),
-            (TerminalProgress::Error, (Tint::Error, 1.0)),
-            (TerminalProgress::Paused, (Tint::Paused, 1.0)),
+            (TerminalProgress::Error(30), (Tint::Error, 1.0)),
+            (TerminalProgress::Paused(70), (Tint::Paused, 1.0)),
         ] {
             assert_eq!(treatment(progress, false), resting, "{progress:?}");
             assert_eq!(
@@ -764,8 +769,8 @@ mod tests {
     fn semantic_statuses_keep_distinct_shapes_when_their_colors_coincide() {
         let shapes = [
             status_shape(TerminalProgress::Indeterminate),
-            status_shape(TerminalProgress::Error),
-            status_shape(TerminalProgress::Paused),
+            status_shape(TerminalProgress::Error(30)),
+            status_shape(TerminalProgress::Paused(70)),
         ];
 
         assert!(shapes[0] != shapes[1] && shapes[0] != shapes[2] && shapes[1] != shapes[2]);
@@ -788,15 +793,13 @@ mod tests {
 
     #[test]
     fn normal_and_indeterminate_work_use_the_reusable_progress_states() {
-        let StatusShape::Progress(ProgressState::Determinate(normal)) =
-            status_shape(TerminalProgress::Normal(42))
-        else {
+        let StatusShape::Determinate(normal) = status_shape(TerminalProgress::Normal(42)) else {
             panic!("normal work should use determinate progress");
         };
         assert!((normal.value() - 0.42).abs() < f32::EPSILON);
         assert_eq!(
             status_shape(TerminalProgress::Indeterminate),
-            StatusShape::Progress(ProgressState::Indeterminate)
+            StatusShape::Spinner
         );
     }
 
@@ -809,8 +812,8 @@ mod tests {
                 ProgressMetadata::Indeterminate,
                 TerminalProgress::Indeterminate,
             ),
-            (ProgressMetadata::Error(30), TerminalProgress::Error),
-            (ProgressMetadata::Paused(70), TerminalProgress::Paused),
+            (ProgressMetadata::Error(30), TerminalProgress::Error(30)),
+            (ProgressMetadata::Paused(70), TerminalProgress::Paused(70)),
         ] {
             assert_eq!(
                 TerminalProgress::from_metadata(&metadata(reported, MetadataFreshness::Live), true,),

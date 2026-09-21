@@ -1,9 +1,10 @@
 use gpui::prelude::*;
 use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, px, rgba};
 
+use crate::progress::spinner_frame_index;
 use crate::{
-    DeterminateProgress, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing,
-    ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
+    DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
 };
 
 const BAR_WIDTH: f32 = 240.0;
@@ -23,6 +24,7 @@ fn test_theme(motion: ProgressMotion) -> ProgressTheme {
 enum FixtureKind {
     Bar { right_to_left: bool },
     Ring,
+    Spinner,
 }
 
 struct ProgressFixture {
@@ -41,7 +43,16 @@ impl Render for ProgressFixture {
                     .debug_selector("test-progress")
                     .into_any_element()
             }
-            FixtureKind::Ring => ProgressRing::new("test-progress", "Copying files", self.state)
+            FixtureKind::Ring => {
+                let ProgressState::Determinate(progress) = self.state else {
+                    panic!("ring fixtures require determinate progress")
+                };
+                ProgressRing::new("test-progress", "Copying files", progress)
+                    .size(self.size)
+                    .debug_selector("test-progress")
+                    .into_any_element()
+            }
+            FixtureKind::Spinner => FrameSpinner::new("test-progress", "Copying files")
                 .size(self.size)
                 .debug_selector("test-progress")
                 .into_any_element(),
@@ -185,6 +196,42 @@ fn named_sizes_select_their_installed_geometry(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn frame_spinner_named_sizes_are_stable_across_frames(cx: &mut TestAppContext) {
+    let compact = fixture_window(
+        cx,
+        FixtureKind::Spinner,
+        ProgressState::Indeterminate,
+        ProgressSize::Compact,
+        ProgressMotion::Standard,
+    )
+    .debug_bounds("test-progress")
+    .expect("compact frame spinner should render")
+    .size;
+    let regular = fixture_window(
+        cx,
+        FixtureKind::Spinner,
+        ProgressState::Indeterminate,
+        ProgressSize::Regular,
+        ProgressMotion::Standard,
+    )
+    .debug_bounds("test-progress")
+    .expect("regular frame spinner should render")
+    .size;
+
+    assert_eq!(compact, gpui::size(px(20.0), px(20.0)));
+    assert_eq!(regular, gpui::size(px(32.0), px(32.0)));
+}
+
+#[test]
+fn frame_spinner_advances_and_wraps_at_bounded_intervals() {
+    assert_eq!(spinner_frame_index(0.0), 0);
+    assert_eq!(spinner_frame_index(0.124), 0);
+    assert_eq!(spinner_frame_index(0.125), 1);
+    assert_eq!(spinner_frame_index(0.999), 7);
+    assert_eq!(spinner_frame_index(1.0), 7);
+}
+
+#[gpui::test]
 fn indeterminate_bar_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
     let cx = fixture_window(
         cx,
@@ -217,29 +264,29 @@ fn standard_indeterminate_bar_uses_the_animated_activity_structure(cx: &mut Test
 }
 
 #[gpui::test]
-fn indeterminate_ring_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
+fn frame_spinner_keeps_a_static_frame_with_reduced_motion(cx: &mut TestAppContext) {
     let cx = fixture_window(
         cx,
-        FixtureKind::Ring,
+        FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Regular,
         ProgressMotion::Reduced,
     );
 
-    assert!(cx.debug_bounds("test-progress-activity").is_some());
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
+    assert!(cx.debug_bounds("test-progress-frame").is_some());
 }
 
 #[gpui::test]
-fn standard_indeterminate_ring_uses_the_animated_activity_structure(cx: &mut TestAppContext) {
+fn standard_frame_spinner_uses_the_animated_frame_structure(cx: &mut TestAppContext) {
     let cx = fixture_window(
         cx,
-        FixtureKind::Ring,
+        FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Regular,
         ProgressMotion::Standard,
     );
 
-    assert!(cx.debug_bounds("test-progress-activity").is_some());
+    assert!(cx.debug_bounds("test-progress-frame").is_some());
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
 }
