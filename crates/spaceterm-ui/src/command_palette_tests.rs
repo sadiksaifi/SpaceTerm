@@ -48,15 +48,15 @@ fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
     let paint = test_theme().paint;
 
     assert_eq!(
-        paint.row_paint(false, false, false).foreground,
+        paint.row_paint(false, false, false, true).foreground,
         paint.foreground
     );
     assert_eq!(
-        paint.row_paint(false, true, false).foreground,
+        paint.row_paint(false, true, false, true).foreground,
         paint.selected_foreground
     );
     assert_eq!(
-        paint.row_paint(true, true, false).foreground,
+        paint.row_paint(true, true, false, true).foreground,
         paint.disabled
     );
 }
@@ -76,7 +76,7 @@ fn selected_hovered_row_should_preserve_the_complete_combined_paint() {
         row(0x808080ff),
     ));
 
-    assert_eq!(paint.row_paint(false, true, true), selected_hovered);
+    assert_eq!(paint.row_paint(false, true, true, true), selected_hovered);
 }
 
 fn items() -> Vec<CommandPaletteItem<u8>> {

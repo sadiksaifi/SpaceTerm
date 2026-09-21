@@ -2942,6 +2942,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         .font(typography.regular().clone())
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
+    let collection_focused = state.read(cx).focus_handle.contains_focused(window, cx);
     for (depth, bounds, entries, highlighted, scroll) in panels {
         overlay = overlay.child(render_panel(
             state.downgrade(),
@@ -2956,6 +2957,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             scroll,
             &typography,
             icon_offset,
+            collection_focused,
         ));
     }
 
@@ -3054,6 +3056,7 @@ fn render_panel(
     scroll: ScrollHandle,
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
+    collection_focused: bool,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -3139,6 +3142,7 @@ fn render_panel(
                     style,
                     typography,
                     icon_offset,
+                    collection_focused,
                 ));
             }
             InternalEntryKind::Submenu {
@@ -3168,6 +3172,7 @@ fn render_panel(
                     style,
                     typography,
                     icon_offset,
+                    collection_focused,
                 ));
             }
         }
@@ -3197,13 +3202,14 @@ fn render_row(
     style: MenuStyle,
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
+    collection_focused: bool,
 ) -> AnyElement {
     let rows = if destructive {
         style.paint.destructive_rows
     } else {
         style.paint.rows
     };
-    let row_paint = resolve_row_paint(rows, !disabled, highlighted, hovered);
+    let row_paint = resolve_row_paint(rows, !disabled, highlighted, hovered, collection_focused);
     let foreground = if hovered && !disabled && !destructive {
         style.paint.hover_foreground
     } else {
@@ -3379,8 +3385,9 @@ fn resolve_row_paint(
     enabled: bool,
     selected: bool,
     hovered: bool,
+    collection_focused: bool,
 ) -> Option<crate::ListRowPaint> {
-    rows.map(|rows| rows.resolve(enabled, selected, hovered))
+    rows.map(|rows| rows.resolve_for_collection(enabled, selected, hovered, collection_focused))
 }
 
 fn mark_icon(mark: EntryMark) -> Option<IconName> {
@@ -3634,7 +3641,7 @@ mod tests {
         let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
 
         assert_eq!(
-            resolve_row_paint(Some(rows), true, true, true),
+            resolve_row_paint(Some(rows), true, true, true, true),
             Some(selected_hovered)
         );
     }

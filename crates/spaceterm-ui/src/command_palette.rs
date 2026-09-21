@@ -963,9 +963,15 @@ impl CommandPalettePaint {
     /// Keyboard selection and pointer hover are independent facts about one row. Pointer hover in
     /// this control also moves the selection, so the row under the pointer is normally both, and
     /// the combined state is the one a reader actually sees.
-    pub fn row_paint(self, disabled: bool, selected: bool, hovered: bool) -> crate::ListRowPaint {
+    pub fn row_paint(
+        self,
+        disabled: bool,
+        selected: bool,
+        hovered: bool,
+        collection_focused: bool,
+    ) -> crate::ListRowPaint {
         if let Some(rows) = self.rows {
-            return rows.resolve(!disabled, selected, hovered);
+            return rows.resolve_for_collection(!disabled, selected, hovered, collection_focused);
         }
         let foreground = if disabled {
             self.disabled
@@ -2776,6 +2782,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             return div().into_any_element();
         }
         let theme = command_palette_theme(cx);
+        let collection_focused = self.focus_scope.contains_focused(window, cx);
         let metrics = theme.metrics;
         let typography = crate::control_typography(cx);
         let font = typography.regular().clone();
@@ -2875,6 +2882,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             },
             theme,
             typography,
+            collection_focused,
             cx,
         );
         let overlay = div()
@@ -3019,6 +3027,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         layout: CommandPalettePanelLayout,
         theme: CommandPaletteTheme,
         typography: crate::ControlTypography,
+        collection_focused: bool,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let CommandPalettePanelLayout {
@@ -3040,7 +3049,14 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             )
             .into_any_element()
         } else {
-            self.render_results(list_height, theme, typography, icon_offset, cx)
+            self.render_results(
+                list_height,
+                theme,
+                typography,
+                icon_offset,
+                collection_focused,
+                cx,
+            )
         };
 
         let panel = div()
@@ -3115,6 +3131,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         theme: CommandPaletteTheme,
         typography: crate::ControlTypography,
         icon_offset: Pixels,
+        collection_focused: bool,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let items = Rc::clone(&self.presented_items);
@@ -3165,6 +3182,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                             selected.as_ref() == Some(&item.id),
                                         ),
                                         icon_offset,
+                                        collection_focused,
                                     )
                                 })
                             })
@@ -3463,10 +3481,11 @@ fn render_row<I: Clone + Eq + 'static>(
     theme: CommandPaletteTheme,
     label_font: gpui::Font,
     icon_offset: Pixels,
+    collection_focused: bool,
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
-    let row_paint = paint.row_paint(item.disabled, selected, hovered);
+    let row_paint = paint.row_paint(item.disabled, selected, hovered, collection_focused);
     let foreground = row_paint.foreground;
     let secondary = row_paint.secondary;
     let match_foreground = row_paint.matched;

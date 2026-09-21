@@ -12,18 +12,19 @@ fn row_chip(
     selected: bool,
     appearance: &crate::ui::appearance::ChromeAppearance,
     colors: &crate::appearance::ChromeColors,
+    selection_colors: &crate::appearance::ChromeColors,
     cx: &App,
 ) -> SelectionChip {
     let paint = if selected {
         ChipPaint {
-            fill: Some(colors.row_selected_background),
-            rim: Some(colors.row_selected_border),
+            fill: Some(selection_colors.row_selected_background),
+            rim: Some(selection_colors.row_selected_border),
             hover_fill: appearance
                 .active
-                .then_some(colors.row_selected_hover_background),
+                .then_some(selection_colors.row_selected_hover_background),
             hover_rim: appearance
                 .active
-                .then_some(colors.row_selected_hover_border),
+                .then_some(selection_colors.row_selected_hover_border),
         }
     } else {
         ChipPaint {
@@ -137,14 +138,24 @@ impl WorkspaceSidebar {
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected roles are promoted
         // below, because that promotion is what the row's text and icons consume.
-        let chip = row_chip(active, appearance, &row_colors, cx);
+        let selection_colors = if appearance.active && !self.focus.is_focused(window) {
+            appearance
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+                .clone()
+        } else {
+            row_colors.clone()
+        };
+        let chip = row_chip(active, appearance, &row_colors, &selection_colors, cx);
         if active {
-            row_colors.row_foreground = row_colors.row_selected_foreground;
-            row_colors.row_secondary = row_colors.row_selected_secondary;
-            row_colors.row_icon = row_colors.row_selected_icon;
-            row_colors.row_hover_foreground = row_colors.row_selected_hover_foreground;
-            row_colors.row_hover_secondary = row_colors.row_selected_hover_secondary;
-            row_colors.row_hover_icon = row_colors.row_selected_hover_icon;
+            row_colors.row_selected_background = selection_colors.row_selected_background;
+            row_colors.row_selected_hover_background =
+                selection_colors.row_selected_hover_background;
+            row_colors.row_foreground = selection_colors.row_selected_foreground;
+            row_colors.row_secondary = selection_colors.row_selected_secondary;
+            row_colors.row_icon = selection_colors.row_selected_icon;
+            row_colors.row_hover_foreground = selection_colors.row_selected_hover_foreground;
+            row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
+            row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
         }
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
@@ -356,18 +367,9 @@ impl WorkspaceSidebar {
                         row_text_appearance,
                     )),
             )
-            // Rows rest on the continuous base surface without separators; the hover and selection
-            // chips alone give each Workspace its shape.
-            // Keyboard focus rides just outside the chip it belongs to, with a hairline of the
-            // sidebar surface between the two. A ring drawn on the row's own edges would box the
-            // whole strip and say nothing about which shape the keyboard is pointing at.
-            .when(active && self.focus.is_focused(window), |row| {
-                row.child(chip.ring(
-                    appearance.spacing(SIDEBAR_ROW_SELECTION_RING_GAP),
-                    row_colors.sidebar_focus,
-                    "workspace-sidebar-focus-indicator",
-                ))
-            });
+            // Rows rest on the continuous base surface without separators. The hover and selection
+            // chips alone give each Workspace its shape; collection focus never adds a row ring.
+            ;
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
             .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))

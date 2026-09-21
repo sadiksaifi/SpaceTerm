@@ -6104,14 +6104,21 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         (1, true)
     );
 
-    let sidebar = cx
-        .debug_bounds("workspace-sidebar")
-        .expect("the Workspace sidebar should render");
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the New Workspace ComboBox panel should render");
-    let space = frame_space(cx);
-    assert_eq!(panel.size.width, sidebar.size.width - space - space);
+    let workspace = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace root should render");
+    assert!(panel.left() >= workspace.left() && panel.right() <= workspace.right());
+    assert!(panel.size.width >= px(240.0) && panel.size.width <= px(420.0));
+    let remote_label = cx
+        .debug_bounds("combo-box-row-2-label")
+        .expect("the Remote Workspace label should render");
+    let remote_shortcut = cx
+        .debug_bounds("combo-box-row-2-shortcut")
+        .expect("the Remote Workspace shortcut should render");
+    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
     let chooser = cx
         .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
@@ -8118,9 +8125,27 @@ fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_quer
         let matched = cx.debug_bounds("workspace-switcher-result-1").unwrap();
         let local = cx.debug_bounds("workspace-switcher-create-local").unwrap();
         let remote = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
-        assert!(matched.bottom() <= local.top());
+        let separator = cx
+            .debug_bounds("workspace-switcher-create-local-group-separator")
+            .expect("the creation group must be separated from matching Workspaces");
+        assert!(matched.bottom() <= separator.top());
+        assert!(separator.bottom() <= local.top());
         assert!(local.bottom() <= remote.top());
     }
+}
+
+#[gpui::test]
+fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut TestAppContext) {
+    let (_manager, _, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+
+    let panel = cx.debug_bounds("combo-box-panel").unwrap();
+    let remote_label = cx.debug_bounds("combo-box-row-2-label").unwrap();
+    let remote_shortcut = cx.debug_bounds("combo-box-row-2-shortcut").unwrap();
+
+    assert!(panel.size.width > px(240.0));
+    assert!(panel.size.width <= px(420.0));
+    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
 }
 
 #[gpui::test]
@@ -8682,7 +8707,8 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
     assert!(first.top() >= list.top());
     assert!(
         cx.debug_bounds("workspace-sidebar-focus-indicator")
-            .is_some()
+            .is_none(),
+        "collection rows must not paint a focus ring"
     );
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
@@ -8866,7 +8892,8 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
     );
     assert!(
         cx.debug_bounds("workspace-sidebar-focus-indicator")
-            .is_some()
+            .is_none(),
+        "restored collection focus must not add a row focus ring"
     );
     cx.simulate_keystrokes("shift-f10");
     cx.run_until_parked();

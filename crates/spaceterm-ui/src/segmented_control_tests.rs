@@ -18,6 +18,55 @@ fn density_scales_segment_bounds_but_not_radius() {
     assert_eq!(comfortable.radius, original.radius);
 }
 
+#[test]
+fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
+    let shadow = ControlShadow::single(crate::ControlShadowLayer::new(
+        rgba(0x11111159).into(),
+        px(0.0),
+        px(1.0),
+        px(2.0),
+        px(-1.0),
+    ));
+    let track_border = rgba(0x00000026);
+    let selected_border = rgba(0x00000026);
+    let bottom_edge = rgba(0x0000002e);
+    let theme = test_theme().track_elevation(
+        shadow,
+        Some(track_border),
+        bottom_edge,
+        Some(selected_border),
+    );
+    let style = theme.resolve(SegmentedSize::Regular);
+
+    assert_eq!(style.track_shadow, shadow);
+    assert_eq!(style.track_bottom_edge, bottom_edge);
+    assert_eq!(style.track_border, track_border);
+    assert_eq!(style.selected_shadow, ControlShadow::none());
+    for paints in [
+        theme.paints.normal,
+        theme.paints.hovered,
+        theme.paints.pressed,
+        theme.paints.disabled,
+    ] {
+        assert_eq!(paints.selected.border, selected_border);
+        assert_eq!(paints.unselected.border, rgba(0x00000000));
+    }
+}
+
+#[test]
+fn every_selected_option_uses_emphasis_without_changing_unselected_labels() {
+    let typography = crate::ControlTypography::default();
+
+    assert_eq!(
+        option_label_font(&typography, false),
+        typography.regular().clone()
+    );
+    assert_eq!(
+        option_label_font(&typography, true),
+        typography.emphasis().clone()
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Light,

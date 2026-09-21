@@ -54,6 +54,8 @@ pub struct ListRowPaints {
     selected_hovered: ListRowPaint,
     disabled: ListRowPaint,
     disabled_selected: ListRowPaint,
+    unfocused_selected: Option<ListRowPaint>,
+    unfocused_selected_hovered: Option<ListRowPaint>,
 }
 impl ListRowPaints {
     /// Creates all independently authored list row states.
@@ -71,6 +73,8 @@ impl ListRowPaints {
             selected_hovered,
             disabled,
             disabled_selected: disabled,
+            unfocused_selected: None,
+            unfocused_selected_hovered: None,
         }
     }
 
@@ -80,6 +84,13 @@ impl ListRowPaints {
     /// compatibility with catalogs that predate this state.
     pub fn disabled_selected(mut self, paint: ListRowPaint) -> Self {
         self.disabled_selected = paint;
+        self
+    }
+
+    /// Installs the prepared selected paints used while the collection lacks keyboard focus.
+    pub fn unfocused_selection(mut self, prepared: Self) -> Self {
+        self.unfocused_selected = Some(prepared.selected);
+        self.unfocused_selected_hovered = Some(prepared.selected_hovered);
         self
     }
 
@@ -98,6 +109,26 @@ impl ListRowPaints {
                 (false, true) => self.hovered,
                 (false, false) => self.normal,
             }
+        }
+    }
+
+    /// Resolves selection with the collection's independent keyboard-focus state.
+    pub fn resolve_for_collection(
+        self,
+        enabled: bool,
+        selected: bool,
+        hovered: bool,
+        focused: bool,
+    ) -> ListRowPaint {
+        if enabled && selected && !focused {
+            if hovered {
+                self.unfocused_selected_hovered
+                    .unwrap_or(self.selected_hovered)
+            } else {
+                self.unfocused_selected.unwrap_or(self.selected)
+            }
+        } else {
+            self.resolve(enabled, selected, hovered)
         }
     }
 }
@@ -149,5 +180,44 @@ mod tests {
         let paints = ListRowPaints::new(row(10), row(20), row(30), row(40), disabled);
 
         assert_eq!(paints.resolve(false, true, true), disabled);
+    }
+
+    #[test]
+    fn unfocused_selection_uses_only_the_prepared_selected_states() {
+        let row = |seed| {
+            let [bg, fg, secondary, icon, matched, border] =
+                [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5].map(gpui::rgba);
+            ListRowPaint::new(bg, fg, secondary, icon, matched, border)
+        };
+        let active = ListRowPaints::new(row(10), row(20), row(30), row(40), row(50))
+            .disabled_selected(row(60));
+        let prepared = ListRowPaints::new(row(110), row(120), row(130), row(140), row(150))
+            .disabled_selected(row(160));
+        let paints = active.unfocused_selection(prepared);
+
+        assert_eq!(
+            paints.resolve_for_collection(true, false, false, false),
+            row(10)
+        );
+        assert_eq!(
+            paints.resolve_for_collection(true, false, true, false),
+            row(20)
+        );
+        assert_eq!(
+            paints.resolve_for_collection(false, true, true, false),
+            row(60)
+        );
+        assert_eq!(
+            paints.resolve_for_collection(true, true, false, false),
+            row(130)
+        );
+        assert_eq!(
+            paints.resolve_for_collection(true, true, true, false),
+            row(140)
+        );
+        assert_eq!(
+            paints.resolve_for_collection(true, true, false, true),
+            row(30)
+        );
     }
 }

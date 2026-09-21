@@ -54,14 +54,13 @@ pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 /// The row's own padding is this padding plus the chip inset on that side, so the content stays
 /// balanced inside the chip even though the chip's two insets differ.
 pub(super) const SIDEBAR_ROW_CHIP_PADDING: f32 = 6.0;
-/// The vertical inset and focus-ring gap of the chip that carries a row's selection.
+/// The vertical inset of the chip that carries a row's selection.
 ///
 /// The horizontal insets come from the Workspace frame, which knows what the chip rests against on
 /// each side: the window edge on the leading side and the floating content stage on the trailing
 /// one. The radius comes from the same frame, so a selected Workspace, an Active Tab, and a
 /// floating Pane are one family of shapes.
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
-pub(super) const SIDEBAR_ROW_SELECTION_RING_GAP: f32 = 2.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 pub(super) const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;

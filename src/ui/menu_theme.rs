@@ -22,6 +22,7 @@ pub(super) fn themed_with_rows(
         reference,
         colors,
         row_colors,
+        None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
         super::control_theme_catalog::OverlayRowPolicy::default(),
@@ -32,10 +33,23 @@ pub(super) fn prepared_with_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
     row_colors: &ChromeColors,
+    unfocused_row_colors: Option<&ChromeColors>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
     row_policy: super::control_theme_catalog::OverlayRowPolicy,
 ) -> MenuTheme {
+    let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+        reference, row_colors, row_policy,
+    );
+    let rows = unfocused_row_colors.map_or(rows, |unfocused| {
+        rows.unfocused_selection(super::control_theme_catalog::overlay_list_rows_with_policy(
+            unfocused, unfocused, row_policy,
+        ))
+    });
+    let destructive = destructive_rows(reference, row_colors, row_policy);
+    let destructive = unfocused_row_colors.map_or(destructive, |unfocused| {
+        destructive.unfocused_selection(destructive_rows(unfocused, unfocused, row_policy))
+    });
     let paint = MenuPaint::new(
         gpui_color(colors.text),
         gpui_color(colors.icon),
@@ -44,10 +58,8 @@ pub(super) fn prepared_with_rows(
         gpui_color(colors.ghost_element_selected_foreground),
         gpui_color(colors.error),
     )
-    .rows(super::control_theme_catalog::overlay_list_rows_with_policy(
-        reference, row_colors, row_policy,
-    ))
-    .destructive_rows(destructive_rows(reference, row_colors, row_policy))
+    .rows(rows)
+    .destructive_rows(destructive)
     .hover_background(gpui_color(colors.ghost_element_hover))
     .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(

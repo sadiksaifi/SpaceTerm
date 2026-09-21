@@ -14,7 +14,9 @@ use spaceterm_ui::{
     Switch, TextInput,
 };
 
-use super::super::appearance::{ChromeAppearance, FloatingControlFamily};
+use super::super::appearance::{
+    ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily,
+};
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
 use super::super::chrome_geometry::RadiusRole;
 use super::super::chrome_icons::IconRole;
@@ -97,7 +99,75 @@ fn floating_fallback_family_label(family: FloatingControlFamily) -> &'static str
     }
 }
 
-fn floating_fallback_diagnostic_text(appearance: &ChromeAppearance) -> Option<String> {
+fn control_diagnostic_lines(appearance: &ChromeAppearance) -> Vec<(String, bool)> {
+    let mut lines = Vec::new();
+    let contrast = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::ContrastFloor { family } => Some(family),
+            DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !contrast.is_empty() {
+        lines.push((format!("Disabled contrast floor unmet: {contrast}"), true));
+    }
+    let separation = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::Separation { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !separation.is_empty() {
+        lines.push((
+            format!("Disabled separation target unmet: {separation}"),
+            false,
+        ));
+    }
+    let shared = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::SharedPaint { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !shared.is_empty() {
+        lines.push((format!("Disabled shared paint unmet: {shared}"), false));
+    }
+    let selected_step = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::SelectedStep { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !selected_step.is_empty() {
+        lines.push((
+            format!("Disabled selected step unmet: {selected_step}"),
+            false,
+        ));
+    }
+
     let hosts = [
         ("Window", &appearance.window_control_fallbacks),
         ("TitleBar", &appearance.title_bar_controls.fallback_families),
@@ -117,17 +187,51 @@ fn floating_fallback_diagnostic_text(appearance: &ChromeAppearance) -> Option<St
         format!("{host}: {families}")
     })
     .collect::<Vec<_>>();
-    (!hosts.is_empty())
-        .then(|| format!("Control constraint fallback families: {}", hosts.join("; ")))
+    if !hosts.is_empty() {
+        lines.push((
+            format!("Control constraint fallback families: {}", hosts.join("; ")),
+            false,
+        ));
+    }
+    lines
+}
+
+#[cfg(test)]
+fn floating_fallback_diagnostic_text(appearance: &ChromeAppearance) -> Option<String> {
+    let lines = control_diagnostic_lines(appearance);
+    (!lines.is_empty()).then(|| {
+        lines
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
 }
 
 fn floating_fallback_diagnostic(appearance: &ChromeAppearance) -> Option<gpui::Div> {
-    floating_fallback_diagnostic_text(appearance).map(|message| {
-        div()
-            .debug_selector(|| "gallery-floating-fallback-diagnostic".to_owned())
-            .chrome_text(appearance.typography.style(TextRole::Secondary))
-            .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
-            .child(message)
+    let lines = control_diagnostic_lines(appearance);
+    (!lines.is_empty()).then(|| {
+        lines.into_iter().fold(
+            div()
+                .debug_selector(|| "gallery-floating-fallback-diagnostic".to_owned())
+                .flex()
+                .flex_col(),
+            |diagnostic, (message, severe)| {
+                diagnostic.child(
+                    div()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(rgba(
+                            if severe {
+                                appearance.colors.error
+                            } else {
+                                appearance.colors.text_muted
+                            }
+                            .rgba_hex(),
+                        ))
+                        .child(message),
+                )
+            },
+        )
     })
 }
 
@@ -718,10 +822,12 @@ impl Gallery {
                         Some(1_u8),
                         "Choose",
                         vec![
-                            ComboBoxItem::new(1, "Selected row")
-                                .description("Selected secondary text"),
-                            ComboBoxItem::new(2, "Another row")
-                                .description("Hovered secondary text"),
+                            ComboBoxItem::new(1, "Preview: disabled selected row")
+                                .description("Visual-state preview; unavailable to navigation")
+                                .disabled(true)
+                                .preview_selected(true),
+                            ComboBoxItem::new(2, "Enabled navigation target")
+                                .description("Keyboard and pointer acceptance remain live"),
                         ],
                     )
                     .on_accept(|_, _, _| {}),
@@ -790,6 +896,34 @@ mod tests {
             floating_fallback_diagnostic_text(&appearance).as_deref(),
             Some(
                 "Control constraint fallback families: Window: Segmented; TitleBar: GhostElement; Panel: Input; Card: Segmented; Floating: Element, GhostElement, Toggle"
+            )
+        );
+    }
+
+    #[test]
+    fn disabled_diagnostics_distinguish_readability_from_separation() {
+        let appearance = ChromeAppearance {
+            disabled_diagnostics: vec![
+                DisabledControlDiagnostic::ContrastFloor {
+                    family: FloatingControlFamily::Element,
+                },
+                DisabledControlDiagnostic::Separation {
+                    family: FloatingControlFamily::Toggle,
+                },
+                DisabledControlDiagnostic::SharedPaint {
+                    family: FloatingControlFamily::Input,
+                },
+                DisabledControlDiagnostic::SelectedStep {
+                    family: FloatingControlFamily::Segmented,
+                },
+            ],
+            ..ChromeAppearance::default()
+        };
+
+        assert_eq!(
+            floating_fallback_diagnostic_text(&appearance).as_deref(),
+            Some(
+                "Disabled contrast floor unmet: Element; Disabled separation target unmet: Toggle; Disabled shared paint unmet: Input; Disabled selected step unmet: Segmented"
             )
         );
     }
@@ -907,6 +1041,91 @@ mod tests {
             });
         }
         assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+    }
+
+    #[gpui::test]
+    fn authored_fixture_floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+            super::super::tests::ReadOnlyExerciserStorage,
+        ));
+        let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+        platform.set_system_appearance(Some(Appearance::Dark));
+        platform.set_native_window_transparency_supported(true);
+        cx.update(|cx| {
+            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            crate::ui::init(cx).unwrap();
+        });
+        let (gallery, cx) = cx.add_window_view(Gallery::new);
+
+        for fixture in FIXTURES {
+            gallery.update(cx, |gallery, cx| gallery.select(fixture, cx));
+            for transparency in [0.0, 0.35, 1.0] {
+                gallery.update(cx, |gallery, cx| {
+                    let token = gallery.preview.as_ref().unwrap();
+                    let mut candidate = (*settings.snapshot().candidate).clone();
+                    candidate.preferences.background.transparency = transparency;
+                    settings.update_preview(token, candidate).unwrap();
+                    cx.notify();
+                });
+                cx.run_until_parked();
+
+                for activity in [
+                    spaceterm_ui::ControlWindowActivity::Active,
+                    spaceterm_ui::ControlWindowActivity::Inactive,
+                ] {
+                    let prepared = cx.update(|_, cx| {
+                        activity.with_scope(|| super::super::super::appearance::shared_chrome(cx))
+                    });
+                    for role in [
+                        spaceterm_ui::FloatingRole::Popover,
+                        spaceterm_ui::FloatingRole::Command,
+                        spaceterm_ui::FloatingRole::Modal,
+                        spaceterm_ui::FloatingRole::Tooltip,
+                        spaceterm_ui::FloatingRole::Notice,
+                        spaceterm_ui::FloatingRole::Readout,
+                    ] {
+                        let shell = prepared.floating_surfaces().shell(role);
+                        let tone = crate::appearance::Color::rgba(u32::from(shell.backdrop_tone()));
+                        let wash = crate::appearance::Color::rgba(u32::from(shell.material()));
+                        for endpoint in [
+                            crate::appearance::Color::rgb(0x000000),
+                            crate::appearance::Color::rgb(0xffffff),
+                        ] {
+                            let composite = wash.source_over(tone.source_over(endpoint));
+                            let lightness = cie_lightness(composite);
+                            match fixture.appearance() {
+                                Appearance::Light => assert!(
+                                    lightness >= 50.0,
+                                    "{fixture:?} {transparency} {activity:?} {role:?} crossed below L* 50 over {endpoint:?}: {lightness:.2}"
+                                ),
+                                Appearance::Dark => assert!(
+                                    lightness < 50.0,
+                                    "{fixture:?} {transparency} {activity:?} {role:?} crossed above L* 50 over {endpoint:?}: {lightness:.2}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn cie_lightness(color: crate::appearance::Color) -> f64 {
+        let linear = |channel: u8| {
+            let channel = f64::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance =
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b);
+        if luminance <= 216.0 / 24_389.0 {
+            luminance * 24_389.0 / 27.0
+        } else {
+            116.0 * luminance.cbrt() - 16.0
+        }
     }
 
     #[gpui::test]

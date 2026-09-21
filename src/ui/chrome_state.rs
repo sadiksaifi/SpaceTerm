@@ -24,6 +24,7 @@ impl ChromeStatePolicy {
 
     pub(crate) fn colors(self, source: &ChromeColors, host: Color) -> ChromeColors {
         let mut colors = source.clone();
+        neutral_disabled_fills(&mut colors);
         if !self.active {
             inactive(&mut colors, host);
         }
@@ -48,8 +49,8 @@ impl ChromeStatePolicy {
 
 /// Resolves disabled content against the surface it actually paints on.
 ///
-/// Disabled fills stay authored and remain identical across window activity. Only their content is
-/// moved when the authored paint falls below the disabled readability floor.
+/// Disabled fills use the ordinary disabled seed across intents and window activity. Content is
+/// moved when its authored paint falls below the disabled readability floor.
 fn disabled_content(c: &mut ChromeColors, host: Color, minimum: f64) {
     macro_rules! on_host {
         ($($role:ident),+ $(,)?) => { $(
@@ -75,6 +76,17 @@ fn disabled_content(c: &mut ChromeColors, host: Color, minimum: f64) {
         toggle_on_disabled_background => [toggle_on_disabled_mark]
     );
     on_host!(toggle_off_disabled_label, toggle_on_disabled_label);
+}
+
+fn neutral_disabled_fills(c: &mut ChromeColors) {
+    c.primary_disabled_background = c.element_disabled;
+    c.destructive_disabled_background = c.element_disabled;
+    c.toggle_on_disabled_background = c.element_disabled;
+    c.selection_disabled_background = c.element_disabled;
+    c.primary_disabled_border = c.element_disabled_border;
+    c.destructive_disabled_border = c.element_disabled_border;
+    c.toggle_on_disabled_border = c.element_disabled_border;
+    c.selection_disabled_border = c.element_disabled_border;
 }
 
 fn suppress_hover(c: &mut ChromeColors) {
@@ -234,13 +246,40 @@ fn inactive(c: &mut ChromeColors, host: Color) {
     c.primary_border = c.element_border;
     c.primary_hover_border = c.element_border;
     c.primary_pressed_border = c.element_border;
-    let checked = host.mix(c.text, 0.45);
+    c.destructive_background = c.primary_background;
+    c.destructive_hover_background = c.primary_hover_background;
+    c.destructive_pressed_background = c.primary_pressed_background;
+    c.destructive_foreground = c.primary_foreground;
+    c.destructive_hover_foreground = c.primary_hover_foreground;
+    c.destructive_pressed_foreground = c.primary_pressed_foreground;
+    c.destructive_icon = c.primary_icon;
+    c.destructive_hover_icon = c.primary_hover_icon;
+    c.destructive_pressed_icon = c.primary_pressed_icon;
+    c.destructive_border = c.element_border;
+    c.destructive_hover_border = c.element_border;
+    c.destructive_pressed_border = c.element_border;
+    let checked = c.element_background;
     c.toggle_on_background = checked;
     c.toggle_on_hover_background = checked;
     c.toggle_on_pressed_background = checked;
-    c.toggle_on_mark = readable(c.toggle_on_mark, checked, 4.5);
+    c.toggle_on_mark = readable(c.toggle_on_mark, checked.source_over(host), 4.5);
     c.toggle_on_hover_mark = c.toggle_on_mark;
     c.toggle_on_pressed_mark = c.toggle_on_mark;
+    c.toggle_on_border = c.element_border;
+    c.toggle_on_hover_border = c.element_border;
+    c.toggle_on_pressed_border = c.element_border;
+    c.selection_background = c.element_background;
+    c.selection_hover_background = c.element_background;
+    c.selection_pressed_background = c.element_background;
+    c.selection_foreground = c.primary_foreground;
+    c.selection_hover_foreground = c.primary_foreground;
+    c.selection_pressed_foreground = c.primary_foreground;
+    c.selection_icon = c.primary_foreground;
+    c.selection_hover_icon = c.primary_foreground;
+    c.selection_pressed_icon = c.primary_foreground;
+    c.selection_border = c.element_border;
+    c.selection_hover_border = c.element_border;
+    c.selection_pressed_border = c.element_border;
     // The window variant now owns the inactive selection. Legacy Tab consumers remain equivalent
     // until they switch to the common active-state roles.
     c.tab_inactive_selected_background = c.tab_active_background;
@@ -419,10 +458,7 @@ mod tests {
         let source = ChromeColors::default();
         let active = policy(true).colors(&source, source.background);
         let prepared = policy(false).colors(&source, source.background);
-        assert_eq!(
-            prepared.destructive_background,
-            source.destructive_background
-        );
+        assert_eq!(prepared.destructive_background, prepared.element_background);
         assert_eq!(prepared.error, source.error);
         assert_eq!(prepared.primary_background, prepared.element_background);
         assert_eq!(prepared.element_disabled, active.element_disabled);
@@ -443,6 +479,47 @@ mod tests {
         assert_eq!(prepared.focus_ring.a, 0);
         assert_eq!(prepared.input_focused_border, prepared.input_border);
         assert_eq!(prepared.input_invalid_border, source.input_invalid_border);
+    }
+
+    #[test]
+    fn inactive_filled_controls_use_the_ordinary_fill_and_boundary() {
+        let source = ChromeColors::default();
+        let original = source.clone();
+        let prepared = policy(false).colors(&source, source.background);
+        for fill in [
+            prepared.primary_background,
+            prepared.destructive_background,
+            prepared.toggle_on_background,
+            prepared.selection_background,
+        ] {
+            assert_eq!(fill, prepared.element_background);
+        }
+        for edge in [
+            prepared.primary_border,
+            prepared.destructive_border,
+            prepared.toggle_on_border,
+            prepared.selection_border,
+        ] {
+            assert_eq!(edge, prepared.element_border);
+        }
+        assert_eq!(prepared.error, source.error);
+        assert_eq!(source, original);
+    }
+
+    #[test]
+    fn disabled_intent_fills_share_the_ordinary_disabled_seed_across_activity() {
+        let source = ChromeColors::default();
+        for active in [true, false] {
+            let prepared = policy(active).colors(&source, source.background);
+            for fill in [
+                prepared.primary_disabled_background,
+                prepared.destructive_disabled_background,
+                prepared.toggle_on_disabled_background,
+                prepared.selection_disabled_background,
+            ] {
+                assert_eq!(fill, prepared.element_disabled);
+            }
+        }
     }
 
     #[test]

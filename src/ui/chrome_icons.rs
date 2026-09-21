@@ -22,6 +22,19 @@ pub(crate) enum InteractiveIconRole {
     Chrome,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MarkRole {
+    Clear,
+}
+
+impl MarkRole {
+    const COUNT: usize = 1;
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 impl InteractiveIconRole {
     const COUNT: usize = 3;
 
@@ -61,10 +74,18 @@ pub(crate) struct ChromeIconMetrics {
     pub(crate) baseline_center: Pixels,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChromeMarkMetrics {
+    pub(crate) disc_diameter: Pixels,
+    pub(crate) glyph_size: Pixels,
+    pub(crate) target_size: Pixels,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChromeIcons {
     metrics: [ChromeIconMetrics; IconRole::COUNT],
     interactive_target_sizes: [Pixels; InteractiveIconRole::COUNT],
+    mark_metrics: [ChromeMarkMetrics; MarkRole::COUNT],
 }
 
 impl ChromeIcons {
@@ -89,9 +110,18 @@ impl ChromeIcons {
                 baseline_center: px((paired_size * 0.36).round()),
             }
         });
+        let body_size = f32::from(typography.style(TextRole::Body).size);
+        let clear_disc = body_size.round();
+        let minimum_target = interactive_target_size(InteractiveIconRole::Control, density);
+        let mark_metrics = [ChromeMarkMetrics {
+            disc_diameter: px(clear_disc),
+            glyph_size: px((clear_disc * 0.58).round()),
+            target_size: px(minimum_target.max(clear_disc)),
+        }];
         Self {
             metrics,
             interactive_target_sizes,
+            mark_metrics,
         }
     }
 
@@ -101,6 +131,10 @@ impl ChromeIcons {
 
     pub(crate) fn interactive_target_size(&self, role: InteractiveIconRole) -> Pixels {
         self.interactive_target_sizes[role.index()]
+    }
+
+    pub(crate) fn mark_metrics(&self, role: MarkRole) -> ChromeMarkMetrics {
+        self.mark_metrics[role.index()]
     }
 }
 
@@ -129,13 +163,17 @@ mod tests {
     use super::*;
 
     fn typography(density: ChromeDensity) -> ChromeTypography {
+        typography_with_size(13.0, density)
+    }
+
+    fn typography_with_size(size: f32, density: ChromeDensity) -> ChromeTypography {
         use crate::appearance::{FontStyle, ResolvedChromeTypography, ResolvedFontDescriptor};
 
         let descriptor = || ResolvedFontDescriptor {
             primary_family: ".SystemUIFont".to_owned(),
             fallback_families: Vec::new(),
-            size: 13.0,
-            line_height: 13.0,
+            size,
+            line_height: size,
             weight: 400,
             style: FontStyle::Normal,
             features: Vec::new(),
@@ -201,5 +239,36 @@ mod tests {
             icons.metrics(IconRole::Control).glyph_size,
             icons.metrics(IconRole::Row).glyph_size
         );
+    }
+
+    #[test]
+    fn clear_mark_pairs_body_geometry_with_the_control_target() {
+        let compact_type = typography(ChromeDensity::Compact);
+        let comfortable_type = typography(ChromeDensity::Comfortable);
+        let compact = ChromeIcons::prepare(&compact_type, ChromeDensity::Compact);
+        let comfortable = ChromeIcons::prepare(&comfortable_type, ChromeDensity::Comfortable);
+
+        assert_eq!(
+            compact.mark_metrics(MarkRole::Clear),
+            ChromeMarkMetrics {
+                disc_diameter: px(12.0),
+                glyph_size: px(7.0),
+                target_size: px(20.0),
+            }
+        );
+        assert_eq!(
+            comfortable.mark_metrics(MarkRole::Clear),
+            ChromeMarkMetrics {
+                disc_diameter: px(13.0),
+                glyph_size: px(8.0),
+                target_size: px(28.0),
+            }
+        );
+
+        let large_type = typography_with_size(33.0, ChromeDensity::Compact);
+        let large = ChromeIcons::prepare(&large_type, ChromeDensity::Compact);
+        let large = large.mark_metrics(MarkRole::Clear);
+        assert_eq!(large.disc_diameter, px(32.0));
+        assert_eq!(large.target_size, large.disc_diameter);
     }
 }

@@ -16,6 +16,7 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> Command
     prepared(
         reference,
         colors,
+        None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
         super::control_theme_catalog::OverlayRowPolicy::default(),
@@ -25,6 +26,7 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> Command
 pub(super) fn prepared(
     reference: &ChromeColors,
     colors: &ChromeColors,
+    unfocused_colors: Option<&ChromeColors>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
     row_policy: super::control_theme_catalog::OverlayRowPolicy,
@@ -41,9 +43,18 @@ pub(super) fn prepared(
             gpui_color(colors.ghost_element_selected_foreground),
             gpui_color(colors.text_accent),
         )
-        .rows(super::control_theme_catalog::overlay_list_rows_with_policy(
-            reference, colors, row_policy,
-        ))
+        .rows({
+            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+                reference, colors, row_policy,
+            );
+            unfocused_colors.map_or(rows, |unfocused| {
+                rows.unfocused_selection(
+                    super::control_theme_catalog::overlay_list_rows_with_policy(
+                        unfocused, unfocused, row_policy,
+                    ),
+                )
+            })
+        })
         .icons(gpui_color(colors.icon), gpui_color(colors.icon_disabled))
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))

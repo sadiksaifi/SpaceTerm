@@ -1,5 +1,7 @@
 //! Product-owned Chrome radii and structural edge width, in GPUI logical points.
-//! Density changes spacing and control heights, but leaves these values unchanged.
+//! Density changes spacing and control heights, but leaves these values unchanged. The Pane is the
+//! single named exception: its radius follows the native outer corner after the density-scaled
+//! frame inset, bounded by the Control and SurfaceLarge roles.
 
 use gpui::{Pixels, px};
 
@@ -48,6 +50,13 @@ pub(crate) const fn concentric_outset(inner: f32, outset: f32) -> f32 {
     inner + outset
 }
 
+/// Carries the native window corner inward by the frame inset without escaping the radius scale.
+pub(crate) fn pane_radius(outer_radius: f32, frame_inset: f32) -> f32 {
+    (outer_radius - frame_inset)
+        .round()
+        .clamp(RADIUS_CONTROL, RADIUS_SURFACE_LARGE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +64,12 @@ mod tests {
     #[test]
     fn outer_outlines_keep_concentric_corners() {
         assert_eq!(concentric_outset(RADIUS_CONTROL, 3.0), 9.0);
+    }
+
+    #[test]
+    fn pane_radius_is_the_only_native_derived_radius_and_stays_inside_the_scale() {
+        assert_eq!(pane_radius(0.0, 6.0), RADIUS_CONTROL);
+        assert_eq!(pane_radius(16.0, 6.0), 10.0);
+        assert_eq!(pane_radius(100.0, 6.0), RADIUS_SURFACE_LARGE);
     }
 }

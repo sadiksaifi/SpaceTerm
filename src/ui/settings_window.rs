@@ -89,9 +89,6 @@ const FOOTER_HEIGHT: f32 = 40.0;
 /// The height of one navigation entry and of the search field above it, so the sidebar runs on one
 /// rhythm from its first row to its last.
 const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
-/// The air a focus ring keeps outside the navigation chip.
-const NAVIGATION_CHIP_RING_GAP: f32 = 2.0;
-
 /// The chip a navigation entry rests its hover and its current-section state on.
 ///
 /// It fills the entry rather than insetting further: the sidebar's own padding and the space
@@ -101,11 +98,13 @@ fn navigation_chip(
     selected: bool,
     available: bool,
     appearance: &ChromeAppearance,
+    selection_colors: &crate::appearance::ChromeColors,
 ) -> SelectionChip {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    let paint_colors = if selected { selection_colors } else { colors };
     SelectionChip::new(
         ChipShape::symmetric(px(0.0), px(0.0), RadiusRole::Control.pixels()),
-        navigation_chip_paint(selected, available, colors)
+        navigation_chip_paint(selected, available, paint_colors)
             .raised_on(appearance, colors.panel_background),
     )
 }
@@ -934,6 +933,13 @@ impl SettingsWindow {
         let available = self.navigable_sections();
         let list_focused = self.navigation_has_visible_focus(window);
         let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+        let selection_colors = if appearance.active && !list_focused {
+            appearance
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+                .clone()
+        } else {
+            panel_colors.clone()
+        };
         let entries = SettingsSectionId::ALL
             .iter()
             .map(|section| {
@@ -945,10 +951,10 @@ impl SettingsWindow {
                 let colors = panel_colors;
                 let (foreground, icon, hover_foreground, hover_icon) = if selected {
                     (
-                        colors.row_selected_foreground,
-                        colors.row_selected_icon,
-                        colors.row_selected_hover_foreground,
-                        colors.row_selected_hover_icon,
+                        selection_colors.row_selected_foreground,
+                        selection_colors.row_selected_icon,
+                        selection_colors.row_selected_hover_foreground,
+                        selection_colors.row_selected_hover_icon,
                     )
                 } else {
                     (
@@ -960,7 +966,7 @@ impl SettingsWindow {
                 };
                 // The same chip the Workspace sidebar rests its current row on, so the two
                 // navigation surfaces read as one material rather than as two conventions.
-                let chip = navigation_chip(selected, has_matches, appearance);
+                let chip = navigation_chip(selected, has_matches, appearance, &selection_colors);
                 let chip_selector = format!("settings-navigation-chip-{}", section.selector());
                 div()
                     .id(SharedString::from(format!(
@@ -1004,13 +1010,6 @@ impl SettingsWindow {
                     })
                     .when(!has_matches, |entry| {
                         entry.text_color(gpui_color(panel_colors.text_disabled))
-                    })
-                    .when(selected && list_focused, |entry| {
-                        entry.child(chip.ring(
-                            appearance.spacing(NAVIGATION_CHIP_RING_GAP),
-                            panel_colors.sidebar_focus,
-                            "settings-navigation-focus-indicator",
-                        ))
                     })
                     .child(
                         div()

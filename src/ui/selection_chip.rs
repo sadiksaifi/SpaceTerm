@@ -1,14 +1,6 @@
-//! The inset rounded chip SpaceTerm paints behind a hovered or selected navigation item.
-//!
-//! A navigation item that fills its strip edge to edge reads as a band laid over the surface, and
-//! a band has no front or back. Pulling the paint into a chip with a small inset and a modest
-//! radius gives the current item a shape of its own, and gives hover somewhere to land that does
-//! not contradict it.
-//!
-//! The Workspace sidebar, the Tab bar, and the Settings navigation all carry the same idea, so the
-//! geometry, the resting and hovered paints, and the keyboard focus ring live here rather than
-//! three times over. Each surface still chooses its own metrics and its own roles: what this
-//! Module owns is the shape those choices are expressed in.
+//! Shared inset selection and hover geometry for Workspace rows, Tabs, and Settings navigation.
+//! Callers supply prepared state paints and semantic geometry. Collection focus changes the
+//! selection paint; it never adds a row focus ring.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Pixels, div, px, rgba};
@@ -137,24 +129,6 @@ impl SelectionChip {
                 }
             })
             .into_any_element()
-    }
-
-    /// Keyboard focus, riding just outside the chip it belongs to.
-    ///
-    /// A ring drawn on the item's own edges would box the whole strip and say nothing about which
-    /// shape the keyboard is pointing at. The gap is the hairline of surface left visible between
-    /// the two, so the ring reads as something around the chip rather than as a thicker chip.
-    pub(crate) fn ring(self, gap: Pixels, color: Color, selector: &'static str) -> AnyElement {
-        Self::body(ChipShape {
-            inset_leading: self.shape.inset_leading - gap,
-            inset_trailing: self.shape.inset_trailing - gap,
-            inset_y: self.shape.inset_y - gap,
-            radius: self.shape.radius + gap,
-        })
-        .border(px(HAIRLINE))
-        .border_color(rgba(color.rgba_hex()))
-        .debug_selector(move || selector.to_owned())
-        .into_any_element()
     }
 }
 

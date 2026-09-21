@@ -518,7 +518,7 @@ fn resolve(preferences: &AppearancePreferences) -> ResolvedAppearance {
 }
 
 #[test]
-fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
+fn resolved_pane_caption_keeps_weight_400_while_chrome_caption_uses_retained_regular_weight() {
     let mut preferences = AppearancePreferences::default();
     preferences.chrome.typography.regular_weight = 500;
     preferences.chrome.typography.emphasis_weight = 700;
@@ -540,7 +540,7 @@ fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
     let body = prepared
         .typography
         .style(crate::ui::chrome_typography::TextRole::Body);
-    assert_eq!(caption.font.weight, gpui::FontWeight::NORMAL);
+    assert_eq!(caption.font.weight, gpui::FontWeight(500.0));
     assert_eq!(caption.font.family, body.font.family);
 }
 

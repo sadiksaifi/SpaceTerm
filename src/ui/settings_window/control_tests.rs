@@ -275,12 +275,9 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     );
 }
 
-/// Selecting with the pointer leaves no focus ring; reaching the list with the keyboard draws one.
-///
-/// A ring that an ordinary click leaves behind reads as an accessibility signal rather than as the
-/// resting selection, and the selected material already says which section is current.
+/// Selection remains a fill-only collection state for both pointer and keyboard navigation.
 #[gpui::test]
-fn pointer_selection_leaves_no_focus_ring_while_the_keyboard_draws_one(cx: &mut TestAppContext) {
+fn navigation_selection_never_adds_a_row_focus_ring(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
     click("settings-navigation-settings-section-terminal", cx);
@@ -317,18 +314,15 @@ fn pointer_selection_leaves_no_focus_ring_while_the_keyboard_draws_one(cx: &mut 
         settings.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::ColorSchemes
     );
-    let chip = cx
-        .debug_bounds("settings-navigation-chip-settings-section-color-schemes")
-        .expect("the selected section should keep its own material");
-    let ring = cx
-        .debug_bounds("settings-navigation-focus-indicator")
-        .expect("the keyboard should report where it is in the list");
     assert!(
-        ring.left() < chip.left()
-            && ring.top() < chip.top()
-            && ring.right() > chip.right()
-            && ring.bottom() > chip.bottom(),
-        "focus should ride outside the chip it belongs to, got {ring:?} around {chip:?}"
+        cx.debug_bounds("settings-navigation-chip-settings-section-color-schemes")
+            .is_some(),
+        "keyboard navigation must retain the selected fill"
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-focus-indicator")
+            .is_none(),
+        "collection rows must not paint a focus ring"
     );
 }
 
@@ -381,7 +375,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
         cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_some()
+            .is_none()
     );
 
     click("settings-navigation-settings-section-interface", cx);
@@ -403,7 +397,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
         cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_some()
+            .is_none()
     );
 }
 

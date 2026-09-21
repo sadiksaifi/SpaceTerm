@@ -1073,6 +1073,12 @@ impl IconButton {
         self
     }
 
+    /// Overrides the outer pointer-target side length for a semantic mark with its own metrics.
+    pub fn target_size(mut self, size: Pixels) -> Self {
+        self.core.icon_button_size = Some(size.max(px(0.0)));
+        self
+    }
+
     /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
@@ -1169,6 +1175,7 @@ struct ButtonCore {
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    icon_button_size: Option<Pixels>,
     #[cfg(feature = "appearance-exerciser")]
     preview_state: Option<crate::ControlPreviewState>,
 }
@@ -1192,6 +1199,7 @@ impl ButtonCore {
             modal_press_owner: None,
             preserve_ancestor_hover: false,
             contextual_style: None,
+            icon_button_size: None,
             #[cfg(feature = "appearance-exerciser")]
             preview_state: None,
         }
@@ -1209,6 +1217,9 @@ impl ButtonCore {
             style.pressed = paints.pressed;
             style.disabled = paints.disabled;
             style.focus_border = focus_border;
+        }
+        if let Some(icon_button_size) = self.icon_button_size {
+            style.icon_button_size = icon_button_size;
         }
         style
     }
@@ -1853,6 +1864,16 @@ mod tests {
             .tooltip(Tooltip::new("icon-tooltip", "Icon help"));
 
         assert!(button.core.tooltip.is_some() && icon.core.tooltip.is_some());
+    }
+
+    #[test]
+    fn icon_button_can_take_a_semantic_target_size_without_changing_its_size_role() {
+        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
+            .size(ButtonSize::Compact)
+            .target_size(px(28.0));
+
+        assert_eq!(icon.core.size, ButtonSize::Compact);
+        assert_eq!(icon.core.icon_button_size, Some(px(28.0)));
     }
 
     #[test]

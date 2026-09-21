@@ -1482,6 +1482,69 @@ fn disabled_pinned_fallback_should_render_without_becoming_provisional(cx: &mut 
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
 
+#[cfg(feature = "appearance-exerciser")]
+#[gpui::test]
+fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigation(
+    cx: &mut TestAppContext,
+) {
+    let observed_icon = Rc::new(Cell::new(rgba(0)));
+    let rendered_icon = Rc::clone(&observed_icon);
+    let fixture_items = vec![
+        ComboBoxItem::new(1, "Preview: disabled selected row")
+            .disabled(true)
+            .preview_selected(true)
+            .leading_icon(move |foreground, size| {
+                rendered_icon.set(foreground);
+                div().size(size).bg(foreground).into_any_element()
+            })
+            .debug_selector("disabled-selected-preview"),
+        ComboBoxItem::new(2, "Enabled navigation target").debug_selector("enabled-preview-target"),
+    ];
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), fixture_items, false);
+    let normal = rgba(0x101010ff);
+    let disabled = rgba(0x606060ff);
+    let disabled_selected = rgba(0xd15ab1ff);
+    let row = |color| crate::ListRowPaint::new(color, color, color, color, color, color);
+    cx.update(|window, cx| {
+        let rows = crate::ListRowPaints::new(
+            row(normal),
+            row(normal),
+            row(normal),
+            row(normal),
+            row(disabled),
+        )
+        .disabled_selected(row(disabled_selected));
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                normal, normal, disabled, normal, normal, normal, normal, normal, normal,
+            )
+            .rows(rows),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+
+    open_by_pointer(cx);
+    cx.run_until_parked();
+    assert_eq!(observed_icon.get(), disabled_selected);
+    events.borrow_mut().clear();
+
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 2,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .all(|event| !matches!(event, RecordedEvent::Accepted { item_id: 1, .. })),
+        "the painted preview must not make its disabled item navigable or acceptable",
+    );
+}
+
 #[gpui::test]
 fn navigation_should_remain_provisional_until_acceptance(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);

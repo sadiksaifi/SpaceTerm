@@ -370,6 +370,8 @@ pub struct SegmentedControlTheme {
     track_border: Rgba,
     focus_border: Rgba,
     focus_ring_width: Pixels,
+    track_shadow: ControlShadow,
+    track_bottom_edge: Rgba,
     selected_shadow: ControlShadow,
 }
 
@@ -389,6 +391,8 @@ impl SegmentedControlTheme {
             track_border,
             focus_border,
             focus_ring_width: px(1.0),
+            track_shadow: ControlShadow::none(),
+            track_bottom_edge: Rgba::default(),
             selected_shadow: ControlShadow::none(),
         }
     }
@@ -396,6 +400,28 @@ impl SegmentedControlTheme {
     /// Sets the focus-ring width independently of the track border and radius.
     pub fn focus_ring_width(mut self, width: Pixels) -> Self {
         self.focus_ring_width = width.max(px(0.0));
+        self
+    }
+
+    /// Adds the application-owned elevation treatment to the track and selected option.
+    pub fn track_elevation(
+        mut self,
+        shadow: ControlShadow,
+        track_border: Option<Rgba>,
+        bottom_edge: Rgba,
+        selected_border: Option<Rgba>,
+    ) -> Self {
+        self.track_shadow = shadow;
+        self.track_bottom_edge = bottom_edge;
+        if let Some(border) = track_border {
+            self.track_border = border;
+        }
+        if let Some(border) = selected_border {
+            self.paints.normal.selected.border = border;
+            self.paints.hovered.selected.border = border;
+            self.paints.pressed.selected.border = border;
+            self.paints.disabled.selected.border = border;
+        }
         self
     }
 
@@ -441,6 +467,8 @@ impl SegmentedControlTheme {
             track_border: self.track_border,
             focus_border: self.focus_border,
             focus_ring_width: self.focus_ring_width,
+            track_shadow: self.track_shadow,
+            track_bottom_edge: self.track_bottom_edge,
             selected_shadow: self.selected_shadow,
         }
     }
@@ -681,9 +709,10 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 let refine_interaction = option_enabled;
                 #[cfg(feature = "appearance-exerciser")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
+                let label_font = option_label_font(&crate::control_typography(cx), selected);
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
                     paint,
-                    font: crate::control_typography(cx).regular().clone(),
+                    font: label_font.clone(),
                     font_size: metrics.font_size,
                     line_height: metrics.line_height,
                 };
@@ -720,7 +749,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .text_color(paint.label)
                     .text_size(metrics.font_size)
                     .line_height(gpui::relative(metrics.line_height))
-                    .font(crate::control_typography(cx).regular().clone())
+                    .font(label_font)
                     .cursor_default()
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
@@ -803,6 +832,22 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .border(metrics.border_width)
                     .border_color(style.track_border)
                     .bg(style.track_background)
+                    .when(enabled, |track| {
+                        track
+                            .shadow(style.track_shadow.layers())
+                            .shadow_outside_only()
+                            .when(style.track_bottom_edge.a > 0.0, |track| {
+                                track.child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(1.0))
+                                        .left(metrics.radius)
+                                        .right(metrics.radius)
+                                        .h(px(1.0))
+                                        .bg(style.track_bottom_edge),
+                                )
+                            })
+                    })
             })
             .cursor_default()
             .block_mouse_except_scroll()
@@ -869,6 +914,15 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
     }
 }
 
+fn option_label_font(typography: &crate::ControlTypography, selected: bool) -> gpui::Font {
+    if selected {
+        typography.emphasis()
+    } else {
+        typography.regular()
+    }
+    .clone()
+}
+
 /// Returns the nearest enabled option after `origin` in the requested direction.
 ///
 /// With nothing current, navigation starts at the first enabled option regardless of direction, so
@@ -911,6 +965,8 @@ struct SegmentedStyle {
     track_border: Rgba,
     focus_border: Rgba,
     focus_ring_width: Pixels,
+    track_shadow: ControlShadow,
+    track_bottom_edge: Rgba,
     selected_shadow: ControlShadow,
 }
 

@@ -51,6 +51,7 @@ pub struct SearchFieldMetrics {
     icon_baseline_center: Pixels,
     clear_mark_size: Pixels,
     clear_glyph_size: Pixels,
+    clear_target_size: Pixels,
     clear_trailing_inset: Pixels,
 }
 
@@ -68,6 +69,7 @@ impl SearchFieldMetrics {
             icon_baseline_center: px(4.0),
             clear_mark_size: height / 2.0,
             clear_glyph_size: px(8.0),
+            clear_target_size: px(20.0),
             clear_trailing_inset: px(4.0),
         }
     }
@@ -116,10 +118,12 @@ impl SearchFieldMetrics {
         mut self,
         diameter: Pixels,
         glyph_size: Pixels,
+        target_size: Pixels,
         trailing_inset: Pixels,
     ) -> Self {
         self.clear_mark_size = diameter;
         self.clear_glyph_size = glyph_size;
+        self.clear_target_size = target_size;
         self.clear_trailing_inset = trailing_inset;
         self
     }
@@ -147,6 +151,7 @@ impl SearchFieldMetrics {
             ),
             clear_mark_size: crate::appearance::scale_metric(self.clear_mark_size, text_scale),
             clear_glyph_size: crate::appearance::scale_metric(self.clear_glyph_size, text_scale),
+            clear_target_size: self.clear_target_size,
             clear_trailing_inset: crate::appearance::scale_metric(
                 self.clear_trailing_inset,
                 spacing_scale,
@@ -300,6 +305,7 @@ impl RenderOnce for SearchField {
                     })
                     // Compact keeps the target comfortably larger than the mark it centers.
                     .size(ButtonSize::Compact)
+                    .target_size(metrics.clear_target_size)
                     // The target itself stays invisible and carries only the pointer interaction,
                     // so the theme paints every state into the mark inside it and the mark never
                     // takes a ring of its own.
@@ -346,5 +352,13 @@ mod tests {
 
         assert!(comfortable.height > metrics.height);
         assert_eq!(comfortable.corner_radius, metrics.corner_radius);
+    }
+
+    #[test]
+    fn clear_mark_target_is_semantic_and_does_not_scale_twice() {
+        let metrics =
+            SearchFieldMetrics::new(px(28.0)).clear_mark(px(13.0), px(8.0), px(28.0), px(2.0));
+
+        assert_eq!(metrics.scaled(1.5, 1.25).clear_target_size, px(28.0));
     }
 }

@@ -18,7 +18,7 @@ use gpui::{App, Pixels, px};
 
 use crate::appearance::{ChromeColors, Color};
 use crate::platform::window_frame::WindowFrameGeometry;
-use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_geometry::{RadiusRole, pane_radius};
 
 /// The one continuous Chrome surface beneath the Workspace: the sidebar region, the content stage
 /// insets, and the gaps between Panes.
@@ -31,9 +31,6 @@ pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
 
 /// The Compact-density measurement of every visible gap in the Workspace.
 const SPACE: f32 = RadiusRole::Control.points();
-/// The smallest Pane radius that still reads as a rounded surface at every density.
-const MINIMUM_PANE_RADIUS: f32 = RadiusRole::Control.points();
-
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
 
@@ -66,7 +63,7 @@ impl WorkspaceFrame {
             Some(radius) if radius.is_finite() && radius >= 0.0 => radius,
             Some(_) | None => FALLBACK_WINDOW_RADIUS,
         };
-        let pane_radius = (window_radius - space).round().max(MINIMUM_PANE_RADIUS);
+        let pane_radius = pane_radius(window_radius, space);
         Self {
             space: px(space),
             half_space: px((space / 2.0).round()),
@@ -292,7 +289,15 @@ mod tests {
         }
         assert_eq!(
             frame(ChromeDensity::Compact, window(Some(0.0))).pane_radius(),
-            px(MINIMUM_PANE_RADIUS)
+            RadiusRole::Control.pixels()
+        );
+    }
+
+    #[test]
+    fn pane_radius_should_not_exceed_the_largest_semantic_surface() {
+        assert_eq!(
+            frame(ChromeDensity::Compact, window(Some(100.0))).pane_radius(),
+            RadiusRole::SurfaceLarge.pixels()
         );
     }
 

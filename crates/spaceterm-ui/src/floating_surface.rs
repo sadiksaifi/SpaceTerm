@@ -184,13 +184,24 @@ impl FloatingSurfacePaint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatingSurfacePaints {
     raised: FloatingSurfacePaint,
+    tooltip: FloatingSurfacePaint,
     readout: FloatingSurfacePaint,
 }
 
 impl FloatingSurfacePaints {
     /// Creates the complete bounded material catalog.
     pub fn new(raised: FloatingSurfacePaint, readout: FloatingSurfacePaint) -> Self {
-        Self { raised, readout }
+        Self {
+            raised,
+            tooltip: raised,
+            readout,
+        }
+    }
+
+    /// Supplies the text-dense Tooltip treatment independently of interactive surfaces.
+    pub fn tooltip(mut self, paint: FloatingSurfacePaint) -> Self {
+        self.tooltip = paint;
+        self
     }
 }
 
@@ -272,7 +283,9 @@ impl FloatingSurfaceTheme {
             FloatingRole::Command | FloatingRole::Modal => self.corner_radii[2],
         };
         let scale = self.spacing_scale;
-        let paint = if role.quiet_material() {
+        let paint = if role == FloatingRole::Tooltip {
+            self.paints.tooltip
+        } else if role.quiet_material() {
             self.paints.readout
         } else {
             self.paints.raised
@@ -281,11 +294,7 @@ impl FloatingSurfaceTheme {
             role,
             paint,
             elevation: role.elevation(self.shadow_ink),
-            backdrop_blur: if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
-                self.backdrop_blur.min(px(12.0))
-            } else {
-                self.backdrop_blur
-            },
+            backdrop_blur: self.backdrop_blur,
             backdrop_alpha_limit: self.backdrop_alpha_limit,
             corner_radius: radius,
             content_inset: px(inset * scale),
@@ -839,6 +848,31 @@ impl SurfaceControlThemes {
         self
     }
 
+    /// Applies caller-owned elevation to Toggle and SegmentedControl subparts on this host.
+    pub fn toggle_segmented_elevation(
+        mut self,
+        track_shadow: ControlShadow,
+        track_border: Option<Rgba>,
+        bottom_edge: Rgba,
+        thumb_shadow: ControlShadow,
+        thumb_border: Option<Rgba>,
+    ) -> Self {
+        self.toggle = self.toggle.elevation(
+            track_shadow,
+            track_border,
+            bottom_edge,
+            thumb_shadow,
+            thumb_border,
+        );
+        self.segmented_control = self.segmented_control.track_elevation(
+            track_shadow,
+            track_border,
+            bottom_edge,
+            track_border,
+        );
+        self
+    }
+
     /// Creates the complete catalog of host-relative control presentation.
     pub fn new(
         button: ButtonTheme,
@@ -999,9 +1033,9 @@ mod tests {
             (FloatingRole::Popover, 10.0, 20.0),
             (FloatingRole::Command, 12.0, 20.0),
             (FloatingRole::Modal, 12.0, 20.0),
-            (FloatingRole::Tooltip, 8.0, 12.0),
+            (FloatingRole::Tooltip, 8.0, 20.0),
             (FloatingRole::Notice, 10.0, 20.0),
-            (FloatingRole::Readout, 8.0, 12.0),
+            (FloatingRole::Readout, 8.0, 20.0),
         ] {
             assert_eq!(theme.shell(role).corner_radius(), px(radius));
             assert_eq!(scaled.shell(role).corner_radius(), px(radius));

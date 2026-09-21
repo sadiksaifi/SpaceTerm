@@ -22,6 +22,7 @@ pub(super) fn themed_with_rows(
         reference,
         colors,
         row_colors,
+        None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
         super::control_theme_catalog::OverlayRowPolicy::default(),
@@ -32,6 +33,7 @@ pub(super) fn prepared_with_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
     row_colors: &ChromeColors,
+    unfocused_row_colors: Option<&ChromeColors>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
     row_policy: super::control_theme_catalog::OverlayRowPolicy,
@@ -58,9 +60,18 @@ pub(super) fn prepared_with_rows(
             gpui_color(colors.element_active),
             gpui_color(colors.element_disabled),
         )
-        .rows(super::control_theme_catalog::overlay_list_rows_with_policy(
-            reference, row_colors, row_policy,
-        ))
+        .rows({
+            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+                reference, row_colors, row_policy,
+            );
+            unfocused_row_colors.map_or(rows, |unfocused| {
+                rows.unfocused_selection(
+                    super::control_theme_catalog::overlay_list_rows_with_policy(
+                        unfocused, unfocused, row_policy,
+                    ),
+                )
+            })
+        })
         .hover_background(gpui_color(colors.ghost_element_hover))
         .hover_foreground(gpui_color(colors.ghost_element_hover_foreground)),
         ComboBoxMetrics::new(px(240.0), px(28.0))

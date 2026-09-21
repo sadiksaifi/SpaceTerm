@@ -2926,7 +2926,6 @@ impl WorkspaceManager {
             appearance.colors.title_bar_inactive_background
         };
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        let chip_inset = frame.sidebar_chip_inset();
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
         let chrome_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         let placeholder_color = gpui_color(
@@ -2969,6 +2968,7 @@ impl WorkspaceManager {
             "No Workspaces",
             "No matching Workspaces",
         ))
+        .menu_with_filter_header()
         .fallback(ComboBoxFallback::pinned_rows(move |query| {
             let name = query.trim().to_owned();
             let local = ComboBoxItem::new(
@@ -3027,9 +3027,6 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        // The chooser's panel spans exactly the width a selected Workspace row's chip spans, so the
-        // list it opens lines up with the list it came from.
-        .panel_width(self.sidebar.read(cx).layout().width - chip_inset - chip_inset)
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")

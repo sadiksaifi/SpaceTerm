@@ -1,5 +1,6 @@
 //! Prepared chrome presentation shared by app-owned composites and reusable controls.
 
+mod collection_selection;
 mod disabled_union;
 
 use std::sync::Arc;
@@ -79,6 +80,8 @@ pub(crate) struct ChromeAppearance {
     pub(crate) typography: ChromeTypography,
     pub(crate) icons: ChromeIcons,
     pub(crate) semantic_text_pairs: super::chrome_semantic_pairs::SemanticTextPairs,
+    /// Prepared active-window selection pairs for collections without keyboard focus.
+    pub(crate) unfocused_selection: collection_selection::PreparedCollectionSelection,
     /// Opaque presentation: the contrast reference and the input to Workspace surface owners.
     pub(crate) colors: ChromeColors,
     /// The same colors with the window's material applied to background fills, for controls.
@@ -111,6 +114,8 @@ pub(crate) struct ChromeAppearance {
     /// unrepresentable host-relative step can instead retain the legacy safe presentation, which
     /// may remain translucent.
     pub(crate) floating_fallbacks: Vec<FloatingControlFamily>,
+    /// Content-free disabled-state failures collected across every prepared host.
+    pub(crate) disabled_diagnostics: Vec<DisabledControlDiagnostic>,
     pub(crate) materials: SurfaceMaterials,
     pub(crate) floating_materials: SurfaceMaterials,
     pub(crate) floating_blur: bool,
@@ -126,6 +131,14 @@ pub(crate) struct PreparedControlHost {
     pub(crate) colors: ChromeColors,
     pub(crate) segmented: ChromeColors,
     pub(crate) fallback_families: Vec<FloatingControlFamily>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DisabledControlDiagnostic {
+    ContrastFloor { family: FloatingControlFamily },
+    Separation { family: FloatingControlFamily },
+    SharedPaint { family: FloatingControlFamily },
+    SelectedStep { family: FloatingControlFamily },
 }
 
 fn with_final_host_content(mut reference: ChromeColors, resolved: &ChromeColors) -> ChromeColors {
@@ -251,6 +264,13 @@ impl Default for ChromeAppearance {
             colors.elevated_surface_background,
             false,
         );
+        let unfocused_selection = collection_selection::PreparedCollectionSelection::identity(
+            &colors,
+            &title_bar_controls.reference,
+            &panel_controls.reference,
+            &card_controls.reference,
+            &floating_colors,
+        );
         Self {
             appearance: Appearance::Dark,
             active: true,
@@ -258,6 +278,7 @@ impl Default for ChromeAppearance {
             typography: ChromeTypography::default(),
             icons: ChromeIcons::default(),
             semantic_text_pairs,
+            unfocused_selection,
             control_colors,
             segmented_control_colors,
             window_control_fallbacks,
@@ -281,6 +302,7 @@ impl Default for ChromeAppearance {
                 }
                 fallback_families
             },
+            disabled_diagnostics: Vec::new(),
             materials: SurfaceMaterials::OPAQUE,
             floating_materials,
             floating_blur: false,
@@ -480,6 +502,57 @@ pub(super) fn readable_on_backgrounds<const N: usize>(
     readable
 }
 
+fn content_meets_backgrounds<const N: usize>(
+    content: Color,
+    backgrounds: [Color; N],
+    minimum: f64,
+) -> bool {
+    backgrounds
+        .into_iter()
+        .all(|background| content.source_over(background).contrast_ratio(background) >= minimum)
+}
+
+fn content_is_lighter_than_background(content: Color, background: Color) -> bool {
+    relative_luminance(content.source_over(background)) > relative_luminance(background)
+}
+
+fn preferred_readable_endpoint<const N: usize>(backgrounds: [Color; N]) -> Color {
+    let minimum = |color: Color| {
+        backgrounds
+            .into_iter()
+            .map(|background| color.contrast_ratio(background))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let dark = Color::rgb(0x000000);
+    let light = Color::rgb(0xffffff);
+    if minimum(dark) >= minimum(light) {
+        dark
+    } else {
+        light
+    }
+}
+
+fn readable_toward_endpoint<const N: usize>(
+    proposed: Color,
+    endpoint: Color,
+    backgrounds: [Color; N],
+    minimum: f64,
+) -> Color {
+    let endpoint_is_lighter = backgrounds
+        .into_iter()
+        .all(|background| relative_luminance(endpoint) >= relative_luminance(background));
+    let proposed_is_on_endpoint_side = backgrounds.into_iter().all(|background| {
+        (relative_luminance(proposed.source_over(background)) >= relative_luminance(background))
+            == endpoint_is_lighter
+    });
+    if proposed_is_on_endpoint_side && content_meets_backgrounds(proposed, backgrounds, minimum) {
+        return proposed;
+    }
+    proposed
+        .readable_preserving_chroma_toward(&backgrounds, minimum, endpoint_is_lighter)
+        .unwrap_or(endpoint)
+}
+
 #[cfg(test)]
 fn resolve_floating_field_colors(
     authored: &ChromeColors,
@@ -648,6 +721,7 @@ pub(crate) enum FloatingControlFamily {
 struct FloatingContrastFloors {
     primary: f64,
     secondary: f64,
+    mark: f64,
     disabled: f64,
     boundary: f64,
     focus: Option<f64>,
@@ -658,6 +732,7 @@ impl FloatingContrastFloors {
     const STANDARD: Self = Self {
         primary: 4.5,
         secondary: 4.5,
+        mark: 3.0,
         disabled: 3.0,
         boundary: 3.0,
         focus: None,
@@ -667,6 +742,7 @@ impl FloatingContrastFloors {
     const INCREASED: Self = Self {
         primary: 7.0,
         secondary: 4.5,
+        mark: 4.5,
         disabled: 4.5,
         boundary: 3.0,
         focus: Some(4.5),
@@ -853,6 +929,9 @@ fn rehost_floating_states<const N: usize>(
         state.target_fill = host_relative_fill(authored, authoring_root, host)
             .ok_or(FloatingFamilyFailure::UnrepresentableHostStep)?;
         state.reference_surface = host;
+        state.initial_alpha = (0..=255)
+            .find(|&alpha| equivalent_overlay(state.target_fill, host, alpha).is_some())
+            .ok_or(FloatingFamilyFailure::UnrepresentableHostStep)?;
     }
     Ok(states)
 }
@@ -891,12 +970,42 @@ fn resolve_floating_state_at_alpha(
     alpha: u8,
     host_backgrounds: [Color; 2],
 ) -> Option<FloatingStateResolution> {
+    resolve_floating_state_at_alpha_with_content_fallback(state, alpha, host_backgrounds, false)
+}
+
+fn resolve_floating_state_at_alpha_with_content_fallback(
+    state: FloatingStateSpec,
+    alpha: u8,
+    host_backgrounds: [Color; 2],
+    allow_content_fallback: bool,
+) -> Option<FloatingStateResolution> {
     let fill = if state.unpainted {
         Color::rgba(0)
     } else {
         equivalent_overlay(state.target_fill, state.reference_surface, alpha)?
     };
     let fill_backgrounds = host_backgrounds.map(|background| fill.source_over(background));
+    let fill_constraints_need_adjustment = !state.unpainted
+        && state.constraints.into_iter().flatten().any(|constraint| {
+            matches!(constraint.background, FloatingConstraintBackground::Fill)
+                && !content_meets_backgrounds(
+                    constraint.proposed,
+                    fill_backgrounds,
+                    constraint.minimum,
+                )
+        });
+    let authored_fill_endpoint = state
+        .constraints
+        .into_iter()
+        .flatten()
+        .find(|constraint| matches!(constraint.background, FloatingConstraintBackground::Fill))
+        .map(|constraint| {
+            if content_is_lighter_than_background(constraint.proposed, state.target_fill) {
+                Color::rgb(0xffffff)
+            } else {
+                Color::rgb(0x000000)
+            }
+        });
     let mut content = [Color::rgba(0); 4];
     for (index, constraint) in state.constraints.into_iter().enumerate() {
         let Some(constraint) = constraint else {
@@ -906,11 +1015,41 @@ fn resolve_floating_state_at_alpha(
             FloatingConstraintBackground::Fill => fill_backgrounds,
             FloatingConstraintBackground::Host => host_backgrounds,
         };
-        let resolved =
-            readable_on_backgrounds(constraint.proposed, backgrounds, constraint.minimum);
-        if !backgrounds.into_iter().all(|background| {
-            resolved.source_over(background).contrast_ratio(background) >= constraint.minimum
-        }) {
+        let resolved = if matches!(constraint.background, FloatingConstraintBackground::Fill)
+            && !state.unpainted
+        {
+            if fill_constraints_need_adjustment {
+                let same_polarity = readable_toward_endpoint(
+                    constraint.proposed,
+                    authored_fill_endpoint?,
+                    backgrounds,
+                    constraint.minimum,
+                );
+                if content_meets_backgrounds(same_polarity, backgrounds, constraint.minimum) {
+                    same_polarity
+                } else if allow_content_fallback {
+                    readable_toward_endpoint(
+                        constraint.proposed,
+                        preferred_readable_endpoint(backgrounds),
+                        backgrounds,
+                        constraint.minimum,
+                    )
+                } else {
+                    return None;
+                }
+            } else if content_meets_backgrounds(
+                constraint.proposed,
+                backgrounds,
+                constraint.minimum,
+            ) {
+                constraint.proposed
+            } else {
+                return None;
+            }
+        } else {
+            readable_on_backgrounds(constraint.proposed, backgrounds, constraint.minimum)
+        };
+        if !content_meets_backgrounds(resolved, backgrounds, constraint.minimum) {
             return None;
         }
         content[index] = resolved;
@@ -953,9 +1092,6 @@ fn interaction_order_holds(
             luminance[1].partial_cmp(&luminance[2]),
         ];
         comparisons == relationships.map(Some)
-            && fills[0].contrast_ratio(fills[1]) >= 1.05
-            && fills[0].contrast_ratio(fills[2]) >= 1.05
-            && fills[1].contrast_ratio(fills[2]) >= 1.05
     })
 }
 
@@ -1009,11 +1145,36 @@ fn resolve_floating_family_for_presentation<const N: usize>(
     }
 
     let resolved = states
-        .into_iter()
-        .map(|state| resolve_floating_state_at_alpha(state, 255, host_backgrounds))
+        .iter()
+        .copied()
+        .map(|state| {
+            resolve_floating_state_at_alpha_with_content_fallback(
+                state,
+                255,
+                host_backgrounds,
+                true,
+            )
+        })
         .collect::<Option<Vec<_>>>()
         .ok_or(FloatingFamilyFailure::NoTranslucentSolution)?;
-    Ok((resolved, host_backgrounds[0] != host_backgrounds[1]))
+    let used_content_fallback = states.iter().zip(&resolved).any(|(state, resolved)| {
+        let background = state.target_fill;
+        state
+            .constraints
+            .into_iter()
+            .zip(resolved.content)
+            .any(|(constraint, resolved)| {
+                constraint.is_some_and(|constraint| {
+                    matches!(constraint.background, FloatingConstraintBackground::Fill)
+                        && content_is_lighter_than_background(constraint.proposed, background)
+                            != content_is_lighter_than_background(resolved, background)
+                })
+            })
+    });
+    Ok((
+        resolved,
+        host_backgrounds[0] != host_backgrounds[1] || used_content_fallback,
+    ))
 }
 
 #[cfg(test)]
@@ -1391,6 +1552,20 @@ fn resolve_floating_control_colors_detailed(
         selection_disabled_foreground,
         selection_disabled_icon
     );
+    if !floors.interactive {
+        paint.selection_background = paint.element_background;
+        paint.selection_foreground = paint.element_foreground;
+        paint.selection_icon = paint.element_icon;
+        paint.selection_border = paint.element_border;
+        paint.selection_hover_background = paint.element_background;
+        paint.selection_hover_foreground = paint.element_foreground;
+        paint.selection_hover_icon = paint.element_icon;
+        paint.selection_hover_border = paint.element_border;
+        paint.selection_pressed_background = paint.element_background;
+        paint.selection_pressed_foreground = paint.element_foreground;
+        paint.selection_pressed_icon = paint.element_icon;
+        paint.selection_pressed_border = paint.element_border;
+    }
     let (toggle_off_background, text_accent) = resolve_floating_progress_accent(
         reference.toggle_off_background,
         paint.toggle_off_background,
@@ -1402,19 +1577,20 @@ fn resolve_floating_control_colors_detailed(
     paint.toggle_off_background = toggle_off_background;
     paint.text_accent = text_accent;
 
-    let toggle_state = |reference_fill, paint_fill, mark, label, border, content_floor| {
-        floating_state(
-            reference_fill,
-            paint_fill,
-            reference.elevated_surface_background,
-            [
-                floating_constraint(mark, content_floor),
-                floating_host_constraint(label, content_floor),
-                floating_host_constraint(border, floors.boundary),
-                None,
-            ],
-        )
-    };
+    let toggle_state =
+        |reference_fill, paint_fill, mark, label, border, mark_floor, label_floor| {
+            floating_state(
+                reference_fill,
+                paint_fill,
+                reference.elevated_surface_background,
+                [
+                    floating_constraint(mark, mark_floor),
+                    floating_host_constraint(label, label_floor),
+                    floating_host_constraint(border, floors.boundary),
+                    None,
+                ],
+            )
+        };
     let toggle_states = rehost_floating_states(
         [
             toggle_state(
@@ -1423,6 +1599,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_off_mark,
                 reference.toggle_off_label,
                 paint.toggle_off_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1431,6 +1608,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_off_hover_mark,
                 reference.toggle_off_hover_label,
                 paint.toggle_off_hover_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1439,6 +1617,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_off_pressed_mark,
                 reference.toggle_off_pressed_label,
                 paint.toggle_off_pressed_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1448,6 +1627,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_off_disabled_label,
                 paint.toggle_off_disabled_border,
                 floors.disabled,
+                floors.disabled,
             ),
             toggle_state(
                 reference.toggle_on_background,
@@ -1455,6 +1635,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_on_mark,
                 reference.toggle_on_label,
                 paint.toggle_on_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1463,6 +1644,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_on_hover_mark,
                 reference.toggle_on_hover_label,
                 paint.toggle_on_hover_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1471,6 +1653,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_on_pressed_mark,
                 reference.toggle_on_pressed_label,
                 paint.toggle_on_pressed_border,
+                floors.mark,
                 floors.primary,
             ),
             toggle_state(
@@ -1479,6 +1662,7 @@ fn resolve_floating_control_colors_detailed(
                 reference.toggle_on_disabled_mark,
                 reference.toggle_on_disabled_label,
                 paint.toggle_on_disabled_border,
+                floors.disabled,
                 floors.disabled,
             ),
         ],
@@ -1532,19 +1716,19 @@ fn resolve_floating_control_colors_detailed(
             }
             toggle_state_with_boundary!(
                 toggle_off_background,
-                floors.primary,
+                floors.mark,
                 toggle_off_mark,
                 toggle_off_border
             );
             toggle_state_with_boundary!(
                 toggle_off_hover_background,
-                floors.primary,
+                floors.mark,
                 toggle_off_hover_mark,
                 toggle_off_hover_border
             );
             toggle_state_with_boundary!(
                 toggle_off_pressed_background,
-                floors.primary,
+                floors.mark,
                 toggle_off_pressed_mark,
                 toggle_off_pressed_border
             );
@@ -1556,19 +1740,19 @@ fn resolve_floating_control_colors_detailed(
             );
             toggle_state_with_boundary!(
                 toggle_on_background,
-                floors.primary,
+                floors.mark,
                 toggle_on_mark,
                 toggle_on_border
             );
             toggle_state_with_boundary!(
                 toggle_on_hover_background,
-                floors.primary,
+                floors.mark,
                 toggle_on_hover_mark,
                 toggle_on_hover_border
             );
             toggle_state_with_boundary!(
                 toggle_on_pressed_background,
-                floors.primary,
+                floors.mark,
                 toggle_on_pressed_mark,
                 toggle_on_pressed_border
             );
@@ -1781,11 +1965,41 @@ fn resolve_floating_frame<const N: usize>(
     host_backgrounds: [Color; 2],
     proposed: [(Color, f64); N],
 ) -> (Color, [Color; N]) {
+    let exact_content = proposed.map(|(color, _)| color);
     let backgrounds = host_backgrounds.map(|background| paint_fill.source_over(background));
-    if let Some(resolved) = resolve_content_on_backgrounds(proposed, backgrounds) {
-        return (paint_fill, resolved);
+    if proposed
+        .into_iter()
+        .all(|(color, minimum)| content_meets_backgrounds(color, backgrounds, minimum))
+    {
+        return (paint_fill, exact_content);
     }
     let unpainted = reference_fill.a == 0 && paint_fill.a == 0;
+    if !unpainted {
+        let target = reference_fill.source_over(reference_surface);
+        let endpoint = proposed
+            .first()
+            .map_or(Color::rgb(0x000000), |(content, _)| {
+                if content_is_lighter_than_background(*content, target) {
+                    Color::rgb(0xffffff)
+                } else {
+                    Color::rgb(0x000000)
+                }
+            });
+        for alpha in paint_fill.a..=255 {
+            let Some(fill) = equivalent_overlay(target, reference_surface, alpha) else {
+                continue;
+            };
+            let backgrounds = host_backgrounds.map(|background| fill.source_over(background));
+            let content = proposed.map(|(color, minimum)| {
+                readable_toward_endpoint(color, endpoint, backgrounds, minimum)
+            });
+            if content.iter().zip(proposed).all(|(color, (_, minimum))| {
+                content_meets_backgrounds(*color, backgrounds, minimum)
+            }) {
+                return (fill, content);
+            }
+        }
+    }
     let fallback = if unpainted {
         Color::rgba(0)
     } else {
@@ -1840,11 +2054,13 @@ fn resolve_floating_frame_with_boundary<const N: usize>(
     }
 
     let fill_backgrounds = host_backgrounds.map(|background| paint_fill.source_over(background));
-    if let (Some(content), Some([border])) = (
-        resolve_content_on_backgrounds(proposed, fill_backgrounds),
-        resolve_content_on_backgrounds([(proposed_border, boundary_floor)], host_backgrounds),
-    ) {
-        return (paint_fill, content, border);
+    if proposed
+        .into_iter()
+        .all(|(color, minimum)| content_meets_backgrounds(color, fill_backgrounds, minimum))
+        && let Some([border]) =
+            resolve_content_on_backgrounds([(proposed_border, boundary_floor)], host_backgrounds)
+    {
+        return (paint_fill, proposed.map(|(color, _)| color), border);
     }
 
     let (fill, content) = resolve_floating_frame(
@@ -2084,46 +2300,53 @@ fn resolve_material_control_colors(
         [selection_disabled_foreground, selection_disabled_icon],
         selection_disabled_border
     );
+    if !floors.interactive {
+        paint.selection_background = paint.element_background;
+        paint.selection_foreground = paint.element_foreground;
+        paint.selection_icon = paint.element_icon;
+        paint.selection_border = paint.element_border;
+        paint.selection_hover_background = paint.element_background;
+        paint.selection_hover_foreground = paint.element_foreground;
+        paint.selection_hover_icon = paint.element_icon;
+        paint.selection_hover_border = paint.element_border;
+        paint.selection_pressed_background = paint.element_background;
+        paint.selection_pressed_foreground = paint.element_foreground;
+        paint.selection_pressed_icon = paint.element_icon;
+        paint.selection_pressed_border = paint.element_border;
+    }
 
     macro_rules! toggle_state {
-        ($fill:ident, $minimum:expr, $mark:ident, $label:ident, $border:ident) => {{
-            let fill_background = paint.$fill.source_over(host);
-            let mark =
-                resolve_content_on_backgrounds([(reference.$mark, $minimum)], [fill_background; 2]);
-            let label = resolve_content_on_backgrounds([(reference.$label, $minimum)], hosts);
-            if let (Some([mark]), Some([label])) = (mark, label) {
+        ($fill:ident, $mark_minimum:expr, $label_minimum:expr, $mark:ident, $label:ident, $border:ident) => {{
+            if accessible_boundaries {
+                let (fill, [mark], border) = resolve_floating_frame_with_boundary(
+                    reference.$fill,
+                    paint.$fill,
+                    reference_surface,
+                    hosts,
+                    [(reference.$mark, $mark_minimum)],
+                    paint.$border,
+                    floors.boundary,
+                );
+                paint.$fill = fill;
                 paint.$mark = mark;
-                paint.$label = label;
+                paint.$border = border;
             } else {
-                let unpainted = reference.$fill.a == 0 && paint.$fill.a == 0;
-                paint.$fill = if unpainted {
-                    Color::rgba(0)
-                } else {
-                    reference.$fill.source_over(reference_surface)
-                };
-                let mut background = paint.$fill.source_over(host);
-                paint.$mark = readable_on_backgrounds(reference.$mark, [background; 2], $minimum);
-                if !unpainted
-                    && paint
-                        .$mark
-                        .source_over(background)
-                        .contrast_ratio(background)
-                        < $minimum
-                {
-                    paint.$fill = super::chrome_state::contrast_host(background, $minimum);
-                    background = paint.$fill;
-                    paint.$mark =
-                        readable_on_backgrounds(reference.$mark, [background; 2], $minimum);
-                }
-                paint.$label = readable_on_backgrounds(reference.$label, hosts, $minimum);
+                let (fill, [mark]) = resolve_floating_frame(
+                    reference.$fill,
+                    paint.$fill,
+                    reference_surface,
+                    hosts,
+                    [(reference.$mark, $mark_minimum)],
+                );
+                paint.$fill = fill;
+                paint.$mark = mark;
             }
-            if accessible_boundaries && paint.$border.a != 0 {
-                paint.$border = readable_on_backgrounds(paint.$border, hosts, floors.boundary);
-            }
+            paint.$label = readable_on_backgrounds(reference.$label, hosts, $label_minimum);
         }};
     }
     toggle_state!(
         toggle_off_background,
+        floors.mark,
         floors.primary,
         toggle_off_mark,
         toggle_off_label,
@@ -2131,6 +2354,7 @@ fn resolve_material_control_colors(
     );
     toggle_state!(
         toggle_off_hover_background,
+        floors.mark,
         floors.primary,
         toggle_off_hover_mark,
         toggle_off_hover_label,
@@ -2138,6 +2362,7 @@ fn resolve_material_control_colors(
     );
     toggle_state!(
         toggle_off_pressed_background,
+        floors.mark,
         floors.primary,
         toggle_off_pressed_mark,
         toggle_off_pressed_label,
@@ -2146,12 +2371,14 @@ fn resolve_material_control_colors(
     toggle_state!(
         toggle_off_disabled_background,
         floors.disabled,
+        floors.disabled,
         toggle_off_disabled_mark,
         toggle_off_disabled_label,
         toggle_off_disabled_border
     );
     toggle_state!(
         toggle_on_background,
+        floors.mark,
         floors.primary,
         toggle_on_mark,
         toggle_on_label,
@@ -2159,6 +2386,7 @@ fn resolve_material_control_colors(
     );
     toggle_state!(
         toggle_on_hover_background,
+        floors.mark,
         floors.primary,
         toggle_on_hover_mark,
         toggle_on_hover_label,
@@ -2166,6 +2394,7 @@ fn resolve_material_control_colors(
     );
     toggle_state!(
         toggle_on_pressed_background,
+        floors.mark,
         floors.primary,
         toggle_on_pressed_mark,
         toggle_on_pressed_label,
@@ -2173,6 +2402,7 @@ fn resolve_material_control_colors(
     );
     toggle_state!(
         toggle_on_disabled_background,
+        floors.disabled,
         floors.disabled,
         toggle_on_disabled_mark,
         toggle_on_disabled_label,
@@ -2264,6 +2494,64 @@ fn resolve_material_control_colors(
     }
     on_host!(floors.boundary; info, success, warning, error);
     paint
+}
+
+fn material_content_polarity_fallbacks(
+    reference: &ChromeColors,
+    paint: &ChromeColors,
+    host: Color,
+) -> Vec<FloatingControlFamily> {
+    let changed = |reference_fill: Color,
+                   paint_fill: Color,
+                   reference_content: Color,
+                   paint_content: Color| {
+        let reference_background = reference_fill.source_over(host);
+        let paint_background = paint_fill.source_over(host);
+        reference_content.contrast_ratio(reference_background) >= 1.05
+            && content_is_lighter_than_background(reference_content, reference_background)
+                != content_is_lighter_than_background(paint_content, paint_background)
+    };
+    let mut fallbacks = Vec::new();
+    macro_rules! family {
+        ($family:expr; $(($fill:ident, $($content:ident),+)),+ $(,)?) => {
+            if false $($(|| changed(
+                reference.$fill,
+                paint.$fill,
+                reference.$content,
+                paint.$content,
+            ))+)+ {
+                fallbacks.push($family);
+            }
+        };
+    }
+    family!(FloatingControlFamily::Element;
+        (element_background, element_foreground, element_icon),
+        (element_hover, element_hover_foreground, element_hover_icon),
+        (element_active, element_active_foreground, element_active_icon),
+        (primary_background, primary_foreground, primary_icon),
+        (primary_hover_background, primary_hover_foreground, primary_hover_icon),
+        (primary_pressed_background, primary_pressed_foreground, primary_pressed_icon),
+        (destructive_background, destructive_foreground, destructive_icon),
+        (destructive_hover_background, destructive_hover_foreground, destructive_hover_icon),
+        (destructive_pressed_background, destructive_pressed_foreground, destructive_pressed_icon),
+        (selection_background, selection_foreground, selection_icon),
+        (selection_hover_background, selection_hover_foreground, selection_hover_icon),
+        (selection_pressed_background, selection_pressed_foreground, selection_pressed_icon),
+    );
+    family!(FloatingControlFamily::GhostElement;
+        (ghost_element_hover, ghost_element_hover_foreground, ghost_element_hover_icon),
+        (ghost_element_active, ghost_element_active_foreground, ghost_element_active_icon),
+    );
+    family!(FloatingControlFamily::Toggle;
+        (toggle_off_background, toggle_off_mark),
+        (toggle_off_hover_background, toggle_off_hover_mark),
+        (toggle_off_pressed_background, toggle_off_pressed_mark),
+        (toggle_on_background, toggle_on_mark),
+        (toggle_on_hover_background, toggle_on_hover_mark),
+        (toggle_on_pressed_background, toggle_on_pressed_mark),
+    );
+    family!(FloatingControlFamily::Input; (input_background, input_text, input_caret));
+    fallbacks
 }
 
 fn resolve_material_segmented_colors(
@@ -2380,8 +2668,17 @@ fn resolve_content_on_backgrounds<const N: usize, const B: usize>(
     proposed: [(Color, f64); N],
     backgrounds: [Color; B],
 ) -> Option<[Color; N]> {
-    let resolved =
-        proposed.map(|(color, minimum)| readable_on_backgrounds(color, backgrounds, minimum));
+    let needs_fallback = proposed
+        .into_iter()
+        .any(|(color, minimum)| !content_meets_backgrounds(color, backgrounds, minimum));
+    let endpoint = needs_fallback.then(|| preferred_readable_endpoint(backgrounds));
+    let resolved = proposed.map(|(color, minimum)| {
+        if let Some(endpoint) = endpoint {
+            readable_toward_endpoint(color, endpoint, backgrounds, minimum)
+        } else {
+            color
+        }
+    });
     resolved
         .iter()
         .zip(proposed)
@@ -2963,6 +3260,11 @@ fn prepare_state_control_host(
         floors,
         state.capabilities.increase_contrast || state.capabilities.show_borders,
     );
+    for family in material_content_polarity_fallbacks(&reference, &colors, final_host) {
+        if !fallback_families.contains(&family) {
+            fallback_families.push(family);
+        }
+    }
     let segmented_authored = state.colors(authored, authored.background);
     let segmented =
         compile_segmented_control_colors(&segmented_authored, &reference, &colors, materials);
@@ -3316,6 +3618,14 @@ pub(super) fn readable_on_background(
 }
 
 impl ChromeAppearance {
+    /// Active-window selection paints used while a collection lacks keyboard focus.
+    pub(crate) fn unfocused_selection_colors(
+        &self,
+        host: spaceterm_ui::ControlHost,
+    ) -> &ChromeColors {
+        self.unfocused_selection.colors(host)
+    }
+
     /// Content paints resolved for the semantic surface that actually owns the content.
     pub(crate) fn host_colors(&self, host: spaceterm_ui::ControlHost) -> &ChromeColors {
         match host {
@@ -3389,14 +3699,17 @@ impl ChromeAppearance {
     pub(crate) fn floating_surfaces(&self) -> spaceterm_ui::FloatingSurfaceTheme {
         use spaceterm_ui::{FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme};
 
-        let paint = |color: Color| {
-            let (tone, wash) = state_floating_material(
+        let paint = |color: Color, text_dense: bool| {
+            let (mut tone, wash) = state_floating_material(
                 self.appearance,
                 self.floating_materials,
                 self.colors.background,
                 color,
                 self.capabilities.increase_contrast,
             );
+            if text_dense && tone.a > 0 {
+                tone = tone.with_alpha(tone.a.max(230));
+            }
             let edge = if self.capabilities.increase_contrast {
                 readable_on_material(self.colors.border, tone, wash, 3.0)
             } else {
@@ -3417,9 +3730,10 @@ impl ChromeAppearance {
         };
         FloatingSurfaceTheme::new(
             FloatingSurfacePaints::new(
-                paint(self.colors.elevated_surface_background),
-                paint(self.colors.preview_background),
-            ),
+                paint(self.colors.elevated_surface_background, false),
+                paint(self.colors.preview_background, true),
+            )
+            .tooltip(paint(self.colors.elevated_surface_background, true)),
             rgba(
                 self.colors
                     .shadow
@@ -3468,7 +3782,8 @@ impl ChromeAppearance {
     pub(crate) fn prepare_variants(resolved: &ResolvedChromeAppearance) -> (Self, Self) {
         let mut active = Self::prepare_variant(resolved, true);
         let mut inactive = Self::prepare_variant(resolved, false);
-        disabled_union::reconcile(&mut active, &mut inactive);
+        disabled_union::reconcile(&mut active, &mut inactive, &resolved.colors);
+        active.unfocused_selection = collection_selection::prepare(&active, &inactive);
         (active, inactive)
     }
 
@@ -3596,11 +3911,16 @@ impl ChromeAppearance {
             &control_colors,
             resolved.composition.materials,
         );
-        let window_control_fallbacks = segmented_compilation
+        let mut window_control_fallbacks = segmented_compilation
             .used_host_fallback
             .then_some(FloatingControlFamily::Segmented)
             .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        for family in material_content_polarity_fallbacks(&colors, &control_colors, window_host) {
+            if !window_control_fallbacks.contains(&family) {
+                window_control_fallbacks.push(family);
+            }
+        }
         let segmented_control_colors = resolve_material_segmented_colors(
             &colors,
             segmented_compilation.colors,
@@ -3704,6 +4024,13 @@ impl ChromeAppearance {
             card_host,
             capabilities.increase_contrast,
         );
+        let unfocused_selection = collection_selection::PreparedCollectionSelection::identity(
+            &colors,
+            &title_bar_controls.reference,
+            &panel_controls.reference,
+            &card_controls.reference,
+            &floating_colors,
+        );
         Self {
             appearance: resolved.appearance,
             active,
@@ -3711,6 +4038,7 @@ impl ChromeAppearance {
             typography,
             icons,
             semantic_text_pairs,
+            unfocused_selection,
             control_colors,
             segmented_control_colors,
             window_control_fallbacks,
@@ -3732,6 +4060,7 @@ impl ChromeAppearance {
                 }
                 fallback_families
             },
+            disabled_diagnostics: Vec::new(),
             materials: resolved.composition.materials,
             floating_materials: resolved.composition.floating_materials,
             floating_blur: resolved.composition.floating_blur,
@@ -3774,9 +4103,69 @@ mod typography_tests {
     use super::{
         ChromeAppearance, FloatingContrastFloors, floating_constraint, floating_host_constraint,
         floating_state, host_relative_fill, relative_luminance, resolve_floating_control_colors,
-        resolve_floating_field_colors, resolve_floating_segmented_colors,
+        resolve_floating_field_colors, resolve_floating_frame, resolve_floating_segmented_colors,
         resolve_floating_state_at_alpha, resolve_material_control_colors,
     };
+
+    #[test]
+    fn material_frame_strengthens_the_fill_before_changing_authored_content_polarity() {
+        use crate::appearance::Color;
+
+        let host = Color::rgb(0xffffff);
+        let opaque_seed = Color::rgb(0x0055aa);
+        let translucent_fill = Color::rgba(0x0055aa80);
+        let authored_content = Color::rgb(0xffffff);
+        let (fill, [content]) = resolve_floating_frame(
+            opaque_seed,
+            translucent_fill,
+            host,
+            [host; 2],
+            [(authored_content, 4.5)],
+        );
+        let background = fill.source_over(host);
+
+        assert_eq!(
+            content, authored_content,
+            "a representable opaque seed must preserve authored content polarity"
+        );
+        assert_ne!(
+            fill, translucent_fill,
+            "the prepared fill must strengthen before content changes"
+        );
+        assert!(content.contrast_ratio(background) >= 4.5);
+    }
+
+    #[test]
+    fn nonfloating_filled_polarity_flip_is_coherent_and_diagnosed() {
+        use crate::appearance::{ChromeColors, Color};
+
+        let host = Color::rgb(0xffffff);
+        let reference = ChromeColors {
+            background: host,
+            primary_background: Color::rgb(0xaaaaaa),
+            primary_foreground: Color::rgb(0xffffff),
+            primary_icon: Color::rgb(0x111111),
+            ..ChromeColors::default()
+        };
+        let resolved = resolve_material_control_colors(
+            &reference,
+            reference.clone(),
+            host,
+            host,
+            FloatingContrastFloors::STANDARD,
+            false,
+        );
+        let background = resolved.primary_background.source_over(host);
+
+        for content in [resolved.primary_foreground, resolved.primary_icon] {
+            assert!(relative_luminance(content) < relative_luminance(background));
+            assert!(content.contrast_ratio(background) >= 4.5);
+        }
+        assert!(
+            super::material_content_polarity_fallbacks(&reference, &resolved, host)
+                .contains(&super::FloatingControlFamily::Element)
+        );
+    }
 
     #[test]
     fn material_control_resolution_escapes_an_infeasible_increased_contrast_fill() {
@@ -3918,6 +4307,69 @@ mod typography_tests {
             resolved.content[1].source_over(white).contrast_ratio(white) >= 4.5,
             "adjacent labels and perimeter strokes read on the host"
         );
+    }
+
+    #[test]
+    fn unpainted_floating_content_resolves_on_the_host_without_forcing_family_opacity() {
+        use crate::appearance::Color;
+
+        let host = Color::rgb(0xffffff);
+        let proposed = Color::rgb(0x999999);
+        let resolved = resolve_floating_state_at_alpha(
+            floating_state(
+                Color::rgba(0),
+                Color::rgba(0),
+                host,
+                [floating_constraint(proposed, 4.5), None, None, None],
+            ),
+            0,
+            [host; 2],
+        )
+        .expect("unpainted content can move on its actual host without changing the fill");
+
+        assert_eq!(resolved.fill.a, 0);
+        assert!(resolved.content[0].contrast_ratio(host) >= 4.5);
+    }
+
+    #[test]
+    fn filled_fallback_keeps_label_and_icon_on_one_readable_polarity() {
+        use crate::appearance::Color;
+
+        let fill = Color::rgb(0x333333);
+        let states = [floating_state(
+            fill,
+            fill,
+            fill,
+            [
+                floating_constraint(Color::rgb(0xffffff), 4.5),
+                floating_constraint(Color::rgb(0x222222), 4.5),
+                None,
+                None,
+            ],
+        )];
+        let (resolved, used_fallback) =
+            super::resolve_floating_family_for_presentation(Ok(states), [fill; 2], &[])
+                .expect("the opaque fill has a coherent readable endpoint");
+
+        assert!(used_fallback);
+        for content in [resolved[0].content[0], resolved[0].content[1]] {
+            assert!(relative_luminance(content) > relative_luminance(fill));
+            assert!(content.contrast_ratio(fill) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn fixed_polarity_readability_moves_an_already_readable_opposite_ink() {
+        use crate::appearance::Color;
+
+        let fill = Color::rgb(0x757575);
+        let opposite = Color::rgb(0x000000);
+        assert!(opposite.contrast_ratio(fill) >= 4.5);
+
+        let resolved = super::readable_toward_endpoint(opposite, Color::rgb(0xffffff), [fill], 4.5);
+
+        assert!(relative_luminance(resolved) > relative_luminance(fill));
+        assert!(resolved.contrast_ratio(fill) >= 4.5);
     }
 
     #[test]

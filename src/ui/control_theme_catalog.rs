@@ -31,6 +31,10 @@ pub(super) fn catalog(
     let mut popup = host.clone();
     popup.elevated_surface_background =
         appearance.floating_surface(appearance.colors.elevated_surface_background);
+    let mut unfocused_popup = appearance
+        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
+        .clone();
+    unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
     let row_reference = host.clone();
     let row_policy = OverlayRowPolicy::prepared(appearance);
     let title_bar_controls = surface_control_themes(
@@ -75,6 +79,7 @@ pub(super) fn catalog(
             &row_reference,
             colors,
             &popup,
+            Some(&unfocused_popup),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -82,6 +87,7 @@ pub(super) fn catalog(
         command_palette_theme::prepared(
             &row_reference,
             &popup,
+            Some(&unfocused_popup),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -90,6 +96,7 @@ pub(super) fn catalog(
             &row_reference,
             colors,
             &popup,
+            Some(&unfocused_popup),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -129,6 +136,7 @@ pub(super) fn catalog(
                 &row_reference,
                 floating_controls,
                 &popup,
+                Some(&unfocused_popup),
                 &appearance.typography,
                 &appearance.icons,
                 row_policy,
@@ -137,6 +145,7 @@ pub(super) fn catalog(
                 &row_reference,
                 floating_controls,
                 &popup,
+                Some(&unfocused_popup),
                 &appearance.typography,
                 &appearance.icons,
                 row_policy,
@@ -154,12 +163,9 @@ pub(super) fn catalog(
         1.0
     }));
 
-    if appearance.appearance != Appearance::Light {
-        return catalog;
-    }
-
+    let shadow_opacity = if appearance.active { 89 } else { 53 };
     let shadow = ControlShadow::single(ControlShadowLayer::new(
-        gpui_color(appearance.colors.shadow.multiply_opacity(89)).into(),
+        gpui_color(appearance.colors.shadow.multiply_opacity(shadow_opacity)).into(),
         px(0.0),
         px(1.0),
         px(2.0),
@@ -167,11 +173,27 @@ pub(super) fn catalog(
     ));
     let preserve_accessibility_border =
         appearance.capabilities.increase_contrast || appearance.capabilities.show_borders;
-    catalog.ordinary_control_elevation(
+    let light = appearance.appearance == Appearance::Light;
+    let border =
+        (light && !preserve_accessibility_border).then_some(gpui_color(Color::rgba(0x00000026)));
+    let bottom_edge = if light {
+        gpui_color(Color::rgba(0x0000002e))
+    } else {
+        gpui_color(Color::rgba(0x00000000))
+    };
+    let catalog = catalog.toggle_segmented_elevation(
+        if light { shadow } else { ControlShadow::none() },
+        border,
+        bottom_edge,
         shadow,
-        (!preserve_accessibility_border).then_some(gpui_color(Color::rgba(0x00000026))),
-        gpui_color(Color::rgba(0x0000002e)),
-    )
+        light.then_some(gpui_color(Color::rgba(0x0000001f))),
+    );
+
+    if !light {
+        return catalog;
+    }
+
+    catalog.ordinary_control_elevation(shadow, border, bottom_edge)
 }
 
 fn prepared_control_typography(typography: &ChromeTypography) -> spaceterm_ui::ControlTypography {
@@ -199,6 +221,10 @@ pub(super) fn surface_control_themes(
     let icons = &appearance.icons;
     let show_borders = appearance.capabilities.show_borders;
     let row_policy = OverlayRowPolicy::prepared(appearance);
+    let mut unfocused_popup = appearance
+        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
+        .clone();
+    unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
     spaceterm_ui::SurfaceControlThemes::new(
         button_theme::prepared(&host.colors, typography, icons, show_borders),
         toggle_theme::prepared(&host.colors, typography),
@@ -212,6 +238,7 @@ pub(super) fn surface_control_themes(
             row_reference,
             &host.colors,
             popup,
+            Some(&unfocused_popup),
             typography,
             icons,
             row_policy,
@@ -220,6 +247,7 @@ pub(super) fn surface_control_themes(
             row_reference,
             &host.colors,
             popup,
+            Some(&unfocused_popup),
             typography,
             icons,
             row_policy,
@@ -741,7 +769,7 @@ mod tests {
         let shortcut = controls.shortcut();
         assert_eq!(shortcut.family.as_ref(), "Body Family");
         assert_eq!(shortcut.style, gpui::FontStyle::Italic);
-        assert_eq!(shortcut.weight, gpui::FontWeight::NORMAL);
+        assert_eq!(shortcut.weight, gpui::FontWeight(375.0));
         assert_eq!(
             shortcut
                 .fallbacks
@@ -767,7 +795,7 @@ mod tests {
         let caption = controls.caption();
         assert_eq!(caption.family.as_ref(), "Caption Family");
         assert_eq!(caption.style, gpui::FontStyle::Normal);
-        assert_eq!(caption.weight, gpui::FontWeight::NORMAL);
+        assert_eq!(caption.weight, gpui::FontWeight(375.0));
         assert_eq!(
             caption
                 .fallbacks
@@ -782,7 +810,7 @@ mod tests {
         let badge = controls.badge();
         assert_eq!(badge.family.as_ref(), "Caption Family");
         assert_eq!(badge.style, gpui::FontStyle::Normal);
-        assert_eq!(badge.weight, gpui::FontWeight::SEMIBOLD);
+        assert_eq!(badge.weight, gpui::FontWeight(375.0));
         assert!(
             badge
                 .features

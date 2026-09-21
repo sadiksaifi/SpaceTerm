@@ -16,12 +16,17 @@ pub(super) fn prepared(colors: &ChromeColors, typography: &ChromeTypography) -> 
 }
 
 fn metrics(typography: &ChromeTypography) -> TooltipMetrics {
-    let caption = typography.style(TextRole::Caption);
-    let badge = typography.style(TextRole::Badge);
+    let body = typography.style(TextRole::Body);
+    let secondary = typography.style(TextRole::Secondary);
+    let shortcut = typography.style(TextRole::Shortcut);
     TooltipMetrics::new(px(480.0))
         .spacing(px(8.0), px(5.0), px(4.0), px(12.0), px(6.0), px(8.0))
-        .font_sizes(caption.size, badge.size, badge.size)
-        .line_heights(caption.line_height, badge.line_height, badge.line_height)
+        .font_sizes(body.size, secondary.size, shortcut.size)
+        .line_heights(
+            body.line_height,
+            secondary.line_height,
+            shortcut.line_height,
+        )
 }
 
 fn gpui_color(color: Color) -> Rgba {
@@ -33,17 +38,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tooltip_metrics_project_caption_and_badge_line_heights() {
+    fn tooltip_metrics_project_body_secondary_and_shortcut_roles() {
         let typography = ChromeTypography::default();
-        let caption = typography.style(TextRole::Caption);
-        let badge = typography.style(TextRole::Badge);
+        let body = typography.style(TextRole::Body);
+        let secondary = typography.style(TextRole::Secondary);
+        let shortcut = typography.style(TextRole::Shortcut);
 
         assert_eq!(
             metrics(&typography),
             TooltipMetrics::new(px(480.0))
                 .spacing(px(8.0), px(5.0), px(4.0), px(12.0), px(6.0), px(8.0))
-                .font_sizes(caption.size, badge.size, badge.size)
-                .line_heights(caption.line_height, badge.line_height, badge.line_height)
+                .font_sizes(body.size, secondary.size, shortcut.size)
+                .line_heights(
+                    body.line_height,
+                    secondary.line_height,
+                    shortcut.line_height,
+                )
         );
     }
 }

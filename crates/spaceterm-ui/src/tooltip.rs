@@ -199,9 +199,9 @@ impl TooltipMetrics {
 
     /// Sets primary, secondary, and keyboard-equivalent font sizes.
     pub fn font_sizes(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
-        self.primary_font_size = bounded_metric(primary, 8.0, 20.0, 11.0);
-        self.secondary_font_size = bounded_metric(secondary, 8.0, 20.0, 10.0);
-        self.keyboard_font_size = bounded_metric(keyboard, 8.0, 20.0, 10.0);
+        self.primary_font_size = bounded_metric(primary, 8.0, 32.0, 11.0);
+        self.secondary_font_size = bounded_metric(secondary, 8.0, 32.0, 10.0);
+        self.keyboard_font_size = bounded_metric(keyboard, 8.0, 32.0, 10.0);
         self
     }
 
@@ -572,9 +572,9 @@ fn render_surface(
 
 fn tooltip_fonts(typography: &crate::ControlTypography) -> [gpui::Font; 3] {
     [
-        typography.caption().clone(),
-        typography.badge().clone(),
-        typography.badge().clone(),
+        typography.regular().clone(),
+        typography.regular().clone(),
+        typography.shortcut().clone(),
     ]
 }
 
@@ -1490,15 +1490,28 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_text_uses_the_current_caption_badge_badge_font_mapping() {
+    fn tooltip_text_uses_body_secondary_and_shortcut_font_mapping() {
         let regular = gpui::font("Regular");
         let caption = gpui::font("Caption");
         let badge = gpui::font("Badge");
+        let shortcut = gpui::font("Shortcut");
         let typography =
             crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
-                .semantic_fonts(regular, caption.clone(), badge.clone());
+                .semantic_fonts(shortcut.clone(), caption, badge);
 
-        assert_eq!(tooltip_fonts(&typography), [caption, badge.clone(), badge]);
+        assert_eq!(
+            tooltip_fonts(&typography),
+            [regular.clone(), regular, shortcut]
+        );
+    }
+
+    #[test]
+    fn tooltip_metrics_preserve_large_prepared_semantic_font_sizes() {
+        let metrics = TooltipMetrics::new(px(480.0)).font_sizes(px(31.0), px(30.0), px(30.0));
+
+        assert_eq!(metrics.primary_font_size, px(31.0));
+        assert_eq!(metrics.secondary_font_size, px(30.0));
+        assert_eq!(metrics.keyboard_font_size, px(30.0));
     }
 
     #[test]
@@ -1593,11 +1606,11 @@ mod tests {
 
     #[test]
     fn theme_metrics_should_clamp_non_finite_and_out_of_range_values() {
-        let metrics = TooltipMetrics::new(px(f32::NAN)).font_sizes(px(2.0), px(30.0), px(11.0));
+        let metrics = TooltipMetrics::new(px(f32::NAN)).font_sizes(px(2.0), px(40.0), px(11.0));
 
         assert_eq!(metrics.maximum_width, px(320.0));
         assert_eq!(metrics.primary_font_size, px(8.0));
-        assert_eq!(metrics.secondary_font_size, px(20.0));
+        assert_eq!(metrics.secondary_font_size, px(32.0));
     }
 
     struct TestRoot {

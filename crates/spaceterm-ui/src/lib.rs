@@ -284,6 +284,48 @@ impl ControlThemeCatalog {
         self
     }
 
+    /// Applies the toggle and segmented-control subpart elevation policy on every prepared host.
+    pub fn toggle_segmented_elevation(
+        mut self,
+        track_shadow: ControlShadow,
+        track_border: Option<gpui::Rgba>,
+        bottom_edge: gpui::Rgba,
+        thumb_shadow: ControlShadow,
+        thumb_border: Option<gpui::Rgba>,
+    ) -> Self {
+        self.toggle = self.toggle.elevation(
+            track_shadow,
+            track_border,
+            bottom_edge,
+            thumb_shadow,
+            thumb_border,
+        );
+        self.segmented_control = self.segmented_control.track_elevation(
+            track_shadow,
+            track_border,
+            bottom_edge,
+            track_border,
+        );
+        for host in [
+            &mut self.title_bar_controls,
+            &mut self.panel_controls,
+            &mut self.card_controls,
+            &mut self.floating_controls,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *host = host.clone().toggle_segmented_elevation(
+                track_shadow,
+                track_border,
+                bottom_edge,
+                thumb_shadow,
+                thumb_border,
+            );
+        }
+        self
+    }
+
     /// Creates the complete catalog required by [`init`].
     #[expect(
         clippy::too_many_arguments,
