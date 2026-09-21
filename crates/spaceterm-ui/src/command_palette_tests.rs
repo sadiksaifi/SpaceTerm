@@ -154,13 +154,11 @@ fn presented_results_should_own_section_order_and_match_mapping() {
 }
 
 #[test]
-fn an_unheaded_singleton_run_should_not_gain_a_separator() {
+fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
     let items = vec![
-        CommandPaletteItem::new(1, "Config One").section("SSH config"),
-        CommandPaletteItem::new(2, "Config Two").section("SSH config"),
-        CommandPaletteItem::new(3, "Saved Singleton"),
-        CommandPaletteItem::new(4, "Entered One").section("Entered host"),
-        CommandPaletteItem::new(5, "Entered Two").section("Entered host"),
+        CommandPaletteItem::new(1, "SSH host list is incomplete").section("SSH Config Warning"),
+        CommandPaletteItem::new(2, "dev.example.com"),
+        CommandPaletteItem::new(3, "prod.example.com"),
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
     let results = PresentedResults::new(&items, &matches);
@@ -168,27 +166,18 @@ fn an_unheaded_singleton_run_should_not_gain_a_separator() {
     assert_eq!(
         results.rows(),
         &[
-            PaletteRow::Section("SSH config".into()),
+            PaletteRow::Section("SSH Config Warning".into()),
             PaletteRow::Item {
                 position: 0,
                 single_line: true,
             },
+            PaletteRow::Separator,
             PaletteRow::Item {
                 position: 1,
                 single_line: true,
             },
             PaletteRow::Item {
                 position: 2,
-                single_line: true,
-            },
-            PaletteRow::Separator,
-            PaletteRow::Section("Entered host".into()),
-            PaletteRow::Item {
-                position: 3,
-                single_line: true,
-            },
-            PaletteRow::Item {
-                position: 4,
                 single_line: true,
             },
         ]

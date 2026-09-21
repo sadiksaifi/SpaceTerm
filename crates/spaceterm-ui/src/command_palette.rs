@@ -1500,7 +1500,7 @@ mod presented_results {
                     continue;
                 };
                 if !started || item.section != current {
-                    if started && item.section.is_some() {
+                    if started {
                         rows.push(PaletteRow::Separator);
                     }
                     if let Some(section) = item.section.clone() {
