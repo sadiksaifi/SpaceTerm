@@ -5398,9 +5398,9 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
     );
 }
 
-/// The Workspace identity stays centered in the Tab row across appearance scales.
+/// The collapsed switcher matches the Tab surface height across appearance scales.
 #[gpui::test]
-fn collapsed_workspace_identity_should_stay_centered(cx: &mut TestAppContext) {
+fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
     assert!(cx.debug_bounds("workspace-switcher-chip").is_none());
@@ -5420,6 +5420,12 @@ fn collapsed_workspace_identity_should_stay_centered(cx: &mut TestAppContext) {
         cx.run_until_parked();
         let workspace = cx.debug_bounds("workspace-chip").unwrap();
         let tab = cx.debug_bounds("tab-item-1-chip").unwrap();
+        let switcher = cx.debug_bounds("workspace-switcher").unwrap();
+        assert_eq!(
+            (switcher.top(), switcher.bottom()),
+            (tab.top(), tab.bottom()),
+            "switcher and Tab surface edges must align at text scale {text_scale}, spacing scale {spacing_scale}"
+        );
         assert_eq!(workspace.center().y, tab.center().y);
         assert!(workspace.top() >= tab.top() && workspace.bottom() <= tab.bottom());
     }
