@@ -24,7 +24,7 @@ pub(super) fn title(
         .typography
         .style(TextRole::Navigation)
         .line_height
-        + appearance.spacing(6.0);
+        + appearance.spacing(super::SIDEBAR_ROW_TITLE_LINE_PADDING);
     canvas(
         move |bounds, window, cx| {
             let name_width = appearance
@@ -86,8 +86,8 @@ pub(super) fn detail(
     id: u64,
     appearance: ChromeAppearance,
 ) -> AnyElement {
-    let height =
-        appearance.typography.style(TextRole::Secondary).line_height + appearance.spacing(3.0);
+    let height = appearance.typography.style(TextRole::Secondary).line_height
+        + appearance.spacing(super::SIDEBAR_ROW_DETAIL_LINE_PADDING);
     canvas(
         move |bounds, window, cx| {
             let counts_width = appearance

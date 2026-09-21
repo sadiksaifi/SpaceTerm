@@ -48,7 +48,11 @@ pub(super) enum SidebarEvent {
 }
 impl EventEmitter<SidebarEvent> for WorkspaceSidebar {}
 
+/// Minimum Workspace row height before semantic text requires more room.
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
+pub(super) const SIDEBAR_ROW_TITLE_LINE_PADDING: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_DETAIL_LINE_PADDING: f32 = 3.0;
+pub(super) const SIDEBAR_ROW_LINE_GAP: f32 = 2.0;
 /// The air a row's content keeps inside the chip that carries its selection.
 ///
 /// The row's own padding is this padding plus the chip inset on that side, so the content stays

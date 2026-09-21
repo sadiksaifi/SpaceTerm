@@ -299,6 +299,67 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     assert_eq!(row.size.height, px(SIDEBAR_ROW_HEIGHT));
 }
 
+#[gpui::test]
+fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.chrome.typography.base_size = 24.0;
+        preferences.chrome.density = density;
+        let resolved = crate::appearance::SchemeCatalog::default()
+            .resolve(
+                crate::appearance::AppearanceGeneration::INITIAL,
+                &preferences,
+                crate::appearance::SystemAppearance::unavailable()
+                    .with_composition(crate::appearance::CompositionCapabilities::new(true, true)),
+                &crate::appearance::AvailableFonts::default(),
+            )
+            .expect("maximum supported Chrome typography should resolve");
+        let (active, inactive) =
+            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+        cx.update(|window, cx| {
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        for id in [1, 2] {
+            let row_selector: &'static str = format!(
+                "workspace-row-{id}-{}",
+                if id == 2 { "active" } else { "inactive" }
+            )
+            .leak();
+            let name_selector: &'static str = format!("workspace-row-name-{id}").leak();
+            let detail_selector: &'static str = format!("workspace-row-path-{id}").leak();
+            let row = cx.debug_bounds(row_selector).expect("Workspace row");
+            let name = cx.debug_bounds(name_selector).expect("Workspace name");
+            let detail = cx.debug_bounds(detail_selector).expect("Workspace detail");
+            assert!(
+                name.top() >= row.top() && detail.bottom() <= row.bottom(),
+                "{density:?} row {id} must contain its semantic line boxes: row={row:?}, name={name:?}, detail={detail:?}"
+            );
+        }
+        let first = cx
+            .debug_bounds("workspace-row-1-inactive")
+            .expect("first Workspace row");
+        let second = cx
+            .debug_bounds("workspace-row-2-active")
+            .expect("second Workspace row");
+        assert!(
+            first.bottom() <= second.top(),
+            "{density:?} adjacent Workspace targets must not overlap: first={first:?}, second={second:?}"
+        );
+    }
+}
+
 #[test]
 fn remote_home_labels_should_ignore_trailing_separators_without_changing_tooltip_paths() {
     let location = WorkspaceLocation::Remote {

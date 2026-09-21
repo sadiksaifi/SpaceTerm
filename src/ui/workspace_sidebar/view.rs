@@ -61,6 +61,18 @@ fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -
         + appearance.spacing(SIDEBAR_ROW_CHIP_PADDING)
 }
 
+fn row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    let content_height = appearance
+        .typography
+        .style(TextRole::Navigation)
+        .line_height
+        + appearance.typography.style(TextRole::Secondary).line_height
+        + appearance.spacing(
+            SIDEBAR_ROW_TITLE_LINE_PADDING + SIDEBAR_ROW_DETAIL_LINE_PADDING + SIDEBAR_ROW_LINE_GAP,
+        );
+    appearance.spacing(SIDEBAR_ROW_HEIGHT).max(content_height)
+}
+
 /// Resolves the rename frame after the row enters its Panel control host.
 #[derive(IntoElement)]
 struct WorkspaceRenameField {
@@ -258,7 +270,7 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(appearance.spacing(SIDEBAR_ROW_HEIGHT))
+            .h(row_height(appearance))
             .flex_shrink_0()
             .px(row_padding)
             .flex()
@@ -348,7 +360,7 @@ impl WorkspaceSidebar {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(appearance.spacing(2.0))
+                    .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
                     .child(text::title(
                         name,
                         first_line,
