@@ -3177,10 +3177,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         leading_reserved,
                                         row_height,
                                         theme,
-                                        crate::list_row::label_font(
-                                            &typography,
-                                            selected.as_ref() == Some(&item.id),
-                                        ),
+                                        typography.regular().clone(),
                                         icon_offset,
                                         collection_focused,
                                     )

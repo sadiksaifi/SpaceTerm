@@ -136,7 +136,7 @@ impl WorkspaceSidebar {
         let row_group = format!("workspace-row-state-{}", workspace_id.get());
         // Hover and selection are carried by an inset chip rather than by the row's own fill, so
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
-        // with air around it. The chip's paints are read before the selected roles are promoted
+        // with air around it. The chip's paints are read before the selected colors are promoted
         // below, because that promotion is what the row's text and icons consume.
         let selection_colors = if appearance.active && !self.focus.is_focused(window) {
             appearance
@@ -212,17 +212,12 @@ impl WorkspaceSidebar {
             }
             .into_any_element()
         } else {
-            let role = if active {
-                TextRole::BodyEmphasis
-            } else {
-                TextRole::Navigation
-            };
             div()
                 .id(("workspace-row-name", workspace_id.get()))
                 .debug_selector(move || format!("workspace-row-name-{}", workspace_id.get()))
                 .w_full()
                 .truncate()
-                .chrome_text(appearance.typography.style(role))
+                .chrome_text(appearance.typography.style(TextRole::Navigation))
                 .text_color(gpui_color(row_colors.row_foreground))
                 .when(appearance.active, |label| {
                     label.group_hover(row_group.clone(), |style| {

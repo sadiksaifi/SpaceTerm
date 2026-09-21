@@ -327,11 +327,7 @@ impl SettingsRow {
         };
         let label_selector = format!("{selector}-label");
         let reset_slot_selector = format!("{selector}-reset-slot");
-        let label_role = if self.highlighted {
-            TextRole::BodyEmphasis
-        } else {
-            TextRole::Body
-        };
+        let label_role = TextRole::Body;
         // Text left to size itself inside a row is measured once without a width and keeps that
         // answer, so it would neither wrap nor stay put. The label instead starts from the width
         // of its one line and gives up only what the reset's slot and the control need, and the

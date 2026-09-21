@@ -3237,7 +3237,7 @@ fn render_row(
         .items_center()
         .gap(style.metrics.gap)
         .rounded(row_corner_radius(style.metrics))
-        .font(crate::list_row::label_font(typography, highlighted))
+        .font(typography.regular().clone())
         .text_color(foreground)
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))

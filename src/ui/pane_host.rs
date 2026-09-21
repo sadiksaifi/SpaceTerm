@@ -131,35 +131,29 @@ struct CaptionMetrics {
 impl CaptionMetrics {
     fn measure(
         text: &PaneCaptionText,
-        focused: bool,
         window: &Window,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
-        let host = measure_caption_segment(&text.origin.host, focused, window, appearance);
+        let host = measure_caption_segment(&text.origin.host, window, appearance);
         Self {
             user: if text.origin.user.is_empty() {
                 px(0.0)
             } else {
-                measure_caption_segment(
-                    &origin_account(&text.origin.user),
-                    focused,
-                    window,
-                    appearance,
-                )
+                measure_caption_segment(&origin_account(&text.origin.user), window, appearance)
             },
             host: if host > px(0.0) {
                 host + appearance.spacing(PANE_ORIGIN_SEPARATOR_WIDTH)
             } else {
                 host
             },
-            directory: measure_caption_segment(&text.directory, focused, window, appearance),
-            name: measure_caption_segment(&text.name, focused, window, appearance),
+            directory: measure_caption_segment(&text.directory, window, appearance),
+            name: measure_caption_segment(&text.name, window, appearance),
             status_separator: if text.has_directory {
                 appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
             } else {
                 px(0.0)
             },
-            label: measure_caption_segment(&text.label, focused, window, appearance),
+            label: measure_caption_segment(&text.label, window, appearance),
         }
     }
 
@@ -185,7 +179,7 @@ impl CaptionLayout {
         Self::from_metrics(
             caption.has_multiple_panes,
             width,
-            CaptionMetrics::measure(&caption.text, caption.focused, window, appearance),
+            CaptionMetrics::measure(&caption.text, window, appearance),
             appearance.spacing_scale,
             f32::from(appearance.icons.metrics(IconRole::Status).glyph_size),
             f32::from(
@@ -267,28 +261,16 @@ const fn controls_width(count: usize, control_size: f32, spacing_scale: f32) -> 
 
 fn measure_caption_segment(
     text: &gpui::SharedString,
-    focused: bool,
     window: &Window,
     appearance: &super::appearance::ChromeAppearance,
 ) -> Pixels {
     if text.is_empty() {
         return px(0.0);
     }
-    appearance
-        .typography
-        .measure(caption_text_role(focused), text, window)
-}
-
-const fn caption_text_role(focused: bool) -> TextRole {
-    if focused {
-        TextRole::BodyEmphasis
-    } else {
-        TextRole::Body
-    }
+    appearance.typography.measure(TextRole::Body, text, window)
 }
 
 fn pane_caption_foreground(
-    _current: crate::appearance::Color,
     appearance: &super::appearance::ChromeAppearance,
     background: crate::appearance::Color,
     focused: bool,
@@ -1949,9 +1931,7 @@ fn render_pane_caption(
                     .unwrap_or(caption.text);
             }
             caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
-                let caption_style = appearance
-                    .typography
-                    .style(caption_text_role(caption.focused));
+                let caption_style = appearance.typography.style(TextRole::Body);
                 reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
             });
             let background = caption.terminal.read(cx).surface_background();
@@ -1960,12 +1940,8 @@ fn render_pane_caption(
                     .pane_radius();
             let pane_id = caption.pane_id;
             let mut paint = appearance.colors.caption(background, caption.focused);
-            paint.foreground = pane_caption_foreground(
-                paint.foreground,
-                &appearance,
-                paint.background,
-                caption.focused,
-            );
+            paint.foreground =
+                pane_caption_foreground(&appearance, paint.background, caption.focused);
             // Caption buttons already sit on the Pane. Add only their state color difference;
             // repeating the Terminal background here would leave opaque squares on the glass.
             for control in [
@@ -2257,7 +2233,7 @@ fn render_pane_caption_content(
         .pl(appearance.spacing(PANE_CAPTION_LEFT_PADDING))
         .pr(appearance.spacing(PANE_CAPTION_RIGHT_PADDING))
         .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
-        .chrome_text(appearance.typography.style(caption_text_role(focused)))
+        .chrome_text(appearance.typography.style(TextRole::Body))
         .text_color(gpui_color(color))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
@@ -3741,12 +3717,6 @@ mod tests {
     }
 
     #[test]
-    fn focused_caption_uses_body_emphasis_while_unfocused_caption_uses_body() {
-        assert_eq!(caption_text_role(true), TextRole::BodyEmphasis);
-        assert_eq!(caption_text_role(false), TextRole::Body);
-    }
-
-    #[test]
     fn caption_text_uses_each_activity_variants_primary_and_secondary_pair() {
         for active in [true, false] {
             let mut appearance = super::super::appearance::ChromeAppearance {
@@ -3773,12 +3743,7 @@ mod tests {
             ] {
                 let paint = appearance.colors.caption(surface, focused);
                 assert_eq!(
-                    pane_caption_foreground(
-                        paint.foreground,
-                        &appearance,
-                        paint.background,
-                        focused,
-                    ),
+                    pane_caption_foreground(&appearance, paint.background, focused),
                     expected,
                     "active={active} focused={focused}"
                 );

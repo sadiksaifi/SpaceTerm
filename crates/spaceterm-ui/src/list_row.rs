@@ -1,18 +1,5 @@
 use gpui::Rgba;
 
-/// Chooses the label font for a row's persistent selection state.
-///
-/// Disabled and inactive presentation may change paints, but neither clears selection, so every
-/// selected row keeps the emphasis font supplied by the application catalog.
-pub(crate) fn label_font(typography: &crate::ControlTypography, selected: bool) -> gpui::Font {
-    if selected {
-        typography.emphasis()
-    } else {
-        typography.regular()
-    }
-    .clone()
-}
-
 /// Complete result-row paints, including content that is secondary to the label.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ListRowPaint {
@@ -136,14 +123,6 @@ impl ListRowPaints {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selected_rows_keep_the_catalog_emphasis_font() {
-        let typography = crate::ControlTypography::default();
-
-        assert_eq!(label_font(&typography, false), typography.regular().clone());
-        assert_eq!(label_font(&typography, true), typography.emphasis().clone());
-    }
 
     #[test]
     fn complete_row_state_follows_selection_hover_and_disabled_precedence() {

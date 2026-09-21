@@ -179,15 +179,20 @@ impl SettingsWindow {
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .chrome_text(appearance.typography.style(if selected {
-                        TextRole::BodyEmphasis
-                    } else {
-                        TextRole::Body
-                    }))
+                    .chrome_text(appearance.typography.style(TextRole::Body))
                     .text_color(gpui_color(colors.text))
                     .child(SharedString::from(summary.name.clone())),
             )
-            .children(selected.then(|| badge("In use", appearance)))
+            .child(
+                div()
+                    .debug_selector({
+                        let id = summary.id.clone();
+                        move || format!("settings-scheme-status-slot-{}", id.as_str())
+                    })
+                    .flex_none()
+                    .when(!selected, |slot| slot.invisible())
+                    .child(badge("In use", appearance)),
+            )
             .child(
                 div()
                     .flex_none()

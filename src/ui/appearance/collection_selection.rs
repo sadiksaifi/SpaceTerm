@@ -160,8 +160,18 @@ fn prepare_state<const N: usize>(
     backgrounds: impl Fn(Color) -> [Color; 2],
 ) {
     let proposals = content.each_ref().map(|(color, floor)| (**color, *floor));
+    let hosts = backgrounds(Color::rgba(0));
     let resolve = |fill: Color| {
         let backgrounds = backgrounds(fill);
+        if backgrounds
+            .into_iter()
+            .zip(hosts)
+            .any(|(background, host)| {
+                background.contrast_ratio(host) < super::SUBDUED_SELECTION_CONTRAST
+            })
+        {
+            return None;
+        }
         let resolved =
             proposals.map(|(color, floor)| color.readable_preserving_chroma(&backgrounds, floor));
         let resolved: Option<[Color; N]> = resolved

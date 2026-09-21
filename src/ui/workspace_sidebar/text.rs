@@ -22,14 +22,14 @@ pub(super) fn title(
 ) -> AnyElement {
     let height = appearance
         .typography
-        .style(TextRole::BodyEmphasis)
+        .style(TextRole::Navigation)
         .line_height
         + appearance.spacing(6.0);
     canvas(
         move |bounds, window, cx| {
             let name_width = appearance
                 .typography
-                .measure(TextRole::BodyEmphasis, &name, window);
+                .measure(TextRole::Navigation, &name, window);
             let machine = machine.and_then(|machine| {
                 let full_width =
                     appearance

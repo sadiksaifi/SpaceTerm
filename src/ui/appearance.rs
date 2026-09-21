@@ -16,6 +16,8 @@ use crate::appearance::{
     ResolvedChromeAppearance, ResolvedFontDescriptor, SurfaceMaterials, SurfaceRole,
 };
 
+pub(super) const SUBDUED_SELECTION_CONTRAST: f64 = 1.20;
+
 pub(crate) fn prepared_font(descriptor: &ResolvedFontDescriptor) -> Font {
     let mut result = font(descriptor.primary_family.clone());
     result.weight = FontWeight(f32::from(descriptor.weight));

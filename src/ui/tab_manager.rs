@@ -1270,22 +1270,16 @@ impl TabManager {
         let hover_foreground = presentation.tab_hover_foreground(active);
         let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let status_host = presentation.tab_surface(active, ancestor_hovered);
-        let close_clearance = (active || ancestor_hovered).then(|| {
-            cx.global::<ButtonTheme>()
-                .icon_button_size(ButtonSize::Compact)
-                + appearance.spacing(TAB_TRAILING_GAP)
-        });
+        let close_clearance = cx
+            .global::<ButtonTheme>()
+            .icon_button_size(ButtonSize::Compact)
+            + appearance.spacing(TAB_TRAILING_GAP);
         let close_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         #[cfg(test)]
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
         #[cfg(test)]
         let rendered_inactive_close_icon = Rc::clone(&self.rendered_inactive_close_icon);
-        let text_role = if active {
-            TextRole::BodyEmphasis
-        } else {
-            TextRole::Navigation
-        };
-        let text_style = appearance.typography.style(text_role);
+        let text_style = appearance.typography.style(TextRole::Navigation);
         let mut identity = identity;
         identity.glyph =
             super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
@@ -1332,7 +1326,6 @@ impl TabManager {
                     }
                 });
             })
-            // Weight marks the Active Tab exactly as it marks the current Settings section.
             .chrome_text(text_style)
             .text_color(gpui_color(foreground))
             // Content follows the chip's paired hover paint, preserving selected identity.
@@ -1716,7 +1709,7 @@ fn render_tab_identity(
     identity: TabIdentity,
     status: crate::appearance::StatusPaint,
     status_host: crate::appearance::Color,
-    close_clearance: Option<Pixels>,
+    close_clearance: Pixels,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let origin_location = if identity.remote { "remote" } else { "local" };
@@ -1770,7 +1763,7 @@ fn render_tab_identity(
         .flex_1()
         .min_w_0()
         .overflow_hidden()
-        .when_some(close_clearance, |item, clearance| item.pr(clearance))
+        .pr(close_clearance)
         .flex()
         .flex_row()
         .items_center()
@@ -4163,9 +4156,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn inactive_tab_identity_should_use_full_width_until_close_is_revealed(
-        cx: &mut TestAppContext,
-    ) {
+    fn inactive_tab_identity_should_reserve_close_width_before_reveal(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
@@ -4180,19 +4171,22 @@ mod tests {
             .expect("the inactive Tab close button was not rendered");
 
         assert_eq!(item.right() - title.right(), px(TAB_ITEM_RIGHT_PADDING));
-        assert!(title.right() > close_button.left());
+        let resting_identity = cx
+            .debug_bounds("tab-identity-1")
+            .expect("the inactive Tab identity was not rendered");
+        assert!(
+            resting_identity.right() + px(TAB_TRAILING_GAP) <= close_button.left(),
+            "the resting identity {resting_identity:?} should reserve the hidden Close slot {close_button:?}"
+        );
 
         cx.simulate_mouse_move(item.center(), None, Modifiers::none());
         cx.run_until_parked();
-        let identity = cx
+        let hovered_identity = cx
             .debug_bounds("tab-identity-1")
             .expect("the hovered inactive Tab title was not rendered");
-        let close_button = cx
-            .debug_bounds("tab-close-button-1")
-            .expect("the hovered inactive Tab close button was not rendered");
-        assert!(
-            identity.right() + px(TAB_TRAILING_GAP) <= close_button.left(),
-            "revealing Close should clip the identity {identity:?} before the floating control {close_button:?} without reserving room at rest"
+        assert_eq!(
+            hovered_identity, resting_identity,
+            "revealing Close must not change the identity's available width or truncation point"
         );
     }
 

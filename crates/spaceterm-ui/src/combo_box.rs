@@ -2588,7 +2588,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
                             ),
                             collection_focused,
                             theme,
-                            label_font: crate::list_row::label_font(&typography, paints_selected),
+                            label_font: typography.regular().clone(),
                             icon_offset,
                         },
                     )
@@ -3090,7 +3090,7 @@ fn natural_menu_width<I>(
         + leading
         + theme.metrics.gap;
     let widest = items.iter().fold(px(0.0), |widest, item| {
-        let label = measure(&item.label, theme.metrics.label_size, typography.emphasis());
+        let label = measure(&item.label, theme.metrics.label_size, typography.regular());
         let description = item.description.as_ref().map_or(px(0.0), |description| {
             measure(
                 description,

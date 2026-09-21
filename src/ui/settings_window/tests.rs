@@ -832,6 +832,71 @@ fn search_reveals_the_first_match(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+
+    use gpui::{DivInspectorState, IntoElement as _, ParentElement as _, div};
+
+    let (window, _harness, cx) = open_settings(cx);
+    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
+    let styles = Rc::clone(&observed);
+    cx.update(|window, cx| {
+        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
+            styles.borrow_mut().push(state.clone());
+            gpui::Empty
+        });
+        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
+            div()
+                .children(inspector.render_inspector_states(window, cx))
+                .into_any_element()
+        }));
+        window.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+    let geometry = |cx: &mut VisualTestContext| {
+        let row = cx
+            .debug_bounds("settings-row-appearance-mode")
+            .expect("the appearance mode row should render");
+        let label = cx
+            .debug_bounds("settings-row-appearance-mode-label")
+            .expect("the appearance mode label should render");
+        observed.borrow_mut().clear();
+        cx.simulate_mouse_move(point(px(0.0), px(0.0)), None, Modifiers::none());
+        cx.run_until_parked();
+        observed.borrow_mut().clear();
+        cx.simulate_mouse_move(label.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let mut text_style = observed
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|state| {
+                (state.bounds == label)
+                    .then(|| state.base_style.text.clone())
+                    .flatten()
+            })
+            .expect("the inspector should expose the rendered label text style");
+        text_style.color = None;
+        text_style.background_color = None;
+        (
+            label.left() - row.left(),
+            label.top() - row.top(),
+            label.size,
+            text_style,
+        )
+    };
+    let resting = geometry(cx);
+
+    set_query(&window, "automatic", cx);
+
+    assert_eq!(
+        geometry(cx),
+        resting,
+        "search selection may add fill and match color, but must not move or resize its label"
+    );
+}
+
+#[gpui::test]
 fn search_reveals_the_first_match_available_in_auto_mode(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     cx.update(|_, cx| {
@@ -2387,6 +2452,36 @@ fn every_installed_scheme_row_keeps_one_line(cx: &mut TestAppContext) {
     assert!(
         heights.windows(2).all(|pair| pair[0] == pair[1]),
         "scheme rows should share one height, got {heights:?}"
+    );
+}
+
+#[gpui::test]
+fn every_installed_scheme_reserves_the_in_use_status_slot(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::ColorSchemes, cx);
+    let ids = window.read_with(cx, |window, _| {
+        [SchemeKind::Chrome, SchemeKind::Terminal]
+            .into_iter()
+            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
+            .map(|summary| summary.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    });
+
+    let widths = ids
+        .iter()
+        .map(|id| {
+            let selector: &'static str =
+                Box::leak(format!("settings-scheme-status-slot-{id}").into_boxed_str());
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} should reserve the scheme status column"))
+                .size
+                .width
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        widths.windows(2).all(|pair| pair[0] == pair[1]),
+        "selected and unselected schemes should reserve the same status width, got {widths:?}"
     );
 }
 

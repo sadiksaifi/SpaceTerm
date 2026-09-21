@@ -709,7 +709,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 let refine_interaction = option_enabled;
                 #[cfg(feature = "appearance-exerciser")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
-                let label_font = option_label_font(&crate::control_typography(cx), selected);
+                // Selection changes the chip, never the label's glyphs or advance widths.
+                let label_font = crate::control_typography(cx).regular().clone();
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
                     paint,
                     font: label_font.clone(),
@@ -912,15 +913,6 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             track.into_any_element()
         }
     }
-}
-
-fn option_label_font(typography: &crate::ControlTypography, selected: bool) -> gpui::Font {
-    if selected {
-        typography.emphasis()
-    } else {
-        typography.regular()
-    }
-    .clone()
 }
 
 /// Returns the nearest enabled option after `origin` in the requested direction.

@@ -989,11 +989,7 @@ impl SettingsWindow {
                         + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
                     .px(appearance.spacing(8.0))
                     .cursor_default()
-                    .chrome_text(appearance.typography.style(if selected {
-                        TextRole::BodyEmphasis
-                    } else {
-                        TextRole::Navigation
-                    }))
+                    .chrome_text(appearance.typography.style(TextRole::Navigation))
                     .child(chip.render(chip_selector, &row_group))
                     .when(has_matches, |entry| {
                         entry

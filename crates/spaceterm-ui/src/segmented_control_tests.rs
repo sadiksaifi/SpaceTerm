@@ -53,20 +53,6 @@ fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
     }
 }
 
-#[test]
-fn every_selected_option_uses_emphasis_without_changing_unselected_labels() {
-    let typography = crate::ControlTypography::default();
-
-    assert_eq!(
-        option_label_font(&typography, false),
-        typography.regular().clone()
-    );
-    assert_eq!(
-        option_label_font(&typography, true),
-        typography.emphasis().clone()
-    );
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Light,
@@ -104,11 +90,13 @@ struct TestRoot {
     right_to_left: bool,
     changes: Rc<RefCell<Vec<SegmentedChange<Mode>>>>,
     other_focus: FocusHandle,
+    preview_font: Rc<RefCell<Option<gpui::Font>>>,
 }
 
 impl Render for TestRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let changes = Rc::clone(&self.changes);
+        let preview_font = Rc::clone(&self.preview_font);
         let control = SegmentedControl::new(
             "test-segmented",
             "Appearance",
@@ -116,8 +104,23 @@ impl Render for TestRoot {
             vec![
                 SegmentedOption::new(Mode::Light, "Light")
                     .debug_selector("test-segmented-light")
-                    .preview(|color, extent| {
-                        div().w(extent).h(extent).bg(color).into_any_element()
+                    .preview(move |color, extent| {
+                        let preview_font = Rc::clone(&preview_font);
+                        div()
+                            .w(extent)
+                            .h(extent)
+                            .bg(color)
+                            .child(
+                                gpui::canvas(
+                                    move |_, window, _| {
+                                        *preview_font.borrow_mut() =
+                                            Some(window.text_style().font());
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .size_full(),
+                            )
+                            .into_any_element()
                     }),
                 SegmentedOption::new(Mode::Dark, "Dark").debug_selector("test-segmented-dark"),
             ]
@@ -162,10 +165,36 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     (root, changes, cx)
+}
+
+#[gpui::test]
+fn selection_keeps_the_rendered_segment_font_stable(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.size = SegmentedSize::Card;
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let before = root.read_with(cx, |root, _| root.preview_font.borrow().clone().unwrap());
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.current = Mode::Light;
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let after = root.read_with(cx, |root, _| root.preview_font.borrow().clone().unwrap());
+    assert_eq!(
+        after, before,
+        "selection must not reshape the segment's text"
+    );
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -176,6 +205,47 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_mouse_move(position, None, Modifiers::none());
     cx.simulate_click(position, Modifiers::none());
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn selection_keeps_segment_and_label_geometry_stable(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+        cx.update(|_, cx| {
+            root.update(cx, |root, cx| {
+                root.size = size;
+                root.current = Mode::Dark;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let selectors = [
+            "test-segmented",
+            "test-segmented-light",
+            "test-segmented-light-label",
+            "test-segmented-dark",
+            "test-segmented-dark-label",
+            "test-segmented-auto",
+            "test-segmented-auto-label",
+        ];
+        let before = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+        for mode in [Mode::Light, Mode::Auto, Mode::Dark] {
+            cx.update(|_, cx| {
+                root.update(cx, |root, cx| {
+                    root.current = mode;
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            for (selector, expected) in selectors.into_iter().zip(before) {
+                assert_eq!(
+                    cx.debug_bounds(selector).unwrap(),
+                    expected,
+                    "{selector} moved or resized after selection changed to {mode:?} ({size:?})"
+                );
+            }
+        }
+    }
 }
 
 fn focus_control(cx: &mut VisualTestContext) {
@@ -488,6 +558,7 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();

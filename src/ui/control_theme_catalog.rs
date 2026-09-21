@@ -293,7 +293,7 @@ impl OverlayRowPolicy {
             } else if appearance.active {
                 1.25
             } else {
-                1.12
+                super::appearance::SUBDUED_SELECTION_CONTRAST
             }),
             boundary: increased.then_some(3.0),
             disabled_selected_fill: Some(appearance.floating_disabled_selected_background),

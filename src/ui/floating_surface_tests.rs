@@ -112,14 +112,6 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                     if !opposing_custom_host {
                         let inactive_colors = inactive.host_colors(host);
                         assert_eq!(
-                            mixed.row_selected_background,
-                            inactive_colors.row_selected_background
-                        );
-                        assert_eq!(
-                            mixed.row_selected_hover_background,
-                            inactive_colors.row_selected_hover_background
-                        );
-                        assert_eq!(
                             mixed.row_selected_border,
                             inactive_colors.row_selected_border
                         );
@@ -166,7 +158,32 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                                 )
                                 .source_over(row_host),
                         ];
-                        for background in backgrounds {
+                        let resting_backgrounds = [
+                            active
+                                .materials
+                                .paint(
+                                    crate::appearance::SurfaceRole::Surface,
+                                    semantic_host,
+                                    Color::rgba(0),
+                                )
+                                .source_over(host_background),
+                            active
+                                .materials
+                                .paint(
+                                    crate::appearance::SurfaceRole::Surface,
+                                    active_colors.row_background,
+                                    Color::rgba(0),
+                                )
+                                .source_over(row_host),
+                        ];
+                        for (background, resting) in
+                            backgrounds.into_iter().zip(resting_backgrounds)
+                        {
+                            assert!(
+                                background.contrast_ratio(resting)
+                                    >= super::appearance::SUBDUED_SELECTION_CONTRAST,
+                                "{appearance:?}/{host:?}/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {resting:?}"
+                            );
                             for (content, floor) in [
                                 (primary, primary_floor),
                                 (secondary, secondary_floor),
@@ -187,14 +204,6 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                 let mixed = active.unfocused_selection_colors(spaceterm_ui::ControlHost::Floating);
                 if !opposing_custom_host {
                     let inactive_colors = inactive.host_colors(spaceterm_ui::ControlHost::Floating);
-                    assert_eq!(
-                        mixed.row_selected_background,
-                        inactive_colors.row_selected_background
-                    );
-                    assert_eq!(
-                        mixed.row_selected_hover_background,
-                        inactive_colors.row_selected_hover_background
-                    );
                     assert_eq!(
                         mixed.row_selected_border,
                         inactive_colors.row_selected_border
@@ -223,6 +232,11 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                     ] {
                         let background = fill.source_over(host);
+                        assert!(
+                            background.contrast_ratio(host)
+                                >= super::appearance::SUBDUED_SELECTION_CONTRAST,
+                            "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {host:?}"
+                        );
                         for (content, floor) in [
                             (primary, primary_floor),
                             (secondary, secondary_floor),
