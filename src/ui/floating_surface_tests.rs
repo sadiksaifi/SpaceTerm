@@ -1,7 +1,7 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SchemeCatalog,
-    SystemAppearance, WindowBackgroundAppearance,
+    ChromeDensity, Color, ColorProvenance, CompositionCapabilities, ResolvedAppearance,
+    SchemeCatalog, SystemAppearance, WindowBackgroundAppearance,
 };
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
 use spaceterm_ui::{FloatingRole, FloatingShell};
@@ -100,7 +100,79 @@ fn light_selections_and_terminal_share_the_common_surface() {
 }
 
 #[test]
-fn light_unfocused_navigation_keeps_its_selected_fill_with_transparency() {
+fn settings_surfaces_transmit_in_order_and_controls_use_their_actual_hosts() {
+    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
+
+    let cumulative_alpha = |under: u8, over: u8| {
+        let under = f64::from(under) / 255.0;
+        let over = f64::from(over) / 255.0;
+        ((over + under * (1.0 - over)) * 255.0).round() as u8
+    };
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            let (resolved, _) =
+                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+            let authored = resolved.chrome.colors.clone();
+            let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+            let (settings, _) =
+                super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            let sidebar = settings.surface(Sidebar);
+            let canvas = settings.surface(Canvas);
+            let card = settings.surface(Card);
+
+            assert_eq!(resolved.chrome.colors, authored);
+            for (host, expected) in [
+                (spaceterm_ui::ControlHost::Panel, sidebar.background),
+                (spaceterm_ui::ControlHost::Window, canvas.background),
+                (spaceterm_ui::ControlHost::Card, card.background),
+            ] {
+                assert_eq!(settings.chrome.control_host_background(host), expected);
+            }
+            if transparency == 0.0 {
+                assert_eq!([sidebar.paint.a, canvas.paint.a, card.paint.a], [255; 3]);
+            } else {
+                let card_alpha = cumulative_alpha(canvas.paint.a, card.paint.a);
+                assert!(sidebar.paint.a < canvas.paint.a);
+                assert!(canvas.paint.a < card_alpha);
+                assert!(card_alpha < u8::MAX);
+            }
+        }
+
+        let (resolved, _) = resolve_case_with_transparency_accessibility(
+            appearance,
+            ChromeDensity::Compact,
+            1.0,
+            true,
+            true,
+            false,
+        );
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let (settings, _) =
+            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+        assert_eq!(
+            [
+                settings.surface(Sidebar).paint.a,
+                settings.surface(Canvas).paint.a,
+                settings.surface(Card).paint.a,
+            ],
+            [255; 3]
+        );
+    }
+
+    let (mut resolved, _) =
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.35, true, true);
+    let authored_panel = Color::rgb(0x7a91b3);
+    std::sync::Arc::make_mut(&mut resolved.chrome)
+        .colors
+        .panel_background = authored_panel;
+    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+    let (settings, _) =
+        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+    assert_eq!(settings.surface(Sidebar).semantic, authored_panel);
+}
+
+#[test]
+fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() {
     for transparency in [0.0, 0.35, 1.0] {
         let (_, prepared) = resolve_case(
             Appearance::Light,
@@ -124,7 +196,12 @@ fn light_unfocused_navigation_keeps_its_selected_fill_with_transparency() {
             hover_rim: Some(panel.row_selected_hover_border),
         }
         .selected_on(&prepared, panel.panel_background);
-        assert_eq!(chip.fill, Some(Color::rgb(0xfafafa)));
+        let fill = chip.fill.expect("selected navigation paints a fill");
+        assert_eq!(
+            fill,
+            prepared.selection_surface(panel.panel_background, panel.row_selected_background)
+        );
+        assert_eq!(fill.a == 255, transparency == 0.0);
         for (host, colors) in [
             (
                 spaceterm_ui::ControlHost::Window,
@@ -142,10 +219,15 @@ fn light_unfocused_navigation_keeps_its_selected_fill_with_transparency() {
             let track = colors
                 .element_background
                 .source_over(prepared.control_host_background(host));
+            let selected = colors.selection_background.source_over(track);
+            assert!(
+                selected.r > track.r,
+                "selected segment should remain raised on {host:?} at {transparency}"
+            );
             assert_eq!(
-                colors.selection_background.source_over(track),
-                Color::rgb(0xfafafa),
-                "selected segment on {host:?} at transparency {transparency}",
+                colors.selection_background.a == 255,
+                transparency == 0.0,
+                "selected segment on {host:?} must respect transparency {transparency}"
             );
         }
     }
@@ -1536,6 +1618,24 @@ fn resolve_case(
     blur: bool,
     supported: bool,
 ) -> (ResolvedAppearance, ChromeAppearance) {
+    resolve_case_with_transparency_accessibility(
+        appearance,
+        density,
+        transparency,
+        blur,
+        supported,
+        true,
+    )
+}
+
+fn resolve_case_with_transparency_accessibility(
+    appearance: Appearance,
+    density: ChromeDensity,
+    transparency: f32,
+    blur: bool,
+    supported: bool,
+    accessibility_allows_transparency: bool,
+) -> (ResolvedAppearance, ChromeAppearance) {
     let mut preferences = AppearancePreferences {
         mode: match appearance {
             Appearance::Light => AppearanceMode::Light,
@@ -1551,7 +1651,10 @@ fn resolve_case(
             AppearanceGeneration::INITIAL,
             &preferences,
             SystemAppearance::available(appearance).with_composition(
-                crate::appearance::CompositionCapabilities::new(supported, true),
+                crate::appearance::CompositionCapabilities::new(
+                    supported,
+                    accessibility_allows_transparency,
+                ),
             ),
             &AvailableFonts::default(),
         )
@@ -2188,17 +2291,15 @@ fn floating_control_states_transmit_their_host_until_the_opaque_override() {
         }
         let segmented_selection = translucent.floating_segmented_colors.selection_background;
         if appearance == Appearance::Light {
-            assert_eq!(
-                segmented_selection,
-                Color::rgb(0xfafafa),
-                "Light floating selection must preserve the common selected surface"
+            assert!(
+                segmented_selection.a < 255,
+                "the built-in Light floating segment must not force its FAFAFA base opaque"
             );
-        } else if translucent
+        }
+        if !translucent
             .floating_fallbacks
             .contains(&FloatingControlFamily::Segmented)
         {
-            assert_eq!(segmented_selection.a, 255);
-        } else {
             assert!(segmented_selection.a < 255);
         }
         assert_ne!(paint.element_background, paint.element_hover);
@@ -2211,6 +2312,34 @@ fn floating_control_states_transmit_their_host_until_the_opaque_override() {
             opaque.floating_control_colors.input_background,
         ] {
             assert_eq!(paint.a, 255);
+        }
+    }
+}
+
+#[test]
+fn built_in_control_backgrounds_transmit_at_the_default_transparency() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.35, true, true);
+        for (host, colors) in [
+            ("Window", &prepared.control_colors),
+            ("TitleBar", &prepared.title_bar_controls.colors),
+            ("Panel", &prepared.panel_controls.colors),
+            ("Card", &prepared.card_controls.colors),
+            ("Floating", &prepared.floating_control_colors),
+        ] {
+            for (state, fill) in [
+                ("button", colors.element_background),
+                ("primary", colors.primary_background),
+                ("destructive", colors.destructive_background),
+                ("field", colors.input_background),
+                ("selection", colors.selection_background),
+                ("toggle", colors.toggle_off_background),
+            ] {
+                assert!(
+                    fill.a < 255,
+                    "{appearance:?}/{host}/{state} forced opaque: {fill:?}"
+                );
+            }
         }
     }
 }
@@ -2325,6 +2454,78 @@ fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback
 }
 
 #[test]
+fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for transparency in [0.35, 0.7, 1.0] {
+            let (resolved, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+            let colors = &prepared.floating_control_colors;
+            assert!(
+                !prepared
+                    .floating_fallbacks
+                    .contains(&FloatingControlFamily::GhostElement),
+                "{appearance:?} Ghost must not require an opaque fallback at {transparency}"
+            );
+            assert!(
+                colors.ghost_element_hover.a < 255 && colors.ghost_element_active.a < 255,
+                "{appearance:?} Ghost states must transmit at {transparency}: hover={:?}, pressed={:?}",
+                colors.ghost_element_hover,
+                colors.ghost_element_active,
+            );
+
+            let reference = [
+                resolved.chrome.colors.background,
+                resolved.chrome.colors.ghost_element_hover,
+                resolved.chrome.colors.ghost_element_active,
+            ];
+            let reference_order = [
+                reference[0].r.cmp(&reference[1].r),
+                reference[0].r.cmp(&reference[2].r),
+                reference[1].r.cmp(&reference[2].r),
+            ];
+            let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+            for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                let host = shell_endpoint_background(shell, underlay);
+                let rendered = [
+                    host,
+                    colors.ghost_element_hover.source_over(host),
+                    colors.ghost_element_active.source_over(host),
+                ];
+                assert_eq!(
+                    [
+                        rendered[0].r.cmp(&rendered[1].r),
+                        rendered[0].r.cmp(&rendered[2].r),
+                        rendered[1].r.cmp(&rendered[2].r),
+                    ],
+                    reference_order,
+                    "{appearance:?} Ghost order changed over {underlay:?} at {transparency}"
+                );
+                for (background, foreground, icon) in [
+                    (
+                        rendered[1],
+                        colors.ghost_element_hover_foreground,
+                        colors.ghost_element_hover_icon,
+                    ),
+                    (
+                        rendered[2],
+                        colors.ghost_element_active_foreground,
+                        colors.ghost_element_active_icon,
+                    ),
+                ] {
+                    assert!(
+                        foreground
+                            .source_over(background)
+                            .contrast_ratio(background)
+                            >= 4.5
+                    );
+                    assert!(icon.source_over(background).contrast_ratio(background) >= 4.5);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
     for (appearance, root, hover, pressed) in [
         (
@@ -2376,10 +2577,6 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
                 ("segmented track", host.segmented.element_background),
                 ("segmented option", host.segmented.selection_background),
             ] {
-                if appearance == Appearance::Light && state == "segmented option" {
-                    assert_eq!(fill, Color::rgb(0xfafafa));
-                    continue;
-                }
                 assert!(
                     fill.a < 255,
                     "{appearance:?} {name} {state} must transmit its immediate host: {fill:?}"
@@ -2570,6 +2767,36 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
             "{host_name}/disabled must keep the selected chip step"
         );
     }
+}
+
+#[test]
+fn segmented_options_use_a_translucent_authored_track_composited_over_its_root() {
+    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
+    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
+    chrome.colors.background = Color::rgb(0x182838);
+    chrome.colors.segmented_track_background = Color::rgba(0xb0603080);
+    chrome.colors.selection_background = Color::rgba(0xf0c070c0);
+    chrome
+        .provenance
+        .insert("segmented_track_background", ColorProvenance::Authored);
+    let authored_track = chrome
+        .colors
+        .segmented_track_background
+        .source_over(chrome.colors.background);
+    let authored_selection = chrome
+        .colors
+        .selection_background
+        .source_over(authored_track);
+
+    let prepared = ChromeAppearance::prepare(&resolved.chrome);
+    assert_eq!(
+        prepared.segmented_control_colors.element_background,
+        authored_track,
+    );
+    assert_eq!(
+        prepared.segmented_control_colors.selection_background,
+        authored_selection,
+    );
 }
 
 #[test]

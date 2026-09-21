@@ -3,6 +3,7 @@
 mod collection_selection;
 mod disabled_union;
 mod separator;
+pub(crate) mod settings;
 
 use std::sync::Arc;
 
@@ -124,6 +125,7 @@ pub(crate) struct ChromeAppearance {
     pub(crate) floating_blur: bool,
     pub(crate) text_scale: f32,
     pub(crate) spacing_scale: f32,
+    pub(crate) settings_hosts: Option<settings::SettingsHostBackgrounds>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -314,6 +316,7 @@ impl Default for ChromeAppearance {
             floating_blur: false,
             text_scale: 1.0,
             spacing_scale: 1.0,
+            settings_hosts: None,
         }
     }
 }
@@ -2724,7 +2727,9 @@ fn compile_segmented_control_colors(
     let mut candidate = semantic.clone();
     let mut feasible = true;
     let authored_track = if explicit_track {
-        authored.segmented_track_background
+        authored
+            .segmented_track_background
+            .source_over(authored.background)
     } else {
         authored.background
     };
@@ -2790,14 +2795,6 @@ fn compile_segmented_control_colors(
         selection_pressed_background,
         selection_disabled_background,
     );
-    if explicit_track {
-        // An authored track defines the selected option's reference surface directly. Preserve
-        // its color instead of compressing the selection into the host's translucent ladder.
-        segmented.selection_background = semantic.selection_background;
-        segmented.selection_hover_background = semantic.selection_hover_background;
-        segmented.selection_pressed_background = semantic.selection_pressed_background;
-    }
-
     let filled_option = |fill: Color| {
         if fill.a == 0 { reference_track } else { fill }
     };
@@ -3438,16 +3435,16 @@ fn resolve_floating_segmented_colors_detailed(
             reference.element_background
         })
     };
-    let track_overlay = equivalent_overlay(
-        semantic_track,
-        reference.elevated_surface_background,
-        if explicit_track {
-            paint.segmented_track_background.a
-        } else {
-            paint.element_background.a
-        },
-    )
-    .unwrap_or(semantic_track);
+    let track_overlay = if explicit_track {
+        paint.segmented_track_background
+    } else {
+        equivalent_overlay(
+            semantic_track,
+            reference.elevated_surface_background,
+            paint.element_background.a,
+        )
+        .unwrap_or(semantic_track)
+    };
     let (track, [text_secondary, text_disabled]) = resolve_floating_frame(
         semantic_track,
         track_overlay,
@@ -3496,91 +3493,134 @@ fn resolve_floating_segmented_colors_detailed(
             ],
         )
     };
-    let segmented_states = rehost_floating_states(
-        [
-            segmented_state(
-                reference.ghost_element_background,
-                paint.ghost_element_background,
-                reference.text_secondary,
-                paint.border_transparent,
-                floors.secondary,
-            ),
-            segmented_state(
-                reference.ghost_element_hover,
-                paint.ghost_element_hover,
-                reference.ghost_element_hover_foreground,
-                paint.border_transparent,
-                floors.primary,
-            ),
-            segmented_state(
-                reference.ghost_element_active,
-                paint.ghost_element_active,
-                reference.ghost_element_active_foreground,
-                paint.border_variant,
-                floors.primary,
-            ),
-            segmented_state(
-                reference.ghost_element_disabled,
-                paint.ghost_element_disabled,
-                reference.text_disabled,
-                paint.border_transparent,
-                floors.disabled,
-            ),
-            segmented_state(
-                reference.selection_background,
-                paint.selection_background,
-                reference.selection_foreground,
-                paint.selection_border,
-                floors.primary,
-            ),
-            segmented_state(
-                reference.selection_hover_background,
-                paint.selection_hover_background,
-                reference.selection_hover_foreground,
-                paint.selection_hover_border,
-                floors.primary,
-            ),
-            segmented_state(
-                reference.selection_pressed_background,
-                paint.selection_pressed_background,
-                reference.selection_pressed_foreground,
-                paint.selection_pressed_border,
-                floors.primary,
-            ),
-            segmented_state(
-                reference.selection_disabled_background,
-                paint.selection_disabled_background,
-                reference.selection_disabled_foreground,
-                paint.selection_disabled_border,
-                floors.disabled,
-            ),
-        ],
-        [
-            authored.ghost_element_background,
-            authored.ghost_element_hover,
-            authored.ghost_element_active,
-            authored.ghost_element_disabled,
-            authored.selection_background,
-            authored.selection_hover_background,
-            authored.selection_pressed_background,
-            authored.selection_disabled_background,
-        ],
-        if explicit_track {
-            authored.segmented_track_background
-        } else {
-            authored.background
-        },
-        semantic_track,
-    );
-    let segmented_resolution = resolve_floating_family_for_presentation(
-        segmented_states,
-        track_backgrounds,
-        if floors.interactive {
-            &[[0, 1, 2], [4, 5, 6]]
-        } else {
-            &[]
-        },
-    );
+    let segmented_states = [
+        segmented_state(
+            reference.ghost_element_background,
+            paint.ghost_element_background,
+            reference.text_secondary,
+            paint.border_transparent,
+            floors.secondary,
+        ),
+        segmented_state(
+            reference.ghost_element_hover,
+            paint.ghost_element_hover,
+            reference.ghost_element_hover_foreground,
+            paint.border_transparent,
+            floors.primary,
+        ),
+        segmented_state(
+            reference.ghost_element_active,
+            paint.ghost_element_active,
+            reference.ghost_element_active_foreground,
+            paint.border_variant,
+            floors.primary,
+        ),
+        segmented_state(
+            reference.ghost_element_disabled,
+            paint.ghost_element_disabled,
+            reference.text_disabled,
+            paint.border_transparent,
+            floors.disabled,
+        ),
+        segmented_state(
+            reference.selection_background,
+            paint.selection_background,
+            reference.selection_foreground,
+            paint.selection_border,
+            floors.primary,
+        ),
+        segmented_state(
+            reference.selection_hover_background,
+            paint.selection_hover_background,
+            reference.selection_hover_foreground,
+            paint.selection_hover_border,
+            floors.primary,
+        ),
+        segmented_state(
+            reference.selection_pressed_background,
+            paint.selection_pressed_background,
+            reference.selection_pressed_foreground,
+            paint.selection_pressed_border,
+            floors.primary,
+        ),
+        segmented_state(
+            reference.selection_disabled_background,
+            paint.selection_disabled_background,
+            reference.selection_disabled_foreground,
+            paint.selection_disabled_border,
+            floors.disabled,
+        ),
+    ];
+    let segmented_states = if explicit_track {
+        // These fills have already been materialized against their authored track. Rehosting
+        // their opaque targets would discard transparency and force bright selections opaque.
+        Ok(segmented_states)
+    } else {
+        rehost_floating_states(
+            segmented_states,
+            [
+                authored.ghost_element_background,
+                authored.ghost_element_hover,
+                authored.ghost_element_active,
+                authored.ghost_element_disabled,
+                authored.selection_background,
+                authored.selection_hover_background,
+                authored.selection_pressed_background,
+                authored.selection_disabled_background,
+            ],
+            authored.background,
+            semantic_track,
+        )
+    };
+    let segmented_resolution = if explicit_track {
+        // The unselected option includes an unpainted resting state. Its hover may require a
+        // stronger backing without forcing the independently painted selected option opaque.
+        segmented_states.and_then(
+            |[
+                normal,
+                hover,
+                pressed,
+                disabled,
+                selected,
+                selected_hover,
+                selected_pressed,
+                selected_disabled,
+            ]| {
+                let orders: &[[usize; 3]] = if floors.interactive {
+                    &[[0, 1, 2]]
+                } else {
+                    &[]
+                };
+                let (mut states, unselected_fallback) = resolve_floating_family_for_presentation(
+                    Ok([normal, hover, pressed, disabled]),
+                    track_backgrounds,
+                    orders,
+                )?;
+                let (selected, selected_fallback) = resolve_floating_family_for_presentation(
+                    Ok([
+                        selected,
+                        selected_hover,
+                        selected_pressed,
+                        selected_disabled,
+                    ]),
+                    track_backgrounds,
+                    orders,
+                )?;
+                states.extend(selected);
+                Ok((states, unselected_fallback || selected_fallback))
+            },
+        )
+    } else {
+        resolve_floating_family_for_presentation(
+            segmented_states,
+            track_backgrounds,
+            if floors.interactive {
+                &[[0, 1, 2], [4, 5, 6]]
+            } else {
+                &[]
+            },
+        )
+    };
     if let Ok((states, used_opaque_fallback)) = segmented_resolution {
         if used_opaque_fallback {
             fallback_families.push(FloatingControlFamily::Segmented);
@@ -3718,18 +3758,36 @@ impl ChromeAppearance {
         }
     }
 
-    /// A Light selected chip retains its authored color instead of compressing into the glass
-    /// ladder. The surrounding host can still transmit the desktop; selection stays identifiable.
-    /// Inactive windows and Increase Contrast retain their separate material preparation.
+    /// Selected chips use the same host-relative material as other resting surfaces.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
-        if self.appearance == Appearance::Light
-            && self.active
-            && !self.capabilities.increase_contrast
-        {
-            color
-        } else {
-            self.materials.paint(SurfaceRole::Surface, host, color)
+        let paint = self.materials.paint(SurfaceRole::Surface, host, color);
+        if self.materials.is_opaque() || paint.a == 0 {
+            return paint;
         }
+        // Keep selection identifiable when the neutral surface ladder compresses at high
+        // transparency. Strengthen only its overlay, never replace it with an opaque fill.
+        let minimum = color.source_over(host).contrast_ratio(host).min(1.22);
+        let visible = |alpha| {
+            paint
+                .with_alpha(alpha)
+                .source_over(host)
+                .contrast_ratio(host)
+                >= minimum
+        };
+        if visible(paint.a) {
+            return paint;
+        }
+        let mut lower = paint.a;
+        let mut upper = 254;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            if visible(middle) {
+                upper = middle;
+            } else {
+                lower = middle + 1;
+            }
+        }
+        paint.with_alpha(upper)
     }
 
     /// Applies the window's material for one surface role to an authored background color.
@@ -3747,6 +3805,11 @@ impl ChromeAppearance {
     /// Floating callers that need transmission bounds use the shell's two endpoint backgrounds;
     /// its value here is the opaque semantic reference only.
     pub(crate) fn control_host_background(&self, host: spaceterm_ui::ControlHost) -> Color {
+        if let Some(settings) = self.settings_hosts
+            && let Some(background) = settings.background(host)
+        {
+            return background;
+        }
         match host {
             spaceterm_ui::ControlHost::Floating => self.floating_colors.elevated_surface_background,
             host => non_floating_control_host_background(
@@ -3834,11 +3897,12 @@ impl ChromeAppearance {
 
     /// The backdrop a Pane paints beneath its Terminal.
     ///
-    /// Presentation only: protocol colors and explicit cell backgrounds keep their own values. A
-    /// translucent window lifts the default backdrop toward the scheme's elevated surface so it
-    /// separates from the base; an opaque window paints it as is. Dark also retains a backing
-    /// beneath that tint so desktop colors do not wash out Terminal text.
+    /// Light applies the shared material directly to the accepted Terminal background. Dark
+    /// retains its elevation tint and readability backing. Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
+        if self.appearance == Appearance::Light {
+            return self.surface(SurfaceRole::Surface, terminal_background);
+        }
         self.materials.pane_surface(
             self.colors.background,
             self.colors.elevated_surface_background,
@@ -4227,6 +4291,7 @@ impl ChromeAppearance {
             floating_blur: resolved.composition.floating_blur,
             text_scale: resolved.typography.body.size / 13.0,
             spacing_scale: Self::density_spacing_scale(resolved.density),
+            settings_hosts: None,
         }
     }
 
@@ -4819,11 +4884,21 @@ impl InstalledChrome {
 }
 
 pub(crate) fn chrome(cx: &App) -> &ChromeAppearance {
+    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
+        && cx.has_global::<settings::InstalledSettingsChrome>()
+    {
+        return settings::selected(cx).chrome.as_ref();
+    }
     selected_chrome(cx)
 }
 
 /// Retains the immutable prepared variant for render closures without copying its catalogs.
 pub(crate) fn shared_chrome(cx: &App) -> Arc<ChromeAppearance> {
+    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
+        && cx.has_global::<settings::InstalledSettingsChrome>()
+    {
+        return Arc::clone(&settings::selected(cx).chrome);
+    }
     Arc::clone(selected_chrome(cx))
 }
 
@@ -4848,5 +4923,9 @@ pub(crate) fn initialize(cx: &mut App) {
         cx.set_global(InstalledChrome::single(Arc::new(
             ChromeAppearance::default(),
         )));
+    }
+    if !cx.has_global::<settings::InstalledSettingsChrome>() {
+        let chrome = cx.global::<InstalledChrome>().active.as_ref().clone();
+        cx.set_global(settings::InstalledSettingsChrome::single(chrome));
     }
 }

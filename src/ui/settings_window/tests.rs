@@ -1538,7 +1538,15 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
         let mut resolved = installed.chrome.as_ref().clone();
         resolved.colors = authored;
         resolved.composition.capabilities.increase_contrast = true;
-        let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved);
+        let (active, inactive) =
+            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved);
+        let installed_active = Arc::new(active.clone());
+        let installed_inactive = Arc::new(inactive.clone());
+        let (settings_active, settings_inactive) =
+            crate::ui::appearance::settings::prepare_variants(&resolved, active, inactive);
+        let settings_active = Arc::new(settings_active);
+        let settings_inactive = Arc::new(settings_inactive);
+        let appearance = settings_active.chrome.as_ref();
         let root = appearance
             .host_colors(spaceterm_ui::ControlHost::Window)
             .clone();
@@ -1558,7 +1566,7 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
             );
         }
         let navigation_row_fill = super::navigation_chip_paint(false, true, &panel)
-            .raised_on(&appearance, panel.panel_background)
+            .raised_on(appearance, panel.panel_background)
             .fill
             .expect("the authored idle navigation row has a fill");
         assert!(
@@ -1566,22 +1574,28 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
             "Increase Contrast must resolve the navigation foreground on its rendered row fill"
         );
         let expected = [
-            appearance.surface(
-                crate::appearance::SurfaceRole::Sheet,
-                appearance.colors.background,
-            ),
+            settings_active
+                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Sidebar)
+                .paint,
+            settings_active
+                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Canvas)
+                .paint,
             navigation_row_fill,
-            appearance.surface(
-                crate::appearance::SurfaceRole::Surface,
-                appearance.colors.elevated_surface_background,
-            ),
-            super::controls::highlighted_row_background(&appearance),
+            settings_active
+                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Card)
+                .paint,
+            super::controls::highlighted_row_background(appearance),
             card.row_selected_foreground,
             root.text_muted,
         ];
-        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
-            appearance,
-        )));
+        cx.set_global(crate::ui::appearance::InstalledChrome {
+            active: installed_active,
+            inactive: installed_inactive,
+        });
+        cx.set_global(crate::ui::appearance::settings::InstalledSettingsChrome {
+            active: settings_active,
+            inactive: settings_inactive,
+        });
         cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
             observed_styles.borrow_mut().push(state.clone());
             gpui::Empty
@@ -1597,24 +1611,25 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
     cx.run_until_parked();
     set_query(&settings, "line height", cx);
     for (selector, expected_background, expected_foreground) in [
-        ("settings-window-surface", Some(expected[0]), None),
+        ("settings-sidebar", Some(expected[0]), None),
+        ("settings-canvas", Some(expected[1]), None),
         (
             "settings-navigation-chip-settings-section-interface",
-            Some(expected[1]),
+            Some(expected[2]),
             None,
         ),
         (
             "settings-section-terminal-group-font-card",
-            Some(expected[2]),
+            Some(expected[3]),
             None,
         ),
-        ("settings-row-terminal-line-height", Some(expected[3]), None),
+        ("settings-row-terminal-line-height", Some(expected[4]), None),
         (
             "settings-row-terminal-line-height-label",
             None,
-            Some(expected[4]),
+            Some(expected[5]),
         ),
-        ("settings-save-status", None, Some(expected[5])),
+        ("settings-save-status", None, Some(expected[6])),
     ] {
         cx.update(|window, cx| window.toggle_inspector(cx));
         cx.run_until_parked();

@@ -16,6 +16,7 @@ use spaceterm_ui::{
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::{IconRole, InteractiveIconRole};
 use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, TextRole};
@@ -159,20 +160,15 @@ impl SettingsGroup {
         }
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+    pub(super) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
+        let appearance = &settings.chrome;
         let selector = self.selector.clone();
         let title_selector = format!("{selector}-title");
         let radius = RadiusRole::Card.pixels();
         let card_selector = format!("{selector}-card");
-        let card_colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let card_background = appearance.surface(
-            crate::appearance::SurfaceRole::Surface,
-            appearance.colors.elevated_surface_background,
-        );
-        let card_edge = appearance
-            .materials
-            .edge(card_colors.elevated_surface_background, card_colors.border);
-        let row_separator = appearance.separator(spaceterm_ui::ControlHost::Card);
+        let card_background = settings.surface(SettingsSurfaceRole::Card).paint;
+        let card_edge = settings.card_edge();
+        let row_separator = settings.separator(SettingsSurfaceRole::Card);
         let row_inset = row_horizontal_padding(appearance);
         let separator_selector = card_selector.clone();
         let rows = self

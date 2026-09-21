@@ -74,17 +74,18 @@ fn highlighted_row_materializes_against_its_card_host() {
 fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext) {
     use crate::appearance::Color;
     use crate::ui::appearance::ChromeAppearance;
+    use crate::ui::appearance::settings::SettingsAppearance;
     use gpui::{
         Context, DivInspectorState, IntoElement as _, ParentElement as _, Render, ScrollDelta,
         ScrollWheelEvent, Styled as _, TouchPhase, Window, div, point, px,
     };
     use std::cell::RefCell;
 
-    struct StepperCard(ChromeAppearance);
+    struct StepperCard(SettingsAppearance);
     impl Render for StepperCard {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
             let stepper = super::controls::Stepper::new("host-stepper", "Value", "1")
-                .render(&self.0)
+                .render(&self.0.chrome)
                 .into_any_element();
             div().size_full().p(px(20.0)).child(
                 super::controls::SettingsGroup::new(
@@ -112,7 +113,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
         )
         .unwrap()
     });
-    let (_, cx) = cx.add_window_view(|_, _| StepperCard(appearance));
+    let (_, cx) = cx.add_window_view(|_, _| StepperCard(SettingsAppearance::fallback(appearance)));
     cx.run_until_parked();
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);

@@ -477,6 +477,36 @@ pub enum ControlWindowActivity {
     Inactive,
 }
 
+/// The bounded window kind used to select a cached reusable-control catalog.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ControlThemeScope {
+    /// Workspace windows and every other application surface.
+    #[default]
+    Application,
+    /// The Settings Window and its deferred descendants.
+    Settings,
+}
+
+impl ControlThemeScope {
+    /// Returns the scope active while the current element is being constructed or painted.
+    pub fn current() -> Self {
+        current_control_theme_scope()
+    }
+
+    /// Enters this scope while constructing a window's root content.
+    pub fn with_scope<R>(self, work: impl FnOnce() -> R) -> R {
+        enter_control_theme_scope(self, work)
+    }
+
+    /// Retains this scope through layout, prepaint, paint, and deferred descendants.
+    pub fn mount(self, content: impl IntoElement) -> ControlThemeScopeElement {
+        ControlThemeScopeElement {
+            content: content.into_any_element(),
+            scope: self,
+        }
+    }
+}
+
 impl ControlWindowActivity {
     /// Returns the activity variant entered for the current window-rendering scope.
     pub fn current() -> Self {
@@ -541,6 +571,7 @@ impl ControlHost {
 thread_local! {
     static CURRENT_CONTROL_HOST: Cell<ControlHost> = const { Cell::new(ControlHost::Window) };
     static CURRENT_WINDOW_ACTIVITY: Cell<ControlWindowActivity> = const { Cell::new(ControlWindowActivity::Active) };
+    static CURRENT_CONTROL_THEME_SCOPE: Cell<ControlThemeScope> = const { Cell::new(ControlThemeScope::Application) };
 }
 
 struct ControlHostGuard {
@@ -577,6 +608,102 @@ fn enter_window_activity<R>(activity: ControlWindowActivity, work: impl FnOnce()
 
 pub(crate) fn current_window_activity() -> ControlWindowActivity {
     CURRENT_WINDOW_ACTIVITY.with(Cell::get)
+}
+
+struct ControlThemeScopeGuard {
+    previous: ControlThemeScope,
+}
+
+impl Drop for ControlThemeScopeGuard {
+    fn drop(&mut self) {
+        CURRENT_CONTROL_THEME_SCOPE.with(|current| current.set(self.previous));
+    }
+}
+
+fn enter_control_theme_scope<R>(scope: ControlThemeScope, work: impl FnOnce() -> R) -> R {
+    let previous = CURRENT_CONTROL_THEME_SCOPE.with(|current| current.replace(scope));
+    let _guard = ControlThemeScopeGuard { previous };
+    work()
+}
+
+pub(crate) fn current_control_theme_scope() -> ControlThemeScope {
+    CURRENT_CONTROL_THEME_SCOPE.with(Cell::get)
+}
+
+/// Selects a cached control catalog for one window without drawing a surface.
+pub struct ControlThemeScopeElement {
+    content: AnyElement,
+    scope: ControlThemeScope,
+}
+
+impl IntoElement for ControlThemeScopeElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ControlThemeScopeElement {
+    type RequestLayoutState = (ControlWindowActivity, ControlThemeScope);
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let activity = current_window_activity();
+        let scope = self.scope;
+        let content = &mut self.content;
+        (
+            enter_window_activity(activity, || {
+                enter_control_theme_scope(scope, || content.request_layout(window, cx))
+            }),
+            (activity, scope),
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let content = &mut self.content;
+        enter_window_activity(state.0, || {
+            enter_control_theme_scope(state.1, || content.prepaint(window, cx));
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let content = &mut self.content;
+        enter_window_activity(state.0, || {
+            enter_control_theme_scope(state.1, || content.paint(window, cx));
+        });
+    }
 }
 
 /// Selects descendant control presentation for one Operating-System Window.
@@ -665,7 +792,7 @@ impl IntoElement for ControlHostElement {
 }
 
 impl Element for ControlHostElement {
-    type RequestLayoutState = ControlWindowActivity;
+    type RequestLayoutState = (ControlWindowActivity, ControlThemeScope);
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -685,12 +812,15 @@ impl Element for ControlHostElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let host = self.host;
         let activity = current_window_activity();
+        let scope = current_control_theme_scope();
         let content = &mut self.content;
         (
             enter_window_activity(activity, || {
-                enter_host(host, || content.request_layout(window, cx))
+                enter_control_theme_scope(scope, || {
+                    enter_host(host, || content.request_layout(window, cx))
+                })
             }),
-            activity,
+            (activity, scope),
         )
     }
 
@@ -699,14 +829,16 @@ impl Element for ControlHostElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        activity: &mut Self::RequestLayoutState,
+        state: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let host = self.host;
         let content = &mut self.content;
-        enter_window_activity(*activity, || {
-            enter_host(host, || content.prepaint(window, cx));
+        enter_window_activity(state.0, || {
+            enter_control_theme_scope(state.1, || {
+                enter_host(host, || content.prepaint(window, cx));
+            });
         });
     }
 
@@ -715,15 +847,17 @@ impl Element for ControlHostElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        activity: &mut Self::RequestLayoutState,
+        state: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let host = self.host;
         let content = &mut self.content;
-        enter_window_activity(*activity, || {
-            enter_host(host, || content.paint(window, cx));
+        enter_window_activity(state.0, || {
+            enter_control_theme_scope(state.1, || {
+                enter_host(host, || content.paint(window, cx));
+            });
         });
     }
 }

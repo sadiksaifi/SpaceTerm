@@ -63,9 +63,10 @@ pub use command_palette::{
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use floating_surface::{
-    ControlHost, ControlHostElement, ControlWindowActivity, ControlWindowActivityElement,
-    FloatingLayer, FloatingRole, FloatingShell, FloatingSurfacePaint, FloatingSurfacePaints,
-    FloatingSurfaceTheme, SurfaceControlThemes, floating_surface_theme,
+    ControlHost, ControlHostElement, ControlThemeScope, ControlThemeScopeElement,
+    ControlWindowActivity, ControlWindowActivityElement, FloatingLayer, FloatingRole,
+    FloatingShell, FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme,
+    SurfaceControlThemes, floating_surface_theme,
 };
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
@@ -191,8 +192,10 @@ impl gpui::Global for ControlThemeCatalog {}
 
 #[derive(Clone, Debug, PartialEq)]
 struct InstalledControlThemeCatalogs {
-    active: ControlThemeCatalog,
-    inactive: ControlThemeCatalog,
+    active: Box<ControlThemeCatalog>,
+    inactive: Box<ControlThemeCatalog>,
+    settings_active: Option<Box<ControlThemeCatalog>>,
+    settings_inactive: Option<Box<ControlThemeCatalog>>,
 }
 
 impl gpui::Global for InstalledControlThemeCatalogs {}
@@ -513,7 +516,46 @@ impl ControlThemeCatalog {
 /// [`install_text_input_keybindings`].
 pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     icon::register_font(cx)?;
-    install_control_theme_catalogs(cx, catalog.clone(), catalog);
+    let catalog = Box::new(catalog);
+    install_control_theme_catalogs(cx, catalog.clone(), catalog, None);
+    initialize_control_state(cx);
+    Ok(())
+}
+
+/// Installs the application and Settings Window presentation variants and initializes
+/// control-owned state.
+///
+/// Heap-owned catalogs keep the complete scoped catalog set out of the caller's stack frame.
+pub fn init_scoped_control_theme_catalogs(
+    cx: &mut App,
+    active: Box<ControlThemeCatalog>,
+    inactive: Box<ControlThemeCatalog>,
+    settings_active: Box<ControlThemeCatalog>,
+    settings_inactive: Box<ControlThemeCatalog>,
+) -> gpui::Result<()> {
+    let generation = active.generation;
+    if [
+        inactive.generation,
+        settings_active.generation,
+        settings_inactive.generation,
+    ]
+    .into_iter()
+    .any(|candidate| candidate != generation)
+    {
+        return Err(ControlThemeCatalogPairError::GenerationMismatch.into());
+    }
+    icon::register_font(cx)?;
+    install_control_theme_catalogs(
+        cx,
+        active,
+        inactive,
+        Some((settings_active, settings_inactive)),
+    );
+    initialize_control_state(cx);
+    Ok(())
+}
+
+fn initialize_control_state(cx: &mut App) {
     button::init(cx);
     text_input::init(cx);
     menu::init(cx);
@@ -521,7 +563,6 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     combo_box::init(cx);
     tooltip::init(cx);
     modal::init_core(cx);
-    Ok(())
 }
 
 /// Replaces all reusable-control presentation without reinstalling fonts, coordinators, or
@@ -538,10 +579,15 @@ pub fn replace_control_theme_catalog(
         return Err(ControlThemeReplacementError);
     }
     let installed = cx.global::<InstalledControlThemeCatalogs>();
-    if installed.active == catalog && installed.inactive == catalog {
+    if installed.active.as_ref() == &catalog
+        && installed.inactive.as_ref() == &catalog
+        && installed.settings_active.is_none()
+        && installed.settings_inactive.is_none()
+    {
         return Ok(ControlThemeReplacement::Unchanged);
     }
-    install_control_theme_catalogs(cx, catalog.clone(), catalog);
+    let catalog = Box::new(catalog);
+    install_control_theme_catalogs(cx, catalog.clone(), catalog, None);
     cx.refresh_windows();
     Ok(ControlThemeReplacement::Applied)
 }
@@ -563,20 +609,69 @@ pub fn replace_control_theme_catalogs(
         return Err(ControlThemeCatalogPairError::NotInitialized);
     }
     let installed = cx.global::<InstalledControlThemeCatalogs>();
-    if installed.active == active && installed.inactive == inactive {
+    if installed.active.as_ref() == &active
+        && installed.inactive.as_ref() == &inactive
+        && installed.settings_active.is_none()
+        && installed.settings_inactive.is_none()
+    {
         return Ok(ControlThemeReplacement::Unchanged);
     }
-    install_control_theme_catalogs(cx, active, inactive);
+    install_control_theme_catalogs(cx, Box::new(active), Box::new(inactive), None);
+    cx.refresh_windows();
+    Ok(ControlThemeReplacement::Applied)
+}
+
+/// Atomically replaces the application and Settings Window presentation variants.
+///
+/// The Settings pair is selected only inside an explicit [`ControlThemeScope::Settings`] scope;
+/// every other window continues to use the application pair.
+pub fn replace_scoped_control_theme_catalogs(
+    cx: &mut App,
+    active: Box<ControlThemeCatalog>,
+    inactive: Box<ControlThemeCatalog>,
+    settings_active: Box<ControlThemeCatalog>,
+    settings_inactive: Box<ControlThemeCatalog>,
+) -> Result<ControlThemeReplacement, ControlThemeCatalogPairError> {
+    let generation = active.generation;
+    if [
+        inactive.generation,
+        settings_active.generation,
+        settings_inactive.generation,
+    ]
+    .into_iter()
+    .any(|candidate| candidate != generation)
+    {
+        return Err(ControlThemeCatalogPairError::GenerationMismatch);
+    }
+    if !cx.has_global::<InstalledControlThemeCatalogs>() {
+        return Err(ControlThemeCatalogPairError::NotInitialized);
+    }
+    let installed = cx.global::<InstalledControlThemeCatalogs>();
+    if installed.active == active
+        && installed.inactive == inactive
+        && installed.settings_active.as_ref() == Some(&settings_active)
+        && installed.settings_inactive.as_ref() == Some(&settings_inactive)
+    {
+        return Ok(ControlThemeReplacement::Unchanged);
+    }
+    install_control_theme_catalogs(
+        cx,
+        active,
+        inactive,
+        Some((settings_active, settings_inactive)),
+    );
     cx.refresh_windows();
     Ok(ControlThemeReplacement::Applied)
 }
 
 fn install_control_theme_catalogs(
     cx: &mut App,
-    active: ControlThemeCatalog,
-    inactive: ControlThemeCatalog,
+    active: Box<ControlThemeCatalog>,
+    inactive: Box<ControlThemeCatalog>,
+    settings: Option<(Box<ControlThemeCatalog>, Box<ControlThemeCatalog>)>,
 ) {
     debug_assert_eq!(active.generation, inactive.generation);
+    let (settings_active, settings_inactive) = settings.unzip();
     cx.set_global(active.button);
     cx.set_global(active.toggle);
     cx.set_global(active.progress);
@@ -591,8 +686,13 @@ fn install_control_theme_catalogs(
     cx.set_global(active.tooltip);
     cx.set_global(active.modal);
     cx.set_global(active.floating.unwrap_or_default());
-    cx.set_global(active.clone());
-    cx.set_global(InstalledControlThemeCatalogs { active, inactive });
+    cx.set_global(active.as_ref().clone());
+    cx.set_global(InstalledControlThemeCatalogs {
+        active,
+        inactive,
+        settings_active,
+        settings_inactive,
+    });
 }
 
 /// Restates a control's complete text style inside an interaction refinement.
@@ -618,12 +718,25 @@ pub(crate) fn refine_control_text(
 
 pub(crate) fn control_theme_catalog(cx: &App) -> Option<&ControlThemeCatalog> {
     cx.try_global::<InstalledControlThemeCatalogs>()
-        .map(
-            |catalogs| match floating_surface::current_window_activity() {
-                ControlWindowActivity::Active => &catalogs.active,
-                ControlWindowActivity::Inactive => &catalogs.inactive,
-            },
-        )
+        .map(|catalogs| {
+            let settings = match floating_surface::current_window_activity() {
+                ControlWindowActivity::Active => catalogs.settings_active.as_ref(),
+                ControlWindowActivity::Inactive => catalogs.settings_inactive.as_ref(),
+            };
+            let catalog =
+                if floating_surface::current_control_theme_scope() == ControlThemeScope::Settings {
+                    settings.unwrap_or_else(|| match floating_surface::current_window_activity() {
+                        ControlWindowActivity::Active => &catalogs.active,
+                        ControlWindowActivity::Inactive => &catalogs.inactive,
+                    })
+                } else {
+                    match floating_surface::current_window_activity() {
+                        ControlWindowActivity::Active => &catalogs.active,
+                        ControlWindowActivity::Inactive => &catalogs.inactive,
+                    }
+                };
+            catalog.as_ref()
+        })
         .or_else(|| cx.try_global::<ControlThemeCatalog>())
 }
 

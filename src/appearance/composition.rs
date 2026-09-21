@@ -76,6 +76,22 @@ impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
     pub(crate) const OPAQUE: Self = Self { glass: 0 };
 
+    /// Returns the same material policy with only a share of its requested transmission.
+    ///
+    /// A nested application surface can retain more of its semantic color than the window sheet
+    /// without inventing another transparency preference. Accessibility-forced opaque materials
+    /// remain opaque because their requested transmission is already zero.
+    pub(crate) fn with_transmission_share(self, share: f32) -> Self {
+        let share = if share.is_finite() {
+            share.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            glass: (f32::from(self.glass) * share).round() as u8,
+        }
+    }
+
     /// What a resting surface still paints at the maximum setting, and what a floating one does.
     ///
     /// The sheet is the window's transmission: one continuous tint over everything, so the

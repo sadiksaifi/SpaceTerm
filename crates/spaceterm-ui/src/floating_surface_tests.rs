@@ -25,6 +25,12 @@ const HOST_FIELD: gpui::Rgba = gpui::Rgba {
     b: 0.4,
     a: 1.0,
 };
+const SETTINGS_FIELD: gpui::Rgba = gpui::Rgba {
+    r: 0.8,
+    g: 0.7,
+    b: 0.6,
+    a: 1.0,
+};
 
 fn input_theme(background: gpui::Rgba, caret_width: Pixels) -> TextInputTheme {
     let text = rgba(0xffffffff);
@@ -265,6 +271,22 @@ struct ActivityFixture {
     activity: ControlWindowActivity,
     constructed: Rc<RefCell<Vec<ControlWindowActivity>>>,
     observations: ActivityObservations,
+}
+
+struct ThemeScopeFixture {
+    scope: ControlThemeScope,
+    observations: PhaseObservations,
+}
+
+impl Render for ThemeScopeFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.scope.with_scope(|| {
+            self.scope.mount(PhaseField {
+                content: div().size_full().into_any_element(),
+                observations: Rc::clone(&self.observations),
+            })
+        })
+    }
 }
 
 impl Render for ActivityFixture {
@@ -563,6 +585,85 @@ fn window_activity_scope_is_reentrant_and_restores_its_caller() {
         ControlWindowActivity::current(),
         ControlWindowActivity::Active
     );
+}
+
+#[test]
+fn control_theme_scope_is_reentrant_and_restores_its_caller() {
+    assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+    ControlThemeScope::Settings.with_scope(|| {
+        assert_eq!(ControlThemeScope::current(), ControlThemeScope::Settings);
+        ControlThemeScope::Application.with_scope(|| {
+            assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+        });
+        assert_eq!(ControlThemeScope::current(), ControlThemeScope::Settings);
+    });
+    assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+}
+
+#[gpui::test]
+fn settings_catalog_scope_is_isolated_and_retained_in_every_rendering_phase(
+    cx: &mut TestAppContext,
+) {
+    let application = activity_catalog(
+        1,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        px(1.0),
+    );
+    let settings = activity_catalog(
+        1,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        px(1.0),
+    );
+    cx.update(|cx| init(cx, application.clone())).unwrap();
+    cx.update(|cx| {
+        replace_scoped_control_theme_catalogs(
+            cx,
+            Box::new(application.clone()),
+            Box::new(application),
+            Box::new(settings.clone()),
+            Box::new(settings),
+        )
+    })
+    .unwrap();
+
+    let application_observations = PhaseObservations::default();
+    let settings_observations = PhaseObservations::default();
+    let _application_window = cx.add_window({
+        let observations = Rc::clone(&application_observations);
+        move |_, _| ThemeScopeFixture {
+            scope: ControlThemeScope::Application,
+            observations,
+        }
+    });
+    let _settings_window = cx.add_window({
+        let observations = Rc::clone(&settings_observations);
+        move |_, _| ThemeScopeFixture {
+            scope: ControlThemeScope::Settings,
+            observations,
+        }
+    });
+    cx.run_until_parked();
+
+    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+        assert!(
+            application_observations
+                .borrow()
+                .contains(&(phase, Some(ROOT_FIELD.into())))
+        );
+        assert!(
+            settings_observations
+                .borrow()
+                .contains(&(phase, Some(SETTINGS_FIELD.into())))
+        );
+    }
 }
 
 #[gpui::test]

@@ -452,7 +452,14 @@ impl Render for FloatingFixtures {
                     .flex_col()
                     .child(
                         div()
-                            .bg(rgba(appearance.colors.panel_background.rgba_hex()))
+                            .bg(rgba(
+                                appearance
+                                    .surface(
+                                        crate::appearance::SurfaceRole::Base,
+                                        appearance.colors.panel_background,
+                                    )
+                                    .rgba_hex(),
+                            ))
                             .text_color(rgba(appearance.colors.text.rgba_hex()))
                             .p(appearance.spacing(8.0))
                             .child(controls),

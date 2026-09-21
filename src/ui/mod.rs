@@ -147,10 +147,24 @@ pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
     let installed = cx.global::<appearance::InstalledChrome>();
     let motion = appearance_runtime::progress_motion(cx);
-    let active = control_theme_catalog::catalog(&installed.active, motion);
-    let inactive = control_theme_catalog::catalog(&installed.inactive, motion);
-    spaceterm_ui::init(cx, active.clone())?;
-    spaceterm_ui::replace_control_theme_catalogs(cx, active, inactive)?;
+    let active = Box::new(control_theme_catalog::catalog(&installed.active, motion));
+    let inactive = Box::new(control_theme_catalog::catalog(&installed.inactive, motion));
+    let settings = cx.global::<appearance::settings::InstalledSettingsChrome>();
+    let settings_active = Box::new(control_theme_catalog::catalog(
+        &settings.active.chrome,
+        motion,
+    ));
+    let settings_inactive = Box::new(control_theme_catalog::catalog(
+        &settings.inactive.chrome,
+        motion,
+    ));
+    spaceterm_ui::init_scoped_control_theme_catalogs(
+        cx,
+        active,
+        inactive,
+        settings_active,
+        settings_inactive,
+    )?;
     Ok(())
 }
 

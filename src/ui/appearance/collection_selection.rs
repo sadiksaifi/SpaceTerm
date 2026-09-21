@@ -78,7 +78,7 @@ pub(super) fn prepare(
             result.colors_mut(host),
             inactive_colors,
             active.capabilities.increase_contrast,
-            semantic_host,
+            1.12,
             |fill| {
                 let surface = active
                     .selection_surface(semantic_host, fill)
@@ -102,7 +102,11 @@ pub(super) fn prepare(
         &mut result.floating,
         &inactive.floating_colors,
         active.capabilities.increase_contrast,
-        active.floating_colors.elevated_surface_background,
+        if active.appearance == crate::appearance::Appearance::Dark {
+            super::SUBDUED_SELECTION_CONTRAST
+        } else {
+            1.12
+        },
         |fill| hosts.map(|host| fill.source_over(host)),
     );
     result
@@ -124,7 +128,7 @@ fn prepare_colors(
     active: &mut ChromeColors,
     inactive: &ChromeColors,
     increase_contrast: bool,
-    semantic_host: Color,
+    minimum_selection_contrast: f64,
     backgrounds: impl Fn(Color) -> [Color; 2] + Copy,
 ) {
     let primary = if increase_contrast { 7.0 } else { 4.5 };
@@ -140,7 +144,7 @@ fn prepare_colors(
             (&mut active.row_selected_match, primary),
         ],
         increase_contrast,
-        semantic_host,
+        minimum_selection_contrast,
         backgrounds,
     );
     prepare_state(
@@ -153,7 +157,7 @@ fn prepare_colors(
             (&mut active.row_selected_hover_match, primary),
         ],
         increase_contrast,
-        semantic_host,
+        minimum_selection_contrast,
         backgrounds,
     );
     active.row_selected_border = inactive.row_selected_border;
@@ -165,7 +169,7 @@ fn prepare_state<const N: usize>(
     inactive_fill: Color,
     mut content: [(&mut Color, f64); N],
     increase_contrast: bool,
-    semantic_host: Color,
+    minimum_selection_contrast: f64,
     backgrounds: impl Fn(Color) -> [Color; 2],
 ) {
     let active_fill = *target_fill;
@@ -174,10 +178,14 @@ fn prepare_state<const N: usize>(
     let selection_floor = if increase_contrast {
         super::SUBDUED_SELECTION_CONTRAST
     } else {
-        active_fill
-            .source_over(semantic_host)
-            .contrast_ratio(semantic_host)
-            .clamp(1.12, super::SUBDUED_SELECTION_CONTRAST)
+        // A translucent selected fill cannot promise its opaque reference contrast. Retain the
+        // visible active step instead of flipping a raised selection into a dark recess.
+        backgrounds(active_fill)
+            .into_iter()
+            .zip(hosts)
+            .map(|(background, host)| background.contrast_ratio(host))
+            .fold(super::SUBDUED_SELECTION_CONTRAST, f64::min)
+            .max(minimum_selection_contrast)
     };
     let inactive_keeps_direction = backgrounds(active_fill)
         .into_iter()

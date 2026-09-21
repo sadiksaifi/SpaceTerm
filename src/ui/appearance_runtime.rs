@@ -17,7 +17,7 @@ use crate::appearance::{
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
 
-use super::appearance::{ChromeAppearance, InstalledChrome};
+use super::appearance::{ChromeAppearance, InstalledChrome, settings};
 
 #[derive(Clone)]
 pub(crate) struct InstalledAppearance(pub(crate) Arc<ResolvedAppearance>);
@@ -201,19 +201,43 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     });
     if chrome_changed || progress_motion_changed {
         let (prepared, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-        let controls = super::control_theme_catalog::catalog(&prepared, progress_motion)
-            .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
-        let inactive_controls = super::control_theme_catalog::catalog(&inactive, progress_motion)
-            .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
+        let (settings_prepared, settings_inactive) =
+            settings::prepare_variants(&resolved.chrome, prepared.clone(), inactive.clone());
+        let controls = Box::new(
+            super::control_theme_catalog::catalog(&prepared, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let inactive_controls = Box::new(
+            super::control_theme_catalog::catalog(&inactive, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let settings_controls = Box::new(
+            super::control_theme_catalog::catalog(&settings_prepared.chrome, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let settings_inactive_controls = Box::new(
+            super::control_theme_catalog::catalog(&settings_inactive.chrome, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
         if cx.has_global::<InstalledAppearance>() {
-            spaceterm_ui::replace_control_theme_catalogs(cx, controls, inactive_controls)
-                .map_err(|_| SettingsError::Invalid)?;
+            spaceterm_ui::replace_scoped_control_theme_catalogs(
+                cx,
+                controls,
+                inactive_controls,
+                settings_controls,
+                settings_inactive_controls,
+            )
+            .map_err(|_| SettingsError::Invalid)?;
         }
 
         if chrome_changed {
             cx.set_global(InstalledChrome {
                 active: Arc::new(prepared),
                 inactive: Arc::new(inactive),
+            });
+            cx.set_global(settings::InstalledSettingsChrome {
+                active: Arc::new(settings_prepared),
+                inactive: Arc::new(settings_inactive),
             });
         }
     }

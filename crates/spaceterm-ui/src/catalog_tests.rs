@@ -193,8 +193,8 @@ fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCont
     );
     cx.read(|cx| {
         let installed = cx.global::<InstalledControlThemeCatalogs>();
-        assert_eq!(installed.active, initial);
-        assert_eq!(installed.inactive, initial);
+        assert_eq!(installed.active.as_ref(), &initial);
+        assert_eq!(installed.inactive.as_ref(), &initial);
     });
 
     let active = catalog(2);
@@ -205,8 +205,8 @@ fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCont
     );
     cx.read(|cx| {
         let installed = cx.global::<InstalledControlThemeCatalogs>();
-        assert_eq!(installed.active, active);
-        assert_eq!(installed.inactive, inactive);
+        assert_eq!(installed.active.as_ref(), &active);
+        assert_eq!(installed.inactive.as_ref(), &inactive);
     });
 }
 

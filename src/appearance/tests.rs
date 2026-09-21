@@ -357,7 +357,7 @@ fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() 
 }
 
 #[test]
-fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
+fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
         ..Default::default()
@@ -373,16 +373,76 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
                 &AvailableFonts::default(),
             )
             .unwrap();
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let background = resolved.terminal.colors.background;
-        let expected = prepared.surface(
-            SurfaceRole::Surface,
-            background.mix(
-                prepared.colors.elevated_surface_background,
-                f64::from(prepared.materials.elevation(prepared.colors.background)),
-            ),
+        let (active, inactive) =
+            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+        for prepared in [active, inactive] {
+            assert_eq!(
+                prepared.pane_surface(background),
+                prepared.surface(SurfaceRole::Surface, background),
+                "Light Terminal at transparency {transparency}, active={}",
+                prepared.active,
+            );
+        }
+    }
+}
+
+#[test]
+fn light_terminal_backing_uses_custom_background_as_its_material_color() {
+    let resolved = resolve(&AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    });
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    for background in [Color::rgb(0x18324c), Color::rgba(0xe8d9b780)] {
+        assert_eq!(
+            prepared.pane_surface(background),
+            prepared.surface(SurfaceRole::Surface, background)
         );
-        assert_eq!(prepared.pane_surface(background), expected);
+    }
+}
+
+#[test]
+fn selected_surfaces_follow_transparency_in_both_appearances() {
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            let mut preferences = AppearancePreferences {
+                mode,
+                ..Default::default()
+            };
+            preferences.background.transparency = transparency;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let selected = prepared.selection_surface(
+                prepared.colors.panel_background,
+                prepared.colors.row_selected_background,
+            );
+            if transparency == 0.0 {
+                assert_eq!(selected, prepared.colors.row_selected_background);
+            } else {
+                assert!(
+                    selected.a > 0 && selected.a < 255,
+                    "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
+                );
+                let host = prepared.colors.panel_background;
+                assert!(
+                    selected.source_over(host).contrast_ratio(host) >= 1.12,
+                    "{mode:?} selection must remain visible while transmitting its host"
+                );
+                assert!(
+                    selected.source_over(host).r > host.r,
+                    "built-in raised selections must not turn into dark recesses"
+                );
+            }
+        }
     }
 }
 

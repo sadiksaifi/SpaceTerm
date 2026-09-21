@@ -53,6 +53,7 @@ use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -654,13 +655,18 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
+        let scope = spaceterm_ui::ControlThemeScope::Settings;
+        activity.mount(
+            activity
+                .with_scope(|| scope.mount(scope.with_scope(|| self.render_chrome(window, cx)))),
+        )
     }
 }
 
 impl SettingsWindow {
     fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let appearance = crate::ui::appearance::shared_chrome(cx);
+        let settings = crate::ui::appearance::settings::shared(cx);
+        let appearance = &settings.chrome;
         self.sync_scrollbar(cx);
         let content = div()
             .debug_selector(|| "settings-window-surface".to_owned())
@@ -707,10 +713,6 @@ impl SettingsWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Sheet,
-                appearance.colors.background,
-            )))
             .text_color(gpui_color(appearance.colors.text))
             .chrome_text(appearance.typography.style(TextRole::Body))
             // Both columns run to the window's top edge beneath the transparent native titlebar.
@@ -720,10 +722,10 @@ impl SettingsWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(&appearance, window, cx))
-                    .child(self.render_detail(&appearance, window, cx)),
+                    .child(self.render_sidebar(&settings, window, cx))
+                    .child(self.render_detail(&settings, window, cx)),
             )
-            .child(self.render_footer(&appearance, cx));
+            .child(self.render_footer(&settings, cx));
         ModalLayer::new(content).into_any_element()
     }
 }
@@ -834,9 +836,10 @@ impl SettingsWindow {
     /// window-movement space; a hairline appears only once content has scrolled under it.
     fn render_detail_heading(
         &self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let section = self.active_section;
         let scrolled =
             self.scroll.max_offset().height > px(0.0) && self.scroll.offset().y < px(-0.5);
@@ -868,9 +871,7 @@ impl SettingsWindow {
                         .left_0()
                         .w_full()
                         .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(
-                            appearance.separator(spaceterm_ui::ControlHost::Window),
-                        )),
+                        .bg(gpui_color(settings.separator(SettingsSurfaceRole::Canvas))),
                 )
             })
             .into_any_element()
@@ -930,10 +931,11 @@ impl SettingsWindow {
 
     fn render_sidebar(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let available = self.navigable_sections();
         let list_focused = self.navigation_has_visible_focus(window);
         let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
@@ -1045,7 +1047,9 @@ impl SettingsWindow {
             .flex_none()
             .w(appearance.spacing(SIDEBAR_WIDTH))
             .h_full()
-            .bg(gpui_color(appearance.control_colors.panel_background))
+            .bg(gpui_color(
+                settings.surface(SettingsSurfaceRole::Sidebar).paint,
+            ))
             .child(self.render_sidebar_titlebar(appearance, cx))
             .child(
                 div()
@@ -1111,26 +1115,27 @@ impl SettingsWindow {
 
     fn render_detail(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         // One section at a time: navigation selects a view rather than a scroll destination, so
         // nothing from a neighbouring section can scroll into this one.
-        let section = self.render_section(self.active_section, appearance, window, cx);
+        let section = self.render_section(self.active_section, settings, window, cx);
         let empty = self.rows_for(self.active_section).is_empty();
         let revealing = cx.weak_entity();
         div()
+            .debug_selector(|| "settings-canvas".to_owned())
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                appearance.colors.background,
-            )))
-            .child(self.render_detail_heading(appearance, cx))
+            .bg(gpui_color(
+                settings.surface(SettingsSurfaceRole::Canvas).paint,
+            ))
+            .child(self.render_detail_heading(settings, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1177,10 +1182,11 @@ impl SettingsWindow {
     fn render_section(
         &mut self,
         section: SettingsSectionId,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let rows = self.rows_for(section);
         if rows.is_empty() {
             return div()
@@ -1202,7 +1208,7 @@ impl SettingsWindow {
             .into_iter()
             .map(|(title, members)| {
                 SettingsGroup::new(group_selector(section, title), title, members)
-                    .render(appearance)
+                    .render(settings)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -2051,9 +2057,10 @@ impl SettingsWindow {
     /// thing left on that line. The save status is plain text and needs no such correction.
     fn render_footer(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let status = self.editor.status();
         let owner = cx.weak_entity();
         div()
@@ -2070,10 +2077,10 @@ impl SettingsWindow {
                     .h_full()
                     .w(appearance.spacing(SIDEBAR_WIDTH))
                     .border_t_1()
-                    .border_color(gpui_color(
-                        appearance.separator(spaceterm_ui::ControlHost::Panel),
-                    ))
-                    .bg(gpui_color(appearance.control_colors.panel_background)),
+                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Sidebar)))
+                    .bg(gpui_color(
+                        settings.surface(SettingsSurfaceRole::Sidebar).paint,
+                    )),
             )
             .child(
                 div()
@@ -2082,13 +2089,10 @@ impl SettingsWindow {
                     .min_w_0()
                     .h_full()
                     .border_t_1()
-                    .border_color(gpui_color(
-                        appearance.separator(spaceterm_ui::ControlHost::Window),
+                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Canvas)))
+                    .bg(gpui_color(
+                        settings.surface(SettingsSurfaceRole::Canvas).paint,
                     ))
-                    .bg(gpui_color(appearance.surface(
-                        crate::appearance::SurfaceRole::Base,
-                        appearance.colors.background,
-                    )))
                     .items_center()
                     .justify_between()
                     .gap(appearance.spacing(CONTENT_GUTTER))
