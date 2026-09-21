@@ -3753,20 +3753,6 @@ impl ChromeAppearance {
             super::chrome_geometry::RadiusRole::Surface.pixels(),
             super::chrome_geometry::RadiusRole::SurfaceLarge.pixels(),
         )
-        .top_highlight(rgba(
-            Color::rgb(0xffffff)
-                .with_alpha(if self.capabilities.increase_contrast {
-                    0
-                } else {
-                    let alpha = if self.appearance == Appearance::Dark {
-                        31.0_f32
-                    } else {
-                        102.0_f32
-                    };
-                    (alpha * if self.active { 1.0 } else { 0.5 }).round() as u8
-                })
-                .rgba_hex(),
-        ))
         .backdrop_alpha_limit(self.materials.floating_backdrop_alpha_limit())
         .backdrop_blur(if self.floating_blur {
             px(20.0)

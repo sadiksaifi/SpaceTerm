@@ -218,7 +218,6 @@ pub struct FloatingSurfaceTheme {
     backdrop_blur: Pixels,
     backdrop_alpha_limit: f32,
     spacing_scale: f32,
-    top_highlight: Rgba,
     corner_radii: [Pixels; 3],
 }
 
@@ -232,7 +231,6 @@ impl FloatingSurfaceTheme {
             backdrop_blur: px(0.0),
             backdrop_alpha_limit: 1.0,
             spacing_scale: 1.0,
-            top_highlight: Rgba::default(),
             corner_radii: [px(8.0), px(10.0), px(12.0)],
         }
     }
@@ -240,12 +238,6 @@ impl FloatingSurfaceTheme {
     /// Requests one logical-pixel Gaussian sigma for every shell in this catalog.
     pub fn backdrop_blur(mut self, radius: Pixels) -> Self {
         self.backdrop_blur = radius.max(px(0.0));
-        self
-    }
-
-    /// Sets the optional inset top hairline for interactive floating surfaces.
-    pub fn top_highlight(mut self, color: Rgba) -> Self {
-        self.top_highlight = color;
         self
     }
 
@@ -298,11 +290,6 @@ impl FloatingSurfaceTheme {
             backdrop_alpha_limit: self.backdrop_alpha_limit,
             corner_radius: radius,
             content_inset: px(inset * scale),
-            top_highlight: if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
-                Rgba::default()
-            } else {
-                self.top_highlight
-            },
         }
     }
 
@@ -354,7 +341,6 @@ pub struct FloatingShell {
     backdrop_alpha_limit: f32,
     corner_radius: Pixels,
     content_inset: Pixels,
-    top_highlight: Rgba,
 }
 
 impl FloatingShell {
@@ -446,11 +432,7 @@ impl FloatingShell {
 
     /// Applies the surface treatment and hosts every descendant control on this surface.
     pub fn mount(&self, frame: impl Styled + IntoElement) -> ControlHostElement {
-        ControlHost::Floating.mount(FloatingHighlight {
-            content: self.frame(frame).into_any_element(),
-            color: self.top_highlight,
-            inset: self.corner_radius,
-        })
+        ControlHost::Floating.mount(self.frame(frame))
     }
 
     /// Hosts descendant controls on this surface without painting a shell.
@@ -459,77 +441,6 @@ impl FloatingShell {
     /// controls beneath them.
     pub fn host(&self, content: impl IntoElement) -> ControlHostElement {
         ControlHost::Floating.mount(content)
-    }
-}
-
-/// A decorative top edge drawn after the shell content without adding an input target.
-struct FloatingHighlight {
-    content: AnyElement,
-    color: Rgba,
-    inset: Pixels,
-}
-
-impl IntoElement for FloatingHighlight {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for FloatingHighlight {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.content.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.content.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.content.paint(window, cx);
-        let width = bounds.size.width - self.inset * 2.0;
-        if self.color.a > 0.0 && width > px(0.0) {
-            let line = Bounds::new(
-                bounds.origin + gpui::point(self.inset, px(1.0)),
-                gpui::size(width, px(1.0)),
-            );
-            window.paint_quad(gpui::fill(line, self.color));
-        }
     }
 }
 

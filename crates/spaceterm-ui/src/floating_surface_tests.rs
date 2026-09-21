@@ -60,15 +60,13 @@ fn test_catalog(hosted: bool, generation: u64, host_fill: gpui::Rgba) -> Control
 
 type FieldObservations = Rc<RefCell<Vec<(&'static str, Option<Fill>)>>>;
 
-struct HighlightFixture {
+struct FloatingShellFixture {
     role: FloatingRole,
 }
 
-impl Render for HighlightFixture {
+impl Render for FloatingShellFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let shell = FloatingSurfaceTheme::default()
-            .top_highlight(rgba(0x12ab3456))
-            .shell(self.role);
+        let shell = FloatingSurfaceTheme::default().shell(self.role);
         div()
             .p(px(20.0))
             .child(shell.mount(div().w(px(200.0)).h(px(80.0))))
@@ -76,39 +74,49 @@ impl Render for HighlightFixture {
 }
 
 #[gpui::test]
-fn floating_highlight_is_an_inset_hairline_and_quiet_surfaces_omit_it(cx: &mut TestAppContext) {
-    let (root, cx) = cx.add_window_view(|_, _| HighlightFixture {
+fn floating_shell_keeps_its_rounded_edge_without_a_straight_top_hairline(cx: &mut TestAppContext) {
+    let (root, cx) = cx.add_window_view(|_, _| FloatingShellFixture {
         role: FloatingRole::Popover,
     });
-    cx.run_until_parked();
-    cx.update(|window, _| {
-        let quads = window.painted_quads_for_test();
-        let highlights: Vec<_> = quads
-            .iter()
-            .filter(|quad| quad.background == gpui::Background::from(rgba(0x12ab3456)))
-            .collect();
-        assert_eq!(highlights.len(), 1);
-        assert_eq!(
-            highlights[0].visible_bounds.size.height,
-            px(1.0).scale(window.scale_factor())
-        );
-        assert_eq!(
-            highlights[0].visible_bounds.size.width,
-            px(180.0).scale(window.scale_factor())
-        );
-    });
-    for role in [FloatingRole::Tooltip, FloatingRole::Readout] {
+    for role in [
+        FloatingRole::Popover,
+        FloatingRole::Command,
+        FloatingRole::Modal,
+        FloatingRole::Tooltip,
+        FloatingRole::Notice,
+        FloatingRole::Readout,
+    ] {
         root.update(cx, |root, cx| {
             root.role = role;
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.update(|window, _| {
-            window
-                .painted_quads_for_test()
+        cx.update(|window, _| {
+            let top = px(20.0).scale(window.scale_factor());
+            let top_strip_bottom = px(22.0).scale(window.scale_factor());
+            let hairline = px(1.0).scale(window.scale_factor());
+            let minimum_line_width = px(100.0).scale(window.scale_factor());
+            let quads = window.painted_quads_for_test();
+            let straight_top_edges: Vec<_> = quads
                 .iter()
-                .all(|quad| quad.background != gpui::Background::from(rgba(0x12ab3456)))
-        }));
+                .filter(|quad| {
+                    quad.visible_bounds.origin.y >= top
+                        && quad.visible_bounds.bottom() <= top_strip_bottom
+                        && quad.visible_bounds.size.height == hairline
+                        && quad.visible_bounds.size.width >= minimum_line_width
+                })
+                .collect();
+            assert!(
+                straight_top_edges.is_empty(),
+                "{role:?} must not add a straight top hairline: {straight_top_edges:?}"
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.border_color == rgba(0xffffff26).into()),
+                "{role:?} must retain the shell's rounded outer edge"
+            );
+        });
     }
 }
 
