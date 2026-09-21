@@ -3243,7 +3243,24 @@ fn prepare_state_control_host(
     state: ChromeStatePolicy,
     floors: FloatingContrastFloors,
 ) -> PreparedControlHost {
-    let (reference, mut fallback_families) = rehost_control_reference(authored, host);
+    let (mut reference, mut fallback_families) = rehost_control_reference(authored, host);
+    if host_role == spaceterm_ui::ControlHost::Panel
+        && reference.navigation_selected_background != reference.row_selected_background
+    {
+        // Navigation rests on the sidebar, not on the raised surface used by menu rows.
+        reference.row_selected_background = reference.navigation_selected_background;
+        reference.row_selected_hover_background = reference
+            .navigation_selected_background
+            .mix(reference.text, 0.06);
+        reference.row_selected_foreground = reference.navigation_selected_foreground;
+        reference.row_selected_secondary = reference.navigation_selected_secondary;
+        reference.row_selected_icon = reference.navigation_selected_icon;
+        reference.row_selected_match = reference.navigation_selected_foreground;
+        reference.row_selected_hover_foreground = reference.navigation_selected_foreground;
+        reference.row_selected_hover_secondary = reference.navigation_selected_secondary;
+        reference.row_selected_hover_icon = reference.navigation_selected_icon;
+        reference.row_selected_hover_match = reference.navigation_selected_foreground;
+    }
     let mut reference = state.colors(&reference, host);
     if state.capabilities.increase_contrast {
         let semantic_host = match host_role {

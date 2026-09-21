@@ -126,8 +126,8 @@ fn spaceterm_light_chrome() -> ChromeColors {
 /// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
 /// alone.
 ///
-/// Cards and floating surfaces lighten in both appearances. Interaction fills move toward text:
-/// lighter in Dark and darker in Light. Tabs and navigation rows share that selection direction.
+/// Cards and floating surfaces lighten in both appearances. Light navigation selections share the
+/// raised surface color; other interaction fills move toward text.
 ///
 /// Every resting surface, separator, text gray, and shadow is authored with equal channels:
 /// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
@@ -163,6 +163,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             selected_inactive: 0x1c1c1c,
             row_hover: 0x282828,
             row_selected: 0x323232,
+            navigation_selected: None,
             tab_active: 0x2e2e2e,
             row_selected_text: 0xf2f2f2,
             row_selected_secondary: 0xbcbcbc,
@@ -201,38 +202,39 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shadow: 0x00000080,
         },
         Appearance::Light => ChromePalette {
-            root: 0xebebeb,
-            shell: 0xf1f1f1,
-            shell_inactive: 0xefefef,
-            raised: 0xf8f8f8,
+            root: 0xe5e5e5,
+            shell: 0xe5e5e5,
+            shell_inactive: 0xe5e5e5,
+            raised: 0xfafafa,
             field: 0xffffff,
             control_fill: Some(0xededed),
-            control_hover: 0xe3e3e3,
-            control_pressed: 0xdcdcdc,
-            ghost_hover: 0xe3e3e3,
-            ghost_pressed: 0xdcdcdc,
-            selected: 0xd6d6d6,
+            control_hover: 0xdfdfdf,
+            control_pressed: 0xdadada,
+            ghost_hover: 0xdddddd,
+            ghost_pressed: 0xd6d6d6,
+            selected: 0xd0d0d0,
             selected_inactive: 0xececec,
-            row_hover: 0xe9e9e9,
-            row_selected: 0xdfdfdf,
-            tab_active: 0xe4e4e4,
+            row_hover: 0xdddddd,
+            row_selected: 0xd3d3d3,
+            navigation_selected: Some(0xfafafa),
+            tab_active: 0xfafafa,
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
             text_secondary: 0x585858,
-            text_muted: 0x6e6e6e,
+            text_muted: 0x666666,
             text_placeholder: 0x717171,
-            text_disabled: 0xa5a5a5,
-            separator: 0xe6e6e6,
-            separator_quiet: 0xeeeeee,
-            separator_disabled: 0xf2f2f2,
-            field_outline: 0xdadada,
-            control_outline: 0xd8d8d8,
+            text_disabled: 0x828282,
+            separator: 0xd7d7d7,
+            separator_quiet: 0xdedede,
+            separator_disabled: 0xdbdbdb,
+            field_outline: 0xd0d0d0,
+            control_outline: 0xcecece,
             control_outline_strong: 0xc6c6c6,
-            tab_separator: 0xcbcbcb,
-            mark_outline: 0x858585,
+            tab_separator: 0xc2c2c2,
+            mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
-            mark_track: 0xe8e8e8,
+            mark_track: 0xe2e2e2,
             mark_indicator: 0x595959,
             mark_indicator_strong: 0x474747,
             scrollbar_thumb: 0x808080,
@@ -288,6 +290,7 @@ struct ChromePalette {
     row_hover: u32,
     /// Persistent row selection is stronger than hover on both hosts, without a decorative rim.
     row_selected: u32,
+    navigation_selected: Option<u32>,
     /// The Active Tab, authored apart from the list-row fills but stepping the same way from the
     /// title bar that a selected row steps from its own surface.
     tab_active: u32,
@@ -390,6 +393,7 @@ impl ChromePalette {
             // fill a segmented option needs against its own track, and those surfaces differ.
             row_hover_background: opaque(self.row_hover),
             row_selected_background: opaque(self.row_selected),
+            navigation_selected_background: self.navigation_selected.map(Color::rgb),
             // Built-in rows use fill and text for selection. Custom appearances may author rims.
             row_selected_border: translucent(0),
             row_selected_hover_border: translucent(0),
@@ -397,7 +401,7 @@ impl ChromePalette {
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
             row_selected_hover_secondary: opaque(self.row_selected_secondary),
-            // Tabs share the row selection direction but use a smaller contrast step.
+            // Tabs and navigation rows share the appearance's selection direction.
             tab_active_background: opaque(self.tab_active),
             // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
             // hover identically. The chip's shape is its fill; no hairline is drawn around it.
@@ -696,7 +700,7 @@ mod tests {
 
     /// The Active Tab and selected rows carry the same content hierarchy with distinct materials.
     ///
-    /// Both move toward text without a decorative outline. An unfocused Tab uses a smaller step.
+    /// Both share the navigation direction without an outline. An unfocused Tab uses a smaller step.
     #[test]
     fn the_active_tab_should_share_borderless_row_selection_direction() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -754,7 +758,8 @@ mod tests {
             let bar = weight(colors.title_bar_background);
             let focused = weight(colors.tab_active_background) - bar;
             let unfocused = weight(colors.tab_inactive_selected_background) - bar;
-            let row = weight(colors.row_selected_background) - weight(colors.panel_background);
+            let row =
+                weight(colors.navigation_selected_background) - weight(colors.panel_background);
             assert!(
                 focused * row > 0.0 && unfocused * row > 0.0,
                 "{appearance:?} should keep Tab states in the row selection direction, got \

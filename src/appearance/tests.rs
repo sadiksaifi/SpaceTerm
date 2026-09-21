@@ -247,6 +247,10 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             tab_shell, sidebar_shell,
             "Light navigation hosts should share one shell at {transparency}"
         );
+        assert_eq!(
+            tab_shell, sheet,
+            "Light navigation shell should match the root at {transparency}"
+        );
 
         let active_tab = appearance
             .materials
@@ -261,7 +265,7 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             .paint(
                 SurfaceRole::Surface,
                 colors.panel_background,
-                colors.row_selected_background,
+                colors.navigation_selected_background,
             )
             .source_over(sidebar_shell);
         let tab_direction = (weight(active_tab) - weight(tab_shell)).signum();
@@ -427,8 +431,8 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
     }
 }
 
-/// Light's hierarchy is checked as rendered over a desktop: raised surfaces lift, selections
-/// shade their host, and every material remains distinct across the transparency range.
+/// Light's hierarchy is checked as rendered over a desktop: the navigation shell matches the
+/// root, while raised surfaces and navigation selections lift across the transparency range.
 #[test]
 fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
@@ -454,18 +458,21 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
                 .source_over(sheet)
         };
         let shell = rendered(SurfaceRole::Base, reference.panel_background);
-        let selected = materials
+        let selected_navigation = materials
             .paint(
                 SurfaceRole::Surface,
                 reference.panel_background,
-                reference.row_selected_background,
+                reference.navigation_selected_background,
             )
             .source_over(shell);
         let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
         for (name, surface, host) in [
             ("Pane against the sheet", pane, sheet),
-            ("selected row against the shell", selected, shell),
-            ("shell against the sheet", shell, sheet),
+            (
+                "selected navigation row against the shell",
+                selected_navigation,
+                shell,
+            ),
         ] {
             let step = surface.g.abs_diff(host.g);
             assert!(
@@ -474,13 +481,13 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
             );
         }
         assert!(pane.g > sheet.g, "a Pane should lift from the light sheet");
-        assert!(
-            shell.g > sheet.g,
-            "the shell should lift from the light sheet"
+        assert_eq!(
+            shell, sheet,
+            "the Light navigation shell should match the root"
         );
         assert!(
-            selected.g < shell.g,
-            "a selected row should shade the light shell"
+            selected_navigation.g > shell.g,
+            "a selected navigation row should lift from the Light shell"
         );
         assert!(
             pane.g.saturating_sub(sheet.g) >= minimum,

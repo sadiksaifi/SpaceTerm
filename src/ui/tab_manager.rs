@@ -2150,8 +2150,8 @@ mod tests {
             );
             let tab_step = i32::from(colors.tab_active_background.r)
                 - i32::from(colors.title_bar_background.r);
-            let row_step =
-                i32::from(colors.row_selected_background.r) - i32::from(colors.panel_background.r);
+            let row_step = i32::from(colors.navigation_selected_background.r)
+                - i32::from(colors.panel_background.r);
             assert!(
                 tab_step * row_step > 0,
                 "{appearance:?} Active Tab should follow the navigation selection direction"

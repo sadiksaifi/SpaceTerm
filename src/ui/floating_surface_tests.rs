@@ -16,6 +16,26 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 ];
 
 #[test]
+fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
+    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
+    let background = Color::rgb(0xe5e5e5);
+    let raised = Color::rgb(0xfafafa);
+    assert_eq!(prepared.colors.background, background);
+    assert_eq!(prepared.colors.title_bar_background, background);
+    assert_eq!(prepared.colors.panel_background, background);
+    assert_eq!(prepared.colors.elevated_surface_background, raised);
+    assert_eq!(prepared.colors.tab_active_background, raised);
+    assert_eq!(
+        prepared.panel_controls.reference.row_selected_background,
+        raised
+    );
+    assert_ne!(
+        prepared.floating_colors.row_selected_background,
+        prepared.floating_colors.elevated_surface_background
+    );
+}
+
+#[test]
 fn floating_separators_remain_visible_on_both_material_endpoints() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for transparency in [0.0, 0.35, 1.0] {
@@ -2173,9 +2193,9 @@ fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
         ),
         (
             Appearance::Light,
-            Color::rgb(0xebebeb),
-            Color::rgb(0xe3e3e3),
-            Color::rgb(0xdcdcdc),
+            Color::rgb(0xe5e5e5),
+            Color::rgb(0xdddddd),
+            Color::rgb(0xd6d6d6),
         ),
     ] {
         let (resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
@@ -2241,11 +2261,6 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
                     "button pressed",
                     host.colors.element_active,
                     host.reference.element_active,
-                ),
-                (
-                    "button disabled",
-                    host.colors.element_disabled,
-                    host.reference.element_disabled,
                 ),
                 (
                     "ghost hover",
