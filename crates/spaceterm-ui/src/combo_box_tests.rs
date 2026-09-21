@@ -1074,6 +1074,39 @@ fn filter_editor_should_use_compact_text_and_caret_geometry(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn disclosure_should_stay_centered_when_label_geometry_changes(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let paint = ComboBoxPaint::new(
+        rgba(0xcdcdcdff),
+        rgba(0x878787ff),
+        rgba(0x606079ff),
+        rgba(0x252530ff),
+        rgba(0xffffffff),
+        rgba(0x141415ff),
+        rgba(0x1c1c24ff),
+        rgba(0x606079ff),
+        rgba(0x7e98e8ff),
+    );
+    let metrics = ComboBoxMetrics::new(px(240.0), px(40.0))
+        .font_sizes(px(17.0), px(11.0))
+        .text_geometry(px(23.0), px(15.0), px(12.0))
+        .icon_baseline_center(px(5.0));
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(paint, metrics));
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("combo box trigger should render");
+    let disclosure = cx
+        .debug_bounds("combo-box-trigger-disclosure")
+        .expect("combo box disclosure should render");
+    assert_eq!(disclosure.center().y, trigger.center().y);
+}
+
+#[gpui::test]
 fn secondary_click_and_modified_release_should_not_accept_an_option(cx: &mut TestAppContext) {
     let (_, events, _, cx) = combo_box_window(cx, None, items(), false);
     open_by_pointer(cx);

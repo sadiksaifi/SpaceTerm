@@ -745,7 +745,8 @@ impl ComboBoxMetrics {
         self
     }
 
-    /// Sets the center-above-baseline metric shared by row and labeled-trigger icons.
+    /// Sets the center-above-baseline metric for row and labeled-trigger leading icons.
+    /// Trailing disclosures use the trigger's geometric center instead.
     pub fn icon_baseline_center(mut self, center: Pixels) -> Self {
         self.icon_baseline_center = center;
         self
@@ -2132,6 +2133,10 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .as_ref()
             .map(|selector| format!("{selector}-keyboard-focus"))
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
+        let disclosure_selector = debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-disclosure"))
+            .unwrap_or_else(|| format!("{}-disclosure", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
         let paint = crate::floating_surface::hosted_combo_box_theme(cx)
             .map_or(theme.paint, |theme| theme.paint);
@@ -2262,11 +2267,15 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                             .truncate()
                             .child(label),
                     )
-                    .child(div().relative().top(icon_offset).child(Icon::new(
-                        IconName::ChevronDown,
-                        metrics.trigger_icon_size,
-                        paint.muted,
-                    )))
+                    .child(
+                        div()
+                            .debug_selector(move || disclosure_selector)
+                            .child(Icon::new(
+                                IconName::ChevronDown,
+                                metrics.trigger_icon_size,
+                                paint.muted,
+                            )),
+                    )
             })
             .when_some(focus_ring, |trigger, ring_color| {
                 let gap = px(2.0);

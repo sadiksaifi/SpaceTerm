@@ -435,7 +435,8 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets each text role's line box and aligns icons to the label's cap-height band.
+    /// Sets each text role's line box and the cap-height alignment for row and leading icons.
+    /// Trailing disclosures use the trigger's geometric center instead.
     pub fn text_geometry(
         mut self,
         label_line_height: Pixels,
@@ -985,6 +986,12 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
         let (foreground, disclosure_foreground) =
             trigger_foregrounds(menu_trigger_paint(cx), enabled);
         let icon_offset = menu_icon_offset(style, window, cx);
+        let disclosure_selector = self
+            .core
+            .debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-disclosure"))
+            .unwrap_or_else(|| format!("{}-disclosure", self.core.accessibility_name));
         let icon_trigger = self.icon_trigger;
         let content = div()
             .flex()
@@ -999,13 +1006,16 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
                 )
             })
             .when(!self.icon_trigger, |content| {
-                content
-                    .child(self.label)
-                    .child(div().ml_auto().relative().top(icon_offset).child(Icon::new(
-                        IconName::ChevronDown,
-                        style.metrics.trigger_icon_size,
-                        disclosure_foreground,
-                    )))
+                content.child(self.label).child(
+                    div()
+                        .debug_selector(move || disclosure_selector)
+                        .ml_auto()
+                        .child(Icon::new(
+                            IconName::ChevronDown,
+                            style.metrics.trigger_icon_size,
+                            disclosure_foreground,
+                        )),
+                )
             })
             .into_any_element();
         self.core.render(content, window, cx)
@@ -1253,6 +1263,12 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
         let (foreground, disclosure_foreground) =
             trigger_foregrounds(menu_trigger_paint(cx), enabled);
         let icon_offset = menu_icon_offset(style, window, cx);
+        let disclosure_selector = self
+            .core
+            .debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-disclosure"))
+            .unwrap_or_else(|| format!("{}-disclosure", self.core.accessibility_name));
         let content = div()
             .flex()
             .items_center()
@@ -1261,11 +1277,15 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
                 content.child(div().relative().top(icon_offset).child(icon(foreground)))
             })
             .child(div().flex_grow().child(self.selected_label))
-            .child(div().relative().top(icon_offset).child(Icon::new(
-                IconName::ChevronDown,
-                style.metrics.trigger_icon_size,
-                disclosure_foreground,
-            )))
+            .child(
+                div()
+                    .debug_selector(move || disclosure_selector)
+                    .child(Icon::new(
+                        IconName::ChevronDown,
+                        style.metrics.trigger_icon_size,
+                        disclosure_foreground,
+                    )),
+            )
             .into_any_element();
         self.core.render(content, window, cx)
     }
@@ -3531,6 +3551,16 @@ mod tests {
         MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
     }
 
+    fn text_shifted_theme() -> MenuTheme {
+        let metrics = MenuMetrics::new(px(160.0), px(28.0))
+            .font_sizes(px(17.0), px(11.0))
+            .text_geometry(px(23.0), px(15.0), px(17.0), px(5.0));
+        MenuTheme::new(
+            test_theme().paint,
+            MenuSizes::new(metrics, metrics, metrics),
+        )
+    }
+
     fn test_shell() -> crate::FloatingShell {
         let surface =
             crate::FloatingSurfacePaint::new(rgba(0x202020ff), rgba(0x404040ff), rgba(0x555555ff));
@@ -4113,6 +4143,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn menu_disclosure_should_stay_centered_when_label_geometry_changes(cx: &mut TestAppContext) {
+        let (_, _, cx) = menu_window(cx);
+        cx.update(|window, cx| {
+            cx.set_global(text_shifted_theme());
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("menu-trigger")
+            .expect("menu trigger should render");
+        let disclosure = cx
+            .debug_bounds("menu-trigger-disclosure")
+            .expect("menu disclosure should render");
+        assert_eq!(disclosure.center().y, trigger.center().y);
+    }
+
+    #[gpui::test]
     fn menu_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
         let (root, events, cx) = menu_window(cx);
         let mut theme = test_theme();
@@ -4680,6 +4728,27 @@ mod tests {
                 source: MenuActivationSource::Keyboard,
             }]
         );
+    }
+
+    #[gpui::test]
+    fn picker_disclosure_should_stay_centered_when_label_geometry_changes(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        cx.set_global(text_shifted_theme());
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let root_changes = changes.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| PickerRoot {
+            changes: root_changes,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("picker-trigger")
+            .expect("picker trigger should render");
+        let disclosure = cx
+            .debug_bounds("picker-trigger-disclosure")
+            .expect("picker disclosure should render");
+        assert_eq!(disclosure.center().y, trigger.center().y);
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
