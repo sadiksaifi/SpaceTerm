@@ -462,6 +462,16 @@ impl ButtonTheme {
         self
     }
 
+    /// Sets ordinary-control borders without changing fills, shadows, or focus indicators.
+    pub fn secondary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
+        let ordinary = &mut self.variants.secondary;
+        ordinary.normal.border = borders.normal;
+        ordinary.hovered.border = borders.hovered;
+        ordinary.pressed.border = borders.pressed;
+        ordinary.disabled.border = borders.disabled;
+        self
+    }
+
     /// Returns the outer side length of an icon button in this theme.
     pub fn icon_button_size(self, size: ButtonSize) -> Pixels {
         let metrics = self.sizes.resolve(size);

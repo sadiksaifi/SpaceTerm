@@ -476,6 +476,7 @@ pub struct ComboBoxPaint {
     trigger_pressed_background: Rgba,
     trigger_disabled_background: Rgba,
     trigger_border: Rgba,
+    trigger_state_borders: Option<crate::ControlBorderStates>,
     trigger_shadow: crate::ControlShadow,
     focus_border: Rgba,
 }
@@ -513,6 +514,7 @@ impl ComboBoxPaint {
             trigger_pressed_background: trigger_hover_background,
             trigger_disabled_background: trigger_background,
             trigger_border,
+            trigger_state_borders: None,
             trigger_shadow: crate::ControlShadow::none(),
             focus_border,
         }
@@ -565,6 +567,15 @@ impl ComboBoxPaint {
             (true, true) => self.trigger_pressed_background,
             (true, false) => self.trigger_background,
         }
+    }
+
+    fn trigger_edge(self, enabled: bool, open: bool) -> Rgba {
+        self.trigger_state_borders
+            .map_or(self.trigger_border, |borders| match (enabled, open) {
+                (false, _) => borders.disabled,
+                (true, true) => borders.pressed,
+                (true, false) => borders.normal,
+            })
     }
 
     fn trigger_shadow(self, enabled: bool, open: bool) -> crate::ControlShadow {
@@ -868,6 +879,12 @@ impl ComboBoxTheme {
         content_width + self.metrics.border_width * 2.0
     }
 
+    /// Sets interaction-state borders for non-custom triggers.
+    pub fn ordinary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
+        self.paint.trigger_state_borders = Some(borders);
+        self
+    }
+
     /// Adds the shared ordinary-control elevation to non-custom triggers.
     pub fn ordinary_elevation(
         mut self,
@@ -897,7 +914,7 @@ fn combo_box_theme(cx: &App) -> ComboBoxTheme {
 
 fn trigger_edges(paint: ComboBoxPaint, enabled: bool, focused: bool) -> (Rgba, Option<Rgba>) {
     (
-        paint.trigger_border,
+        paint.trigger_edge(enabled, false),
         (enabled && focused && paint.focus_border.a > 0.0).then_some(paint.focus_border),
     )
 }
@@ -2153,6 +2170,11 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let trigger_background = paint.trigger_background(enabled, open);
         let trigger_shadow = paint.trigger_shadow(enabled, open);
         let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
+        let trigger_border = if open {
+            paint.trigger_edge(enabled, true)
+        } else {
+            trigger_border
+        };
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -2204,11 +2226,21 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     .shadow_outside_only()
                     .when(enabled && !open, |trigger| {
                         trigger
-                            .hover(move |style| style.bg(paint.trigger_hover_background))
+                            .hover(move |style| {
+                                let style = style.bg(paint.trigger_hover_background);
+                                match paint.trigger_state_borders {
+                                    Some(borders) => style.border_color(borders.hovered),
+                                    None => style,
+                                }
+                            })
                             .active(move |style| {
-                                style
+                                let style = style
                                     .bg(paint.trigger_pressed_background)
-                                    .shadow(Vec::new())
+                                    .shadow(Vec::new());
+                                match paint.trigger_state_borders {
+                                    Some(borders) => style.border_color(borders.pressed),
+                                    None => style,
+                                }
                             })
                     })
             })
@@ -3205,6 +3237,36 @@ mod tests {
         assert_eq!(paint.trigger_leading_foreground(false, false), text);
         assert_eq!(paint.trigger_leading_foreground(true, true), icon);
         assert_eq!(paint.trigger_leading_foreground(true, false), disabled);
+    }
+
+    #[test]
+    fn ordinary_state_borders_keep_focus_separate_and_quieten_disabled_triggers() {
+        let fill = gpui::rgba(0xfafafaff);
+        let focus = gpui::rgba(0x0066ccff);
+        let normal = gpui::rgba(0x0000002b);
+        let interaction = gpui::rgba(0x00000040);
+        let disabled = gpui::rgba(0x0000000a);
+        let theme = ComboBoxTheme::new(
+            ComboBoxPaint::new(fill, fill, fill, fill, fill, fill, fill, normal, focus),
+            ComboBoxMetrics::new(px(240.0), px(28.0)),
+        )
+        .ordinary_borders(crate::ControlBorderStates::new(
+            normal,
+            interaction,
+            interaction,
+            disabled,
+        ));
+
+        assert_eq!(
+            trigger_edges(theme.paint, true, true),
+            (normal, Some(focus))
+        );
+        assert_eq!(theme.paint.trigger_edge(true, true), interaction);
+        assert_eq!(
+            theme.paint.trigger_state_borders.unwrap().hovered,
+            interaction
+        );
+        assert_eq!(trigger_edges(theme.paint, false, true), (disabled, None));
     }
 
     #[test]

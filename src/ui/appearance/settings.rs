@@ -14,6 +14,7 @@ use super::{
 
 const CANVAS_TRANSMISSION_SHARE: f32 = 0.5;
 const CARD_TRANSMISSION_SHARE: f32 = 0.25;
+const BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE: f32 = 0.10;
 const SIDEBAR_CHANNEL_STEP: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,8 +125,19 @@ impl SettingsAppearance {
         self.chrome.separator(host)
     }
 
+    /// Separates the built-in Light sidebar from the canvas, which shares its base color.
+    pub(crate) fn sidebar_edge(&self) -> Option<Color> {
+        self.chrome
+            .built_in_light
+            .then(|| self.chrome.surface_edge(spaceterm_ui::ControlHost::Panel))
+    }
+
+    /// Uses a quiet Light card edge and preserves the existing Dark/custom grouping boundary.
     pub(crate) fn card_edge(&self) -> Color {
         let host = self.card.background;
+        if self.chrome.built_in_light {
+            return self.chrome.surface_edge(spaceterm_ui::ControlHost::Card);
+        }
         let prepared = self.separator(SettingsSurfaceRole::Card);
         if self.chrome.capabilities.increase_contrast {
             return prepared;
@@ -163,6 +175,9 @@ pub(crate) fn prepare_variants(
         Arc::make_mut(&mut inactive.chrome),
         &resolved.colors,
     );
+    super::built_in_light::finalize_inactive_segmented_controls(Arc::make_mut(
+        &mut inactive.chrome,
+    ));
     let unfocused = super::collection_selection::prepare(&active.chrome, &inactive.chrome);
     Arc::make_mut(&mut active.chrome).unfocused_selection = unfocused;
     (active, inactive)
@@ -212,6 +227,7 @@ fn prepare_variant(
         state,
         floors,
         explicit_segmented_track,
+        chrome.built_in_light,
     );
     chrome.card_controls = prepare_state_control_host(
         &settings_authored,
@@ -221,6 +237,7 @@ fn prepare_variant(
         state,
         floors,
         explicit_segmented_track,
+        chrome.built_in_light,
     );
     chrome.semantic_text_pairs = super::super::chrome_semantic_pairs::prepare_semantic_text_pairs(
         &chrome.colors,
@@ -254,8 +271,12 @@ fn prepare_surfaces(
     PreparedSettingsSurface,
 ) {
     let root = chrome.colors.background;
-    let sidebar_semantic =
-        settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance);
+    // Built-in Light groups content with raised cards rather than another sidebar color.
+    let sidebar_semantic = if chrome.built_in_light {
+        chrome.colors.panel_background
+    } else {
+        settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance)
+    };
     let canvas_semantic = root;
     let card_semantic = chrome.colors.elevated_surface_background;
     let sidebar_materials = chrome.materials;
@@ -264,7 +285,11 @@ fn prepare_surfaces(
         .with_transmission_share(CANVAS_TRANSMISSION_SHARE);
     let card_materials = chrome
         .materials
-        .with_transmission_share(CARD_TRANSMISSION_SHARE);
+        .with_transmission_share(if chrome.built_in_light {
+            BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE
+        } else {
+            CARD_TRANSMISSION_SHARE
+        });
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
     let canvas_paint = canvas_materials.paint(SurfaceRole::Sheet, root, canvas_semantic);
     let sidebar = PreparedSettingsSurface {
@@ -330,6 +355,10 @@ pub(crate) fn shared(cx: &App) -> Arc<SettingsAppearance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::{
+        AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+        CompositionCapabilities, SchemeCatalog, SystemAppearance,
+    };
 
     #[test]
     fn sidebar_rung_moves_five_channels_in_the_appearance_direction() {
@@ -352,5 +381,81 @@ mod tests {
             settings_sidebar_rung(root, authored_panel, Appearance::Light),
             authored_panel
         );
+    }
+
+    #[test]
+    fn built_in_light_card_keeps_its_content_step_at_full_transparency() {
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Light,
+            ..AppearancePreferences::default()
+        };
+        preferences.background.transparency = 1.0;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::available(Appearance::Light)
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .expect("built-in Light should resolve");
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let (settings, _) = prepare_variants(&resolved.chrome, active, inactive);
+        let canvas = settings.surface(SettingsSurfaceRole::Canvas).background;
+        let card = settings.surface(SettingsSurfaceRole::Card);
+
+        assert!(card.paint.a < u8::MAX, "the card must keep transmitting");
+        assert!(
+            card.background.contrast_ratio(canvas) >= 1.1,
+            "the card must retain its content-tone step over the canvas"
+        );
+    }
+
+    #[test]
+    fn built_in_light_inactive_settings_segments_suppress_hover_after_reconciliation() {
+        for transparency in [0.0, 0.35, 1.0] {
+            let mut preferences = AppearancePreferences {
+                mode: AppearanceMode::Light,
+                ..AppearancePreferences::default()
+            };
+            preferences.background.transparency = transparency;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::available(Appearance::Light)
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .expect("built-in Light should resolve");
+            let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+            let (_, settings) = prepare_variants(&resolved.chrome, active, inactive);
+
+            for (name, host, colors) in [
+                (
+                    "Panel",
+                    spaceterm_ui::ControlHost::Panel,
+                    &settings.chrome.panel_controls.segmented,
+                ),
+                (
+                    "Card",
+                    spaceterm_ui::ControlHost::Card,
+                    &settings.chrome.card_controls.segmented,
+                ),
+            ] {
+                let host = settings.chrome.control_host_background(host);
+                let track = colors.element_background.source_over(host);
+                let selected = colors.selection_background.source_over(track);
+                let hovered = colors.selection_hover_background.source_over(track);
+                assert!(
+                    selected.r > track.r,
+                    "inactive Light Settings {name} segment at {transparency} must stay raised over {track:?}"
+                );
+                assert_eq!(
+                    hovered, selected,
+                    "inactive Light Settings {name} segment at {transparency} must suppress hover"
+                );
+            }
+        }
     }
 }

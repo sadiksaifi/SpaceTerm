@@ -60,6 +60,19 @@ impl ChipPaint {
         paint.hover_fill = self
             .hover_fill
             .map(|fill| appearance.selection_surface(semantic_host, fill));
+        // Built-in Light uses a stronger rim when selected hover keeps the same fill.
+        if appearance.built_in_light
+            && appearance.active
+            && paint.fill == paint.hover_fill
+            && let Some(fill) = paint.fill
+            && let (Some(rim), Some(hover_rim)) = (paint.rim, paint.hover_rim)
+        {
+            let host = fill.source_over(semantic_host);
+            let weight = |edge: Color| edge.source_over(host).contrast_ratio(host);
+            if weight(hover_rim) <= weight(rim) {
+                paint.hover_rim = Some(appearance.selection_hover_rim(host, rim));
+            }
+        }
         paint
     }
 

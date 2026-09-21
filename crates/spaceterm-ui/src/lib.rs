@@ -190,6 +190,32 @@ pub struct ControlThemeCatalog {
 
 impl gpui::Global for ControlThemeCatalog {}
 
+/// Application-owned border paints for an ordinary control's interaction states.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlBorderStates {
+    pub(crate) normal: gpui::Rgba,
+    pub(crate) hovered: gpui::Rgba,
+    pub(crate) pressed: gpui::Rgba,
+    pub(crate) disabled: gpui::Rgba,
+}
+
+impl ControlBorderStates {
+    /// Creates border paints without changing the control's focus indicator or geometry.
+    pub fn new(
+        normal: gpui::Rgba,
+        hovered: gpui::Rgba,
+        pressed: gpui::Rgba,
+        disabled: gpui::Rgba,
+    ) -> Self {
+        Self {
+            normal,
+            hovered,
+            pressed,
+            disabled,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct InstalledControlThemeCatalogs {
     active: Box<ControlThemeCatalog>,
@@ -278,6 +304,24 @@ impl ControlThemeCatalog {
         .flatten()
         {
             *host = host.clone().ordinary_control_elevation(shadow, border);
+        }
+        self
+    }
+
+    /// Applies ordinary-control state borders on every prepared host.
+    pub fn ordinary_control_borders(mut self, borders: ControlBorderStates) -> Self {
+        self.button = self.button.secondary_borders(borders);
+        self.combo_box = self.combo_box.ordinary_borders(borders);
+        for host in [
+            &mut self.title_bar_controls,
+            &mut self.panel_controls,
+            &mut self.card_controls,
+            &mut self.floating_controls,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *host = host.clone().ordinary_control_borders(borders);
         }
         self
     }

@@ -2108,7 +2108,7 @@ mod tests {
     /// surfaces. The Active Tab has one title-bar host, so it keeps the shared text hierarchy while
     /// using its own borderless fill and hover response.
     #[test]
-    fn built_in_active_tab_should_use_an_independent_borderless_chip_material() {
+    fn built_in_active_tab_should_use_its_authored_chip_material_and_edge() {
         use crate::appearance::{Appearance, builtin_chrome_base};
 
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -2138,12 +2138,14 @@ mod tests {
                 "{appearance:?} Active Tab title should match a selected navigation label"
             );
             assert_eq!(
-                colors.tab_active_border.a, 0,
-                "{appearance:?} Active Tab should state its shape without an outline"
+                colors.tab_active_border.a > 0,
+                appearance == Appearance::Light,
+                "{appearance:?} Active Tab should follow its theme edge policy"
             );
-            assert_ne!(
-                chip.hover_fill, chip.fill,
-                "{appearance:?} Active Tab should answer hover"
+            assert_eq!(
+                chip.hover_fill == chip.fill,
+                appearance == Appearance::Light,
+                "Light uses the prepared hover rim; Dark retains its hovered fill"
             );
             assert_eq!(
                 chip.fill == Some(colors.row_selected_background),

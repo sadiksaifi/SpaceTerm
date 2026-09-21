@@ -7,19 +7,30 @@ use super::{content_is_lighter_than_background, host_relative_fill, preferred_re
 pub(super) const CONTRAST_FLOOR: f64 = 1.35;
 pub(super) const CONTRAST_CEILING: f64 = 1.9;
 
-pub(super) fn prepare<const N: usize>(
+/// A role's standard contrast limits. Increase Contrast retains its independent floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SeparatorBand {
+    pub(super) floor: f64,
+    pub(super) ceiling: f64,
+}
+
+impl SeparatorBand {
+    pub(super) const FUNCTIONAL: Self = Self {
+        floor: CONTRAST_FLOOR,
+        ceiling: CONTRAST_CEILING,
+    };
+}
+
+pub(super) fn prepare_in_band<const N: usize>(
     seed: Color,
     root: Color,
     text: Color,
     backgrounds: [Color; N],
     increase_contrast: bool,
+    band: SeparatorBand,
 ) -> Color {
     let host = backgrounds[0];
-    let floor = if increase_contrast {
-        3.0
-    } else {
-        CONTRAST_FLOOR
-    };
+    let floor = if increase_contrast { 3.0 } else { band.floor };
     let lighter = content_is_lighter_than_background(text, host);
     let mut endpoint = Color::rgb(if lighter { 0xffffff } else { 0 });
     let meets_floor = |color: Color| {
@@ -42,7 +53,7 @@ pub(super) fn prepare<const N: usize>(
         increase_contrast
             || backgrounds
                 .iter()
-                .all(|host| color.source_over(*host).contrast_ratio(*host) <= CONTRAST_CEILING)
+                .all(|host| color.source_over(*host).contrast_ratio(*host) <= band.ceiling)
     };
     if on_text_side(proposed) && meets_floor(proposed) && within_ceiling(proposed) {
         return proposed;
@@ -84,12 +95,13 @@ mod tests {
     #[test]
     fn incompatible_endpoint_band_preserves_the_visibility_floor() {
         let backgrounds = [Color::rgb(0), Color::rgb(0x989898)];
-        let color = prepare(
+        let color = prepare_in_band(
             Color::rgb(0x2d2d2d),
             backgrounds[0],
             Color::rgb(0xffffff),
             backgrounds,
             false,
+            SeparatorBand::FUNCTIONAL,
         );
         for host in backgrounds {
             assert!(color.source_over(host).contrast_ratio(host) >= CONTRAST_FLOOR);

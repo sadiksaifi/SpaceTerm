@@ -65,19 +65,27 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                     .materials
                     .edge(prepared.colors.background, prepared.colors.border)
             );
-            assert_eq!(
-                prepared.pane_rim(),
-                prepared.materials.edge(
-                    prepared.colors.panel_background,
-                    prepared.colors.tab_separator,
-                )
-            );
+            if mode == AppearanceMode::Dark {
+                assert_eq!(
+                    prepared.pane_rim(),
+                    prepared.materials.edge(
+                        prepared.colors.panel_background,
+                        prepared.colors.tab_separator,
+                    )
+                );
+            } else {
+                let host = prepared.control_host_background(spaceterm_ui::ControlHost::Window);
+                let edge = prepared.pane_rim().source_over(host);
+                assert!((1.20..=1.30).contains(&edge.contrast_ratio(host)));
+            }
             if transparency == 0.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
                 assert_eq!(controls.border, prepared.colors.border);
-                assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
+                if mode == AppearanceMode::Dark {
+                    assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
+                }
                 assert_eq!(
                     resolved.chrome.composition.effective,
                     WindowBackgroundAppearance::Opaque
@@ -294,8 +302,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
         );
         assert_eq!(
             (colors.tab_active_border.a, colors.row_selected_border.a),
-            (0, 0),
-            "navigation selection should not require decorative borders at {transparency}"
+            (26, 26),
+            "Light navigation should retain its quiet authored rims at {transparency}"
         );
     }
 }
@@ -527,6 +535,10 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
                     host,
                     reference.row_selected_background,
                 );
+                if host == reference.row_selected_background {
+                    assert_eq!(selected.a, 0, "equal host and fill need no overlay");
+                    continue;
+                }
                 assert!(
                     hover.a > 0 && selected.a > hover.a,
                     "{appearance:?} at {transparency}: row ladder collapsed on the \

@@ -880,6 +880,12 @@ pub struct SurfaceControlThemes {
 }
 
 impl SurfaceControlThemes {
+    pub(crate) fn ordinary_control_borders(mut self, borders: crate::ControlBorderStates) -> Self {
+        self.button = self.button.secondary_borders(borders);
+        self.combo_box = self.combo_box.map(|theme| theme.ordinary_borders(borders));
+        self
+    }
+
     pub(crate) fn ordinary_control_elevation(
         mut self,
         shadow: ControlShadow,

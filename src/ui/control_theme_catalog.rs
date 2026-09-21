@@ -174,20 +174,44 @@ pub(super) fn catalog(
     let preserve_accessibility_border =
         appearance.capabilities.increase_contrast || appearance.capabilities.show_borders;
     let light = appearance.appearance == Appearance::Light;
-    let border =
-        (light && !preserve_accessibility_border).then_some(gpui_color(Color::rgba(0x00000026)));
+    // Light controls need a stronger edge than their card or popup host.
+    let (rest_edge, selected_edge) = if appearance.built_in_light {
+        (
+            super::appearance::built_in_light::CONTROL_EDGE,
+            super::appearance::built_in_light::SELECTED_EDGE,
+        )
+    } else {
+        (Color::rgba(0x00000026), Color::rgba(0x0000001f))
+    };
+    let border = (light && !preserve_accessibility_border).then_some(gpui_color(rest_edge));
     let catalog = catalog.toggle_segmented_elevation(
         if light { shadow } else { ControlShadow::none() },
         border,
         shadow,
-        light.then_some(gpui_color(Color::rgba(0x0000001f))),
+        (light && (!appearance.built_in_light || !preserve_accessibility_border))
+            .then_some(gpui_color(selected_edge)),
     );
 
     if !light {
         return catalog;
     }
 
-    catalog.ordinary_control_elevation(shadow, border)
+    let catalog = catalog.ordinary_control_elevation(shadow, border);
+    if appearance.built_in_light && !preserve_accessibility_border {
+        let interaction_edge = if appearance.active {
+            super::appearance::built_in_light::INTERACTION_EDGE
+        } else {
+            rest_edge
+        };
+        catalog.ordinary_control_borders(spaceterm_ui::ControlBorderStates::new(
+            gpui_color(rest_edge),
+            gpui_color(interaction_edge),
+            gpui_color(interaction_edge),
+            gpui_color(super::appearance::built_in_light::DISABLED_EDGE),
+        ))
+    } else {
+        catalog
+    }
 }
 
 fn prepared_control_typography(typography: &ChromeTypography) -> spaceterm_ui::ControlTypography {
@@ -1334,7 +1358,7 @@ mod tests {
                             expected.fill
                         );
                         assert_eq!(
-                            selected || hovered,
+                            fill != reference.elevated_surface_background,
                             expected.fill.a > 0,
                             "{appearance:?}: {:?}",
                             expected.fill

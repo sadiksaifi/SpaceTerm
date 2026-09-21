@@ -1042,6 +1042,7 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
         let sidebar = div()
             .debug_selector(|| "settings-sidebar".to_owned())
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
@@ -1050,6 +1051,19 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Sidebar).paint,
             ))
+            // Paint the boundary inside the sidebar without changing column widths.
+            .when_some(settings.sidebar_edge(), |sidebar, edge| {
+                sidebar.child(
+                    div()
+                        .debug_selector(|| "settings-sidebar-divider".to_owned())
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .bg(gpui_color(edge)),
+                )
+            })
             .child(self.render_sidebar_titlebar(appearance, cx))
             .child(
                 div()
@@ -2073,6 +2087,7 @@ impl SettingsWindow {
                 + appearance.spacing(FOOTER_HEIGHT - 15.0))
             .child(
                 div()
+                    .relative()
                     .flex_none()
                     .h_full()
                     .w(appearance.spacing(SIDEBAR_WIDTH))
@@ -2080,7 +2095,19 @@ impl SettingsWindow {
                     .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Sidebar)))
                     .bg(gpui_color(
                         settings.surface(SettingsSurfaceRole::Sidebar).paint,
-                    )),
+                    ))
+                    .when_some(settings.sidebar_edge(), |footer, edge| {
+                        footer.child(
+                            div()
+                                .debug_selector(|| "settings-sidebar-footer-divider".to_owned())
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_0()
+                                .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                                .bg(gpui_color(edge)),
+                        )
+                    }),
             )
             .child(
                 div()

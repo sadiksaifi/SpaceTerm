@@ -20,6 +20,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let selected = Color::rgb(0xfafafa);
+    let popup_selected = Color::rgb(0xebebeb);
     for (role, fill) in [
         ("Tab", prepared.colors.tab_active_background),
         (
@@ -31,16 +32,6 @@ fn light_selections_and_terminal_share_the_common_surface() {
             prepared
                 .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
                 .row_selected_background,
-        ),
-        (
-            "unfocused popup",
-            prepared
-                .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
-                .row_selected_background,
-        ),
-        (
-            "menu",
-            prepared.floating_control_colors.row_selected_background,
         ),
         (
             "window segment",
@@ -65,6 +56,23 @@ fn light_selections_and_terminal_share_the_common_surface() {
             "Light {role} should share the selected surface"
         );
     }
+    for (role, fill) in [
+        (
+            "unfocused popup",
+            prepared
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
+                .row_selected_background,
+        ),
+        (
+            "menu",
+            prepared.floating_control_colors.row_selected_background,
+        ),
+    ] {
+        assert_eq!(
+            fill, popup_selected,
+            "Light {role} should wash selection against the content surface"
+        );
+    }
     // Menu, ComboBox and Command Palette rows share this final paint resolver. Its contrast
     // policy must preserve the selected color, not only the prepared role inspected above.
     let reference = &prepared.floating_colors;
@@ -77,7 +85,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
         super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
     );
     let expected = [
-        selected,
+        popup_selected,
         reference.row_selected_foreground,
         reference.row_selected_secondary,
         reference.row_selected_icon,
@@ -95,8 +103,96 @@ fn light_selections_and_terminal_share_the_common_surface() {
             expected[4],
             expected[5],
         ),
-        "Light popup rows must paint the common selected fill"
+        "Light popup rows must paint a selected wash over the content surface"
     );
+}
+
+#[test]
+fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
+    for transparency in [0.0, 0.35, 1.0] {
+        let (_, prepared) = resolve_case(
+            Appearance::Light,
+            ChromeDensity::Compact,
+            transparency,
+            true,
+            true,
+        );
+        let colors = &prepared.colors;
+        for (name, fill, hover, rim, hover_rim) in [
+            (
+                "Tab",
+                colors.tab_active_background,
+                colors.tab_active_hover_background,
+                colors.tab_active_border,
+                colors.tab_active_border,
+            ),
+            (
+                "Workspace row",
+                colors.row_selected_background,
+                colors.row_selected_hover_background,
+                colors.row_selected_border,
+                colors.row_selected_hover_border,
+            ),
+        ] {
+            let paint = super::selection_chip::ChipPaint {
+                fill: Some(fill),
+                hover_fill: Some(hover),
+                rim: Some(rim),
+                hover_rim: Some(hover_rim),
+            }
+            .selected_on(&prepared, colors.background);
+            let host = paint.fill.unwrap().source_over(colors.background);
+            let edge = paint.rim.unwrap().source_over(host);
+            let hovered_edge = paint.hover_rim.unwrap().source_over(host);
+            assert_eq!(
+                paint.fill, paint.hover_fill,
+                "Light {name} at {transparency}: selected hover should keep its content fill"
+            );
+            assert!(
+                (1.15..=1.4).contains(&edge.contrast_ratio(host)),
+                "Light {name} at {transparency}: resting edge {edge:?} must remain visible and quiet on {host:?}"
+            );
+            assert!(
+                hovered_edge.contrast_ratio(host) > edge.contrast_ratio(host),
+                "Light {name} at {transparency}: selected hover must strengthen its rim"
+            );
+        }
+    }
+}
+
+#[test]
+fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
+    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
+
+    for transparency in [0.0, 0.35, 1.0] {
+        let (resolved, _) = resolve_case(
+            Appearance::Light,
+            ChromeDensity::Compact,
+            transparency,
+            true,
+            true,
+        );
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let (settings, _) =
+            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+        let canvas = settings.surface(Canvas).background;
+        let card = settings.surface(Card).background;
+        let edge = settings.card_edge().source_over(card);
+        let divider = settings.separator(Card).source_over(card);
+
+        assert!(
+            card.contrast_ratio(canvas) >= 1.1,
+            "Light Settings at {transparency}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
+        );
+        assert!(
+            edge.contrast_ratio(card) <= 1.3,
+            "Light Settings at {transparency}: decorative edge {edge:?} must remain quiet on {card:?}"
+        );
+        assert!(
+            divider.contrast_ratio(card) < edge.contrast_ratio(card),
+            "Light Settings at {transparency}: inset row rule {divider:?} must be quieter than the group edge {edge:?}"
+        );
+    }
 }
 
 #[test]
@@ -241,18 +337,15 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
     assert_eq!(prepared.colors.background, background);
     assert_eq!(prepared.colors.title_bar_background, background);
     assert_eq!(prepared.colors.panel_background, background);
-    assert_eq!(
-        prepared.colors.elevated_surface_background,
-        Color::rgb(0xeaeaea)
-    );
+    assert_eq!(prepared.colors.elevated_surface_background, raised);
     assert_eq!(prepared.colors.tab_active_background, raised);
     assert_eq!(
         prepared.panel_controls.reference.row_selected_background,
         raised
     );
-    assert_ne!(
+    assert_eq!(
         prepared.floating_colors.row_selected_background,
-        prepared.floating_colors.elevated_surface_background
+        Color::rgb(0xebebeb)
     );
 }
 
@@ -275,14 +368,21 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
                         for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
                             let host = shell_endpoint_background(shell, underlay);
                             let contrast = divider.source_over(host).contrast_ratio(host);
-                            let floor = if increase_contrast { 3.0 } else { 1.35 };
+                            let (floor, ceiling) = match (appearance, increase_contrast) {
+                                (_, true) => (3.0, None),
+                                (Appearance::Light, false) => (1.12, Some(1.22)),
+                                (Appearance::Dark, false) => (1.35, Some(1.9)),
+                            };
                             assert!(
                                 contrast >= floor,
                                 "{appearance:?} {role:?} active={} transparency={transparency} increase_contrast={increase_contrast}: separator contrast {contrast} < {floor}",
                                 prepared.active,
                             );
-                            if !increase_contrast {
-                                assert!(contrast <= 1.9, "separator is too strong: {contrast}");
+                            if let Some(ceiling) = ceiling {
+                                assert!(
+                                    contrast <= ceiling,
+                                    "{appearance:?} separator is too strong: {contrast} > {ceiling}"
+                                );
                             }
                         }
                     }
@@ -354,14 +454,21 @@ fn settings_separators_remain_visible_on_their_final_hosts() {
                         let background = prepared.control_host_background(host);
                         let divider = prepared.separator(host);
                         let contrast = divider.source_over(background).contrast_ratio(background);
-                        let floor = if increase_contrast { 3.0 } else { 1.35 };
+                        let (floor, ceiling) = match (appearance, increase_contrast) {
+                            (_, true) => (3.0, None),
+                            (Appearance::Light, false) => (1.12, Some(1.22)),
+                            (Appearance::Dark, false) => (1.35, Some(1.9)),
+                        };
                         assert!(
                             contrast >= floor,
                             "{appearance:?} {host:?} active={} transparency={transparency}: separator {contrast} < {floor}",
                             prepared.active,
                         );
-                        if !increase_contrast {
-                            assert!(contrast <= 1.9);
+                        if let Some(ceiling) = ceiling {
+                            assert!(
+                                contrast <= ceiling,
+                                "{appearance:?} {host:?} separator {contrast} > {ceiling}"
+                            );
                         }
                     }
                 }
@@ -2231,15 +2338,23 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
             );
 
             let opaque_shell = opaque.floating_surfaces().shell(role);
+            let expected_edge = match appearance {
+                Appearance::Light => gpui::rgba(0x0000001a),
+                Appearance::Dark => gpui::rgba(opaque.colors.shadow.with_alpha(115).rgba_hex()),
+            };
             assert_eq!(
                 opaque_shell.edge(),
-                gpui::rgba(opaque.colors.shadow.with_alpha(115).rgba_hex()),
-                "{appearance:?} {role:?} floating boundary uses the scheme shadow ink"
+                expected_edge,
+                "{appearance:?} {role:?} floating boundary uses its surface-edge policy"
             );
             let host = shell_endpoint_background(opaque_shell, Color::rgb(0));
             let divider = Color::rgba(u32::from(opaque_shell.divider()));
+            let expected_divider_band = match appearance {
+                Appearance::Light => 1.12..=1.22,
+                Appearance::Dark => 1.35..=1.9,
+            };
             assert!(
-                (1.35..=1.9).contains(&divider.source_over(host).contrast_ratio(host)),
+                expected_divider_band.contains(&divider.source_over(host).contrast_ratio(host)),
                 "{appearance:?} {role:?} divider is prepared independently of the outer edge"
             );
 
@@ -2537,8 +2652,8 @@ fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
         (
             Appearance::Light,
             Color::rgb(0xe5e5e5),
-            Color::rgb(0xdddddd),
-            Color::rgb(0xd6d6d6),
+            Color::rgb(0xdcdcdc),
+            Color::rgb(0xd3d3d3),
         ),
     ] {
         let (resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);

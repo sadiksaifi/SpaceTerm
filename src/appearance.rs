@@ -223,6 +223,9 @@ pub(crate) use scheme::{
     SchemeSummary, TerminalColors,
 };
 
+/// The definition whose presentation policy ships as SpaceTerm's Light identity.
+pub(crate) use builtin::light_chrome_id as builtin_light_chrome;
+
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
 pub(crate) use builtin::chrome_base as builtin_chrome_base;
