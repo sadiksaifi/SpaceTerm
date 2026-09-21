@@ -5363,11 +5363,12 @@ fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut Tes
     }
 }
 
-/// Visible workspace and Tab surfaces align across density and text-size changes.
+/// The unfilled Workspace identity stays centered in the Tab row across appearance scales.
 #[gpui::test]
-fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext) {
+fn collapsed_workspace_identity_should_stay_centered_without_a_surface(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
+    assert!(cx.debug_bounds("workspace-switcher-chip").is_none());
 
     for (text_scale, spacing_scale) in [(1.0, 1.0), (1.0, 1.25), (24.0 / 13.0, 1.25)] {
         cx.update(|window, cx| {
@@ -5382,11 +5383,10 @@ fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext
             window.refresh();
         });
         cx.run_until_parked();
-        let workspace = cx.debug_bounds("workspace-switcher-chip").unwrap();
+        let workspace = cx.debug_bounds("workspace-chip").unwrap();
         let tab = cx.debug_bounds("tab-item-1-chip").unwrap();
-        assert_eq!(workspace.size.height, tab.size.height);
-        assert_eq!(workspace.top(), tab.top());
-        assert_eq!(workspace.bottom(), tab.bottom());
+        assert_eq!(workspace.center().y, tab.center().y);
+        assert!(workspace.top() >= tab.top() && workspace.bottom() <= tab.bottom());
     }
 }
 

@@ -2928,6 +2928,9 @@ impl WorkspaceManager {
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
         let chrome_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
+        let switcher_colors = appearance.host_colors(spaceterm_ui::ControlHost::TitleBar);
+        let switcher_foreground = gpui_color(switcher_colors.text);
+        let switcher_icon_foreground = gpui_color(switcher_colors.icon);
         let placeholder_color = gpui_color(
             appearance
                 .host_colors(spaceterm_ui::ControlHost::Floating)
@@ -2959,6 +2962,7 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
+        .bare_trigger()
         .input_leading(move |size| {
             Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
@@ -3010,7 +3014,7 @@ impl WorkspaceManager {
         // The chooser takes the top chrome's icon size rather than the selector's own, so the
         // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
         // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
-        .icon_trigger(move |foreground, _| {
+        .icon_trigger(move |_, _| {
             // The same selector the chip's glyph carries: they are the one chooser icon in its two
             // states, so a test can hold them to one size.
             div()
@@ -3019,7 +3023,7 @@ impl WorkspaceManager {
                 .child(Icon::custom(
                     CustomIconName::RectangleStack,
                     chrome_icon_size,
-                    foreground,
+                    switcher_icon_foreground,
                 ))
                 .into_any_element()
         })
@@ -3036,7 +3040,7 @@ impl WorkspaceManager {
         .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
             chooser
                 .custom_trigger(identity.render(
-                    gpui_color(appearance.colors.row_selected_foreground),
+                    switcher_foreground,
                     appearance,
                     top_chrome_background,
                 ))

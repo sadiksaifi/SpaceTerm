@@ -932,6 +932,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     menu_with_filter_header: bool,
     full_width: bool,
     hug: bool,
+    bare_trigger: bool,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
@@ -967,6 +968,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             menu_with_filter_header: false,
             full_width: false,
             hug: false,
+            bare_trigger: false,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
@@ -1054,6 +1056,13 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// reads as values rather than as fields. The popup keeps its own width either way.
     pub fn hug(mut self, hug: bool) -> Self {
         self.hug = hug;
+        self
+    }
+
+    /// Removes the trigger's ordinary fill, border, and shadow without changing its geometry,
+    /// focus ring, content, or interaction.
+    pub fn bare_trigger(mut self) -> Self {
+        self.bare_trigger = true;
         self
     }
 
@@ -2138,6 +2147,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         };
         let custom_trigger = custom_content.is_some();
         let text_trigger = !icon_trigger && !custom_trigger;
+        let bare_trigger = self.bare_trigger;
         let fill_parent = self.full_width && !icon_trigger;
         let hug = self.hug && !fill_parent;
         let trigger_background = paint.trigger_background(enabled, open);
@@ -2182,8 +2192,12 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .items_center()
             .rounded(metrics.trigger_corner_radius)
             .border(metrics.border_width)
-            .border_color(trigger_border)
-            .when(!custom_trigger, |trigger| {
+            .border_color(if bare_trigger {
+                Rgba::default()
+            } else {
+                trigger_border
+            })
+            .when(!custom_trigger && !bare_trigger, |trigger| {
                 trigger
                     .bg(trigger_background)
                     .shadow(trigger_shadow.layers())

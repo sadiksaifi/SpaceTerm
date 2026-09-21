@@ -945,13 +945,14 @@ fn focus_trigger(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
+fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppContext) {
     struct InsetTrigger;
     impl Render for InsetTrigger {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
             div().p(px(16.0)).child(
                 div().w(px(180.0)).child(
                     ComboBox::new("ring-combo", "Choice", Some(1), "Choose", items())
+                        .bare_trigger()
                         .debug_selector("combo-box-trigger")
                         .on_accept(|_, _, _| {}),
                 ),
@@ -959,6 +960,7 @@ fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
         }
     }
     install_themes(cx);
+    let background = rgba(0x141415ff);
     let ordinary = rgba(0x123456ff);
     let focus = rgba(0xabcdefef);
     let theme = ComboBoxTheme::new(
@@ -968,7 +970,7 @@ fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
             rgba(0x606079ff),
             rgba(0x252530ff),
             rgba(0xffffffff),
-            rgba(0x141415ff),
+            background,
             rgba(0x1c1c24ff),
             ordinary,
             focus,
@@ -1006,15 +1008,21 @@ fn focused_trigger_submits_an_unclipped_outset_ring(cx: &mut TestAppContext) {
     cx.update(|window, _| {
         let scale = window.scale_factor();
         let quads = window.painted_quads_for_test();
-        let visible = |color: gpui::Rgba| {
+        let visible_border = |color: gpui::Rgba| {
             quads
                 .iter()
                 .filter(|quad| quad.border_color == color.into())
                 .map(|quad| quad.visible_bounds)
                 .reduce(|bounds, next| bounds.union(&next))
         };
-        assert_eq!(visible(ordinary), Some(trigger.scale(scale)));
-        assert_eq!(visible(focus), Some(ring.scale(scale)));
+        let visible_background = quads
+            .iter()
+            .filter(|quad| quad.background == gpui::Background::from(background))
+            .map(|quad| quad.visible_bounds)
+            .reduce(|bounds, next| bounds.union(&next));
+        assert_eq!(visible_background, None);
+        assert_eq!(visible_border(ordinary), None);
+        assert_eq!(visible_border(focus), Some(ring.scale(scale)));
     });
 }
 

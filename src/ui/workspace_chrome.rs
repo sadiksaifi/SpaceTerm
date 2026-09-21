@@ -5,10 +5,8 @@ use gpui::{AnyElement, App, Pixels, Rgba, Window, div, px};
 use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon, IconName};
 
 use super::appearance::{ChromeAppearance, chrome};
-use super::chrome_geometry::RadiusRole;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -166,7 +164,7 @@ impl WorkspaceChromeIdentity {
         appearance: &ChromeAppearance,
         semantic_host: Color,
     ) -> AnyElement {
-        let status = self.status(appearance);
+        let status = self.status(appearance, semantic_host);
         let badge = self.badge();
         let status_normal = status.map(|status| gpui_color(status.paint.normal));
         let status_hovered = status.map(|status| {
@@ -178,20 +176,6 @@ impl WorkspaceChromeIdentity {
         });
         let status_selector = status.map(|status| status.selector);
         let status_group = "workspace-chrome-status";
-        let surface = SelectionChip::new(
-            ChipShape::symmetric(px(0.0), px(0.0), RadiusRole::Control.pixels()),
-            ChipPaint {
-                fill: Some(appearance.colors.row_selected_background),
-                rim: Some(appearance.colors.row_selected_border),
-                hover_fill: appearance
-                    .active
-                    .then_some(appearance.colors.row_selected_hover_background),
-                hover_rim: appearance
-                    .active
-                    .then_some(appearance.colors.row_selected_hover_border),
-            }
-            .raised_on(appearance, semantic_host),
-        );
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
@@ -235,7 +219,6 @@ impl WorkspaceChromeIdentity {
             .px(appearance.spacing(SWITCHER_HORIZONTAL_PADDING))
             .gap(appearance.spacing(SWITCHER_IDENTITY_GAP))
             .group(status_group)
-            .child(surface.render("workspace-switcher-chip".to_owned(), status_group))
             .child(
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
@@ -309,7 +292,11 @@ impl WorkspaceChromeIdentity {
         })
     }
 
-    fn status(&self, appearance: &ChromeAppearance) -> Option<WorkspaceChromeStatusPaint> {
+    fn status(
+        &self,
+        appearance: &ChromeAppearance,
+        semantic_host: Color,
+    ) -> Option<WorkspaceChromeStatusPaint> {
         let (proposed, selector) =
             if matches!(self.availability, DirectoryAvailability::Unavailable { .. }) {
                 (
@@ -338,18 +325,7 @@ impl WorkspaceChromeIdentity {
             };
         Some(WorkspaceChromeStatusPaint {
             selector,
-            paint: resolve_workspace_status(
-                proposed,
-                appearance
-                    .colors
-                    .row_selected_background
-                    .source_over(appearance.colors.title_bar_background),
-                appearance
-                    .colors
-                    .row_selected_hover_background
-                    .source_over(appearance.colors.title_bar_background),
-                4.5,
-            ),
+            paint: resolve_workspace_status(proposed, semantic_host, semantic_host, 4.5),
         })
     }
 }
@@ -447,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn unhealthy_identity_status_should_be_readable_on_resting_and_hovered_triggers() {
+    fn unhealthy_identity_status_should_be_readable_on_each_title_bar_host() {
         for colors in [
             builtin_chrome_base(Appearance::Dark),
             builtin_chrome_base(Appearance::Light),
@@ -456,45 +432,42 @@ mod tests {
                 colors,
                 ..ChromeAppearance::default()
             };
-            let normal_background = appearance
-                .colors
-                .row_selected_background
-                .source_over(appearance.colors.title_bar_background);
-            let hovered_background = appearance
-                .colors
-                .row_selected_hover_background
-                .source_over(appearance.colors.title_bar_background);
-            for (availability, remote_connection_phase) in [
-                (
-                    DirectoryAvailability::Unavailable {
-                        reason: "unavailable".to_owned(),
-                    },
-                    None,
-                ),
-                (
-                    DirectoryAvailability::Available,
-                    Some(RemoteConnectionPhase::Reconnecting),
-                ),
-                (
-                    DirectoryAvailability::Available,
-                    Some(RemoteConnectionPhase::Disconnected),
-                ),
-                (
-                    DirectoryAvailability::Available,
-                    Some(RemoteConnectionPhase::Failed),
-                ),
+            for host in [
+                appearance.colors.title_bar_background,
+                appearance.colors.title_bar_inactive_background,
             ] {
-                let identity = WorkspaceChromeIdentity {
-                    name: "Workspace".to_owned(),
-                    pinned: false,
-                    availability,
-                    remote_connection_phase,
-                };
-                let status = identity
-                    .status(&appearance)
-                    .expect("unhealthy status paint");
-                assert!(status.paint.normal.contrast_ratio(normal_background) >= 4.5);
-                assert!(status.paint.hovered.contrast_ratio(hovered_background) >= 4.5);
+                for (availability, remote_connection_phase) in [
+                    (
+                        DirectoryAvailability::Unavailable {
+                            reason: "unavailable".to_owned(),
+                        },
+                        None,
+                    ),
+                    (
+                        DirectoryAvailability::Available,
+                        Some(RemoteConnectionPhase::Reconnecting),
+                    ),
+                    (
+                        DirectoryAvailability::Available,
+                        Some(RemoteConnectionPhase::Disconnected),
+                    ),
+                    (
+                        DirectoryAvailability::Available,
+                        Some(RemoteConnectionPhase::Failed),
+                    ),
+                ] {
+                    let identity = WorkspaceChromeIdentity {
+                        name: "Workspace".to_owned(),
+                        pinned: false,
+                        availability,
+                        remote_connection_phase,
+                    };
+                    let status = identity
+                        .status(&appearance, host)
+                        .expect("unhealthy status paint");
+                    assert!(status.paint.normal.contrast_ratio(host) >= 4.5);
+                    assert!(status.paint.hovered.contrast_ratio(host) >= 4.5);
+                }
             }
         }
     }
