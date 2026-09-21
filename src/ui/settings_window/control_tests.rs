@@ -276,9 +276,9 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     );
 }
 
-/// Selection remains a fill-only collection state for both pointer and keyboard navigation.
+/// Pointer selection stays fill-only; keyboard navigation identifies its current target.
 #[gpui::test]
-fn navigation_selection_never_adds_a_row_focus_ring(cx: &mut TestAppContext) {
+fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
     click("settings-navigation-settings-section-terminal", cx);
@@ -322,8 +322,14 @@ fn navigation_selection_never_adds_a_row_focus_ring(cx: &mut TestAppContext) {
     );
     assert!(
         cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_none(),
-        "collection rows must not paint a focus ring"
+            .is_some(),
+        "keyboard navigation must identify the focused section"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-navigation-focus-indicator")
+            .is_none()
     );
 }
 
@@ -376,7 +382,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
         cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_none()
+            .is_some()
     );
 
     click("settings-navigation-settings-section-interface", cx);
@@ -398,7 +404,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
         cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_none()
+            .is_some()
     );
 }
 

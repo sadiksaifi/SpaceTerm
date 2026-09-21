@@ -120,8 +120,8 @@ fn navigation_chip_paint(
     available: bool,
     colors: &crate::appearance::ChromeColors,
 ) -> ChipPaint {
-    // Hover changes the fill. The selected rim stays neutral, while keyboard focus has its own
-    // outset ring; a hover rim at the chip edge would look like persistent keyboard focus.
+    // Hover changes the fill. Keyboard focus has a separate neutral indicator, so pointer
+    // selection does not leave a focus-like rim behind it.
     if selected {
         ChipPaint {
             fill: Some(colors.row_selected_background),
@@ -997,6 +997,21 @@ impl SettingsWindow {
                     .cursor_default()
                     .chrome_text(appearance.typography.style(TextRole::Navigation))
                     .child(chip.render(chip_selector, &row_group))
+                    .when(selected && list_focused && appearance.active, |entry| {
+                        entry.child(
+                            div()
+                                .debug_selector(|| "settings-navigation-focus-indicator".to_owned())
+                                .absolute()
+                                .inset_0()
+                                .rounded(RadiusRole::Control.pixels())
+                                .border(px(if appearance.capabilities.increase_contrast {
+                                    2.0
+                                } else {
+                                    HAIRLINE
+                                }))
+                                .border_color(gpui_color(colors.icon)),
+                        )
+                    })
                     .when(has_matches, |entry| {
                         entry
                             .hover(move |entry| entry.text_color(gpui_color(hover_foreground)))
