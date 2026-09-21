@@ -1546,7 +1546,7 @@ pub(super) fn reconcile(
         active.appearance,
         active.floating_materials,
         host,
-        active.colors.elevated_surface_background,
+        active.floating_colors.elevated_surface_background,
         active.capabilities.increase_contrast,
     );
     let floating_hosts = [Color::rgb(0), Color::rgb(0xffffff)]

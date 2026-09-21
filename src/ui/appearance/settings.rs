@@ -170,6 +170,10 @@ pub(crate) fn prepare_variants(
 ) -> (SettingsAppearance, SettingsAppearance) {
     let mut active = prepare_variant(resolved, active);
     let mut inactive = prepare_variant(resolved, inactive);
+    super::built_in_light::prepare_active_segmented_controls(
+        Arc::make_mut(&mut active.chrome),
+        resolved,
+    );
     super::disabled_union::reconcile(
         Arc::make_mut(&mut active.chrome),
         Arc::make_mut(&mut inactive.chrome),

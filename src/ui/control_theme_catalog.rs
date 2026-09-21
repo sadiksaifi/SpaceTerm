@@ -30,7 +30,7 @@ pub(super) fn catalog(
     // while row states keep their complete host-relative paints and content contrast reference.
     let mut popup = host.clone();
     popup.elevated_surface_background =
-        appearance.floating_surface(appearance.colors.elevated_surface_background);
+        appearance.floating_surface(host.elevated_surface_background);
     let mut unfocused_popup = appearance
         .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
         .clone();
@@ -1406,7 +1406,8 @@ mod tests {
                 .expect("built-in appearance should resolve");
             let prepared = ChromeAppearance::prepare(&resolved.chrome);
             let reference = &prepared.floating_colors;
-            let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
+            let material =
+                prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
             let mut paint = reference.clone();
             paint.elevated_surface_background = material;
             type RowColors = fn(&ChromeColors) -> [Color; 6];
@@ -1470,9 +1471,24 @@ mod tests {
             }
             let alphas = rows.map(|row| row.fill.a);
             assert!(
-                alphas[0] < alphas[1] && alphas[1] != alphas[2],
-                "{appearance:?} selection must be stronger than hover and respond to hover: {alphas:?}"
+                alphas[0] < alphas[1],
+                "{appearance:?} selection must be stronger than hover: {alphas:?}"
             );
+            if appearance == Appearance::Light {
+                assert_eq!(
+                    rows[1].fill, rows[2].fill,
+                    "selected Light hover keeps the raised surface"
+                );
+                assert_ne!(
+                    rows[1].border, rows[2].border,
+                    "selected Light hover strengthens the rim"
+                );
+            } else {
+                assert_ne!(
+                    alphas[1], alphas[2],
+                    "Dark retains its selected-hover fill change"
+                );
+            }
         }
     }
 

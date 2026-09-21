@@ -3320,7 +3320,11 @@ fn prepare_state_control_host(
     }
     let colors = resolve_material_control_colors(
         &reference,
-        reference.material_presentation(materials),
+        if built_in_light {
+            built_in_light::control_paints(&reference, materials)
+        } else {
+            reference.material_presentation(materials)
+        },
         reference.background,
         final_host,
         floors,
@@ -3755,6 +3759,40 @@ pub(super) fn readable_on_background(
     readable
 }
 
+/// Keeps a prominent surface at its authored host-relative contrast using material opacity only.
+pub(super) fn prominent_surface_with(
+    materials: SurfaceMaterials,
+    host: Color,
+    color: Color,
+) -> Color {
+    let paint = materials.paint(SurfaceRole::Surface, host, color);
+    if materials.is_opaque() || paint.a == 0 {
+        return paint;
+    }
+    let minimum = color.source_over(host).contrast_ratio(host).min(1.22);
+    let visible = |alpha| {
+        paint
+            .with_alpha(alpha)
+            .source_over(host)
+            .contrast_ratio(host)
+            >= minimum
+    };
+    if visible(paint.a) {
+        return paint;
+    }
+    let mut lower = paint.a;
+    let mut upper = 254;
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if visible(middle) {
+            upper = middle;
+        } else {
+            lower = middle + 1;
+        }
+    }
+    paint.with_alpha(upper)
+}
+
 impl ChromeAppearance {
     /// Active-window selection paints used while a collection lacks keyboard focus.
     pub(crate) fn unfocused_selection_colors(
@@ -3821,34 +3859,7 @@ impl ChromeAppearance {
 
     /// Selected navigation and Light Pane interiors share one material-strength policy.
     fn prominent_surface(&self, host: Color, color: Color) -> Color {
-        let paint = self.materials.paint(SurfaceRole::Surface, host, color);
-        if self.materials.is_opaque() || paint.a == 0 {
-            return paint;
-        }
-        // Keep these surfaces distinct when the neutral ladder compresses at high transparency.
-        // Strengthen only the overlay, never replace it with an opaque fill.
-        let minimum = color.source_over(host).contrast_ratio(host).min(1.22);
-        let visible = |alpha| {
-            paint
-                .with_alpha(alpha)
-                .source_over(host)
-                .contrast_ratio(host)
-                >= minimum
-        };
-        if visible(paint.a) {
-            return paint;
-        }
-        let mut lower = paint.a;
-        let mut upper = 254;
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2;
-            if visible(middle) {
-                upper = middle;
-            } else {
-                lower = middle + 1;
-            }
-        }
-        paint.with_alpha(upper)
+        prominent_surface_with(self.materials, host, color)
     }
 
     /// Applies the window's material for one surface role to an authored background color.
@@ -4077,7 +4088,7 @@ impl ChromeAppearance {
         };
         FloatingSurfaceTheme::new(
             FloatingSurfacePaints::new(
-                paint(self.colors.elevated_surface_background, false),
+                paint(self.floating_colors.elevated_surface_background, false),
                 paint(self.colors.preview_background, true),
             )
             .tooltip(paint(self.colors.elevated_surface_background, true)),
@@ -4115,6 +4126,7 @@ impl ChromeAppearance {
     pub(crate) fn prepare_variants(resolved: &ResolvedChromeAppearance) -> (Self, Self) {
         let mut active = Self::prepare_variant(resolved, true);
         let mut inactive = Self::prepare_variant(resolved, false);
+        built_in_light::prepare_active_segmented_controls(&mut active, resolved);
         disabled_union::reconcile(&mut active, &mut inactive, &resolved.colors);
         built_in_light::finalize_inactive_segmented_controls(&mut inactive);
         active.unfocused_selection = collection_selection::prepare(&active, &inactive);
@@ -4201,11 +4213,16 @@ impl ChromeAppearance {
                 final_title_bar,
             );
         }
+        let floating_reference = if built_in_light {
+            built_in_light::floating_reference(&authored, resolved)
+        } else {
+            authored.floating_presentation()
+        };
         let (floating_raised_material, floating_raised_wash) = state_floating_material(
             resolved.appearance,
             resolved.composition.floating_materials,
             colors.background,
-            colors.elevated_surface_background,
+            floating_reference.elevated_surface_background,
             capabilities.increase_contrast,
         );
         let (floating_readout_material, floating_readout_wash) = state_floating_material(
@@ -4215,10 +4232,6 @@ impl ChromeAppearance {
             colors.preview_background,
             capabilities.increase_contrast,
         );
-        let mut floating_reference = authored.floating_presentation();
-        if built_in_light {
-            built_in_light::prepare_floating_selection(&mut floating_reference, resolved);
-        }
         let active_rows = ChromeStatePolicy {
             active: true,
             capabilities,
@@ -4249,7 +4262,11 @@ impl ChromeAppearance {
         );
         let control_colors = resolve_material_control_colors(
             &colors,
-            colors.material_presentation(resolved.composition.materials),
+            if built_in_light {
+                built_in_light::control_paints(&colors, resolved.composition.materials)
+            } else {
+                colors.material_presentation(resolved.composition.materials)
+            },
             colors.background,
             window_host,
             floating_contrast_floors,
@@ -4343,7 +4360,14 @@ impl ChromeAppearance {
             &source,
             floating_contrast_floors,
             &floating_colors,
-            floating_colors.material_presentation(resolved.composition.floating_materials),
+            if built_in_light {
+                built_in_light::control_paints(
+                    &floating_colors,
+                    resolved.composition.floating_materials,
+                )
+            } else {
+                floating_colors.material_presentation(resolved.composition.floating_materials)
+            },
             floating_raised_material,
             floating_raised_wash,
         );

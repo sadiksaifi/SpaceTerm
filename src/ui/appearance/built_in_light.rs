@@ -1,7 +1,9 @@
 //! Surface, boundary, and state policy for the built-in Light definition only.
 //! Custom Light schemes retain the shared preparation path.
 
-use crate::appearance::{ChromeColors, Color, ColorProvenance, ResolvedChromeAppearance};
+use crate::appearance::{
+    ChromeColors, Color, ColorProvenance, ResolvedChromeAppearance, SurfaceMaterials,
+};
 use crate::ui::chrome_state::ChromeStatePolicy;
 
 use super::{ChromeAppearance, separator::SeparatorBand};
@@ -30,32 +32,46 @@ pub(crate) const DISABLED_EDGE: Color = Color::rgba(0x0000000a);
 /// The rim of a selected segmented option and of a switch thumb, both of which carry a shadow too.
 pub(crate) const SELECTED_EDGE: Color = Color::rgba(0x0000001a);
 
-/// Popup rows darken on selection because their host already uses the raised content color.
-const FLOATING_ROW_SELECTED: Color = Color::rgb(0xebebeb);
-const FLOATING_ROW_SELECTED_HOVER: Color = Color::rgb(0xe6e6e6);
-
 /// Whether the prepared appearance is the built-in Light definition, including user overrides on it.
 pub(super) fn applies(resolved: &ResolvedChromeAppearance) -> bool {
     resolved.effective_scheme == crate::appearance::builtin_light_chrome()
 }
 
-/// Replaces built-in popup defaults without changing user overrides, including equal-color ones.
-pub(super) fn prepare_floating_selection(
-    reference: &mut ChromeColors,
+/// Popup collections use the base surface so selected rows can use the raised surface.
+pub(super) fn floating_reference(
+    authored: &ChromeColors,
     resolved: &ResolvedChromeAppearance,
-) {
+) -> ChromeColors {
+    let mut source = authored.clone();
     if matches!(
-        resolved.provenance.get("row_selected_background"),
+        resolved.provenance.get("elevated_surface_background"),
         Some(ColorProvenance::Authored)
     ) {
-        reference.row_selected_background = FLOATING_ROW_SELECTED;
+        source.elevated_surface_background = authored.background;
     }
-    if matches!(
-        resolved.provenance.get("row_selected_hover_background"),
-        Some(ColorProvenance::Authored)
-    ) {
-        reference.row_selected_hover_background = FLOATING_ROW_SELECTED_HOVER;
+    source.floating_presentation()
+}
+
+/// Retains the state steps of small controls while their containing surfaces transmit the backdrop.
+pub(super) fn control_paints(
+    reference: &ChromeColors,
+    materials: SurfaceMaterials,
+) -> ChromeColors {
+    let mut paint = reference.material_presentation(materials);
+    macro_rules! retain_state {
+        ($($role:ident),+ $(,)?) => { $(
+            paint.$role = super::prominent_surface_with(materials, reference.background, reference.$role);
+        )+ };
     }
+    retain_state!(
+        element_background,
+        element_hover,
+        element_active,
+        ghost_element_background,
+        ghost_element_hover,
+        ghost_element_active
+    );
+    paint
 }
 
 /// Applies the built-in Light window-state policy after the shared state compiler.
@@ -98,6 +114,90 @@ pub(super) fn prepare_state_colors(
     }
 
     colors
+}
+
+fn use_selected_material(
+    colors: &mut ChromeColors,
+    material: Color,
+    include_hover: bool,
+    include_pressed: bool,
+) {
+    colors.selection_background = material;
+    if include_hover {
+        colors.selection_hover_background = material;
+    }
+    if include_pressed {
+        colors.selection_pressed_background = material;
+    }
+}
+
+/// Routes active selected segments through the same prominent material as navigation selection.
+pub(super) fn prepare_active_segmented_controls(
+    appearance: &mut ChromeAppearance,
+    resolved: &ResolvedChromeAppearance,
+) {
+    if !appearance.built_in_light
+        || !appearance.active
+        || appearance.capabilities.increase_contrast
+        || !matches!(
+            resolved.provenance.get("selection_background"),
+            Some(ColorProvenance::Authored)
+        )
+    {
+        return;
+    }
+
+    let selected = resolved.colors.selection_background;
+    let include_hover = !matches!(
+        resolved.provenance.get("selection_hover_background"),
+        Some(ColorProvenance::Overridden)
+    );
+    let include_pressed = !matches!(
+        resolved.provenance.get("selection_pressed_background"),
+        Some(ColorProvenance::Overridden)
+    );
+    let material = |materials: SurfaceMaterials, reference: &ChromeColors| {
+        super::prominent_surface_with(materials, reference.segmented_track_background, selected)
+    };
+
+    let window = material(appearance.materials, &appearance.colors);
+    let title_bar = material(
+        appearance.materials,
+        &appearance.title_bar_controls.reference,
+    );
+    let panel = material(appearance.materials, &appearance.panel_controls.reference);
+    let card = material(appearance.materials, &appearance.card_controls.reference);
+    let floating = material(appearance.floating_materials, &appearance.floating_colors);
+    use_selected_material(
+        &mut appearance.segmented_control_colors,
+        window,
+        include_hover,
+        include_pressed,
+    );
+    use_selected_material(
+        &mut appearance.title_bar_controls.segmented,
+        title_bar,
+        include_hover,
+        include_pressed,
+    );
+    use_selected_material(
+        &mut appearance.panel_controls.segmented,
+        panel,
+        include_hover,
+        include_pressed,
+    );
+    use_selected_material(
+        &mut appearance.card_controls.segmented,
+        card,
+        include_hover,
+        include_pressed,
+    );
+    use_selected_material(
+        &mut appearance.floating_segmented_colors,
+        floating,
+        include_hover,
+        include_pressed,
+    );
 }
 
 /// Keeps the final inactive segmented paint non-interactive after independent state resolution.

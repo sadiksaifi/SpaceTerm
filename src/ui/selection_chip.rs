@@ -100,7 +100,12 @@ impl ChipPaint {
         };
         Self {
             fill: material(self.fill),
-            hover_fill: material(self.hover_fill),
+            hover_fill: if appearance.built_in_light && appearance.active {
+                self.hover_fill
+                    .map(|fill| appearance.selection_surface(semantic_host, fill))
+            } else {
+                material(self.hover_fill)
+            },
             rim: edge(self.fill, self.rim),
             hover_rim: edge(self.hover_fill.or(self.fill), self.hover_rim),
         }

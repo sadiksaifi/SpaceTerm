@@ -216,13 +216,13 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             field: 0xfafafa,
             control_fill: Some(0xfafafa),
             segmented_track: Some(0xe5e5e5),
-            control_hover: 0xf2f2f2,
-            control_pressed: 0xebebeb,
-            ghost_hover: 0xdcdcdc,
-            ghost_pressed: 0xd3d3d3,
+            control_hover: 0xe9e9e9,
+            control_pressed: 0xdcdcdc,
+            ghost_hover: 0xd2d2d2,
+            ghost_pressed: 0xc4c4c4,
             selected: 0xfafafa,
             selected_inactive: 0xf4f4f4,
-            row_hover: 0xf0f0f0,
+            row_hover: 0xf4f4f4,
             row_selected: 0xfafafa,
             row_selected_hover: Some(0xfafafa),
             navigation_selected: Some(0xfafafa),
@@ -874,8 +874,8 @@ mod tests {
         }
     }
 
-    /// Authored navigation lifts off the shell without hue. Light popup selection is prepared
-    /// separately because its content-tone host matches the authored navigation selection.
+    /// Authored navigation lifts off the shell without hue. Light popup hosts are prepared
+    /// separately from the raised card role, which matches the authored navigation selection.
     #[test]
     fn the_row_ladder_should_step_consistently_from_shell_and_raised_surfaces() {
         for appearance in [Appearance::Light, Appearance::Dark] {

@@ -20,7 +20,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let selected = Color::rgb(0xfafafa);
-    let popup_selected = Color::rgb(0xebebeb);
+    let popup_selected = selected;
     for (role, fill) in [
         ("Tab", prepared.colors.tab_active_background),
         (
@@ -70,7 +70,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
     ] {
         assert_eq!(
             fill, popup_selected,
-            "Light {role} should wash selection against the content surface"
+            "Light {role} should use the common raised selection surface"
         );
     }
     // Menu, ComboBox and Command Palette rows share this final paint resolver. Its contrast
@@ -78,7 +78,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
     let reference = &prepared.floating_colors;
     let mut popup = reference.clone();
     popup.elevated_surface_background =
-        prepared.floating_surface(prepared.colors.elevated_surface_background);
+        prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
     let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
         reference,
         &popup,
@@ -103,7 +103,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
             expected[4],
             expected[5],
         ),
-        "Light popup rows must paint a selected wash over the content surface"
+        "Light popup rows must paint raised selection over the base surface"
     );
 }
 
@@ -343,10 +343,7 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
         prepared.panel_controls.reference.row_selected_background,
         raised
     );
-    assert_eq!(
-        prepared.floating_colors.row_selected_background,
-        Color::rgb(0xebebeb)
-    );
+    assert_eq!(prepared.floating_colors.row_selected_background, raised);
 }
 
 #[test]
@@ -2652,8 +2649,8 @@ fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
         (
             Appearance::Light,
             Color::rgb(0xe5e5e5),
-            Color::rgb(0xdcdcdc),
-            Color::rgb(0xd3d3d3),
+            Color::rgb(0xd2d2d2),
+            Color::rgb(0xc4c4c4),
         ),
     ] {
         let (resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
@@ -3118,7 +3115,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
     let field = &prepared.floating_field_colors;
     let mut popup = reference.clone();
     popup.elevated_surface_background =
-        prepared.floating_surface(prepared.colors.elevated_surface_background);
+        prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
     let mut unfocused_popup = prepared
         .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
         .clone();
@@ -3599,7 +3596,8 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
                 resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
             let reference = prepared.floating_colors.clone();
             let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-            let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
+            let material =
+                prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
             let mut paint = reference.clone();
             paint.elevated_surface_background = material;
             for pick in [
@@ -3679,7 +3677,7 @@ fn custom_midgray_idle_row_uses_the_resolved_material_as_its_contrast_reference(
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let reference = &prepared.floating_colors;
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    let material = prepared.floating_surface(prepared.colors.elevated_surface_background);
+    let material = prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
     assert_ne!(reference.elevated_surface_background, material);
     let idle = OverlayRow::resolve(
         (

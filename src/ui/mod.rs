@@ -15,6 +15,8 @@ mod directory_picker;
 #[cfg(test)]
 mod floating_surface_tests;
 #[cfg(test)]
+mod light_hover_tests;
+#[cfg(test)]
 mod light_inactive_tests;
 #[cfg(test)]
 mod light_theme_preservation_tests;
