@@ -2547,7 +2547,6 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         theme.toggle_segmented_elevation(
             spaceterm_ui::ControlShadow::none(),
             None,
-            gpui::rgba(0x00000000),
             spaceterm_ui::ControlShadow::single(spaceterm_ui::ControlShadowLayer::new(
                 gpui::rgba(prepared.colors.shadow.multiply_opacity(89).rgba_hex()).into(),
                 gpui::px(0.0),

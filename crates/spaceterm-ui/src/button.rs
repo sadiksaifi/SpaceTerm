@@ -117,7 +117,6 @@ pub struct ButtonPaint {
     icon_foreground: Rgba,
     border: Rgba,
     shadow: crate::ControlShadow,
-    bottom_edge: Rgba,
 }
 
 impl ButtonPaint {
@@ -129,7 +128,6 @@ impl ButtonPaint {
             icon_foreground: foreground,
             border,
             shadow: crate::ControlShadow::none(),
-            bottom_edge: Rgba::default(),
         }
     }
 
@@ -443,28 +441,24 @@ impl ButtonTheme {
     }
 
     /// Adds the application's raised treatment to ordinary buttons. Pressed and disabled
-    /// controls do not cast the resting shadow; disabled controls also omit the bottom edge.
+    /// controls do not cast the resting shadow.
     pub fn secondary_elevation(
         mut self,
         shadow: crate::ControlShadow,
         border: Option<Rgba>,
-        bottom_edge: Rgba,
     ) -> Self {
         let ordinary = &mut self.variants.secondary;
         for paint in [&mut ordinary.normal, &mut ordinary.hovered] {
             paint.shadow = shadow;
-            paint.bottom_edge = bottom_edge;
             if let Some(border) = border {
                 paint.border = border;
             }
         }
         ordinary.pressed.shadow = crate::ControlShadow::none();
-        ordinary.pressed.bottom_edge = bottom_edge;
         if let Some(border) = border {
             ordinary.pressed.border = border;
         }
         ordinary.disabled.shadow = crate::ControlShadow::none();
-        ordinary.disabled.bottom_edge = Rgba::default();
         self
     }
 
@@ -1458,17 +1452,6 @@ impl ButtonCore {
                         .border_color(ring_color),
                 )
             })
-            .when(paint.bottom_edge.a > 0.0, |button| {
-                button.child(
-                    div()
-                        .absolute()
-                        .bottom(px(1.0))
-                        .left(style.corner_radius)
-                        .right(style.corner_radius)
-                        .h(px(1.0))
-                        .bg(paint.bottom_edge),
-                )
-            })
             .child(pointer_tracker)
             .when_some(focus_anchor, |button, anchor| {
                 button.child(anchor.bounds_tracker(style.border_width))
@@ -1943,50 +1926,38 @@ mod tests {
         disabled: bool,
     }
 
-    struct ElevationProbeRoot {
-        disabled: bool,
-    }
+    #[test]
+    fn ordinary_button_elevation_keeps_the_border_and_drops_nonresting_shadows() {
+        let border = rgba(0x12345678);
+        let shadow = crate::ControlShadow::single(crate::ControlShadowLayer::new(
+            rgba(0x87654321).into(),
+            px(0.0),
+            px(1.0),
+            px(2.0),
+            px(-1.0),
+        ));
+        let disabled_border = test_theme()
+            .paints(ButtonVariant::Secondary)
+            .disabled
+            .border;
+        let paints = test_theme()
+            .secondary_elevation(shadow, Some(border))
+            .paints(ButtonVariant::Secondary);
 
-    impl Render for ElevationProbeRoot {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().p(px(20.0)).child(
-                Button::new("elevation-probe", "Ordinary action")
-                    .variant(ButtonVariant::Secondary)
-                    .debug_selector("elevation-probe")
-                    .disabled(self.disabled)
-                    .on_activate(|_, _, _| {}),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn ordinary_button_bottom_edge_survives_press_but_not_disabled(cx: &mut TestAppContext) {
-        let edge = rgba(0x12345678);
-        cx.set_global(test_theme().secondary_elevation(crate::ControlShadow::none(), None, edge));
-        let (root, cx) = cx.add_window_view(|_, _| ElevationProbeRoot { disabled: false });
-        cx.run_until_parked();
-        let has_edge = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .painted_quads_for_test()
-                    .iter()
-                    .any(|quad| quad.background == gpui::Background::from(edge))
-            })
-        };
-        assert!(
-            has_edge(cx),
-            "resting ordinary control must paint its bottom edge"
+        assert_eq!(
+            [
+                (paints.normal.border, paints.normal.shadow),
+                (paints.hovered.border, paints.hovered.shadow),
+                (paints.pressed.border, paints.pressed.shadow),
+                (paints.disabled.border, paints.disabled.shadow),
+            ],
+            [
+                (border, shadow),
+                (border, shadow),
+                (border, crate::ControlShadow::none()),
+                (disabled_border, crate::ControlShadow::none()),
+            ]
         );
-        let bounds = cx.debug_bounds("elevation-probe").unwrap();
-        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-        assert!(has_edge(cx), "press removes elevation, not the boundary");
-        root.update(cx, |root, cx| {
-            root.disabled = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(!has_edge(cx));
     }
     impl Render for PaintProbeRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

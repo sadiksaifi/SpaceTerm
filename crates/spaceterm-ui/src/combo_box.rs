@@ -477,7 +477,6 @@ pub struct ComboBoxPaint {
     trigger_disabled_background: Rgba,
     trigger_border: Rgba,
     trigger_shadow: crate::ControlShadow,
-    trigger_bottom_edge: Rgba,
     focus_border: Rgba,
 }
 
@@ -515,7 +514,6 @@ impl ComboBoxPaint {
             trigger_disabled_background: trigger_background,
             trigger_border,
             trigger_shadow: crate::ControlShadow::none(),
-            trigger_bottom_edge: Rgba::default(),
             focus_border,
         }
     }
@@ -553,14 +551,8 @@ impl ComboBoxPaint {
     }
 
     /// Adds the application-owned raised treatment to an ordinary trigger.
-    pub fn trigger_elevation(
-        mut self,
-        shadow: crate::ControlShadow,
-        border: Option<Rgba>,
-        bottom_edge: Rgba,
-    ) -> Self {
+    pub fn trigger_elevation(mut self, shadow: crate::ControlShadow, border: Option<Rgba>) -> Self {
         self.trigger_shadow = shadow;
-        self.trigger_bottom_edge = bottom_edge;
         if let Some(border) = border {
             self.trigger_border = border;
         }
@@ -580,14 +572,6 @@ impl ComboBoxPaint {
             self.trigger_shadow
         } else {
             crate::ControlShadow::none()
-        }
-    }
-
-    fn trigger_bottom_edge(self, enabled: bool, _open: bool) -> Rgba {
-        if enabled {
-            self.trigger_bottom_edge
-        } else {
-            Rgba::default()
         }
     }
 
@@ -889,9 +873,8 @@ impl ComboBoxTheme {
         mut self,
         shadow: crate::ControlShadow,
         border: Option<Rgba>,
-        bottom_edge: Rgba,
     ) -> Self {
-        self.paint = self.paint.trigger_elevation(shadow, border, bottom_edge);
+        self.paint = self.paint.trigger_elevation(shadow, border);
         self
     }
 }
@@ -2159,7 +2142,6 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         let hug = self.hug && !fill_parent;
         let trigger_background = paint.trigger_background(enabled, open);
         let trigger_shadow = paint.trigger_shadow(enabled, open);
-        let trigger_bottom_edge = paint.trigger_bottom_edge(enabled, open);
         let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
         let trigger = div()
             .id(self.id)
@@ -2246,17 +2228,6 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                     }),
             )
             .children(custom_content)
-            .when(trigger_bottom_edge.a > 0.0 && !custom_trigger, |trigger| {
-                trigger.child(
-                    div()
-                        .absolute()
-                        .bottom(px(1.0))
-                        .left(metrics.trigger_corner_radius)
-                        .right(metrics.trigger_corner_radius)
-                        .h(px(1.0))
-                        .bg(trigger_bottom_edge),
-                )
-            })
             .when(text_trigger, |trigger| {
                 trigger
                     .child(
@@ -3260,7 +3231,6 @@ mod tests {
         let pressed = gpui::rgba(0x333333ff);
         let disabled = gpui::rgba(0x444444ff);
         let border = gpui::rgba(0x555555ff);
-        let edge = gpui::rgba(0x666666ff);
         let shadow = crate::ControlShadow::single(crate::ControlShadowLayer::new(
             gpui::rgba(0x777777ff).into(),
             px(0.0),
@@ -3272,7 +3242,7 @@ mod tests {
             normal, normal, disabled, normal, normal, normal, hovered, normal, normal,
         )
         .trigger_state_backgrounds(pressed, disabled)
-        .trigger_elevation(shadow, Some(border), edge);
+        .trigger_elevation(shadow, Some(border));
 
         assert_eq!(paint.trigger_background(true, false), normal);
         assert_eq!(paint.trigger_background(true, true), pressed);
@@ -3287,9 +3257,6 @@ mod tests {
             paint.trigger_shadow(false, false),
             crate::ControlShadow::none()
         );
-        assert_eq!(paint.trigger_bottom_edge(true, false), edge);
-        assert_eq!(paint.trigger_bottom_edge(true, true), edge);
-        assert_eq!(paint.trigger_bottom_edge(false, false), Rgba::default());
     }
 
     #[test]

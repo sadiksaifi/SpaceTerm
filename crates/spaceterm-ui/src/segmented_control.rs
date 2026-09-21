@@ -371,7 +371,6 @@ pub struct SegmentedControlTheme {
     focus_border: Rgba,
     focus_ring_width: Pixels,
     track_shadow: ControlShadow,
-    track_bottom_edge: Rgba,
     selected_shadow: ControlShadow,
 }
 
@@ -392,7 +391,6 @@ impl SegmentedControlTheme {
             focus_border,
             focus_ring_width: px(1.0),
             track_shadow: ControlShadow::none(),
-            track_bottom_edge: Rgba::default(),
             selected_shadow: ControlShadow::none(),
         }
     }
@@ -408,11 +406,9 @@ impl SegmentedControlTheme {
         mut self,
         shadow: ControlShadow,
         track_border: Option<Rgba>,
-        bottom_edge: Rgba,
         selected_border: Option<Rgba>,
     ) -> Self {
         self.track_shadow = shadow;
-        self.track_bottom_edge = bottom_edge;
         if let Some(border) = track_border {
             self.track_border = border;
         }
@@ -468,7 +464,6 @@ impl SegmentedControlTheme {
             focus_border: self.focus_border,
             focus_ring_width: self.focus_ring_width,
             track_shadow: self.track_shadow,
-            track_bottom_edge: self.track_bottom_edge,
             selected_shadow: self.selected_shadow,
         }
     }
@@ -881,17 +876,6 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                         track
                             .shadow(style.track_shadow.layers())
                             .shadow_outside_only()
-                            .when(style.track_bottom_edge.a > 0.0, |track| {
-                                track.child(
-                                    div()
-                                        .absolute()
-                                        .bottom(px(1.0))
-                                        .left(metrics.radius)
-                                        .right(metrics.radius)
-                                        .h(px(1.0))
-                                        .bg(style.track_bottom_edge),
-                                )
-                            })
                     })
             })
             .cursor_default()
@@ -1009,7 +993,6 @@ struct SegmentedStyle {
     focus_border: Rgba,
     focus_ring_width: Pixels,
     track_shadow: ControlShadow,
-    track_bottom_edge: Rgba,
     selected_shadow: ControlShadow,
 }
 

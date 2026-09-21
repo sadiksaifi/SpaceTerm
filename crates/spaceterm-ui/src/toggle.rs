@@ -116,7 +116,6 @@ pub struct TogglePaint {
     border: Rgba,
     label: Rgba,
     shadow: ControlShadow,
-    bottom_edge: Rgba,
     thumb_shadow: ControlShadow,
     thumb_border: Rgba,
 }
@@ -130,7 +129,6 @@ impl TogglePaint {
             border,
             label,
             shadow: ControlShadow::none(),
-            bottom_edge: Rgba::default(),
             thumb_shadow: ControlShadow::none(),
             thumb_border: Rgba::default(),
         }
@@ -358,7 +356,6 @@ impl ToggleTheme {
         mut self,
         track_shadow: ControlShadow,
         track_border: Option<Rgba>,
-        bottom_edge: Rgba,
         thumb_shadow: ControlShadow,
         thumb_border: Option<Rgba>,
     ) -> Self {
@@ -368,7 +365,6 @@ impl ToggleTheme {
             &mut self.paints.pressed,
         ] {
             for paint in [&mut paints.off, &mut paints.on] {
-                paint.bottom_edge = bottom_edge;
                 paint.thumb_shadow = thumb_shadow;
                 if let Some(border) = track_border {
                     paint.border = border;
@@ -911,10 +907,6 @@ impl TogglePaintRefinement {
         style.bg(self.0.foreground)
     }
 
-    fn bottom_edge(self, style: StyleRefinement) -> StyleRefinement {
-        style.bg(self.0.bottom_edge)
-    }
-
     /// Refines the checkbox mark, restating the glyph metrics the base style uses.
     ///
     /// GPUI replaces an element's text style rather than merging it, so a refinement carrying only
@@ -988,7 +980,6 @@ fn checkbox_indicator(
     let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
     let mark_state_id = SharedString::from(format!("{selector}-mark-state"));
-    let edge_state_id = SharedString::from(format!("{selector}-bottom-edge-state"));
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
@@ -1008,24 +999,6 @@ fn checkbox_indicator(
             indicator
                 .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
                 .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
-        })
-        .when(paint.bottom_edge.a > 0.0, |indicator| {
-            indicator.child(
-                div()
-                    .id(edge_state_id)
-                    .absolute()
-                    .bottom(px(1.0))
-                    .left(metrics.checkbox_radius)
-                    .right(metrics.checkbox_radius)
-                    .h(px(1.0))
-                    .bg(paint.bottom_edge)
-                    .when(enabled && !keyboard_pressed, |edge| {
-                        edge.group_hover(INTERACTION_GROUP, move |style| hovered.bottom_edge(style))
-                            .group_active(INTERACTION_GROUP, move |style| {
-                                pressed.bottom_edge(style)
-                            })
-                    }),
-            )
         })
         .when(value == CheckboxState::Checked, |indicator| {
             indicator.child(
@@ -1099,7 +1072,6 @@ fn switch_indicator(
     let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
     let thumb_state_id = SharedString::from(format!("{thumb_selector}-state"));
-    let edge_state_id = SharedString::from(format!("{selector}-bottom-edge-state"));
     let thumb_extent = (metrics.switch_height - metrics.switch_inset * 2.0).max(px(1.0));
     let content_inset = (metrics.switch_inset - metrics.border_width).max(px(0.0));
     let off_offset = px(0.0);
@@ -1131,24 +1103,6 @@ fn switch_indicator(
             indicator
                 .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
                 .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
-        })
-        .when(paint.bottom_edge.a > 0.0, |indicator| {
-            indicator.child(
-                div()
-                    .id(edge_state_id)
-                    .absolute()
-                    .bottom(px(1.0))
-                    .left(radius)
-                    .right(radius)
-                    .h(px(1.0))
-                    .bg(paint.bottom_edge)
-                    .when(enabled && !keyboard_pressed, |edge| {
-                        edge.group_hover(INTERACTION_GROUP, move |style| hovered.bottom_edge(style))
-                            .group_active(INTERACTION_GROUP, move |style| {
-                                pressed.bottom_edge(style)
-                            })
-                    }),
-            )
         })
         .child(
             div()
@@ -1344,11 +1298,9 @@ mod tests {
         ));
         let track_border = rgba(0x00000026);
         let thumb_border = rgba(0x0000001f);
-        let bottom_edge = rgba(0x0000002e);
         let theme = test_theme().elevation(
             track_shadow,
             Some(track_border),
-            bottom_edge,
             thumb_shadow,
             Some(thumb_border),
         );
@@ -1380,15 +1332,6 @@ mod tests {
                     ControlShadow::none()
                 },
                 "only an enabled, unpressed off track is raised"
-            );
-            assert_eq!(
-                paint.bottom_edge,
-                if enabled {
-                    bottom_edge
-                } else {
-                    Rgba::default()
-                },
-                "disabled removes the track or box bottom edge"
             );
             assert_eq!(
                 paint.thumb_shadow,
@@ -1429,10 +1372,6 @@ mod tests {
                 .bg(paint.foreground)
                 .border_color(paint.thumb_border)
                 .shadow(paint.thumb_shadow.layers())
-        );
-        assert_eq!(
-            refinement.bottom_edge(StyleRefinement::default()),
-            StyleRefinement::default().bg(paint.bottom_edge)
         );
         // Both text refinements restate the metrics their base style uses, because GPUI replaces
         // an element's text style rather than merging it.

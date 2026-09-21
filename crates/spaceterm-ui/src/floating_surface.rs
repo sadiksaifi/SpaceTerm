@@ -750,12 +750,11 @@ impl SurfaceControlThemes {
         mut self,
         shadow: ControlShadow,
         border: Option<Rgba>,
-        bottom_edge: Rgba,
     ) -> Self {
-        self.button = self.button.secondary_elevation(shadow, border, bottom_edge);
+        self.button = self.button.secondary_elevation(shadow, border);
         self.combo_box = self
             .combo_box
-            .map(|theme| theme.ordinary_elevation(shadow, border, bottom_edge));
+            .map(|theme| theme.ordinary_elevation(shadow, border));
         self
     }
 
@@ -764,23 +763,15 @@ impl SurfaceControlThemes {
         mut self,
         track_shadow: ControlShadow,
         track_border: Option<Rgba>,
-        bottom_edge: Rgba,
         thumb_shadow: ControlShadow,
         thumb_border: Option<Rgba>,
     ) -> Self {
-        self.toggle = self.toggle.elevation(
-            track_shadow,
-            track_border,
-            bottom_edge,
-            thumb_shadow,
-            thumb_border,
-        );
-        self.segmented_control = self.segmented_control.track_elevation(
-            track_shadow,
-            track_border,
-            bottom_edge,
-            track_border,
-        );
+        self.toggle = self
+            .toggle
+            .elevation(track_shadow, track_border, thumb_shadow, thumb_border);
+        self.segmented_control =
+            self.segmented_control
+                .track_elevation(track_shadow, track_border, track_border);
         self
     }
 

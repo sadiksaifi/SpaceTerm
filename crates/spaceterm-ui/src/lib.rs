@@ -262,12 +262,9 @@ impl ControlThemeCatalog {
         mut self,
         shadow: ControlShadow,
         border: Option<gpui::Rgba>,
-        bottom_edge: gpui::Rgba,
     ) -> Self {
-        self.button = self.button.secondary_elevation(shadow, border, bottom_edge);
-        self.combo_box = self
-            .combo_box
-            .ordinary_elevation(shadow, border, bottom_edge);
+        self.button = self.button.secondary_elevation(shadow, border);
+        self.combo_box = self.combo_box.ordinary_elevation(shadow, border);
         for host in [
             &mut self.title_bar_controls,
             &mut self.panel_controls,
@@ -277,9 +274,7 @@ impl ControlThemeCatalog {
         .into_iter()
         .flatten()
         {
-            *host = host
-                .clone()
-                .ordinary_control_elevation(shadow, border, bottom_edge);
+            *host = host.clone().ordinary_control_elevation(shadow, border);
         }
         self
     }
@@ -289,23 +284,15 @@ impl ControlThemeCatalog {
         mut self,
         track_shadow: ControlShadow,
         track_border: Option<gpui::Rgba>,
-        bottom_edge: gpui::Rgba,
         thumb_shadow: ControlShadow,
         thumb_border: Option<gpui::Rgba>,
     ) -> Self {
-        self.toggle = self.toggle.elevation(
-            track_shadow,
-            track_border,
-            bottom_edge,
-            thumb_shadow,
-            thumb_border,
-        );
-        self.segmented_control = self.segmented_control.track_elevation(
-            track_shadow,
-            track_border,
-            bottom_edge,
-            track_border,
-        );
+        self.toggle = self
+            .toggle
+            .elevation(track_shadow, track_border, thumb_shadow, thumb_border);
+        self.segmented_control =
+            self.segmented_control
+                .track_elevation(track_shadow, track_border, track_border);
         for host in [
             &mut self.title_bar_controls,
             &mut self.panel_controls,
@@ -318,7 +305,6 @@ impl ControlThemeCatalog {
             *host = host.clone().toggle_segmented_elevation(
                 track_shadow,
                 track_border,
-                bottom_edge,
                 thumb_shadow,
                 thumb_border,
             );

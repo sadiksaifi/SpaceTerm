@@ -29,17 +29,10 @@ fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
     ));
     let track_border = rgba(0x00000026);
     let selected_border = rgba(0x00000026);
-    let bottom_edge = rgba(0x0000002e);
-    let theme = test_theme().track_elevation(
-        shadow,
-        Some(track_border),
-        bottom_edge,
-        Some(selected_border),
-    );
+    let theme = test_theme().track_elevation(shadow, Some(track_border), Some(selected_border));
     let style = theme.resolve(SegmentedSize::Regular);
 
     assert_eq!(style.track_shadow, shadow);
-    assert_eq!(style.track_bottom_edge, bottom_edge);
     assert_eq!(style.track_border, track_border);
     assert_eq!(style.selected_shadow, ControlShadow::none());
     for paints in [

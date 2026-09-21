@@ -176,15 +176,9 @@ pub(super) fn catalog(
     let light = appearance.appearance == Appearance::Light;
     let border =
         (light && !preserve_accessibility_border).then_some(gpui_color(Color::rgba(0x00000026)));
-    let bottom_edge = if light {
-        gpui_color(Color::rgba(0x0000002e))
-    } else {
-        gpui_color(Color::rgba(0x00000000))
-    };
     let catalog = catalog.toggle_segmented_elevation(
         if light { shadow } else { ControlShadow::none() },
         border,
-        bottom_edge,
         shadow,
         light.then_some(gpui_color(Color::rgba(0x0000001f))),
     );
@@ -193,7 +187,7 @@ pub(super) fn catalog(
         return catalog;
     }
 
-    catalog.ordinary_control_elevation(shadow, border, bottom_edge)
+    catalog.ordinary_control_elevation(shadow, border)
 }
 
 fn prepared_control_typography(typography: &ChromeTypography) -> spaceterm_ui::ControlTypography {
@@ -712,6 +706,203 @@ mod tests {
         ChromeColors, ChromeDensity, Color, FontStyle, ResolvedChromeTypography,
         ResolvedFontDescriptor,
     };
+
+    struct ControlEdgeFixture(spaceterm_ui::ControlHost);
+
+    impl gpui::Render for ControlEdgeFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{IntoElement as _, ParentElement as _, Styled as _, div};
+            use spaceterm_ui::{
+                Button, ButtonVariant, Checkbox, CheckboxState, ComboBox, ComboBoxItem, Icon,
+                IconButton, IconName, Menu, MenuEntry, Picker, PickerOption, SegmentedControl,
+                SegmentedOption, Switch,
+            };
+
+            self.0.mount(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .p(px(20.0))
+                    .gap(px(8.0))
+                    .child(
+                        Button::new("edge-button", "Action")
+                            .variant(ButtonVariant::Secondary)
+                            .debug_selector("edge-button")
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        IconButton::new("edge-icon", "Workspace", |color| {
+                            Icon::new(IconName::Plus, px(14.0), color).into_any_element()
+                        })
+                        .variant(ButtonVariant::Secondary)
+                        .debug_selector("edge-icon")
+                        .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        ComboBox::new(
+                            "edge-combo",
+                            "Scheme",
+                            Some(1),
+                            "Choose",
+                            vec![ComboBoxItem::new(1, "Scheme")],
+                        )
+                        .debug_selector("edge-combo")
+                        .on_accept(|_, _, _| {}),
+                    )
+                    .child(
+                        ComboBox::new(
+                            "edge-icon-combo",
+                            "Workspace",
+                            Some(1),
+                            "Choose",
+                            vec![ComboBoxItem::new(1, "Workspace")],
+                        )
+                        .icon_trigger(|color, size| {
+                            Icon::new(IconName::Plus, size, color).into_any_element()
+                        })
+                        .debug_selector("edge-icon-combo")
+                        .on_accept(|_, _, _| {}),
+                    )
+                    .child(
+                        Menu::new("edge-menu", "Actions", vec![MenuEntry::action("Open", ())])
+                            .debug_selector("edge-menu")
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Picker::new(
+                            "edge-picker",
+                            "Scheme",
+                            1,
+                            vec![PickerOption::new(1, "Scheme")],
+                        )
+                        .unwrap()
+                        .debug_selector("edge-picker")
+                        .on_change(|_, _, _| {}),
+                    )
+                    .child(
+                        SegmentedControl::new(
+                            "edge-segmented",
+                            "Density",
+                            &false,
+                            vec![
+                                SegmentedOption::new(false, "Compact"),
+                                SegmentedOption::new(true, "Comfortable"),
+                            ],
+                        )
+                        .unwrap()
+                        .debug_selector("edge-segmented")
+                        .on_change(|_, _, _| {}),
+                    )
+                    .child(
+                        Checkbox::new("edge-checkbox", "Choice", CheckboxState::Unchecked)
+                            .debug_selector("edge-checkbox")
+                            .on_change(|_, _, _| {}),
+                    )
+                    .child(
+                        Switch::new("edge-switch", "Enabled", false)
+                            .debug_selector("edge-switch")
+                            .on_change(|_, _, _| {}),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn control_surfaces_do_not_paint_detached_bottom_hairlines(cx: &mut gpui::TestAppContext) {
+        use crate::appearance::{
+            AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+            CompositionCapabilities, SchemeCatalog, SystemAppearance,
+        };
+        use crate::ui::appearance::ChromeAppearance;
+        use spaceterm_ui::{ControlHost, ProgressMotion, replace_control_theme_catalog};
+
+        cx.update(crate::ui::init).unwrap();
+        let mut violations = Vec::new();
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for (increase_contrast, show_borders) in [(false, false), (true, false), (false, true)]
+            {
+                let resolved = SchemeCatalog::default()
+                    .resolve(
+                        AppearanceGeneration::INITIAL,
+                        &AppearancePreferences {
+                            mode: match appearance {
+                                Appearance::Light => AppearanceMode::Light,
+                                Appearance::Dark => AppearanceMode::Dark,
+                            },
+                            ..AppearancePreferences::default()
+                        },
+                        SystemAppearance::available(appearance).with_composition(
+                            CompositionCapabilities {
+                                increase_contrast,
+                                show_borders,
+                                ..CompositionCapabilities::new(true, true)
+                            },
+                        ),
+                        &AvailableFonts::default(),
+                    )
+                    .unwrap();
+                for active in [true, false] {
+                    let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
+                    cx.update(|cx| {
+                        replace_control_theme_catalog(
+                            cx,
+                            catalog(&prepared, ProgressMotion::Standard),
+                        )
+                        .unwrap()
+                    });
+                    for host in [
+                        ControlHost::Window,
+                        ControlHost::TitleBar,
+                        ControlHost::Panel,
+                        ControlHost::Card,
+                        ControlHost::Floating,
+                    ] {
+                        let (_, view) = cx.add_window_view(|_, _| ControlEdgeFixture(host));
+                        view.simulate_resize(gpui::size(px(640.0), px(640.0)));
+                        view.run_until_parked();
+                        for selector in [
+                            "edge-button",
+                            "edge-icon",
+                            "edge-combo",
+                            "edge-icon-combo",
+                            "edge-menu",
+                            "edge-picker",
+                            "edge-segmented",
+                            "edge-checkbox-indicator",
+                            "edge-switch-indicator",
+                        ] {
+                            let bounds = view
+                                .debug_bounds(selector)
+                                .unwrap_or_else(|| panic!("missing {selector}"));
+                            view.update(|window, _| {
+                                let bounds = bounds.scale(window.scale_factor());
+                                let hairline = px(1.0).scale(window.scale_factor());
+                                let quads = window.painted_quads_for_test();
+                                if quads.iter().any(|quad| {
+                                    let line = quad.visible_bounds;
+                                    line.size.height == hairline && line.size.width > hairline * 2.0
+                                        && line.left() > bounds.left() && line.right() < bounds.right()
+                                        && line.bottom() <= bounds.bottom()
+                                        && line.top() >= bounds.bottom() - hairline * 3.0
+                                }) {
+                                    violations.push(format!("{appearance:?}/{host:?}/{selector}/active={active}/contrast={increase_contrast}/borders={show_borders}"));
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "detached bottom hairlines: {violations:?}"
+        );
+    }
 
     #[test]
     fn control_catalog_preserves_exact_semantic_font_metadata() {
