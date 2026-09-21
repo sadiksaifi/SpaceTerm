@@ -1254,7 +1254,10 @@ impl TerminalPane {
                 reported.words.to_owned(),
                 reported
                     .glyph
-                    .filter(|_| running.is_none())
+                    .filter(|glyph| {
+                        running.is_none()
+                            || !super::terminal_status::reported_glyph_is_activity_frame(glyph)
+                    })
                     .map(|glyph| SharedString::from(glyph.to_owned())),
             )
         } else if let Some(command) = command {

@@ -90,6 +90,23 @@ pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
     }
 }
 
+/// Whether a reported glyph is one frame from a generic rotating activity family.
+///
+/// This recognizes visual frame families rather than programs. Meaningful program icons stay in
+/// their Session slot while OSC 133 reports a running command; transient activity frames yield to
+/// SpaceTerm's stable native spinner.
+pub(crate) fn reported_glyph_is_activity_frame(glyph: &str) -> bool {
+    glyph.chars().all(|character| {
+        is_glyph_mark(character)
+            || matches!(
+                u32::from(character),
+                0x2800..=0x28FF // Braille spinner frames.
+                    | 0x25D0..=0x25D3 // Circle halves.
+                    | 0x25F0..=0x25F7 // Circle quadrants and arcs.
+            )
+    })
+}
+
 /// Removes whitespace and one standalone delimiter token after a reported glyph.
 ///
 /// Punctuation attached to the next opaque word is content, such as `--help` or `:memory`.
@@ -228,6 +245,8 @@ pub(crate) enum TerminalProgress {
     Normal(u8),
     /// Work in progress whose completion is unknown.
     Indeterminate,
+    /// A running command whose short activity delay elapsed.
+    Running,
     /// Work that reported a failure.
     Error(u8),
     /// Work that reported it is paused.
@@ -243,7 +262,7 @@ impl TerminalProgress {
             return Self::None;
         }
         match metadata.progress {
-            ProgressMetadata::None if metadata.command_activity => Self::Indeterminate,
+            ProgressMetadata::None if metadata.command_activity => Self::Running,
             ProgressMetadata::None => Self::None,
             ProgressMetadata::Normal(percent) => Self::Normal(percent.min(100)),
             ProgressMetadata::Indeterminate => Self::Indeterminate,
@@ -258,6 +277,7 @@ impl TerminalProgress {
             Self::None => None,
             Self::Normal(_) => Some("normal"),
             Self::Indeterminate => Some("indeterminate"),
+            Self::Running => Some("running"),
             Self::Error(_) => Some("error"),
             Self::Paused(_) => Some("paused"),
         }
@@ -404,7 +424,8 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     }
     match progress {
         TerminalProgress::None => (Tint::Inherited, 1.0),
-        TerminalProgress::Normal(_) | TerminalProgress::Indeterminate => (Tint::Busy, 1.0),
+        TerminalProgress::Normal(_) => (Tint::Busy, 1.0),
+        TerminalProgress::Indeterminate | TerminalProgress::Running => (Tint::Inherited, 1.0),
         TerminalProgress::Error(_) => (Tint::Error, 1.0),
         TerminalProgress::Paused(_) => (Tint::Paused, 1.0),
     }
@@ -455,6 +476,12 @@ impl Mark {
                     .debug_selector(selector)
                     .into_any_element()
             }
+            (StatusShape::Spinner, Some(glyph))
+                if progress == TerminalProgress::Running
+                    && !reported_glyph_is_activity_frame(&glyph) =>
+            {
+                reported_glyph(&glyph, size)
+            }
             (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
                 .debug_selector(selector)
@@ -494,7 +521,7 @@ fn status_shape(progress: TerminalProgress) -> StatusShape {
             DeterminateProgress::new(progress_sweep(percent))
                 .expect("a reported percentage is a finite share of the ring"),
         ),
-        TerminalProgress::Indeterminate => StatusShape::Spinner,
+        TerminalProgress::Indeterminate | TerminalProgress::Running => StatusShape::Spinner,
         TerminalProgress::Error(_) => StatusShape::Error,
         TerminalProgress::Paused(_) => StatusShape::Paused,
     }
@@ -746,7 +773,8 @@ mod tests {
         for (progress, resting) in [
             (TerminalProgress::None, (Tint::Inherited, 1.0)),
             (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
-            (TerminalProgress::Indeterminate, (Tint::Busy, 1.0)),
+            (TerminalProgress::Indeterminate, (Tint::Inherited, 1.0)),
+            (TerminalProgress::Running, (Tint::Inherited, 1.0)),
             (TerminalProgress::Error(30), (Tint::Error, 1.0)),
             (TerminalProgress::Paused(70), (Tint::Paused, 1.0)),
         ] {
@@ -800,6 +828,31 @@ mod tests {
         assert_eq!(
             status_shape(TerminalProgress::Indeterminate),
             StatusShape::Spinner
+        );
+    }
+
+    #[test]
+    fn running_activity_replaces_only_generic_spinner_frames() {
+        for glyph in ["⢹", "⠋", "◐", "◴"] {
+            assert!(reported_glyph_is_activity_frame(glyph), "{glyph}");
+        }
+        for glyph in ["✳", "🚀", "π", "◉"] {
+            assert!(!reported_glyph_is_activity_frame(glyph), "{glyph}");
+        }
+    }
+
+    #[test]
+    fn command_activity_is_distinct_from_explicit_indeterminate_progress() {
+        let mut running = metadata(ProgressMetadata::None, MetadataFreshness::Live);
+        running.command_activity = true;
+        assert_eq!(
+            TerminalProgress::from_metadata(&running, true),
+            TerminalProgress::Running
+        );
+        running.progress = ProgressMetadata::Indeterminate;
+        assert_eq!(
+            TerminalProgress::from_metadata(&running, true),
+            TerminalProgress::Indeterminate
         );
     }
 

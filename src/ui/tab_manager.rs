@@ -4063,15 +4063,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn local_running_command_should_delay_status_and_suppress_reported_glyph(
-        cx: &mut TestAppContext,
-    ) {
+    fn local_running_command_should_replace_only_reported_activity_glyphs(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         assert_running_command_status(&manager, &records, false, cx);
     }
 
     #[gpui::test]
-    fn remote_running_command_should_delay_status_and_suppress_reported_glyph(
+    fn remote_running_command_should_replace_only_reported_activity_glyphs(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = remote_tab_manager(cx);
@@ -4103,9 +4101,13 @@ mod tests {
         let delayed = manager.read_with(cx, |manager, cx| {
             manager.tabs.active_tab().read(cx).tab_identity()
         });
-        assert_eq!(delayed.glyph, None);
+        assert_eq!(
+            delayed.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
         assert_eq!(delayed.progress, TerminalProgress::None);
 
+        // A meaningful program glyph remains authoritative after the command activity delay.
         report_metadata(records, 1, 2, |metadata| {
             if remote {
                 metadata.context = remote_metadata_context("/srv/app");
@@ -4122,12 +4124,65 @@ mod tests {
         let running = manager.read_with(cx, |manager, cx| {
             manager.tabs.active_tab().read(cx).tab_identity()
         });
-        assert_eq!(running.glyph, None);
-        assert_eq!(running.progress, TerminalProgress::Indeterminate);
+        assert_eq!(
+            running.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(running.progress, TerminalProgress::Running);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
+
+        // A generic animated title frame yields to one stable native spinner in each host.
+        report_metadata(records, 1, 3, |metadata| {
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("◐ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+            metadata.command_activity = true;
+        });
+        cx.run_until_parked();
+        let animated = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(animated.glyph, None);
+        assert_eq!(animated.progress, TerminalProgress::Running);
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
 
-        report_metadata(records, 1, 3, |metadata| {
+        // Explicit OSC progress still outranks a meaningful title glyph.
+        report_metadata(records, 1, 4, |metadata| {
+            use crate::terminal::metadata::ProgressMetadata;
+
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("✳ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+            metadata.command_activity = true;
+            metadata.progress = ProgressMetadata::Indeterminate;
+        });
+        cx.run_until_parked();
+        let explicit = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(
+            explicit.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(explicit.progress, TerminalProgress::Indeterminate);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+
+        report_metadata(records, 1, 5, |metadata| {
             if remote {
                 metadata.context = remote_metadata_context("/srv/app");
             }
