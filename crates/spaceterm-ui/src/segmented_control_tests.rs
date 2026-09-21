@@ -81,6 +81,165 @@ fn test_theme() -> SegmentedControlTheme {
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SizingHost {
+    Block,
+    Row,
+    Column,
+}
+
+struct SizingRoot {
+    host: SizingHost,
+    host_width: Pixels,
+    full_width: bool,
+    size: SegmentedSize,
+    right_to_left: bool,
+}
+
+impl Render for SizingRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .debug_selector(|| "sizing-host".to_owned())
+            .w(self.host_width)
+            .when(matches!(self.host, SizingHost::Row), |host| host.flex())
+            .when(matches!(self.host, SizingHost::Column), |host| {
+                host.flex().flex_col()
+            })
+            .child(
+                SegmentedControl::new(
+                    "sizing-control",
+                    "Selection",
+                    &true,
+                    vec![
+                        SegmentedOption::new(false, "Off").debug_selector("sizing-off"),
+                        SegmentedOption::new(true, "Comfortable").debug_selector("sizing-on"),
+                    ],
+                )
+                .unwrap()
+                .size(self.size)
+                .full_width(self.full_width)
+                .right_to_left(self.right_to_left)
+                .debug_selector("sizing-control")
+                .on_change(|_, _, _| {}),
+            )
+    }
+}
+
+#[gpui::test]
+fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) {
+    for scale in [1.0, 1.25] {
+        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
+            for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+                for right_to_left in [false, true] {
+                    let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+                        host,
+                        host_width: px(320.0),
+                        full_width: false,
+                        size,
+                        right_to_left,
+                    });
+                    cx.run_until_parked();
+                    let track = cx.debug_bounds("sizing-control").unwrap();
+                    let off = cx.debug_bounds("sizing-off").unwrap();
+                    let on = cx.debug_bounds("sizing-on").unwrap();
+                    let left = off.left().min(on.left()) - track.left();
+                    let right = track.right() - off.right().max(on.right());
+                    let inset = if size == SegmentedSize::Regular {
+                        px(2.0)
+                    } else {
+                        px(0.0)
+                    };
+                    assert_eq!(
+                        (left, right),
+                        (inset, inset),
+                        "intrinsic track must not retain parent slack: {host:?}/{size:?}/rtl={right_to_left}/scale={scale}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn full_width_track_distributes_all_available_width_between_options(cx: &mut TestAppContext) {
+    for scale in [1.0, 1.25] {
+        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
+            for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+                for right_to_left in [false, true] {
+                    let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+                        host,
+                        host_width: px(320.0),
+                        full_width: true,
+                        size,
+                        right_to_left,
+                    });
+                    cx.run_until_parked();
+                    let host_bounds = cx.debug_bounds("sizing-host").unwrap();
+                    let track = cx.debug_bounds("sizing-control").unwrap();
+                    let off = cx.debug_bounds("sizing-off").unwrap();
+                    let on = cx.debug_bounds("sizing-on").unwrap();
+                    let left = off.left().min(on.left()) - track.left();
+                    let right = track.right() - off.right().max(on.right());
+                    let inset = if size == SegmentedSize::Regular {
+                        px(2.0)
+                    } else {
+                        px(0.0)
+                    };
+                    assert_eq!(track.size.width, host_bounds.size.width);
+                    let device_pixel = cx.update(|window, _| px(1.0 / window.scale_factor()));
+                    assert!(
+                        (off.size.width - on.size.width).abs() <= device_pixel,
+                        "equal segments may differ only by device-pixel rounding: {off:?}, {on:?}"
+                    );
+                    assert_eq!(
+                        (left, right),
+                        (inset, inset),
+                        "full-width track must have symmetric insets: {host:?}/{size:?}/rtl={right_to_left}/scale={scale}"
+                    );
+                    cx.update(|window, _| {
+                        window.activate_window();
+                        window.focus_next();
+                    });
+                    cx.run_until_parked();
+                    assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
+                    let ring = cx.debug_bounds("sizing-control-keyboard-focus").unwrap();
+                    assert_eq!(track.left() - ring.left(), ring.right() - track.right());
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn narrow_full_width_track_contains_equal_options_and_their_labels(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+        let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+            host: SizingHost::Block,
+            host_width: px(40.0),
+            full_width: true,
+            size,
+            right_to_left: false,
+        });
+        cx.run_until_parked();
+        let track = cx.debug_bounds("sizing-control").unwrap();
+        let off = cx.debug_bounds("sizing-off").unwrap();
+        let on = cx.debug_bounds("sizing-on").unwrap();
+        let label = cx.debug_bounds("sizing-on-label").unwrap();
+        assert_eq!(off.size.width, on.size.width);
+        assert!(
+            track.right() >= on.right(),
+            "track {track:?} must contain both options, including {on:?}"
+        );
+        assert!(
+            on.left() <= label.left() && label.right() <= on.right(),
+            "option {on:?} must contain label {label:?}"
+        );
+    }
+}
+
 struct TestRoot {
     current: Mode,
     size: SegmentedSize,

@@ -601,6 +601,7 @@ impl Gallery {
                             ],
                         )
                         .unwrap()
+                        .full_width(true)
                         .disabled(index == 3)
                         .preview_state(*state)
                         .on_change(|_, _, _| {}),

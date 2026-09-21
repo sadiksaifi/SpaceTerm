@@ -585,6 +585,9 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
     }
 
     /// Distributes the options evenly across the available width.
+    /// Otherwise, the track fits its options even inside a stretching parent.
+    /// A full-width track retains enough width for every label and the themed option minimum,
+    /// overflowing a smaller host rather than letting its options escape the track.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
         self
@@ -625,6 +628,36 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .unwrap_or_else(default_theme)
             .resolve(self.size);
         let metrics = style.metrics;
+        let label_font = crate::control_typography(cx).regular().clone();
+        let minimum_option_width = if self.full_width {
+            // Every segment must fit the widest label before sharing the available width equally.
+            self.options
+                .iter()
+                .fold(metrics.minimum_option_width, |width, option| {
+                    let label_width = window
+                        .text_system()
+                        .shape_line(
+                            option.label.clone(),
+                            metrics.font_size,
+                            &[gpui::TextRun {
+                                len: option.label.len(),
+                                font: label_font.clone(),
+                                color: rgba(0).into(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            None,
+                        )
+                        .width;
+                    width.max(
+                        label_width.ceil()
+                            + (metrics.horizontal_padding + metrics.border_width) * 2.0,
+                    )
+                })
+        } else {
+            metrics.minimum_option_width
+        };
         let enabled = !self.disabled && self.on_change.is_some();
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             SegmentedControlState::new(window, cx)
@@ -710,7 +743,6 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 #[cfg(feature = "appearance-exerciser")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
                 // Selection changes the chip, never the label's glyphs or advance widths.
-                let label_font = crate::control_typography(cx).regular().clone();
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
                     paint,
                     font: label_font.clone(),
@@ -738,7 +770,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .items_center()
                     .justify_center()
                     .gap(metrics.preview_gap)
-                    .min_w(metrics.minimum_option_width)
+                    .min_w(minimum_option_width)
                     .min_h(metrics.option_height)
                     .px(metrics.horizontal_padding)
                     .py(metrics.vertical_padding)
@@ -750,7 +782,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .text_color(paint.label)
                     .text_size(metrics.font_size)
                     .line_height(gpui::relative(metrics.line_height))
-                    .font(label_font)
+                    .font(label_font.clone())
                     .cursor_default()
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
@@ -824,7 +856,19 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .flex_row()
             .flex_shrink_0()
             .gap(metrics.option_gap)
-            .when(self.full_width, |track| track.w_full())
+            .when(self.full_width, |track| {
+                let option_count = self.options.len() as f32;
+                let inset = if card {
+                    px(0.0)
+                } else {
+                    metrics.border_width * 4.0
+                };
+                track.w_full().min_w(
+                    minimum_option_width * option_count
+                        + metrics.option_gap * (option_count - 1.0)
+                        + inset,
+                )
+            })
             .when(right_to_left, |track| track.flex_row_reverse())
             .when(!card, |track| {
                 track
@@ -904,13 +948,20 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 ))
             });
 
-        if let Some(tooltip) = self.tooltip {
+        let control = if let Some(tooltip) = self.tooltip {
             tooltip
                 .attach(track, TooltipTargetVisibility::Visible)
                 .disabled(!enabled)
                 .into_any_element()
         } else {
             track.into_any_element()
+        };
+        if self.full_width {
+            control
+        } else {
+            // A row wrapper keeps the painted track intrinsic in block and column parents.
+            // Focus, hit testing, and tooltip bounds stay on the track rather than the wrapper.
+            div().flex().child(control).into_any_element()
         }
     }
 }
