@@ -1,7 +1,8 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, ColorProvenance, CompositionCapabilities, ResolvedAppearance,
-    SchemeCatalog, SystemAppearance, WindowBackgroundAppearance,
+    ChromeColorOverrides, ChromeDensity, ChromeScheme, Color, ColorProvenance,
+    CompositionCapabilities, CustomScheme, ResolvedAppearance, SchemeCatalog, SchemeId,
+    SchemeMetadata, SystemAppearance, WindowBackgroundAppearance,
 };
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
 use spaceterm_ui::{FloatingRole, FloatingShell};
@@ -1316,6 +1317,82 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                 assert_eq!(resolved.chrome.colors, authored);
             }
         }
+    }
+}
+
+#[test]
+fn ordinary_contrast_sparse_custom_rows_and_tabs_read_on_their_material_hosts() {
+    let scheme_id = SchemeId::new("test.opposing-app-owned-hosts").unwrap();
+    let custom = CustomScheme::Chrome(Box::new(ChromeScheme {
+        window_background: None,
+        id: scheme_id.clone(),
+        name: "Opposing App-owned Hosts".to_owned(),
+        appearance: Appearance::Light,
+        metadata: SchemeMetadata::default(),
+        colors: ChromeColorOverrides {
+            background: Some(Color::rgb(0xffffff)),
+            panel_background: Some(Color::rgb(0x101010)),
+            title_bar_background: Some(Color::rgb(0x101010)),
+            title_bar_inactive_background: Some(Color::rgb(0x101010)),
+            ..ChromeColorOverrides::default()
+        },
+    }));
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..AppearancePreferences::default()
+    };
+    preferences.chrome.schemes.light = scheme_id;
+    preferences.background.transparency = 1.0;
+    let resolved = SchemeCatalog::from_custom_schemes(&[custom])
+        .unwrap()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::available(Appearance::Light)
+                .with_composition(CompositionCapabilities::new(true, true)),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    let prepared = ChromeAppearance::prepare(&resolved.chrome);
+
+    let panel = &prepared.panel_controls.reference;
+    let panel_host = prepared.control_host_background(spaceterm_ui::ControlHost::Panel);
+    let row = prepared
+        .materials
+        .paint(
+            crate::appearance::SurfaceRole::Surface,
+            panel.panel_background,
+            panel.row_background,
+        )
+        .source_over(panel_host);
+    assert!(
+        panel.row_foreground.source_over(row).contrast_ratio(row) >= 4.5,
+        "ordinary row content must read on its final Panel material host: content={:?}, host={row:?}",
+        panel.row_foreground
+    );
+
+    let title_bar = prepared.colors.title_bar_background;
+    let title_bar_host = prepared.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+    for (name, fill, foreground) in [
+        (
+            "inactive",
+            prepared.colors.tab_inactive_background,
+            prepared.colors.tab_inactive_foreground,
+        ),
+        (
+            "active",
+            prepared.colors.tab_active_background,
+            prepared.colors.tab_active_foreground,
+        ),
+    ] {
+        let tab = prepared
+            .materials
+            .paint(crate::appearance::SurfaceRole::Surface, title_bar, fill)
+            .source_over(title_bar_host);
+        assert!(
+            foreground.source_over(tab).contrast_ratio(tab) >= 4.5,
+            "ordinary {name} Tab content must read on its final title-bar material host: content={foreground:?}, host={tab:?}"
+        );
     }
 }
 

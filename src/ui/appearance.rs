@@ -3113,6 +3113,7 @@ fn prepare_app_owned_rows(
     materials: SurfaceMaterials,
     semantic_host: Color,
     final_host: Color,
+    floors: FloatingContrastFloors,
 ) {
     macro_rules! row {
         ($fill:ident, [$primary:ident, $secondary:ident, $icon:ident, $matched:ident], $selection:expr) => {{
@@ -3122,10 +3123,10 @@ fn prepare_app_owned_rows(
                 final_host,
                 colors.$fill,
                 [
-                    (colors.$primary, 7.0),
-                    (colors.$secondary, 4.5),
-                    (colors.$icon, 4.5),
-                    (colors.$matched, 7.0),
+                    (colors.$primary, floors.primary),
+                    (colors.$secondary, floors.secondary),
+                    (colors.$icon, floors.mark),
+                    (colors.$matched, floors.primary),
                 ],
                 $selection,
             );
@@ -3178,9 +3179,9 @@ fn prepare_app_owned_rows(
         final_host,
         colors.navigation_selected_background,
         [
-            (colors.navigation_selected_foreground, 7.0),
-            (colors.navigation_selected_secondary, 4.5),
-            (colors.navigation_selected_icon, 4.5),
+            (colors.navigation_selected_foreground, floors.primary),
+            (colors.navigation_selected_secondary, floors.secondary),
+            (colors.navigation_selected_icon, floors.mark),
         ],
         Some(1.4),
     );
@@ -3195,7 +3196,7 @@ fn prepare_app_owned_rows(
         final_host,
         [colors.row_selected_background],
         colors.row_selected_border,
-        3.0,
+        floors.boundary,
     );
     colors.row_selected_hover_border = prepare_app_state_boundary(
         materials,
@@ -3203,7 +3204,7 @@ fn prepare_app_owned_rows(
         final_host,
         [colors.row_selected_hover_background],
         colors.row_selected_hover_border,
-        3.0,
+        floors.boundary,
     );
 }
 
@@ -3212,6 +3213,7 @@ fn prepare_app_owned_tabs(
     materials: SurfaceMaterials,
     semantic_host: Color,
     final_host: Color,
+    floors: FloatingContrastFloors,
 ) {
     macro_rules! tab {
         ($fill:ident, [$foreground:ident, $icon:ident], $selection:expr) => {{
@@ -3220,7 +3222,10 @@ fn prepare_app_owned_tabs(
                 semantic_host,
                 final_host,
                 colors.$fill,
-                [(colors.$foreground, 7.0), (colors.$icon, 4.5)],
+                [
+                    (colors.$foreground, floors.primary),
+                    (colors.$icon, floors.mark),
+                ],
                 $selection,
             );
             colors.$fill = state.fill;
@@ -3263,7 +3268,7 @@ fn prepare_app_owned_tabs(
             colors.tab_active_hover_background,
         ],
         colors.tab_active_border,
-        3.0,
+        floors.boundary,
     );
     colors.tab_inactive_selected_border = prepare_app_state_boundary(
         materials,
@@ -3271,7 +3276,7 @@ fn prepare_app_owned_tabs(
         final_host,
         [colors.tab_inactive_selected_background],
         colors.tab_inactive_selected_border,
-        3.0,
+        floors.boundary,
     );
 }
 
@@ -3312,7 +3317,7 @@ fn prepare_state_control_host(
     } else {
         state.colors(&reference, host)
     };
-    if state.capabilities.increase_contrast {
+    if state.capabilities.increase_contrast || !built_in_light {
         let semantic_host = match host_role {
             spaceterm_ui::ControlHost::Panel => reference.panel_background,
             spaceterm_ui::ControlHost::Card => reference.elevated_surface_background,
@@ -3320,7 +3325,13 @@ fn prepare_state_control_host(
             | spaceterm_ui::ControlHost::TitleBar
             | spaceterm_ui::ControlHost::Floating => host,
         };
-        prepare_app_owned_rows(&mut reference, materials, semantic_host, final_host);
+        prepare_app_owned_rows(
+            &mut reference,
+            materials,
+            semantic_host,
+            final_host,
+            FloatingContrastFloors::for_increase_contrast(state.capabilities.increase_contrast),
+        );
     }
     let colors = resolve_material_control_colors(
         &reference,
@@ -4193,33 +4204,37 @@ impl ChromeAppearance {
         } else {
             state.colors(&opaque, opaque.background)
         };
-        if capabilities.increase_contrast {
-            let sheet = resolved
-                .composition
-                .materials
-                .paint(SurfaceRole::Sheet, colors.background, colors.background)
-                .source_over(colors.background);
-            let title_bar = if active {
-                colors.title_bar_background
-            } else {
-                colors.title_bar_inactive_background
-            };
-            let final_title_bar = resolved
-                .composition
-                .materials
-                .paint(SurfaceRole::Base, colors.background, title_bar)
-                .source_over(sheet);
+        let sheet = resolved
+            .composition
+            .materials
+            .paint(SurfaceRole::Sheet, colors.background, colors.background)
+            .source_over(colors.background);
+        let title_bar = if active {
+            colors.title_bar_background
+        } else {
+            colors.title_bar_inactive_background
+        };
+        let final_title_bar = resolved
+            .composition
+            .materials
+            .paint(SurfaceRole::Base, colors.background, title_bar)
+            .source_over(sheet);
+        if capabilities.increase_contrast || !built_in_light {
+            let app_owned_floors =
+                FloatingContrastFloors::for_increase_contrast(capabilities.increase_contrast);
             prepare_app_owned_rows(
                 &mut colors,
                 resolved.composition.materials,
                 title_bar,
                 final_title_bar,
+                app_owned_floors,
             );
             prepare_app_owned_tabs(
                 &mut colors,
                 resolved.composition.materials,
                 title_bar,
                 final_title_bar,
+                app_owned_floors,
             );
         }
         let floating_reference = if built_in_light {
