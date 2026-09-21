@@ -196,6 +196,53 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
 }
 
 #[test]
+fn dark_search_fields_separate_from_their_host_without_competing_with_selection() {
+    for transparency in [0.0, 0.35] {
+        let (resolved, _) = resolve_case(
+            Appearance::Dark,
+            ChromeDensity::Compact,
+            transparency,
+            true,
+            true,
+        );
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let (settings, _) =
+            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+        let host = settings
+            .chrome
+            .control_host_background(spaceterm_ui::ControlHost::Panel);
+        let colors = &settings.chrome.panel_controls.colors;
+        let field = colors.input_background.source_over(host);
+        assert!(
+            field.r > host.r && field.contrast_ratio(host) >= 1.12,
+            "Dark search fill must remain distinct at {transparency}: {field:?} on {host:?}"
+        );
+        assert!(colors.input_text.source_over(field).contrast_ratio(field) >= 4.5);
+        assert!(
+            colors
+                .input_placeholder
+                .source_over(field)
+                .contrast_ratio(field)
+                >= 3.0
+        );
+        let selection = settings
+            .chrome
+            .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
+        let selected = settings
+            .chrome
+            .selection_surface(
+                settings.chrome.colors.panel_background,
+                selection.row_selected_background,
+            )
+            .source_over(host);
+        assert!(
+            selected.r > field.r,
+            "a search field must not resemble the current section"
+        );
+    }
+}
+
+#[test]
 fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
     use super::appearance::settings::SettingsSurfaceRole::{Canvas, Sidebar};
 

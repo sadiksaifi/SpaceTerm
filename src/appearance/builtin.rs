@@ -153,7 +153,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell: 0x171717,
             shell_inactive: 0x161616,
             raised: 0x202020,
-            field: 0x1c1c1c,
+            field: 0x262626,
             control_fill: Some(0x272727),
             segmented_track: None,
             control_hover: 0x2f2f2f,
