@@ -1,5 +1,6 @@
 //! Prepared chrome presentation shared by app-owned composites and reusable controls.
 
+mod built_in_dark;
 pub(crate) mod built_in_light;
 mod collection_selection;
 mod disabled_union;
@@ -129,6 +130,8 @@ pub(crate) struct ChromeAppearance {
     pub(crate) settings_hosts: Option<settings::SettingsHostBackgrounds>,
     /// The built-in Light definition owns a boundary and surface policy of its own.
     pub(crate) built_in_light: bool,
+    /// The built-in Dark definition separates internal rules from independent surface edges.
+    pub(crate) built_in_dark: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -321,6 +324,7 @@ impl Default for ChromeAppearance {
             spacing_scale: 1.0,
             settings_hosts: None,
             built_in_light: false,
+            built_in_dark: false,
         }
     }
 }
@@ -3917,14 +3921,14 @@ impl ChromeAppearance {
             self.colors.background,
             text,
             backgrounds,
-            self.capabilities.increase_contrast,
+            self.capabilities.increase_contrast || self.capabilities.show_borders,
             self.surface_band(),
         )
     }
 
     /// Functional rules take the quiet boundary where one definition ranks its own edges.
     fn rule_seed(&self) -> Color {
-        if self.built_in_light {
+        if self.built_in_light || self.built_in_dark {
             self.colors.border_variant
         } else {
             self.colors.border
@@ -3934,6 +3938,8 @@ impl ChromeAppearance {
     fn rule_band(&self) -> separator::SeparatorBand {
         if self.built_in_light {
             built_in_light::RULE_BAND
+        } else if self.built_in_dark {
+            built_in_dark::RULE_BAND
         } else {
             separator::SeparatorBand::FUNCTIONAL
         }
@@ -3942,6 +3948,8 @@ impl ChromeAppearance {
     fn surface_band(&self) -> separator::SeparatorBand {
         if self.built_in_light {
             built_in_light::SURFACE_BAND
+        } else if self.built_in_dark {
+            built_in_dark::SURFACE_BAND
         } else {
             separator::SeparatorBand::FUNCTIONAL
         }
@@ -4027,7 +4035,7 @@ impl ChromeAppearance {
 
     /// Prepares the Pane boundary independently of selected-row rims and short Tab separators.
     pub(crate) fn pane_rim(&self) -> Color {
-        if self.built_in_light {
+        if self.built_in_light || self.built_in_dark {
             return self.surface_edge(spaceterm_ui::ControlHost::Window);
         }
         self.materials
@@ -4036,7 +4044,7 @@ impl ChromeAppearance {
 
     /// Resolves the Pane rim against the Terminal surface it is actually painted over.
     pub(crate) fn pane_rim_on(&self, terminal_background: Color) -> Color {
-        if !self.built_in_light {
+        if !self.built_in_light && !self.built_in_dark {
             return self.pane_rim();
         }
         let pane = self
@@ -4064,9 +4072,9 @@ impl ChromeAppearance {
                 wash.source_over(tone.source_over(Color::rgb(0))),
                 wash.source_over(tone.source_over(Color::rgb(0xffffff))),
             ];
-            let edge = if self.capabilities.increase_contrast {
+            let edge = if self.capabilities.increase_contrast || self.capabilities.show_borders {
                 readable_on_material(self.colors.border, tone, wash, 3.0)
-            } else if self.built_in_light {
+            } else if self.built_in_light || self.built_in_dark {
                 self.surface_edge_on(endpoints, self.floating_colors.text)
             } else {
                 self.colors.shadow.with_alpha(115)
@@ -4145,6 +4153,7 @@ impl ChromeAppearance {
     fn prepare_variant(resolved: &ResolvedChromeAppearance, active: bool) -> Self {
         let capabilities = resolved.composition.capabilities;
         let built_in_light = built_in_light::applies(resolved);
+        let built_in_dark = resolved.effective_scheme == crate::appearance::builtin_dark_chrome();
         let explicit_segmented_track = matches!(
             resolved.provenance.get("segmented_track_background"),
             Some(ColorProvenance::Authored | ColorProvenance::Overridden)
@@ -4455,6 +4464,7 @@ impl ChromeAppearance {
             spacing_scale: Self::density_spacing_scale(resolved.density),
             settings_hosts: None,
             built_in_light,
+            built_in_dark,
         }
     }
 

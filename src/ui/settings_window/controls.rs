@@ -91,6 +91,15 @@ fn stepper_readout_min_width(appearance: &ChromeAppearance) -> gpui::Pixels {
     })
 }
 
+fn stepper_separator(appearance: &ChromeAppearance, enabled: bool) -> Color {
+    let colors = &appearance.card_controls.colors;
+    if enabled {
+        colors.input_border
+    } else {
+        colors.input_disabled_border
+    }
+}
+
 /// The widest a run of explanatory prose is allowed to set.
 ///
 /// A sentence spanning the whole pane is a long line to track back from, and the window is free to
@@ -597,7 +606,7 @@ impl Stepper {
 
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let text_style = appearance.typography.style(TextRole::Body).tabular();
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+        let colors = &appearance.card_controls.colors;
         StepperElement {
             readout_min_width: stepper_readout_min_width(appearance),
             control_height: appearance.typography.style(TextRole::Body).line_height
@@ -605,7 +614,7 @@ impl Stepper {
             gap: appearance.spacing(8.0),
             text_style,
             icon_size: appearance.icons.metrics(IconRole::Control).glyph_size,
-            separator: gpui_color(colors.border),
+            separator: gpui_color(stepper_separator(appearance, self.enabled)),
             foreground: gpui_color(if self.enabled {
                 colors.input_text
             } else {
@@ -834,6 +843,22 @@ mod tests {
         assert_eq!(
             style.hovered().foreground(),
             super::gpui_color(colors.ghost_element_hover_foreground)
+        );
+    }
+
+    #[test]
+    fn stepper_divider_uses_materialized_card_field_state() {
+        let mut appearance = ChromeAppearance::default();
+        appearance.card_controls.reference.input_border = Color::rgb(0xabcdef);
+        appearance.card_controls.colors.input_border = Color::rgba(0xffffff18);
+        appearance.card_controls.colors.input_disabled_border = Color::rgba(0xffffff08);
+        assert_eq!(
+            super::stepper_separator(&appearance, true),
+            Color::rgba(0xffffff18)
+        );
+        assert_eq!(
+            super::stepper_separator(&appearance, false),
+            Color::rgba(0xffffff08)
         );
     }
 

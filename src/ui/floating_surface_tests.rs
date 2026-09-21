@@ -368,7 +368,7 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
                             let (floor, ceiling) = match (appearance, increase_contrast) {
                                 (_, true) => (3.0, None),
                                 (Appearance::Light, false) => (1.12, Some(1.22)),
-                                (Appearance::Dark, false) => (1.35, Some(1.9)),
+                                (Appearance::Dark, false) => (1.15, Some(1.35)),
                             };
                             assert!(
                                 contrast >= floor,
@@ -383,6 +383,34 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn show_borders_reinforces_dark_floating_surface_edges() {
+    for transparency in [0.0, 0.35, 1.0] {
+        let (mut resolved, _) = resolve_case(
+            Appearance::Dark,
+            ChromeDensity::Compact,
+            transparency,
+            true,
+            true,
+        );
+        std::sync::Arc::make_mut(&mut resolved.chrome)
+            .composition
+            .capabilities
+            .show_borders = true;
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        for prepared in [active, inactive] {
+            for role in FLOATING_ROLES {
+                let shell = prepared.floating_surfaces().shell(role);
+                let edge = Color::rgba(u32::from(shell.edge()));
+                for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                    let host = shell_endpoint_background(shell, underlay);
+                    assert!(edge.source_over(host).contrast_ratio(host) >= 3.0);
                 }
             }
         }
@@ -454,7 +482,7 @@ fn settings_separators_remain_visible_on_their_final_hosts() {
                         let (floor, ceiling) = match (appearance, increase_contrast) {
                             (_, true) => (3.0, None),
                             (Appearance::Light, false) => (1.12, Some(1.22)),
-                            (Appearance::Dark, false) => (1.35, Some(1.9)),
+                            (Appearance::Dark, false) => (1.15, Some(1.35)),
                         };
                         assert!(
                             contrast >= floor,
@@ -2335,20 +2363,25 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
             );
 
             let opaque_shell = opaque.floating_surfaces().shell(role);
-            let expected_edge = match appearance {
-                Appearance::Light => gpui::rgba(0x0000001a),
-                Appearance::Dark => gpui::rgba(opaque.colors.shadow.with_alpha(115).rgba_hex()),
+            let edge_band = match appearance {
+                Appearance::Light => 1.20..=1.30,
+                Appearance::Dark => 1.25..=1.50,
             };
-            assert_eq!(
-                opaque_shell.edge(),
-                expected_edge,
-                "{appearance:?} {role:?} floating boundary uses its surface-edge policy"
-            );
+            for shell in [opaque_shell, translucent_shell] {
+                for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                    let host = shell_endpoint_background(shell, underlay);
+                    let edge = Color::rgba(u32::from(shell.edge()));
+                    assert!(
+                        edge_band.contains(&edge.source_over(host).contrast_ratio(host)),
+                        "{appearance:?} {role:?} floating boundary uses its surface-edge policy"
+                    );
+                }
+            }
             let host = shell_endpoint_background(opaque_shell, Color::rgb(0));
             let divider = Color::rgba(u32::from(opaque_shell.divider()));
             let expected_divider_band = match appearance {
                 Appearance::Light => 1.12..=1.22,
-                Appearance::Dark => 1.35..=1.9,
+                Appearance::Dark => 1.15..=1.35,
             };
             assert!(
                 expected_divider_band.contains(&divider.source_over(host).contrast_ratio(host)),

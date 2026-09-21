@@ -65,27 +65,19 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                     .materials
                     .edge(prepared.colors.background, prepared.colors.border)
             );
-            if mode == AppearanceMode::Dark {
-                assert_eq!(
-                    prepared.pane_rim(),
-                    prepared.materials.edge(
-                        prepared.colors.panel_background,
-                        prepared.colors.tab_separator,
-                    )
-                );
+            let rim_band = if mode == AppearanceMode::Dark {
+                1.25..=1.50
             } else {
-                let host = prepared.control_host_background(spaceterm_ui::ControlHost::Window);
-                let edge = prepared.pane_rim().source_over(host);
-                assert!((1.20..=1.30).contains(&edge.contrast_ratio(host)));
-            }
+                1.20..=1.30
+            };
+            let host = prepared.control_host_background(spaceterm_ui::ControlHost::Window);
+            let edge = prepared.pane_rim().source_over(host);
+            assert!(rim_band.contains(&edge.contrast_ratio(host)));
             if transparency == 0.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
                 assert_eq!(controls.border, prepared.colors.border);
-                if mode == AppearanceMode::Dark {
-                    assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
-                }
                 assert_eq!(
                     resolved.chrome.composition.effective,
                     WindowBackgroundAppearance::Opaque

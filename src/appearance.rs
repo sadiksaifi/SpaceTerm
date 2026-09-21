@@ -223,6 +223,8 @@ pub(crate) use scheme::{
     SchemeSummary, TerminalColors,
 };
 
+/// The definition whose presentation policy ships as SpaceTerm's Dark identity.
+pub(crate) use builtin::dark_chrome_id as builtin_dark_chrome;
 /// The definition whose presentation policy ships as SpaceTerm's Light identity.
 pub(crate) use builtin::light_chrome_id as builtin_light_chrome;
 

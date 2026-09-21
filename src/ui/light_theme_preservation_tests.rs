@@ -52,25 +52,42 @@ fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
 fn custom_light_keeps_authored_edges_and_surfaces_through_preparation(
     cx: &mut gpui::TestAppContext,
 ) {
+    custom_edges_and_surfaces_are_preserved(cx, Appearance::Light);
+}
+
+#[gpui::test]
+fn custom_dark_keeps_authored_edges_and_surfaces_through_preparation(
+    cx: &mut gpui::TestAppContext,
+) {
+    custom_edges_and_surfaces_are_preserved(cx, Appearance::Dark);
+}
+
+fn custom_edges_and_surfaces_are_preserved(cx: &mut gpui::TestAppContext, appearance: Appearance) {
     let root = Color::rgb(0xe7edf4);
     let sidebar = Color::rgb(0xc8d6e5);
     let card = Color::rgb(0xf4ead7);
     let pane_rim = Color::rgb(0x31516f);
     let row_rim = Color::rgb(0x925123);
     let shadow = Color::rgba(0x18344fdb);
-    let scheme_id = SchemeId::new("test.custom-light-preservation").unwrap();
+    let scheme_id = SchemeId::new("test.custom-preservation").unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Light;
+    document.preferences.mode = match appearance {
+        Appearance::Light => AppearanceMode::Light,
+        Appearance::Dark => AppearanceMode::Dark,
+    };
     document.preferences.background.transparency = 0.0;
     document.preferences.background.blur = false;
-    document.preferences.chrome.schemes.light = scheme_id.clone();
+    match appearance {
+        Appearance::Light => document.preferences.chrome.schemes.light = scheme_id.clone(),
+        Appearance::Dark => document.preferences.chrome.schemes.dark = scheme_id.clone(),
+    }
     document
         .custom_schemes
         .push(CustomScheme::Chrome(Box::new(ChromeScheme {
             window_background: None,
             id: scheme_id,
-            name: "Custom Light Preservation".to_owned(),
-            appearance: Appearance::Light,
+            name: "Custom Preservation".to_owned(),
+            appearance,
             metadata: SchemeMetadata::default(),
             colors: ChromeColorOverrides {
                 background: Some(root),
@@ -91,7 +108,7 @@ fn custom_light_keeps_authored_edges_and_surfaces_through_preparation(
         .resolve(
             AppearanceGeneration::INITIAL,
             &document.preferences,
-            SystemAppearance::available(Appearance::Light)
+            SystemAppearance::available(appearance)
                 .with_composition(CompositionCapabilities::new(true, true)),
             &AvailableFonts::default(),
         )
@@ -124,13 +141,18 @@ fn custom_light_keeps_authored_edges_and_surfaces_through_preparation(
         super::control_theme_catalog::catalog(&active, spaceterm_ui::ProgressMotion::Standard);
     cx.update(|cx| spaceterm_ui::init(cx, catalog))
         .expect("custom control catalog should install");
-    assert_eq!(
-        cx.update(|cx| {
-            cx.global::<spaceterm_ui::ButtonTheme>()
-                .paints(spaceterm_ui::ButtonVariant::Secondary)
-                .normal()
-                .border()
-        }),
-        gpui::rgba(0x00000026)
-    );
+    let border = cx.update(|cx| {
+        cx.global::<spaceterm_ui::ButtonTheme>()
+            .paints(spaceterm_ui::ButtonVariant::Secondary)
+            .normal()
+            .border()
+    });
+    if appearance == Appearance::Light {
+        assert_eq!(border, gpui::rgba(0x00000026));
+    } else {
+        assert_eq!(
+            border,
+            gpui::rgba(active.control_colors.element_border.rgba_hex())
+        );
+    }
 }

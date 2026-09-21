@@ -125,18 +125,18 @@ impl SettingsAppearance {
         self.chrome.separator(host)
     }
 
-    /// Accessibility can reinforce the otherwise fill-separated Light sidebar and canvas.
+    /// Accessibility can reinforce the otherwise fill-separated built-in sidebar and canvas.
     pub(crate) fn sidebar_edge(&self) -> Option<Color> {
-        (self.chrome.built_in_light
+        ((self.chrome.built_in_light || self.chrome.built_in_dark)
             && (self.chrome.capabilities.increase_contrast
                 || self.chrome.capabilities.show_borders))
             .then(|| self.chrome.surface_edge(spaceterm_ui::ControlHost::Panel))
     }
 
-    /// Light groups separate by fill; accessibility and Dark/custom schemes retain boundaries.
+    /// Built-in groups separate by fill; accessibility and custom schemes retain boundaries.
     pub(crate) fn card_edge(&self) -> Color {
         let host = self.card.background;
-        if self.chrome.built_in_light {
+        if self.chrome.built_in_light || self.chrome.built_in_dark {
             return if self.chrome.capabilities.increase_contrast
                 || self.chrome.capabilities.show_borders
             {
@@ -431,6 +431,63 @@ mod tests {
             settings_sidebar_rung(root, authored_panel, Appearance::Light),
             authored_panel
         );
+    }
+
+    #[test]
+    fn built_in_dark_groups_use_fill_separation_and_accessible_edges() {
+        for transparency in [0.0, 0.35, 1.0] {
+            for (increase_contrast, show_borders) in [(false, false), (true, false), (false, true)]
+            {
+                let mut preferences = AppearancePreferences {
+                    mode: AppearanceMode::Dark,
+                    ..AppearancePreferences::default()
+                };
+                preferences.background.transparency = transparency;
+                let mut resolved = SchemeCatalog::default()
+                    .resolve(
+                        AppearanceGeneration::INITIAL,
+                        &preferences,
+                        SystemAppearance::available(Appearance::Dark)
+                            .with_composition(CompositionCapabilities::new(true, true)),
+                        &AvailableFonts::default(),
+                    )
+                    .expect("built-in Dark should resolve");
+                let capabilities =
+                    &mut Arc::make_mut(&mut resolved.chrome).composition.capabilities;
+                capabilities.increase_contrast = increase_contrast;
+                capabilities.show_borders = show_borders;
+                let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+                let (active, inactive) = prepare_variants(&resolved.chrome, active, inactive);
+                for settings in [active, inactive] {
+                    let canvas = settings.surface(SettingsSurfaceRole::Canvas).background;
+                    let card = settings.surface(SettingsSurfaceRole::Card).background;
+                    assert!(card.r > canvas.r, "Dark groups must separate through fill");
+                    if increase_contrast || show_borders {
+                        assert!(settings.card_edge().source_over(card).contrast_ratio(card) >= 3.0);
+                        let sidebar = settings.surface(SettingsSurfaceRole::Sidebar).background;
+                        assert!(
+                            settings
+                                .sidebar_edge()
+                                .unwrap()
+                                .source_over(sidebar)
+                                .contrast_ratio(sidebar)
+                                >= 3.0
+                        );
+                    } else {
+                        assert_eq!(
+                            settings.card_edge().a,
+                            0,
+                            "ordinary Dark groups need no outline"
+                        );
+                        assert!(settings.sidebar_edge().is_none());
+                        let rule = settings.separator(SettingsSurfaceRole::Card);
+                        assert!(
+                            (1.15..=1.35).contains(&rule.source_over(card).contrast_ratio(card))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

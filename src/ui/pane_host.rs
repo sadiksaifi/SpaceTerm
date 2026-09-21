@@ -1492,7 +1492,7 @@ impl PaneHost {
         let surface_terminal = terminal.clone();
         let surface_appearance = appearance.clone();
         let radius = frame.pane_radius();
-        let pane_rim = if appearance.built_in_light {
+        let pane_rim = if appearance.built_in_light || appearance.built_in_dark {
             let rim_terminal = terminal.clone();
             let rim_appearance = appearance.clone();
             gpui::canvas(
@@ -1510,7 +1510,7 @@ impl PaneHost {
             .inset_0()
             .into_any_element()
         } else {
-            // Retain the existing declarative paint path byte-for-byte for Dark and custom
+            // Retain the existing declarative paint path for custom
             // definitions, whose Pane rim is independent of the Terminal surface.
             div()
                 .absolute()
@@ -2548,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn dark_pane_rim_on_terminal_surface_keeps_the_existing_rim() {
+    fn dark_pane_rim_uses_the_accepted_terminal_surface_as_its_host() {
         for transparency in [0.0, 0.35, 1.0] {
             let appearance = prepared_appearance(crate::appearance::Appearance::Dark, transparency);
             for terminal in [
@@ -2556,7 +2556,10 @@ mod tests {
                 Color::rgb(0xfafafa),
                 Color::rgb(0x38658a),
             ] {
-                assert_eq!(appearance.pane_rim_on(terminal), appearance.pane_rim());
+                let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
+                let host = appearance.pane_surface(terminal).source_over(window);
+                let edge = appearance.pane_rim_on(terminal).source_over(host);
+                assert!((1.25..=1.50).contains(&edge.contrast_ratio(host)));
             }
         }
     }
