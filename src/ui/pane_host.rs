@@ -270,22 +270,6 @@ fn measure_caption_segment(
     appearance.typography.measure(TextRole::Body, text, window)
 }
 
-fn pane_caption_foreground(
-    appearance: &super::appearance::ChromeAppearance,
-    background: crate::appearance::Color,
-    focused: bool,
-) -> crate::appearance::Color {
-    super::appearance::readable_on_background(
-        if focused {
-            appearance.colors.text
-        } else {
-            appearance.colors.text_secondary
-        },
-        background,
-        4.5,
-    )
-}
-
 fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
     (PANE_CAPTION_LEFT_PADDING
         + PANE_CAPTION_RIGHT_PADDING
@@ -1940,8 +1924,6 @@ fn render_pane_caption(
                     .pane_radius();
             let pane_id = caption.pane_id;
             let mut paint = appearance.colors.caption(background, caption.focused);
-            paint.foreground =
-                pane_caption_foreground(&appearance, paint.background, caption.focused);
             // Caption buttons already sit on the Pane. Add only their state color difference;
             // repeating the Terminal background here would leave opaque squares on the glass.
             for control in [
@@ -3714,41 +3696,6 @@ mod tests {
             Some(gpui::SharedString::from("π"))
         );
         assert_eq!(cached, Some(gpui::SharedString::from("π")));
-    }
-
-    #[test]
-    fn caption_text_uses_each_activity_variants_primary_and_secondary_pair() {
-        for active in [true, false] {
-            let mut appearance = super::super::appearance::ChromeAppearance {
-                active,
-                ..Default::default()
-            };
-            appearance.colors.background = Color::rgb(0x000000);
-            appearance.colors.text = if active {
-                Color::rgb(0xffffff)
-            } else {
-                Color::rgb(0xf0f0f0)
-            };
-            appearance.colors.text_secondary = if active {
-                Color::rgb(0xd0d0d0)
-            } else {
-                Color::rgb(0xc0c0c0)
-            };
-            appearance.colors.text_muted = Color::rgb(0x909090);
-            let surface = Color::rgb(0x000000);
-
-            for (focused, expected) in [
-                (true, appearance.colors.text),
-                (false, appearance.colors.text_secondary),
-            ] {
-                let paint = appearance.colors.caption(surface, focused);
-                assert_eq!(
-                    pane_caption_foreground(&appearance, paint.background, focused),
-                    expected,
-                    "active={active} focused={focused}"
-                );
-            }
-        }
     }
 
     #[test]

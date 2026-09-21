@@ -1706,6 +1706,7 @@ mod tests {
                 for focused in [false, true] {
                     let caption = colors.caption(surface, focused);
                     assert_eq!(caption.background, surface);
+                    assert_eq!(caption.foreground, caption.control.icon);
                     for text in [
                         caption.foreground,
                         caption.secondary,
