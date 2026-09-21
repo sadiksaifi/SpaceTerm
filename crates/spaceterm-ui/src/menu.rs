@@ -2012,7 +2012,6 @@ struct MenuState {
     style: MenuStyle,
     placement: MenuPlacementConfig,
     enabled: bool,
-    restore_to_trigger: bool,
     freeze_entries_while_open: bool,
     awaiting_context_snapshot: bool,
     open: bool,
@@ -2053,7 +2052,7 @@ impl MenuState {
             if state.open && !window.is_window_active() {
                 let window_id = window.window_handle().window_id();
                 if let Some(reservation) =
-                    state.dismiss(MenuCloseReason::Deactivated, false, None, cx)
+                    state.dismiss(MenuCloseReason::Deactivated, true, Some(window), cx)
                 {
                     release_window(reservation, window_id, cx);
                 }
@@ -2092,7 +2091,6 @@ impl MenuState {
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
-            restore_to_trigger: false,
             freeze_entries_while_open: false,
             awaiting_context_snapshot: false,
             open: false,
@@ -2138,7 +2136,6 @@ impl MenuState {
         self.style = style;
         self.placement = placement;
         self.enabled = enabled;
-        self.restore_to_trigger = trigger_focusable;
         self.freeze_entries_while_open = freeze_entries_while_open;
         self.lifecycle = lifecycle;
         self.focus_handle = self
@@ -2197,13 +2194,10 @@ impl MenuState {
         {
             return false;
         }
-        self.restore_focus = inherited_focus.or_else(|| {
-            if self.restore_to_trigger {
-                Some(self.focus_handle.downgrade())
-            } else {
-                window.focused(cx).map(|handle| handle.downgrade())
-            }
-        });
+        // Pointer opening must not turn the trigger into a lasting keyboard target. A keyboard
+        // opening already has the trigger focused, so the same predecessor rule covers both.
+        self.restore_focus =
+            inherited_focus.or_else(|| window.focused(cx).map(|handle| handle.downgrade()));
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
         self.combo_box_overlay_hosted = combo_box_overlay_hosted;
@@ -2265,11 +2259,13 @@ impl MenuState {
         self.pointer_button = None;
         self.pointer_press = None;
         if restore {
-            if let (Some(window), Some(focus)) = (
-                window,
-                self.restore_focus.take().and_then(|focus| focus.upgrade()),
-            ) {
-                focus.focus(window);
+            let predecessor = self.restore_focus.take().and_then(|focus| focus.upgrade());
+            if let Some(window) = window {
+                if let Some(focus) = predecessor {
+                    focus.focus(window);
+                } else if self.focus_handle.is_focused(window) {
+                    window.blur();
+                }
             }
         } else {
             self.restore_focus = None;
@@ -3639,6 +3635,7 @@ mod tests {
             cx.update(|window, _| window.focus_next());
             cx.run_until_parked();
             let bounds = cx.debug_bounds(selector).unwrap();
+            let keyboard_focus = cx.update(|window, cx| window.focused(cx)).unwrap();
             assert!(cx.debug_bounds(focus_selector).is_none());
             cx.update(|window, _| {
                 assert!(
@@ -3655,6 +3652,27 @@ mod tests {
             assert!(cx.debug_bounds(focus_selector).is_none());
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
+            assert!(cx.update(|window, _| keyboard_focus.is_focused(window)));
+        }
+        for selector in ["ghost-menu", "ghost-picker"] {
+            cx.update(|window, _| window.blur());
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+            cx.simulate_keystrokes("escape");
+            cx.simulate_mouse_move(point(px(500.0), px(500.0)), None, Modifiers::none());
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+            cx.update(|window, _| {
+                assert!(
+                    !window.painted_quads_for_test().iter().any(|quad| {
+                        quad.visible_bounds == bounds.scale(window.scale_factor())
+                            && quad.background == hover.into()
+                    }),
+                    "dismissed {selector} must not retain ghost focus fill"
+                );
+            });
         }
     }
 
@@ -4874,6 +4892,8 @@ mod tests {
         let trigger = cx
             .debug_bounds("activation-order-trigger")
             .unwrap_or_else(|| panic!("activation-order trigger not painted"));
+        // This case exercises restoration to an existing keyboard target before activation.
+        cx.update(|window, _| window.focus_next());
         cx.simulate_click(trigger.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
@@ -4986,11 +5006,63 @@ mod tests {
             ]
         );
         assert_eq!(underlay.get(), 0);
-        assert!(!cx.update(|window, _| focus.is_focused(window)));
+        assert!(cx.update(|window, _| focus.is_focused(window)));
 
         cx.simulate_keystrokes("space");
         cx.run_until_parked();
-        assert_eq!(lifecycle.borrow().last(), Some(&MenuLifecycleEvent::Opened),);
+        assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn pointer_menu_dismissal_returns_focus_to_its_predecessor(cx: &mut TestAppContext) {
+        for prior_focus in [false, true] {
+            for dismissal in ["escape", "enter", "trigger", "outside", "deactivate"] {
+                let (root, _, _, cx) = lifecycle_window(cx);
+                let prior = root.read_with(cx, |root, _| root.other_focus.clone());
+                cx.update(|window, _| {
+                    if prior_focus {
+                        prior.focus(window);
+                    } else {
+                        window.blur();
+                    }
+                });
+                let trigger = cx.debug_bounds("lifecycle-trigger").unwrap();
+                cx.simulate_click(trigger.center(), Modifiers::none());
+                cx.run_until_parked();
+                assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+                match dismissal {
+                    "deactivate" => {
+                        cx.deactivate_window();
+                        cx.run_until_parked();
+                        cx.update(|window, _| window.activate_window());
+                    }
+                    "trigger" => cx.simulate_click(trigger.center(), Modifiers::none()),
+                    "outside" => {
+                        let bounds = cx.debug_bounds("lifecycle-root").unwrap();
+                        cx.simulate_click(
+                            point(bounds.right() - px(4.0), bounds.bottom() - px(4.0)),
+                            Modifiers::none(),
+                        );
+                    }
+                    key => cx.simulate_keystrokes(key),
+                }
+                cx.run_until_parked();
+                assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+                cx.update(|window, cx| {
+                    if prior_focus {
+                        assert!(
+                            prior.is_focused(window),
+                            "{dismissal} must restore the previous control"
+                        );
+                    } else {
+                        assert!(
+                            window.focused(cx).is_none(),
+                            "{dismissal} must not leave the trigger focused"
+                        );
+                    }
+                });
+            }
+        }
     }
 
     #[gpui::test]
