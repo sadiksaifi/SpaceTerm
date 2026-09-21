@@ -85,6 +85,11 @@ struct WorkspaceRenameField {
 impl gpui::RenderOnce for WorkspaceRenameField {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus_on_click = self.focus_handle.clone();
+        let text_style = self.appearance.typography.style(TextRole::Navigation);
+        let field_height = self
+            .appearance
+            .spacing(22.0)
+            .max(text_style.line_height + self.appearance.spacing(6.0));
         spaceterm_ui::field_frame(
             ("workspace-rename-input", self.workspace_id.get()),
             &self.focus_handle,
@@ -92,13 +97,13 @@ impl gpui::RenderOnce for WorkspaceRenameField {
             cx,
         )
         .debug_selector(move || format!("workspace-rename-input-{}", self.workspace_id.get()))
-        .h(self.appearance.spacing(22.0))
+        .h(field_height)
         .w_full()
         .px(self.appearance.spacing(5.0))
         .flex()
         .items_center()
         .rounded(RadiusRole::ControlSmall.pixels())
-        .chrome_text(self.appearance.typography.style(TextRole::Navigation))
+        .chrome_text(text_style)
         .text_color(gpui_color(self.appearance.colors.text))
         .on_click(move |_, window, cx| {
             focus_on_click.focus(window);

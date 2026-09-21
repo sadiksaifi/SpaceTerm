@@ -3428,14 +3428,19 @@ struct TerminalFindField {
 impl gpui::RenderOnce for TerminalFindField {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let appearance = self.appearance;
+        let text_style = appearance.typography.style(TextRole::Body);
+        let field_height = appearance
+            .spacing(24.0)
+            .max(text_style.line_height + appearance.spacing(8.0));
         spaceterm_ui::field_frame(
             "terminal-find-field",
             &self.input.read(cx).focus_handle(),
             spaceterm_ui::FieldState::default(),
             cx,
         )
+        .debug_selector(|| "terminal-find-field".to_owned())
         .relative()
-        .h(appearance.spacing(24.0))
+        .h(field_height)
         .w(appearance.spacing(120.0))
         .max_w_full()
         .min_w(px(0.0))
@@ -3444,7 +3449,7 @@ impl gpui::RenderOnce for TerminalFindField {
         .items_center()
         .px(appearance.spacing(5.0))
         .rounded(self.corner_radius)
-        .chrome_text(appearance.typography.style(TextRole::Body))
+        .chrome_text(text_style)
         .text_color(gpui_color(
             appearance
                 .host_colors(spaceterm_ui::ControlHost::Floating)

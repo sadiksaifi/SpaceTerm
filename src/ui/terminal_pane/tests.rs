@@ -2536,6 +2536,59 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size
 }
 
 #[gpui::test]
+fn terminal_find_field_contains_maximum_chrome_line_height_in_both_densities(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, _) = connected_terminal_pane(cx);
+    cx.dispatch_action(OpenTerminalFind);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let line_height = cx.update(|window, cx| {
+            let mut preferences = crate::appearance::AppearancePreferences::default();
+            preferences.chrome.typography.base_size = 24.0;
+            preferences.chrome.density = density;
+            publish_terminal_preferences(preferences, cx);
+            let resolved = super::super::appearance_runtime::current(cx);
+            let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let line_height = chrome
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Body)
+                .line_height;
+            spaceterm_ui::replace_control_theme_catalog(
+                cx,
+                super::super::control_theme_catalog::catalog(
+                    &chrome,
+                    spaceterm_ui::ProgressMotion::Standard,
+                ),
+            )
+            .unwrap();
+            cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
+                chrome,
+            )));
+            window.refresh();
+            line_height
+        });
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("terminal-find-field")
+            .expect("Terminal Find field");
+        let input = cx
+            .debug_bounds("terminal-find-input")
+            .expect("Terminal Find input");
+        assert!(
+            field.size.height >= line_height
+                && input.top() >= field.top()
+                && input.bottom() <= field.bottom(),
+            "{density:?} Terminal Find must contain its {line_height:?} Body line: field={field:?}, input={input:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn terminal_find_renders_shared_input_and_moves_responder_focus(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let command_count = records.commands().len();

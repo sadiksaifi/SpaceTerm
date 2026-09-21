@@ -7429,6 +7429,60 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
 }
 
 #[gpui::test]
+fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    right_click("workspace-row-1-active", cx);
+    click("workspace-menu-row-rename", cx);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let line_height = cx.update(|window, cx| {
+            let mut preferences = crate::appearance::AppearancePreferences::default();
+            preferences.chrome.typography.base_size = 24.0;
+            preferences.chrome.density = density;
+            let resolved = crate::appearance::SchemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &preferences,
+                    crate::appearance::SystemAppearance::unavailable().with_composition(
+                        crate::appearance::CompositionCapabilities::new(true, true),
+                    ),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("maximum supported Chrome typography should resolve");
+            let (active, inactive) =
+                crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+            let line_height = active
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Navigation)
+                .line_height;
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
+            });
+            window.refresh();
+            line_height
+        });
+        cx.run_until_parked();
+
+        let frame = cx
+            .debug_bounds("workspace-rename-input-1")
+            .expect("inline rename frame");
+        let input = cx
+            .debug_bounds("workspace-rename-input")
+            .expect("inline rename input");
+        assert!(
+            frame.size.height >= line_height
+                && input.top() >= frame.top()
+                && input.bottom() <= frame.bottom(),
+            "{density:?} inline rename must contain its {line_height:?} Navigation line: frame={frame:?}, input={input:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
