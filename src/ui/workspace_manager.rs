@@ -1,6 +1,8 @@
 use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
-use super::workspace_chrome::{TOGGLE_SIZE, WorkspaceChromeIdentity, WorkspaceChromeLayout};
+use super::workspace_chrome::{
+    TOGGLE_SIZE, WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatusHosts,
+};
 #[cfg(test)]
 use super::workspace_sidebar::{
     SIDEBAR_MAXIMUM_WIDTH, SIDEBAR_ROW_HEIGHT, TERMINAL_CONTENT_MINIMUM_WIDTH,
@@ -2948,6 +2950,19 @@ impl WorkspaceManager {
         let new_workspace_shortcut = presentation.shortcut(&NewWorkspace);
         let new_remote_workspace_shortcut = presentation.shortcut(&NewRemoteWorkspace);
         let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity());
+        let switcher_surface =
+            super::tab_manager::active_tab_surface(appearance, window.is_window_active());
+        let title_bar_host =
+            appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+        let switcher_status_hosts = WorkspaceChromeStatusHosts::new(
+            switcher_surface
+                .fill
+                .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
+            switcher_surface
+                .hover_fill
+                .or(switcher_surface.fill)
+                .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
+        );
         let switcher_accessibility_name = collapsed_identity.as_ref().map_or_else(
             || "Switch Workspace".to_owned(),
             |(identity, _)| identity.accessibility_name(),
@@ -2964,22 +2979,25 @@ impl WorkspaceManager {
         .handle(self.workspace_switcher.clone())
         .when(sidebar_visible, |chooser| chooser.ghost_trigger())
         .when(!sidebar_visible, |chooser| {
-            let surface =
-                super::tab_manager::active_tab_surface(appearance, window.is_window_active());
             let normal = spaceterm_ui::ButtonPaint::new(
-                gpui_color(surface.fill.unwrap_or(Color::rgba(0))),
+                gpui_color(switcher_surface.fill.unwrap_or(Color::rgba(0))),
                 switcher_foreground,
-                gpui_color(surface.rim.unwrap_or(Color::rgba(0))),
+                gpui_color(switcher_surface.rim.unwrap_or(Color::rgba(0))),
             );
             let hovered = spaceterm_ui::ButtonPaint::new(
                 gpui_color(
-                    surface
+                    switcher_surface
                         .hover_fill
-                        .or(surface.fill)
+                        .or(switcher_surface.fill)
                         .unwrap_or(Color::rgba(0)),
                 ),
                 switcher_foreground,
-                gpui_color(surface.hover_rim.or(surface.rim).unwrap_or(Color::rgba(0))),
+                gpui_color(
+                    switcher_surface
+                        .hover_rim
+                        .or(switcher_surface.rim)
+                        .unwrap_or(Color::rgba(0)),
+                ),
             );
             chooser.trigger_surface(spaceterm_ui::ButtonVariantStyle::new(
                 normal, hovered, hovered, normal,
@@ -3064,7 +3082,7 @@ impl WorkspaceManager {
                 .custom_trigger(identity.render(
                     switcher_foreground,
                     appearance,
-                    appearance.colors.tab_active_background,
+                    switcher_status_hosts,
                 ))
                 .custom_trigger_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)

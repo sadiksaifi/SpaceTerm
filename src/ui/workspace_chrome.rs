@@ -149,6 +149,18 @@ impl WorkspaceChromeLayout {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkspaceChromeStatusHosts {
+    normal: Color,
+    hovered: Color,
+}
+
+impl WorkspaceChromeStatusHosts {
+    pub(super) const fn new(normal: Color, hovered: Color) -> Self {
+        Self { normal, hovered }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceChromeIdentity {
     pub(super) name: String,
@@ -162,9 +174,9 @@ impl WorkspaceChromeIdentity {
         self,
         switcher_color: Rgba,
         appearance: &ChromeAppearance,
-        semantic_host: Color,
+        status_hosts: WorkspaceChromeStatusHosts,
     ) -> AnyElement {
-        let status = self.status(appearance, semantic_host);
+        let status = self.status(appearance, status_hosts);
         let badge = self.badge();
         let status_normal = status.map(|status| gpui_color(status.paint.normal));
         let status_hovered = status.map(|status| {
@@ -234,7 +246,8 @@ impl WorkspaceChromeIdentity {
                             selector: badge.selector,
                             normal: status_normal.unwrap_or(switcher_color),
                             hovered: status_hovered.unwrap_or(switcher_color),
-                            host: gpui_color(semantic_host),
+                            normal_host: gpui_color(status_hosts.normal),
+                            hovered_host: gpui_color(status_hosts.hovered),
                         }),
                         appearance.icons.metrics(IconRole::Caption).glyph_size,
                     )),
@@ -295,7 +308,7 @@ impl WorkspaceChromeIdentity {
     fn status(
         &self,
         appearance: &ChromeAppearance,
-        semantic_host: Color,
+        hosts: WorkspaceChromeStatusHosts,
     ) -> Option<WorkspaceChromeStatusPaint> {
         let (proposed, selector) =
             if matches!(self.availability, DirectoryAvailability::Unavailable { .. }) {
@@ -325,7 +338,7 @@ impl WorkspaceChromeIdentity {
             };
         Some(WorkspaceChromeStatusPaint {
             selector,
-            paint: resolve_workspace_status(proposed, semantic_host, semantic_host, 4.5),
+            paint: resolve_workspace_status(proposed, hosts.normal, hosts.hovered, 4.5),
         })
     }
 }
@@ -374,9 +387,13 @@ fn render_identity_icon(
                     .size(badge_size)
                     .rounded(badge_size / 2.0)
                     .border(px(super::chrome_geometry::HAIRLINE))
-                    .border_color(badge.host)
+                    .border_color(badge.normal_host)
                     .text_color(badge.normal)
-                    .group_hover(group, move |style| style.text_color(badge.hovered))
+                    .group_hover(group, move |style| {
+                        style
+                            .border_color(badge.hovered_host)
+                            .text_color(badge.hovered)
+                    })
                     .child(Icon::inherited(badge.icon, badge_glyph_size)),
             )
         })
@@ -395,7 +412,8 @@ struct WorkspaceChromeBadgePaint {
     selector: &'static str,
     normal: Rgba,
     hovered: Rgba,
-    host: Rgba,
+    normal_host: Rgba,
+    hovered_host: Rgba,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -411,7 +429,11 @@ fn gpui_color(color: Color) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appearance::{Appearance, builtin_chrome_base};
+    use crate::appearance::{
+        Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+        ChromeColorOverrides, ChromeScheme, CompositionCapabilities, CustomScheme, SchemeCatalog,
+        SchemeId, SchemeMetadata, SystemAppearance, builtin_chrome_base,
+    };
 
     #[test]
     fn fullscreen_header_should_keep_edge_air_without_traffic_lights() {
@@ -463,13 +485,78 @@ mod tests {
                         remote_connection_phase,
                     };
                     let status = identity
-                        .status(&appearance, host)
+                        .status(&appearance, WorkspaceChromeStatusHosts::new(host, host))
                         .expect("unhealthy status paint");
                     assert!(status.paint.normal.contrast_ratio(host) >= 4.5);
                     assert!(status.paint.hovered.contrast_ratio(host) >= 4.5);
                 }
             }
         }
+    }
+
+    #[test]
+    fn unhealthy_identity_status_should_read_on_distinct_painted_chip_hosts() {
+        let scheme_id = SchemeId::new("test.workspace-status-hosts").unwrap();
+        let custom = CustomScheme::Chrome(Box::new(ChromeScheme {
+            window_background: None,
+            id: scheme_id.clone(),
+            name: "Workspace Status Hosts".to_owned(),
+            appearance: Appearance::Light,
+            metadata: SchemeMetadata::default(),
+            colors: ChromeColorOverrides {
+                background: Some(Color::rgb(0xffffff)),
+                title_bar_background: Some(Color::rgb(0xffffff)),
+                tab_active_background: Some(Color::rgb(0x101010)),
+                tab_active_hover_background: Some(Color::rgb(0x101010)),
+                warning: Some(Color::rgb(0xffffff)),
+                ..ChromeColorOverrides::default()
+            },
+        }));
+        let mut preferences = AppearancePreferences {
+            mode: AppearanceMode::Light,
+            ..AppearancePreferences::default()
+        };
+        preferences.chrome.schemes.light = scheme_id;
+        preferences.background.transparency = 1.0;
+        let resolved = SchemeCatalog::from_custom_schemes(&[custom])
+            .unwrap()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::available(Appearance::Light)
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = ChromeAppearance::prepare(&resolved.chrome);
+        let surface = super::super::tab_manager::active_tab_surface(&appearance, true);
+        let title_bar_host =
+            appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+        let painted_normal = surface
+            .fill
+            .map_or(title_bar_host, |fill| fill.source_over(title_bar_host));
+        let painted_hovered = surface
+            .hover_fill
+            .or(surface.fill)
+            .map_or(title_bar_host, |fill| fill.source_over(title_bar_host));
+        let identity = WorkspaceChromeIdentity {
+            name: "Workspace".to_owned(),
+            pinned: false,
+            availability: DirectoryAvailability::Unavailable {
+                reason: "unavailable".to_owned(),
+            },
+            remote_connection_phase: None,
+        };
+
+        let status = identity
+            .status(
+                &appearance,
+                WorkspaceChromeStatusHosts::new(painted_normal, painted_hovered),
+            )
+            .expect("unhealthy status paint");
+
+        assert!(status.paint.normal.contrast_ratio(painted_normal) >= 4.5);
+        assert!(status.paint.hovered.contrast_ratio(painted_hovered) >= 4.5);
     }
 
     #[test]
