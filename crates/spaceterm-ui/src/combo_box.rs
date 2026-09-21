@@ -928,6 +928,41 @@ enum ComboBoxTrigger {
     Custom(AnyElement),
 }
 
+#[derive(Clone, Copy)]
+struct TriggerSurfacePaint {
+    backgrounds: [Rgba; 4],
+    borders: crate::ControlBorderStates,
+}
+
+impl From<crate::ButtonVariantStyle> for TriggerSurfacePaint {
+    fn from(states: crate::ButtonVariantStyle) -> Self {
+        Self {
+            backgrounds: [
+                states.normal(),
+                states.hovered(),
+                states.pressed(),
+                states.disabled(),
+            ]
+            .map(|paint| paint.background()),
+            borders: crate::ControlBorderStates::new(
+                states.normal().border(),
+                states.hovered().border(),
+                states.pressed().border(),
+                states.disabled().border(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum TriggerSurface {
+    #[default]
+    Standard,
+    Bare,
+    Ghost,
+    Contextual(TriggerSurfacePaint),
+}
+
 /// A reusable controlled ComboBox with a searchable anchored popup.
 ///
 /// The caller supplies `selected` on every render. Acceptance proposes a new identity but never
@@ -949,7 +984,7 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     menu_with_filter_header: bool,
     full_width: bool,
     hug: bool,
-    bare_trigger: bool,
+    trigger_surface: TriggerSurface,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
@@ -985,7 +1020,7 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             menu_with_filter_header: false,
             full_width: false,
             hug: false,
-            bare_trigger: false,
+            trigger_surface: TriggerSurface::Standard,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
@@ -1079,7 +1114,21 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// Removes the trigger's ordinary fill, border, and shadow without changing its geometry,
     /// focus ring, content, or interaction.
     pub fn bare_trigger(mut self) -> Self {
-        self.bare_trigger = true;
+        self.trigger_surface = TriggerSurface::Bare;
+        self
+    }
+
+    /// Uses the current host's Ghost button surface, including hover, open, and disabled states.
+    /// Trigger content and popup presentation keep their own semantic colors.
+    pub fn ghost_trigger(mut self) -> Self {
+        self.trigger_surface = TriggerSurface::Ghost;
+        self
+    }
+
+    /// Uses contextual button backgrounds and borders for the trigger only, without a shadow.
+    /// Content colors, geometry, focus, and the popup remain independent of this surface.
+    pub fn trigger_surface(mut self, states: crate::ButtonVariantStyle) -> Self {
+        self.trigger_surface = TriggerSurface::Contextual(states.into());
         self
     }
 
@@ -2147,8 +2196,26 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .map(|selector| format!("{selector}-disclosure"))
             .unwrap_or_else(|| format!("{}-disclosure", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
-        let paint = crate::floating_surface::hosted_combo_box_theme(cx)
+        let mut paint = crate::floating_surface::hosted_combo_box_theme(cx)
             .map_or(theme.paint, |theme| theme.paint);
+        let surface = match self.trigger_surface {
+            TriggerSurface::Ghost => Some(
+                crate::floating_surface::hosted_button_theme(cx)
+                    .paints(crate::ButtonVariant::Ghost)
+                    .into(),
+            ),
+            TriggerSurface::Contextual(states) => Some(states),
+            TriggerSurface::Standard | TriggerSurface::Bare => None,
+        };
+        if let Some(states) = surface {
+            let [normal, hovered, pressed, disabled] = states.backgrounds;
+            paint.trigger_background = normal;
+            paint.trigger_hover_background = hovered;
+            paint.trigger_pressed_background = pressed;
+            paint.trigger_disabled_background = disabled;
+            paint.trigger_state_borders = Some(states.borders);
+            paint.trigger_shadow = crate::ControlShadow::none();
+        }
         let metrics = theme.metrics;
         let icon_offset = crate::icon::text_alignment_offset(
             typography.regular(),
@@ -2164,7 +2231,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         };
         let custom_trigger = custom_content.is_some();
         let text_trigger = !icon_trigger && !custom_trigger;
-        let bare_trigger = self.bare_trigger;
+        let bare_trigger = matches!(self.trigger_surface, TriggerSurface::Bare);
         let fill_parent = self.full_width && !icon_trigger;
         let hug = self.hug && !fill_parent;
         let trigger_background = paint.trigger_background(enabled, open);
@@ -2219,31 +2286,34 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             } else {
                 trigger_border
             })
-            .when(!custom_trigger && !bare_trigger, |trigger| {
-                trigger
-                    .bg(trigger_background)
-                    .shadow(trigger_shadow.layers())
-                    .shadow_outside_only()
-                    .when(enabled && !open, |trigger| {
-                        trigger
-                            .hover(move |style| {
-                                let style = style.bg(paint.trigger_hover_background);
-                                match paint.trigger_state_borders {
-                                    Some(borders) => style.border_color(borders.hovered),
-                                    None => style,
-                                }
-                            })
-                            .active(move |style| {
-                                let style = style
-                                    .bg(paint.trigger_pressed_background)
-                                    .shadow(Vec::new());
-                                match paint.trigger_state_borders {
-                                    Some(borders) => style.border_color(borders.pressed),
-                                    None => style,
-                                }
-                            })
-                    })
-            })
+            .when(
+                (!custom_trigger || surface.is_some()) && !bare_trigger,
+                |trigger| {
+                    trigger
+                        .bg(trigger_background)
+                        .shadow(trigger_shadow.layers())
+                        .shadow_outside_only()
+                        .when(enabled && !open, |trigger| {
+                            trigger
+                                .hover(move |style| {
+                                    let style = style.bg(paint.trigger_hover_background);
+                                    match paint.trigger_state_borders {
+                                        Some(borders) => style.border_color(borders.hovered),
+                                        None => style,
+                                    }
+                                })
+                                .active(move |style| {
+                                    let style = style
+                                        .bg(paint.trigger_pressed_background)
+                                        .shadow(Vec::new());
+                                    match paint.trigger_state_borders {
+                                        Some(borders) => style.border_color(borders.pressed),
+                                        None => style,
+                                    }
+                                })
+                        })
+                },
+            )
             .text_color(if enabled {
                 paint.foreground
             } else {

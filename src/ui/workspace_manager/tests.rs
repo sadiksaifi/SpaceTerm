@@ -5363,9 +5363,44 @@ fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut Tes
     }
 }
 
-/// The unfilled Workspace identity stays centered in the Tab row across appearance scales.
 #[gpui::test]
-fn collapsed_workspace_identity_should_stay_centered_without_a_surface(cx: &mut TestAppContext) {
+fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    let surface = |selector: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads_for_test()
+                .into_iter()
+                .find(|quad| quad.visible_bounds == bounds)
+                .map(|quad| quad.background)
+        })
+    };
+    let resting = surface("workspace-switcher", cx);
+    let switcher = cx.debug_bounds("workspace-switcher").unwrap();
+    cx.simulate_mouse_move(switcher.center(), None, Modifiers::none());
+    redraw(cx);
+    assert_ne!(
+        surface("workspace-switcher", cx),
+        resting,
+        "expanded switcher needs Ghost hover feedback"
+    );
+
+    click("toggle-sidebar-button", cx);
+    cx.simulate_mouse_move(point(px(0.0), px(200.0)), None, Modifiers::none());
+    redraw(cx);
+    let tab = surface("tab-item-1-chip", cx).expect("active Tab surface");
+    assert_eq!(
+        surface("workspace-switcher", cx),
+        Some(tab),
+        "collapsed switcher must share active Tab material"
+    );
+}
+
+/// The Workspace identity stays centered in the Tab row across appearance scales.
+#[gpui::test]
+fn collapsed_workspace_identity_should_stay_centered(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
     assert!(cx.debug_bounds("workspace-switcher-chip").is_none());

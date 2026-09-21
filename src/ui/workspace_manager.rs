@@ -2962,7 +2962,29 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
-        .bare_trigger()
+        .when(sidebar_visible, |chooser| chooser.ghost_trigger())
+        .when(!sidebar_visible, |chooser| {
+            let surface =
+                super::tab_manager::active_tab_surface(appearance, window.is_window_active());
+            let normal = spaceterm_ui::ButtonPaint::new(
+                gpui_color(surface.fill.unwrap_or(Color::rgba(0))),
+                switcher_foreground,
+                gpui_color(surface.rim.unwrap_or(Color::rgba(0))),
+            );
+            let hovered = spaceterm_ui::ButtonPaint::new(
+                gpui_color(
+                    surface
+                        .hover_fill
+                        .or(surface.fill)
+                        .unwrap_or(Color::rgba(0)),
+                ),
+                switcher_foreground,
+                gpui_color(surface.hover_rim.or(surface.rim).unwrap_or(Color::rgba(0))),
+            );
+            chooser.trigger_surface(spaceterm_ui::ButtonVariantStyle::new(
+                normal, hovered, hovered, normal,
+            ))
+        })
         .input_leading(move |size| {
             Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
@@ -3042,7 +3064,7 @@ impl WorkspaceManager {
                 .custom_trigger(identity.render(
                     switcher_foreground,
                     appearance,
-                    top_chrome_background,
+                    appearance.colors.tab_active_background,
                 ))
                 .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)

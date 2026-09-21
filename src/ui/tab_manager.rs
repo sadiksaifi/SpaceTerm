@@ -125,6 +125,19 @@ const TAB_SEPARATOR_LENGTH: f32 = 18.0;
 /// layout rounding to decide which side of an edge it lands on.
 const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 
+/// The selected Tab material shared by the collapsed Workspace Switcher.
+pub(super) fn active_tab_surface(
+    appearance: &super::appearance::ChromeAppearance,
+    window_active: bool,
+) -> ChipPaint {
+    let presentation = TabChromePresentation::resolve(
+        window_active,
+        appearance.capabilities.show_borders,
+        &appearance.colors,
+    );
+    presentation.selected_chip_paint(appearance)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabChromePresentation {
     window_active: bool,
@@ -214,11 +227,16 @@ impl TabChromePresentation {
     ) -> SelectionChip {
         let paint = self.tab_chip_paint(active);
         let paint = if active {
-            paint.selected_on(appearance, self.background)
+            self.selected_chip_paint(appearance)
         } else {
             paint.raised_on(appearance, self.background)
         };
         SelectionChip::new(tab_chip_shape(appearance, cx), paint)
+    }
+
+    fn selected_chip_paint(&self, appearance: &super::appearance::ChromeAppearance) -> ChipPaint {
+        self.tab_chip_paint(true)
+            .selected_on(appearance, self.background)
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
