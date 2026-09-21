@@ -304,6 +304,7 @@ impl MenuPaint {
     }
 
     /// Sets the keyboard focus border color used by menu and picker triggers.
+    /// A transparent border uses the trigger's hover fill for focus feedback instead.
     pub fn focus_border(mut self, color: Rgba) -> Self {
         self.focus_border = color;
         self
@@ -1629,11 +1630,13 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .rounded(style.metrics.trigger_corner_radius)
                 .border(style.metrics.border_width)
                 .border_color(trigger_border)
-                .bg(if open {
-                    paint.trigger_hover_background
-                } else {
-                    paint.trigger_background
-                })
+                .bg(
+                    if enabled && (open || (focused && paint.focus_border.a == 0.0)) {
+                        paint.trigger_hover_background
+                    } else {
+                        paint.trigger_background
+                    },
+                )
                 .text_color(if enabled {
                     paint.foreground
                 } else {
@@ -3589,6 +3592,70 @@ mod tests {
             (border, None),
             "an inactive presentation must not submit a transparent focus primitive"
         );
+    }
+
+    #[gpui::test]
+    fn ringless_menu_and_picker_focus_uses_the_open_hover_fill(cx: &mut TestAppContext) {
+        struct Triggers;
+        impl Render for Triggers {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .p(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Menu::new("ghost-menu", "Actions", vec![MenuEntry::action("Open", ())])
+                            .debug_selector("ghost-menu")
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Picker::new(
+                            "ghost-picker",
+                            "Choice",
+                            1,
+                            vec![PickerOption::new(1, "One")],
+                        )
+                        .unwrap()
+                        .debug_selector("ghost-picker")
+                        .on_change(|_, _, _| {}),
+                    )
+            }
+        }
+        cx.update(super::init);
+        let hover = rgba(0x454545ff);
+        let mut theme = test_theme();
+        theme.paint = theme
+            .paint
+            .trigger(rgba(0), hover, rgba(0))
+            .focus_border(rgba(0));
+        cx.set_global(theme);
+        let (_, cx) = cx.add_window_view(|_, _| Triggers);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        for (selector, focus_selector) in [
+            ("ghost-menu", "ghost-menu-keyboard-focus"),
+            ("ghost-picker", "ghost-picker-keyboard-focus"),
+        ] {
+            cx.update(|window, _| window.focus_next());
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(cx.debug_bounds(focus_selector).is_none());
+            cx.update(|window, _| {
+                assert!(
+                    window.painted_quads_for_test().iter().any(|quad| {
+                        quad.visible_bounds == bounds.scale(window.scale_factor())
+                            && quad.background == hover.into()
+                    }),
+                    "focused {selector} must retain ghost hover feedback"
+                );
+            });
+            cx.simulate_keystrokes("space");
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+            assert!(cx.debug_bounds(focus_selector).is_none());
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
