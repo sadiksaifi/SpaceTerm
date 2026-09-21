@@ -461,9 +461,24 @@ pub(crate) fn text_alignment_offset(
     window: &Window,
 ) -> Pixels {
     let font_id = window.text_system().resolve_font(font);
-    let baseline = window
-        .text_system()
-        .baseline_offset(font_id, font_size, line_height);
+    text_alignment_offset_from_metrics(
+        window.text_system().ascent(font_id, font_size),
+        window.text_system().descent(font_id, font_size),
+        line_height,
+        baseline_center,
+    )
+}
+
+fn text_alignment_offset_from_metrics(
+    ascent: Pixels,
+    descent: Pixels,
+    line_height: Pixels,
+    baseline_center: Pixels,
+) -> Pixels {
+    // GPUI's native shapers turn a platform font's signed descent into the positive line extent
+    // used by text paint. FontMetrics retains the platform sign, so match that paint convention.
+    let descent = gpui::px(f32::from(descent).abs());
+    let baseline = (line_height - ascent - descent) / 2.0 + ascent;
     baseline - baseline_center - line_height / 2.0
 }
 
@@ -792,6 +807,25 @@ mod tests {
         assert!(prepared_lucide_asset("spaceterm-ui/lucide/not-an-icon/12/1.svg").is_none());
         assert!(lucide_asset_path(IconName::X, gpui::px(41.0), gpui::px(41.0)).is_none());
         assert!(lucide_asset_path(IconName::PinOff, gpui::px(8.0), gpui::px(7.0)).is_none());
+    }
+
+    #[test]
+    fn text_alignment_normalizes_platform_descent_before_matching_text_paint() {
+        let negative_descent = text_alignment_offset_from_metrics(
+            gpui::px(12.3),
+            gpui::px(-3.3),
+            gpui::px(16.0),
+            gpui::px(4.0),
+        );
+        let positive_descent = text_alignment_offset_from_metrics(
+            gpui::px(12.3),
+            gpui::px(3.3),
+            gpui::px(16.0),
+            gpui::px(4.0),
+        );
+
+        assert_eq!(negative_descent, positive_descent);
+        assert!((f32::from(negative_descent) - 0.5).abs() < 0.001);
     }
 
     #[test]
