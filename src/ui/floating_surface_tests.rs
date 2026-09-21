@@ -181,16 +181,16 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
         let divider = settings.separator(Card).source_over(card);
 
         assert!(
-            card.contrast_ratio(canvas) >= 1.1,
+            card.r < canvas.r && card.contrast_ratio(canvas) >= 1.05,
             "Light Settings at {transparency}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
         );
         assert!(
-            edge.contrast_ratio(card) <= 1.3,
-            "Light Settings at {transparency}: decorative edge {edge:?} must remain quiet on {card:?}"
+            edge == card,
+            "Light Settings at {transparency}: a group must not need a decorative outline"
         );
         assert!(
-            divider.contrast_ratio(card) < edge.contrast_ratio(card),
-            "Light Settings at {transparency}: inset row rule {divider:?} must be quieter than the group edge {edge:?}"
+            (1.12..=1.22).contains(&divider.contrast_ratio(card)),
+            "Light Settings at {transparency}: inset row rule {divider:?} must remain visible and quiet on {card:?}"
         );
     }
 }

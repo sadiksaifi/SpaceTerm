@@ -125,18 +125,25 @@ impl SettingsAppearance {
         self.chrome.separator(host)
     }
 
-    /// Separates the built-in Light sidebar from the canvas, which shares its base color.
+    /// Accessibility can reinforce the otherwise fill-separated Light sidebar and canvas.
     pub(crate) fn sidebar_edge(&self) -> Option<Color> {
-        self.chrome
-            .built_in_light
+        (self.chrome.built_in_light
+            && (self.chrome.capabilities.increase_contrast
+                || self.chrome.capabilities.show_borders))
             .then(|| self.chrome.surface_edge(spaceterm_ui::ControlHost::Panel))
     }
 
-    /// Uses a quiet Light card edge and preserves the existing Dark/custom grouping boundary.
+    /// Light groups separate by fill; accessibility and Dark/custom schemes retain boundaries.
     pub(crate) fn card_edge(&self) -> Color {
         let host = self.card.background;
         if self.chrome.built_in_light {
-            return self.chrome.surface_edge(spaceterm_ui::ControlHost::Card);
+            return if self.chrome.capabilities.increase_contrast
+                || self.chrome.capabilities.show_borders
+            {
+                self.chrome.surface_edge(spaceterm_ui::ControlHost::Card)
+            } else {
+                Color::rgba(0)
+            };
         }
         let prepared = self.separator(SettingsSurfaceRole::Card);
         if self.chrome.capabilities.increase_contrast {
@@ -199,7 +206,7 @@ fn prepare_variant(
     };
     let authored = state.surfaces(&resolved.colors);
     let mut settings_authored = authored.clone();
-    let (sidebar, canvas, card) = prepare_surfaces(&chrome);
+    let (sidebar, canvas, card) = prepare_surfaces(&chrome, resolved);
     settings_authored.panel_background = sidebar.semantic;
     settings_authored.elevated_surface_background = card.semantic;
     chrome.colors.panel_background = sidebar.semantic;
@@ -223,6 +230,26 @@ fn prepare_variant(
         resolved.provenance.get("segmented_track_background"),
         Some(ColorProvenance::Authored | ColorProvenance::Overridden)
     );
+    if chrome.built_in_light {
+        // The Settings content column is the same light canvas as the Workspace content,
+        // not the muted root beneath navigation. Resolve its controls on the painted host.
+        let mut canvas_authored = settings_authored.clone();
+        canvas_authored.background = canvas.semantic;
+        let window = prepare_state_control_host(
+            &canvas_authored,
+            (canvas.semantic, canvas.background),
+            spaceterm_ui::ControlHost::Window,
+            chrome.materials,
+            state,
+            floors,
+            explicit_segmented_track,
+            true,
+        );
+        chrome.colors = super::with_final_host_content(chrome.colors, &window.colors);
+        chrome.control_colors = window.colors;
+        chrome.segmented_control_colors = window.segmented;
+        chrome.window_control_fallbacks = window.fallback_families;
+    }
     chrome.panel_controls = prepare_state_control_host(
         &settings_authored,
         (sidebar.semantic, sidebar.background),
@@ -269,20 +296,35 @@ fn prepare_variant(
 
 fn prepare_surfaces(
     chrome: &ChromeAppearance,
+    resolved: &ResolvedChromeAppearance,
 ) -> (
     PreparedSettingsSurface,
     PreparedSettingsSurface,
     PreparedSettingsSurface,
 ) {
     let root = chrome.colors.background;
-    // Built-in Light groups content with raised cards rather than another sidebar color.
+    let light_content_hierarchy = chrome.built_in_light
+        && matches!(
+            resolved.provenance.get("elevated_surface_background"),
+            Some(ColorProvenance::Authored)
+        );
+    // Navigation stays muted. The content canvas shares the Workspace's bright material;
+    // inset groups sit between those tones rather than competing with selected controls.
     let sidebar_semantic = if chrome.built_in_light {
         chrome.colors.panel_background
     } else {
         settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance)
     };
-    let canvas_semantic = root;
-    let card_semantic = chrome.colors.elevated_surface_background;
+    let canvas_semantic = if light_content_hierarchy {
+        chrome.colors.elevated_surface_background
+    } else {
+        root
+    };
+    let card_semantic = if light_content_hierarchy {
+        root.mix(canvas_semantic, 0.5)
+    } else {
+        chrome.colors.elevated_surface_background
+    };
     let sidebar_materials = chrome.materials;
     let canvas_materials = chrome
         .materials
@@ -295,7 +337,11 @@ fn prepare_surfaces(
             CARD_TRANSMISSION_SHARE
         });
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
-    let canvas_paint = canvas_materials.paint(SurfaceRole::Sheet, root, canvas_semantic);
+    let canvas_paint = if light_content_hierarchy {
+        super::prominent_surface_with(chrome.materials, root, canvas_semantic)
+    } else {
+        canvas_materials.paint(SurfaceRole::Sheet, root, canvas_semantic)
+    };
     let sidebar = PreparedSettingsSurface {
         semantic: sidebar_semantic,
         paint: sidebar_paint,
@@ -410,7 +456,7 @@ mod tests {
 
         assert!(card.paint.a < u8::MAX, "the card must keep transmitting");
         assert!(
-            card.background.contrast_ratio(canvas) >= 1.1,
+            card.background.r < canvas.r && card.background.contrast_ratio(canvas) >= 1.05,
             "the card must retain its content-tone step over the canvas"
         );
     }

@@ -129,6 +129,97 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
 }
 
 #[test]
+fn light_settings_uses_the_workspace_content_hierarchy() {
+    use super::appearance::settings::{
+        self,
+        SettingsSurfaceRole::{Canvas, Card, Sidebar},
+    };
+
+    for transparency in [0.0, 0.35, 1.0] {
+        let resolved = resolve_light(transparency);
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let content = active.pane_surface(resolved.terminal.colors.background);
+        let (settings, _) = settings::prepare_variants(&resolved.chrome, active, inactive);
+        let sidebar = settings.surface(Sidebar);
+        let canvas = settings.surface(Canvas);
+        let card = settings.surface(Card);
+
+        assert_eq!(
+            canvas.semantic, resolved.terminal.colors.background,
+            "Settings and the built-in Terminal must share the content tone"
+        );
+        assert_eq!(
+            canvas.paint, content,
+            "Content surfaces must share the same transmission treatment"
+        );
+        assert!(
+            sidebar.background.r < card.background.r && card.background.r < canvas.background.r,
+            "Light hierarchy at {transparency}: muted navigation {sidebar:?}, grouped content {card:?}, light canvas {canvas:?}"
+        );
+        assert_eq!(
+            settings.card_edge().a,
+            0,
+            "Normal Light groups separate by fill instead of a decorative outline"
+        );
+    }
+}
+
+#[test]
+fn light_settings_preserves_an_explicit_group_surface_override() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    };
+    preferences.background.transparency = 0.0;
+    let group = Color::rgb(0xe8eef4);
+    preferences.chrome.overrides.insert(
+        crate::appearance::builtin_light_chrome(),
+        crate::appearance::ChromeColorOverrides {
+            elevated_surface_background: Some(group),
+            ..Default::default()
+        },
+    );
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::available(Appearance::Light),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+    let (settings, _) =
+        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+    assert_eq!(
+        settings
+            .surface(super::appearance::settings::SettingsSurfaceRole::Card)
+            .paint,
+        group,
+        "A built-in scheme override must remain the authored group color, not a mixed tone"
+    );
+}
+
+#[test]
+fn light_settings_keeps_accessibility_group_boundaries() {
+    for increase_contrast in [false, true] {
+        let mut resolved = resolve_light(0.35);
+        let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
+        chrome.composition.capabilities.increase_contrast = increase_contrast;
+        chrome.composition.capabilities.show_borders = !increase_contrast;
+        let (active, inactive) = ChromeAppearance::prepare_variants(chrome);
+        let (settings, _) = super::appearance::settings::prepare_variants(chrome, active, inactive);
+        assert!(
+            settings.card_edge().a > 0,
+            "Accessibility must restore the group boundary"
+        );
+        assert!(
+            settings.sidebar_edge().is_some(),
+            "Accessibility must restore the navigation boundary"
+        );
+    }
+}
+
+#[test]
 fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
     for transparency in [0.0, 0.35, 1.0] {
         let resolved = resolve_light(transparency);
@@ -137,6 +228,10 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
             super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
         let appearance = &settings.chrome;
         for (role, colors) in [
+            (
+                spaceterm_ui::ControlHost::Window,
+                &appearance.control_colors,
+            ),
             (
                 spaceterm_ui::ControlHost::Panel,
                 &appearance.panel_controls.colors,
