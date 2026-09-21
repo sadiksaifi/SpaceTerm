@@ -1288,6 +1288,10 @@ impl TabManager {
             appearance.materials,
         );
         let hover_foreground = presentation.tab_hover_foreground(active);
+        // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
+        // this action was visible in the pre-activation frame so a hidden inactive-Tab control
+        // cannot close its Tab through a stale hitbox. The selected Tab remains available.
+        let close_action_available = active || appearance.active;
         let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
         let status_host = presentation.tab_surface(active, ancestor_hovered);
         let close_clearance = cx
@@ -1407,6 +1411,8 @@ impl TabManager {
                             },
                         )
                         .variant(ButtonVariant::Ghost)
+                        .disabled(!close_action_available)
+                        .accept_first_mouse(active)
                         .contextual_style(
                             control_style,
                             gpui_color(title_bar_control_focus_ring(appearance)),
@@ -1419,6 +1425,9 @@ impl TabManager {
                                 .debug_selector(format!("tab-close-tooltip-{}", tab_id.get())),
                         )
                         .on_activate(move |_, _, cx| {
+                            if !close_action_available {
+                                return;
+                            }
                             let _ = close_manager.update(cx, |manager, cx| {
                                 manager.request_close_tab(tab_id, cx);
                             });
@@ -4132,6 +4141,74 @@ mod tests {
             )
         });
         assert_eq!(state, (1, TabId::new(2), vec![1]));
+    }
+
+    #[gpui::test]
+    fn inactive_first_mouse_on_hidden_tab_close_does_not_close_the_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let close = cx
+            .debug_bounds("tab-close-button-1")
+            .expect("the inactive Tab close button was not rendered")
+            .center();
+        cx.deactivate_window();
+        cx.run_until_parked();
+
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: close,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: true,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: close,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.len()),
+            2,
+            "the activation click must not invoke an opacity-zero close action"
+        );
+        assert!(records.dropped_session_ids().is_empty());
+    }
+
+    #[gpui::test]
+    fn inactive_first_mouse_can_close_the_visible_active_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let close = cx
+            .debug_bounds("tab-close-button-2")
+            .expect("the Active Tab close button was not rendered")
+            .center();
+        cx.deactivate_window();
+        cx.run_until_parked();
+
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: close,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: true,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: close,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.len()),
+            1,
+            "the visible active-Tab action remains available on the activation click"
+        );
+        assert_eq!(records.dropped_session_ids(), vec![2]);
     }
 
     #[gpui::test]

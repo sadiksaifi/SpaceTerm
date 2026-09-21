@@ -1107,6 +1107,12 @@ impl IconButton {
         self
     }
 
+    /// Controls whether the click that activates an inactive native window can invoke the action.
+    pub fn accept_first_mouse(mut self, accept: bool) -> Self {
+        self.core.accept_first_mouse = accept;
+        self
+    }
+
     /// Keeps ancestor hover presentation active while the pointer is over this button.
     ///
     /// The button still owns and consumes its pointer activation. Use this when the button is a
@@ -1178,6 +1184,7 @@ struct ButtonCore {
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
+    accept_first_mouse: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     icon_button_size: Option<Pixels>,
     #[cfg(feature = "appearance-exerciser")]
@@ -1202,6 +1209,7 @@ impl ButtonCore {
             modal_borderless: false,
             modal_press_owner: None,
             preserve_ancestor_hover: false,
+            accept_first_mouse: true,
             contextual_style: None,
             icon_button_size: None,
             #[cfg(feature = "appearance-exerciser")]
@@ -1287,6 +1295,7 @@ impl ButtonCore {
         let up_state = state.clone();
         let exit_state = state.clone();
         let on_pointer_activate = self.on_activate.clone();
+        let accept_first_mouse = self.accept_first_mouse;
         let role = self.role;
         let pointer_tracker = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -1304,6 +1313,7 @@ impl ButtonCore {
                     if !phase.capture()
                         || event.button != MouseButton::Left
                         || !down_hitbox.is_hovered(window)
+                        || (event.first_mouse && !accept_first_mouse)
                     {
                         return;
                     }
