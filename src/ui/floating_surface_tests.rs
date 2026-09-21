@@ -196,7 +196,7 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
 }
 
 #[test]
-fn settings_surfaces_transmit_in_order_and_controls_use_their_actual_hosts() {
+fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_hosts() {
     use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
 
     let cumulative_alpha = |under: u8, over: u8| {
@@ -228,7 +228,19 @@ fn settings_surfaces_transmit_in_order_and_controls_use_their_actual_hosts() {
                 assert_eq!([sidebar.paint.a, canvas.paint.a, card.paint.a], [255; 3]);
             } else {
                 let card_alpha = cumulative_alpha(canvas.paint.a, card.paint.a);
-                assert!(sidebar.paint.a < canvas.paint.a);
+                if appearance == Appearance::Dark {
+                    assert_eq!(
+                        canvas.paint,
+                        settings.chrome.surface(
+                            crate::appearance::SurfaceRole::Sheet,
+                            settings.chrome.colors.background,
+                        ),
+                        "Settings must not halve the requested window transparency"
+                    );
+                    assert_eq!(sidebar.paint.a, canvas.paint.a);
+                } else {
+                    assert!(sidebar.paint.a < canvas.paint.a);
+                }
                 assert!(canvas.paint.a < card_alpha);
                 assert!(card_alpha < u8::MAX);
             }

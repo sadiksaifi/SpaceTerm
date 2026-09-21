@@ -12,7 +12,6 @@ use super::{
     ChromeAppearance, ChromeStatePolicy, FloatingContrastFloors, prepare_state_control_host,
 };
 
-const CANVAS_TRANSMISSION_SHARE: f32 = 0.5;
 const CARD_TRANSMISSION_SHARE: f32 = 0.25;
 const BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE: f32 = 0.10;
 const SIDEBAR_CHANNEL_STEP: f64 = 5.0;
@@ -326,9 +325,6 @@ fn prepare_surfaces(
         chrome.colors.elevated_surface_background
     };
     let sidebar_materials = chrome.materials;
-    let canvas_materials = chrome
-        .materials
-        .with_transmission_share(CANVAS_TRANSMISSION_SHARE);
     let card_materials = chrome
         .materials
         .with_transmission_share(if chrome.built_in_light {
@@ -340,7 +336,11 @@ fn prepare_surfaces(
     let canvas_paint = if light_content_hierarchy {
         super::prominent_surface_with(chrome.materials, root, canvas_semantic)
     } else {
-        canvas_materials.paint(SurfaceRole::Sheet, root, canvas_semantic)
+        // This column is a window backing, not a nested card. Keep the same requested
+        // transmission as the Workspace sheet instead of halving it for Settings.
+        chrome
+            .materials
+            .paint(SurfaceRole::Sheet, root, canvas_semantic)
     };
     let sidebar = PreparedSettingsSurface {
         semantic: sidebar_semantic,

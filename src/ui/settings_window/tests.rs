@@ -1293,6 +1293,40 @@ fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_backdrop_tracks_blur_and_accessibility_live(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings(cx);
+    assert_eq!(harness.platform.backdrops.borrow().as_slice(), &[false]);
+
+    harness
+        .platform
+        .set_native_window_transparency_supported(true);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.platform.backdrops.borrow().as_slice(),
+        &[false, true]
+    );
+
+    click("settings-background-blur", cx);
+    assert_eq!(
+        harness.platform.backdrops.borrow().as_slice(),
+        &[false, true, false]
+    );
+    click("settings-background-blur", cx);
+    harness.platform.set_reduce_transparency(true);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.platform.backdrops.borrow().as_slice(),
+        &[false, true, false, true, false]
+    );
+    harness.platform.set_reduce_transparency(false);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.platform.backdrops.borrow().as_slice(),
+        &[false, true, false, true, false, true]
+    );
+}
+
+#[gpui::test]
 fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     cx: &mut TestAppContext,
 ) {
