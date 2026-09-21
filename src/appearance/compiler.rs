@@ -213,9 +213,14 @@ pub(crate) fn compile_chrome(
         resolve!(ghost_element_disabled_foreground, text_disabled);
     let sidebar_focus = resolve!(sidebar_focus, border_focused);
     let info = resolve!(info, text_accent);
-    let success = resolve!(success, contrast(status_seed.success, background, 3.0));
-    let warning = resolve!(warning, contrast(status_seed.warning, background, 3.0));
-    let error = resolve!(error, contrast(status_seed.error, background, 3.0));
+    let status_surface = background.source_over(root_surface);
+    let readable_status = |seed: Color| {
+        seed.readable_preserving_chroma(&[status_surface], 3.0)
+            .unwrap_or_else(|| contrast(seed, status_surface, 3.0))
+    };
+    let success = resolve!(success, readable_status(status_seed.success));
+    let warning = resolve!(warning, readable_status(status_seed.warning));
+    let error = resolve!(error, readable_status(status_seed.error));
     let info_background = resolve!(info_background, info.multiply_opacity(0x1a));
     let info_border = resolve!(info_border, info);
     let success_background = resolve!(success_background, success.multiply_opacity(0x1a));
@@ -1247,6 +1252,36 @@ mod tests {
         assert_eq!(changed.error, baseline.error);
         assert_eq!(changed.element_selected, baseline.element_selected);
         assert_eq!(changed.resize_hovered, baseline.resize_hovered);
+    }
+
+    #[test]
+    fn omitted_status_roles_remain_distinct_and_readable_on_midtones() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let background = Color::rgb(0x777777);
+            let colors = compile_chrome(
+                appearance,
+                &ChromeColorOverrides {
+                    background: Some(background),
+                    ..Default::default()
+                },
+                &Default::default(),
+            )
+            .colors;
+            let statuses = [colors.success, colors.warning, colors.error];
+
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status.contrast_ratio(background) >= 3.0),
+                "{appearance:?} status roles must remain readable: {statuses:?}"
+            );
+            assert!(
+                statuses[0] != statuses[1]
+                    && statuses[0] != statuses[2]
+                    && statuses[1] != statuses[2],
+                "{appearance:?} status roles must remain distinct: {statuses:?}"
+            );
+        }
     }
 
     #[test]
