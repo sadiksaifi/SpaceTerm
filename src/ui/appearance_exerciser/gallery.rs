@@ -101,6 +101,16 @@ fn floating_fallback_family_label(family: FloatingControlFamily) -> &'static str
 
 fn control_diagnostic_lines(appearance: &ChromeAppearance) -> Vec<(String, bool)> {
     let mut lines = Vec::new();
+    let separator_hosts = appearance.separator_ceiling_fallbacks();
+    if !separator_hosts.is_empty() {
+        lines.push((
+            format!(
+                "Separator quietness ceiling relaxed: {}",
+                separator_hosts.join(", ")
+            ),
+            false,
+        ));
+    }
     let contrast = appearance
         .disabled_diagnostics
         .iter()

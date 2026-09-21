@@ -169,9 +169,10 @@ impl SettingsGroup {
             crate::appearance::SurfaceRole::Surface,
             appearance.colors.elevated_surface_background,
         );
-        let separator = appearance
+        let card_edge = appearance
             .materials
             .edge(card_colors.elevated_surface_background, card_colors.border);
+        let row_separator = appearance.separator(spaceterm_ui::ControlHost::Card);
         let row_inset = row_horizontal_padding(appearance);
         let separator_selector = card_selector.clone();
         let rows = self
@@ -191,7 +192,7 @@ impl SettingsGroup {
                             .left(row_inset)
                             .right_0()
                             .h(px(HAIRLINE))
-                            .bg(gpui_color(separator)),
+                            .bg(gpui_color(row_separator)),
                     )
                 })
             })
@@ -224,7 +225,7 @@ impl SettingsGroup {
                         .w_full()
                         .rounded(radius)
                         .border(px(HAIRLINE))
-                        .border_color(gpui_color(separator))
+                        .border_color(gpui_color(card_edge))
                         // A revealed row fills to the card's own edges, so the card clips it back to
                         // its corners instead of letting a square fill escape a rounded shape.
                         .overflow_hidden()

@@ -2,6 +2,7 @@
 
 mod collection_selection;
 mod disabled_union;
+mod separator;
 
 use std::sync::Arc;
 
@@ -3665,6 +3666,68 @@ impl ChromeAppearance {
         }
     }
 
+    /// A functional rule on a nonfloating host, independent of its decorative outer border.
+    pub(crate) fn separator(&self, host: spaceterm_ui::ControlHost) -> Color {
+        separator::prepare(
+            self.colors.border,
+            self.colors.background,
+            self.host_colors(host).text,
+            [self.control_host_background(host)],
+            self.capabilities.increase_contrast,
+        )
+    }
+
+    /// Bounded, content-free evidence when visibility requires relaxing the quietness ceiling.
+    #[cfg(feature = "appearance-exerciser")]
+    pub(crate) fn separator_ceiling_fallbacks(&self) -> Vec<&'static str> {
+        use spaceterm_ui::{ControlHost, FloatingRole};
+
+        if self.capabilities.increase_contrast {
+            return Vec::new();
+        }
+        let mut hosts = Vec::new();
+        for (label, host) in [
+            ("Window", ControlHost::Window),
+            ("Panel", ControlHost::Panel),
+            ("Card", ControlHost::Card),
+        ] {
+            let background = self.control_host_background(host);
+            if self
+                .separator(host)
+                .source_over(background)
+                .contrast_ratio(background)
+                > separator::CONTRAST_CEILING
+            {
+                hosts.push(label);
+            }
+        }
+        let surfaces = self.floating_surfaces();
+        for (label, role) in [
+            ("Popover", FloatingRole::Popover),
+            ("Command", FloatingRole::Command),
+            ("Modal", FloatingRole::Modal),
+            ("Tooltip", FloatingRole::Tooltip),
+            ("Notice", FloatingRole::Notice),
+            ("Readout", FloatingRole::Readout),
+        ] {
+            let shell = surfaces.shell(role);
+            let tone = Color::rgba(u32::from(shell.backdrop_tone()));
+            let wash = Color::rgba(u32::from(shell.material()));
+            let divider = Color::rgba(u32::from(shell.divider()));
+            if [Color::rgb(0), Color::rgb(0xffffff)]
+                .into_iter()
+                .any(|underlay| {
+                    let background = wash.source_over(tone.source_over(underlay));
+                    divider.source_over(background).contrast_ratio(background)
+                        > separator::CONTRAST_CEILING
+                })
+            {
+                hosts.push(label);
+            }
+        }
+        hosts
+    }
+
     /// Returns the combined tone and wash used to evaluate content over a floating surface.
     pub(crate) fn floating_surface(&self, color: Color) -> Color {
         let (tone, wash) = state_floating_material(
@@ -3717,12 +3780,16 @@ impl ChromeAppearance {
             } else {
                 self.colors.shadow.with_alpha(115)
             };
-            let divider = if self.capabilities.increase_contrast {
-                readable_on_material(self.colors.border_variant, tone, wash, 3.0)
-            } else {
-                self.floating_materials
-                    .edge(color, self.colors.border_variant)
-            };
+            let divider = separator::prepare(
+                self.colors.border,
+                self.colors.background,
+                self.floating_colors.text,
+                [
+                    wash.source_over(tone.source_over(Color::rgb(0))),
+                    wash.source_over(tone.source_over(Color::rgb(0xffffff))),
+                ],
+                self.capabilities.increase_contrast,
+            );
             FloatingSurfacePaint::new(
                 rgba(wash.rgba_hex()),
                 rgba(edge.rgba_hex()),

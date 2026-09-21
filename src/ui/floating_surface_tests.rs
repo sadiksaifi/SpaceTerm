@@ -16,6 +16,42 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 ];
 
 #[test]
+fn floating_separators_remain_visible_on_both_material_endpoints() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            for increase_contrast in [false, true] {
+                let (mut resolved, _) =
+                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                std::sync::Arc::make_mut(&mut resolved.chrome)
+                    .composition
+                    .capabilities
+                    .increase_contrast = increase_contrast;
+                let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+                for prepared in [&active, &inactive] {
+                    for role in FLOATING_ROLES {
+                        let shell = prepared.floating_surfaces().shell(role);
+                        let divider = Color::rgba(u32::from(shell.divider()));
+                        for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                            let host = shell_endpoint_background(shell, underlay);
+                            let contrast = divider.source_over(host).contrast_ratio(host);
+                            let floor = if increase_contrast { 3.0 } else { 1.35 };
+                            assert!(
+                                contrast >= floor,
+                                "{appearance:?} {role:?} active={} transparency={transparency} increase_contrast={increase_contrast}: separator contrast {contrast} < {floor}",
+                                prepared.active,
+                            );
+                            if !increase_contrast {
+                                assert!(contrast <= 1.9, "separator is too strong: {contrast}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
@@ -50,6 +86,41 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
                                 3.0
                             };
                             assert!(foreground.source_over(host).contrast_ratio(host) >= minimum);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn settings_separators_remain_visible_on_their_final_hosts() {
+    use spaceterm_ui::ControlHost;
+
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            for increase_contrast in [false, true] {
+                let (mut resolved, _) =
+                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                std::sync::Arc::make_mut(&mut resolved.chrome)
+                    .composition
+                    .capabilities
+                    .increase_contrast = increase_contrast;
+                let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+                for prepared in [&active, &inactive] {
+                    for host in [ControlHost::Window, ControlHost::Panel, ControlHost::Card] {
+                        let background = prepared.control_host_background(host);
+                        let divider = prepared.separator(host);
+                        let contrast = divider.source_over(background).contrast_ratio(background);
+                        let floor = if increase_contrast { 3.0 } else { 1.35 };
+                        assert!(
+                            contrast >= floor,
+                            "{appearance:?} {host:?} active={} transparency={transparency}: separator {contrast} < {floor}",
+                            prepared.active,
+                        );
+                        if !increase_contrast {
+                            assert!(contrast <= 1.9);
                         }
                     }
                 }
@@ -1906,10 +1977,11 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
                 gpui::rgba(opaque.colors.shadow.with_alpha(115).rgba_hex()),
                 "{appearance:?} {role:?} floating boundary uses the scheme shadow ink"
             );
-            assert_eq!(
-                opaque_shell.divider(),
-                gpui::rgba(opaque.colors.border_variant.rgba_hex()),
-                "{appearance:?} {role:?} opaque divider must keep its authored contrast"
+            let host = shell_endpoint_background(opaque_shell, Color::rgb(0));
+            let divider = Color::rgba(u32::from(opaque_shell.divider()));
+            assert!(
+                (1.35..=1.9).contains(&divider.source_over(host).contrast_ratio(host)),
+                "{appearance:?} {role:?} divider is prepared independently of the outer edge"
             );
 
             let accessible_shell = accessible.floating_surfaces().shell(role);

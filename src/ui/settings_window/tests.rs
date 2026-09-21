@@ -1797,6 +1797,17 @@ fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut T
     assert_eq!(separator.size.height, px(1.0));
     assert_eq!(separator.left() - card.left(), px(12.0));
     assert_eq!(separator.right(), card.right() - px(1.0));
+    cx.update(|window, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        let divider =
+            super::controls::gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
+        let scale = window.scale_factor();
+        let quads = window.painted_quads_for_test();
+        assert!(quads.iter().any(|quad| {
+            quad.visible_bounds == separator.scale(scale)
+                && quad.background == gpui::Background::from(divider)
+        }));
+    });
 }
 
 fn assert_reset_all_leads_the_content_footer(document: SettingsDocument, cx: &mut TestAppContext) {

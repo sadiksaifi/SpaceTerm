@@ -863,10 +863,9 @@ impl SettingsWindow {
                         .left_0()
                         .w_full()
                         .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(appearance.materials.edge(
-                            appearance.colors.background,
-                            appearance.colors.border,
-                        ))),
+                        .bg(gpui_color(
+                            appearance.separator(spaceterm_ui::ControlHost::Window),
+                        )),
                 )
             })
             .into_any_element()
@@ -2052,7 +2051,6 @@ impl SettingsWindow {
     ) -> AnyElement {
         let status = self.editor.status();
         let owner = cx.weak_entity();
-        let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
         div()
             .debug_selector(|| "settings-footer".to_owned())
             .flex()
@@ -2068,9 +2066,7 @@ impl SettingsWindow {
                     .w(appearance.spacing(SIDEBAR_WIDTH))
                     .border_t_1()
                     .border_color(gpui_color(
-                        appearance
-                            .materials
-                            .edge(panel_colors.panel_background, panel_colors.border),
+                        appearance.separator(spaceterm_ui::ControlHost::Panel),
                     ))
                     .bg(gpui_color(appearance.control_colors.panel_background)),
             )
@@ -2082,9 +2078,7 @@ impl SettingsWindow {
                     .h_full()
                     .border_t_1()
                     .border_color(gpui_color(
-                        appearance
-                            .materials
-                            .edge(appearance.colors.background, appearance.colors.border),
+                        appearance.separator(spaceterm_ui::ControlHost::Window),
                     ))
                     .bg(gpui_color(appearance.surface(
                         crate::appearance::SurfaceRole::Base,
