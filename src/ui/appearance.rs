@@ -3758,14 +3758,19 @@ impl ChromeAppearance {
         }
     }
 
-    /// Selected chips use the same host-relative material as other resting surfaces.
+    /// Persistent selection uses the shared host-relative prominent-surface material.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
+        self.prominent_surface(host, color)
+    }
+
+    /// Selected navigation and Light Pane interiors share one material-strength policy.
+    fn prominent_surface(&self, host: Color, color: Color) -> Color {
         let paint = self.materials.paint(SurfaceRole::Surface, host, color);
         if self.materials.is_opaque() || paint.a == 0 {
             return paint;
         }
-        // Keep selection identifiable when the neutral surface ladder compresses at high
-        // transparency. Strengthen only its overlay, never replace it with an opaque fill.
+        // Keep these surfaces distinct when the neutral ladder compresses at high transparency.
+        // Strengthen only the overlay, never replace it with an opaque fill.
         let minimum = color.source_over(host).contrast_ratio(host).min(1.22);
         let visible = |alpha| {
             paint
@@ -3897,11 +3902,11 @@ impl ChromeAppearance {
 
     /// The backdrop a Pane paints beneath its Terminal.
     ///
-    /// Light applies the shared material directly to the accepted Terminal background. Dark
+    /// Light uses the selected navigation material with the accepted Terminal background. Dark
     /// retains its elevation tint and readability backing. Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         if self.appearance == Appearance::Light {
-            return self.surface(SurfaceRole::Surface, terminal_background);
+            return self.prominent_surface(self.colors.background, terminal_background);
         }
         self.materials.pane_surface(
             self.colors.background,

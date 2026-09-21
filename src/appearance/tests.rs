@@ -94,19 +94,26 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 if transparency == 1.0 {
                     // The sheet clears while Panes and controls keep enough tint to retain shape.
                     assert_eq!(sheet.a, 0);
-                    assert!(pane.a > 0 && pane.a < 192);
+                    assert!(pane.a > 0 && pane.a < 255);
+                    if mode == AppearanceMode::Dark {
+                        assert!(pane.a < 192);
+                    }
                     assert!(controls.row_selected_background.a > 0);
                     assert!(controls.elevated_surface_background.a >= 96);
                 } else {
-                    // Two resting layers must retain a substantial share of the sheet's backdrop transmission.
-                    // Previously, each added a full tint and almost erased it.
+                    // Check transmission through two resting layers above the window sheet.
                     let retained = (1.0 - f64::from(pane.a) / 255.0)
                         * (1.0 - f64::from(controls.row_selected_background.a) / 255.0);
                     let repeated_full_tints = f64::from(transparency).powi(2);
-                    assert!(
-                        retained > repeated_full_tints * 3.0,
-                        "{mode:?}: resting layers retain {retained}"
-                    );
+                    if mode == AppearanceMode::Dark {
+                        assert!(
+                            retained > repeated_full_tints * 3.0,
+                            "{mode:?}: resting layers retain {retained}"
+                        );
+                    } else {
+                        // Light Panes now retain the same stronger tint as selected navigation.
+                        assert!(retained > 0.0, "Light surfaces must still transmit");
+                    }
                 }
             }
         }
@@ -357,6 +364,47 @@ fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() 
 }
 
 #[test]
+fn light_terminal_and_selected_navigation_share_one_translucent_paint() {
+    use spaceterm_ui::ControlHost;
+
+    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
+        for blur in [false, true] {
+            let mut preferences = AppearancePreferences {
+                mode: AppearanceMode::Light,
+                ..Default::default()
+            };
+            preferences.background.transparency = transparency;
+            preferences.background.blur = blur;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let terminal = appearance.pane_surface(resolved.terminal.colors.background);
+            let title = appearance.host_colors(ControlHost::TitleBar);
+            let panel = appearance.host_colors(ControlHost::Panel);
+            let selection = appearance.unfocused_selection_colors(ControlHost::Panel);
+            for (host, fill) in [
+                (title.title_bar_background, title.tab_active_background),
+                (panel.row_background, selection.row_selected_background),
+            ] {
+                assert_eq!(
+                    terminal,
+                    appearance.selection_surface(host, fill),
+                    "matching Light surfaces must share RGBA at transparency {transparency}, blur={blur}"
+                );
+            }
+            assert_eq!(terminal.a == 255, transparency == 0.0);
+        }
+    }
+}
+
+#[test]
 fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
@@ -379,7 +427,7 @@ fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
         for prepared in [active, inactive] {
             assert_eq!(
                 prepared.pane_surface(background),
-                prepared.surface(SurfaceRole::Surface, background),
+                prepared.selection_surface(prepared.colors.background, background),
                 "Light Terminal at transparency {transparency}, active={}",
                 prepared.active,
             );
@@ -397,7 +445,7 @@ fn light_terminal_backing_uses_custom_background_as_its_material_color() {
     for background in [Color::rgb(0x18324c), Color::rgba(0xe8d9b780)] {
         assert_eq!(
             prepared.pane_surface(background),
-            prepared.surface(SurfaceRole::Surface, background)
+            prepared.selection_surface(prepared.colors.background, background)
         );
     }
 }
