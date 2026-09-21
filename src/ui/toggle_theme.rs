@@ -4,8 +4,18 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
+    prepared(colors, &ChromeTypography::default())
+}
+
+pub(super) fn prepared(colors: &ChromeColors, typography: &ChromeTypography) -> ToggleTheme {
+    let body_size = typography.style(TextRole::Body).size;
+    let body_line_height =
+        f32::from(typography.style(TextRole::Body).line_height) / f32::from(body_size);
     ToggleTheme::new(
         TogglePaints::new(
             values(
@@ -68,14 +78,14 @@ pub(super) fn theme(colors: &ChromeColors) -> ToggleTheme {
         ToggleSizes::new(
             ToggleMetrics::new(px(20.0), px(14.0), px(30.0), px(16.0))
                 .label_gap(px(6.0))
-                .checkbox_radius(px(3.0))
-                .typography(px(11.0), 1.2),
+                .checkbox_radius(RadiusRole::ControlSmall.pixels())
+                .typography(body_size, body_line_height),
             ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0))
                 .label_gap(px(8.0))
-                .checkbox_radius(px(4.0))
-                .typography(px(12.0), 1.2),
+                .checkbox_radius(RadiusRole::ControlSmall.pixels())
+                .typography(body_size, body_line_height),
         ),
-        gpui_color(colors.border_focused),
+        gpui_color(colors.focus_ring),
     )
 }
 

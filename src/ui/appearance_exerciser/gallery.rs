@@ -14,7 +14,13 @@ use spaceterm_ui::{
     Switch, TextInput,
 };
 
+use super::super::appearance::{
+    ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily,
+};
 use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearanceOwner};
+use super::super::chrome_geometry::RadiusRole;
+use super::super::chrome_icons::IconRole;
+use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::appearance::{Appearance, AppearanceMode, SchemeId, ZedImportKind};
 use crate::settings::{PreviewToken, SchemeImport};
 
@@ -83,9 +89,166 @@ const STATES: [(&str, ControlPreviewState); 5] = [
     ("Keyboard focus", ControlPreviewState::Focused),
 ];
 
+fn floating_fallback_family_label(family: FloatingControlFamily) -> &'static str {
+    match family {
+        FloatingControlFamily::Element => "Element",
+        FloatingControlFamily::GhostElement => "GhostElement",
+        FloatingControlFamily::Toggle => "Toggle",
+        FloatingControlFamily::Segmented => "Segmented",
+        FloatingControlFamily::Input => "Input",
+    }
+}
+
+fn control_diagnostic_lines(appearance: &ChromeAppearance) -> Vec<(String, bool)> {
+    let mut lines = Vec::new();
+    let separator_hosts = appearance.separator_ceiling_fallbacks();
+    if !separator_hosts.is_empty() {
+        lines.push((
+            format!(
+                "Separator quietness ceiling relaxed: {}",
+                separator_hosts.join(", ")
+            ),
+            false,
+        ));
+    }
+    let contrast = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::ContrastFloor { family } => Some(family),
+            DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !contrast.is_empty() {
+        lines.push((format!("Disabled contrast floor unmet: {contrast}"), true));
+    }
+    let separation = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::Separation { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !separation.is_empty() {
+        lines.push((
+            format!("Disabled separation target unmet: {separation}"),
+            false,
+        ));
+    }
+    let shared = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::SharedPaint { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SelectedStep { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !shared.is_empty() {
+        lines.push((format!("Disabled shared paint unmet: {shared}"), false));
+    }
+    let selected_step = appearance
+        .disabled_diagnostics
+        .iter()
+        .filter_map(|diagnostic| match *diagnostic {
+            DisabledControlDiagnostic::SelectedStep { family } => Some(family),
+            DisabledControlDiagnostic::ContrastFloor { .. }
+            | DisabledControlDiagnostic::Separation { .. }
+            | DisabledControlDiagnostic::SharedPaint { .. } => None,
+        })
+        .map(floating_fallback_family_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !selected_step.is_empty() {
+        lines.push((
+            format!("Disabled selected step unmet: {selected_step}"),
+            false,
+        ));
+    }
+
+    let hosts = [
+        ("Window", &appearance.window_control_fallbacks),
+        ("TitleBar", &appearance.title_bar_controls.fallback_families),
+        ("Panel", &appearance.panel_controls.fallback_families),
+        ("Card", &appearance.card_controls.fallback_families),
+        ("Floating", &appearance.floating_fallbacks),
+    ]
+    .into_iter()
+    .filter(|(_, families)| !families.is_empty())
+    .map(|(host, families)| {
+        let families = families
+            .iter()
+            .copied()
+            .map(floating_fallback_family_label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{host}: {families}")
+    })
+    .collect::<Vec<_>>();
+    if !hosts.is_empty() {
+        lines.push((
+            format!("Control constraint fallback families: {}", hosts.join("; ")),
+            false,
+        ));
+    }
+    lines
+}
+
+#[cfg(test)]
+fn floating_fallback_diagnostic_text(appearance: &ChromeAppearance) -> Option<String> {
+    let lines = control_diagnostic_lines(appearance);
+    (!lines.is_empty()).then(|| {
+        lines
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+fn floating_fallback_diagnostic(appearance: &ChromeAppearance) -> Option<gpui::Div> {
+    let lines = control_diagnostic_lines(appearance);
+    (!lines.is_empty()).then(|| {
+        lines.into_iter().fold(
+            div()
+                .debug_selector(|| "gallery-floating-fallback-diagnostic".to_owned())
+                .flex()
+                .flex_col(),
+            |diagnostic, (message, severe)| {
+                diagnostic.child(
+                    div()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(rgba(
+                            if severe {
+                                appearance.colors.error
+                            } else {
+                                appearance.colors.text_muted
+                            }
+                            .rgba_hex(),
+                        ))
+                        .child(message),
+                )
+            },
+        )
+    })
+}
+
 struct Gallery {
     window_appearance: WindowAppearanceOwner,
     preview: Option<PreviewToken>,
+    preview_inactive: bool,
     fixture: Fixture,
     status: String,
     fields: Vec<Entity<TextInput>>,
@@ -113,6 +276,8 @@ impl Gallery {
             },
         )
         .detach();
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
         let fields = (0..5)
             .map(|index| {
                 cx.new(|cx| {
@@ -176,6 +341,7 @@ impl Gallery {
         let mut this = Self {
             window_appearance,
             preview: None,
+            preview_inactive: false,
             fixture: Fixture::Dark,
             status: "Ready. Fixture changes are preview-only; fields retain their contents.".into(),
             fields,
@@ -294,12 +460,35 @@ impl Gallery {
                 this.select(FIXTURES[(index + 1) % FIXTURES.len()], cx);
             }))
     }
+
+    fn toggle_activity_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_inactive = !self.preview_inactive;
+        cx.notify();
+    }
 }
 
 impl Render for Gallery {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::super::appearance::chrome(cx).clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let activity = if self.preview_inactive {
+            spaceterm_ui::ControlWindowActivity::Inactive
+        } else {
+            super::super::appearance::window_activity(window)
+        };
+        activity.mount(activity.with_scope(|| self.render_chrome(cx)))
+    }
+}
+
+impl Gallery {
+    fn render_chrome(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = super::super::appearance::shared_chrome(cx);
+        let control_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let weak = cx.weak_entity();
+        let activity_preview = weak.clone();
+        let activity_preview_label = if self.preview_inactive {
+            "Use native window activity"
+        } else {
+            "Preview inactive window"
+        };
         let cell = |label: &'static str| div().w(px(170.0)).flex_none().child(label);
         let mut content = Self::action_scope(cx)
             .id("gallery-scroll")
@@ -318,12 +507,10 @@ impl Render for Gallery {
                     .rgba_hex(),
             ))
             .text_color(rgba(appearance.colors.text.rgba_hex()))
-            .font(appearance.regular.clone())
-            .text_size(px(12.0))
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .child(
                 div()
-                    .font(appearance.heading.clone())
-                    .text_size(px(18.0))
+                    .chrome_text(appearance.typography.style(TextRole::Title))
                     .child("Chrome theme state gallery"),
             )
             .child(
@@ -337,12 +524,36 @@ impl Render for Gallery {
                             .on_activate(move |_, _, cx| {
                                 let _ = weak.update(cx, |this, cx| this.select(fixture, cx));
                             })
-                    })),
+                    }))
+                    .child(
+                        Button::new("gallery-activity-preview", activity_preview_label)
+                            .size(ButtonSize::Small)
+                            .debug_selector("gallery-activity-preview-toggle")
+                            .on_activate(move |_, _, cx| {
+                                let _ = activity_preview
+                                    .update(cx, |this, cx| this.toggle_activity_preview(cx));
+                            }),
+                    ),
             )
             .child(
                 div()
                     .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
                     .child(self.status.clone()),
+            )
+            .when(self.preview_inactive, |content| {
+                content.child(
+                    div()
+                        .debug_selector(|| "gallery-synthetic-activity-status".to_owned())
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                        .child(
+                            "Synthetic inactive-window preview. Native window activity and preferences are unchanged.",
+                        ),
+                )
+            })
+            .when_some(
+                floating_fallback_diagnostic(&appearance),
+                |content, diagnostic| content.child(diagnostic),
             )
             .child(
                 div()
@@ -365,15 +576,17 @@ impl Render for Gallery {
                     .items_center()
                     .gap(px(10.0))
                     .child(div().w(px(130.0)).child(label))
-                    .children(STATES.iter().enumerate().map(|(index, (_, state))| {
+                    .children(STATES.iter().enumerate().map(move |(index, (_, state))| {
                         div().w(px(170.0)).child(
                             Button::new(("gallery-button", row_index * 5 + index), "Action")
                                 .variant(variant)
                                 .size(ButtonSize::Regular)
+                                .debug_selector(format!("gallery-button-{row_index}-{index}"))
                                 .disabled(index == 3)
                                 .preview_state(*state)
-                                .leading(|color| {
-                                    Icon::new(IconName::Plus, px(14.0), color).into_any_element()
+                                .leading(move |color| {
+                                    Icon::new(IconName::Plus, control_icon_size, color)
+                                        .into_any_element()
                                 })
                                 .on_activate(|_, _, _| {}),
                         )
@@ -398,6 +611,7 @@ impl Render for Gallery {
                             ],
                         )
                         .unwrap()
+                        .full_width(true)
                         .disabled(index == 3)
                         .preview_state(*state)
                         .on_change(|_, _, _| {}),
@@ -469,7 +683,7 @@ impl Render for Gallery {
                                     .preview_focus(index == 1 || index == 4),
                                 cx,
                             )
-                            .rounded(px(5.0))
+                            .rounded(RadiusRole::Control.pixels())
                             .px(px(8.0))
                             .h(px(30.0))
                             .child(input.clone()),
@@ -619,17 +833,19 @@ impl Render for Gallery {
                         Some(1_u8),
                         "Choose",
                         vec![
-                            ComboBoxItem::new(1, "Selected row")
-                                .description("Selected secondary text"),
-                            ComboBoxItem::new(2, "Another row")
-                                .description("Hovered secondary text"),
+                            ComboBoxItem::new(1, "Preview: disabled selected row")
+                                .description("Visual-state preview; unavailable to navigation")
+                                .disabled(true)
+                                .preview_selected(true),
+                            ComboBoxItem::new(2, "Enabled navigation target")
+                                .description("Keyboard and pointer acceptance remain live"),
                         ],
                     )
                     .on_accept(|_, _, _| {}),
                 )
                 .child(
-                    IconButton::new("gallery-icon", "Icon-only action", |color| {
-                        Icon::new(IconName::Plus, px(14.0), color).into_any_element()
+                    IconButton::new("gallery-icon", "Icon-only action", move |color| {
+                        Icon::new(IconName::Plus, control_icon_size, color).into_any_element()
                     })
                     .variant(ButtonVariant::Primary)
                     .on_activate(|_, _, _| {}),
@@ -650,6 +866,109 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use std::{rc::Rc, sync::Arc};
+
+    struct FloatingFallbackDiagnosticFixture;
+
+    impl Render for FloatingFallbackDiagnosticFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let appearance = super::super::super::appearance::chrome(cx);
+            div().when_some(
+                floating_fallback_diagnostic(appearance),
+                |root, diagnostic| root.child(diagnostic),
+            )
+        }
+    }
+
+    #[test]
+    fn floating_fallback_diagnostic_names_only_the_bounded_families() {
+        let appearance = ChromeAppearance {
+            window_control_fallbacks: vec![FloatingControlFamily::Segmented],
+            title_bar_controls: super::super::super::appearance::PreparedControlHost {
+                fallback_families: vec![FloatingControlFamily::GhostElement],
+                ..ChromeAppearance::default().title_bar_controls
+            },
+            panel_controls: super::super::super::appearance::PreparedControlHost {
+                fallback_families: vec![FloatingControlFamily::Input],
+                ..ChromeAppearance::default().panel_controls
+            },
+            card_controls: super::super::super::appearance::PreparedControlHost {
+                fallback_families: vec![FloatingControlFamily::Segmented],
+                ..ChromeAppearance::default().card_controls
+            },
+            floating_fallbacks: vec![
+                FloatingControlFamily::Element,
+                FloatingControlFamily::GhostElement,
+                FloatingControlFamily::Toggle,
+            ],
+            ..ChromeAppearance::default()
+        };
+
+        assert_eq!(
+            floating_fallback_diagnostic_text(&appearance).as_deref(),
+            Some(
+                "Control constraint fallback families: Window: Segmented; TitleBar: GhostElement; Panel: Input; Card: Segmented; Floating: Element, GhostElement, Toggle"
+            )
+        );
+    }
+
+    #[test]
+    fn disabled_diagnostics_distinguish_readability_from_separation() {
+        let appearance = ChromeAppearance {
+            disabled_diagnostics: vec![
+                DisabledControlDiagnostic::ContrastFloor {
+                    family: FloatingControlFamily::Element,
+                },
+                DisabledControlDiagnostic::Separation {
+                    family: FloatingControlFamily::Toggle,
+                },
+                DisabledControlDiagnostic::SharedPaint {
+                    family: FloatingControlFamily::Input,
+                },
+                DisabledControlDiagnostic::SelectedStep {
+                    family: FloatingControlFamily::Segmented,
+                },
+            ],
+            ..ChromeAppearance::default()
+        };
+
+        assert_eq!(
+            floating_fallback_diagnostic_text(&appearance).as_deref(),
+            Some(
+                "Disabled contrast floor unmet: Element; Disabled separation target unmet: Toggle; Disabled shared paint unmet: Input; Disabled selected step unmet: Segmented"
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn floating_fallback_diagnostic_disappears_after_appearance_update(cx: &mut TestAppContext) {
+        let fallback = ChromeAppearance {
+            floating_fallbacks: vec![FloatingControlFamily::GhostElement],
+            ..ChromeAppearance::default()
+        };
+        cx.update(|cx| {
+            cx.set_global(super::super::super::appearance::InstalledChrome::single(
+                Arc::new(fallback),
+            ));
+        });
+        let (_, cx) = cx.add_window_view(|_, _| FloatingFallbackDiagnosticFixture);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("gallery-floating-fallback-diagnostic")
+                .is_some()
+        );
+
+        cx.update(|window, cx| {
+            cx.set_global(super::super::super::appearance::InstalledChrome::single(
+                Arc::new(ChromeAppearance::default()),
+            ));
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("gallery-floating-fallback-diagnostic")
+                .is_none()
+        );
+    }
 
     #[gpui::test]
     fn gallery_shortcut_cycles_fixture_while_palette_retains_focus_and_query(
@@ -733,5 +1052,198 @@ mod tests {
             });
         }
         assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+    }
+
+    #[gpui::test]
+    fn authored_fixture_floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+            super::super::tests::ReadOnlyExerciserStorage,
+        ));
+        let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+        platform.set_system_appearance(Some(Appearance::Dark));
+        platform.set_native_window_transparency_supported(true);
+        cx.update(|cx| {
+            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            crate::ui::init(cx).unwrap();
+        });
+        let (gallery, cx) = cx.add_window_view(Gallery::new);
+
+        for fixture in FIXTURES {
+            gallery.update(cx, |gallery, cx| gallery.select(fixture, cx));
+            for transparency in [0.0, 0.35, 1.0] {
+                gallery.update(cx, |gallery, cx| {
+                    let token = gallery.preview.as_ref().unwrap();
+                    let mut candidate = (*settings.snapshot().candidate).clone();
+                    candidate.preferences.background.transparency = transparency;
+                    settings.update_preview(token, candidate).unwrap();
+                    cx.notify();
+                });
+                cx.run_until_parked();
+
+                for activity in [
+                    spaceterm_ui::ControlWindowActivity::Active,
+                    spaceterm_ui::ControlWindowActivity::Inactive,
+                ] {
+                    let prepared = cx.update(|_, cx| {
+                        activity.with_scope(|| super::super::super::appearance::shared_chrome(cx))
+                    });
+                    for role in [
+                        spaceterm_ui::FloatingRole::Popover,
+                        spaceterm_ui::FloatingRole::Command,
+                        spaceterm_ui::FloatingRole::Modal,
+                        spaceterm_ui::FloatingRole::Tooltip,
+                        spaceterm_ui::FloatingRole::Notice,
+                        spaceterm_ui::FloatingRole::Readout,
+                    ] {
+                        let shell = prepared.floating_surfaces().shell(role);
+                        let tone = crate::appearance::Color::rgba(u32::from(shell.backdrop_tone()));
+                        let wash = crate::appearance::Color::rgba(u32::from(shell.material()));
+                        for endpoint in [
+                            crate::appearance::Color::rgb(0x000000),
+                            crate::appearance::Color::rgb(0xffffff),
+                        ] {
+                            let composite = wash.source_over(tone.source_over(endpoint));
+                            let lightness = cie_lightness(composite);
+                            match fixture.appearance() {
+                                Appearance::Light => assert!(
+                                    lightness >= 50.0,
+                                    "{fixture:?} {transparency} {activity:?} {role:?} crossed below L* 50 over {endpoint:?}: {lightness:.2}"
+                                ),
+                                Appearance::Dark => assert!(
+                                    lightness < 50.0,
+                                    "{fixture:?} {transparency} {activity:?} {role:?} crossed above L* 50 over {endpoint:?}: {lightness:.2}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn cie_lightness(color: crate::appearance::Color) -> f64 {
+        let linear = |channel: u8| {
+            let channel = f64::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance =
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b);
+        if luminance <= 216.0 / 24_389.0 {
+            luminance * 24_389.0 / 27.0
+        } else {
+            116.0 * luminance.cbrt() - 16.0
+        }
+    }
+
+    #[gpui::test]
+    fn gallery_activity_preview_selects_inactive_control_states_without_editing_preferences(
+        cx: &mut TestAppContext,
+    ) {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+            super::super::tests::ReadOnlyExerciserStorage,
+        ));
+        let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+        platform.set_system_appearance(Some(Appearance::Dark));
+        cx.update(|cx| {
+            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            crate::ui::init(cx).unwrap();
+        });
+        let (_, cx) = cx.add_window_view(Gallery::new);
+        cx.simulate_resize(size(px(1600.0), px(2400.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let (active, inactive) = cx.update(|_, cx| {
+            (
+                spaceterm_ui::ControlWindowActivity::Active
+                    .with_scope(|| super::super::super::appearance::shared_chrome(cx)),
+                spaceterm_ui::ControlWindowActivity::Inactive
+                    .with_scope(|| super::super::super::appearance::shared_chrome(cx)),
+            )
+        });
+        let active_hover = rgba(active.control_colors.primary_hover_background.rgba_hex());
+        let inactive_hover = rgba(inactive.control_colors.primary_hover_background.rgba_hex());
+        let active_focus = rgba(active.control_colors.focus_ring.rgba_hex());
+        assert_ne!(
+            active_hover, inactive_hover,
+            "the fixture must distinguish hover catalogs"
+        );
+        assert!(
+            active_focus.a > 0.0,
+            "the active fixture must paint keyboard focus"
+        );
+        assert_eq!(inactive.control_colors.focus_ring.a, 0);
+        let preferences = settings.snapshot().candidate.preferences.clone();
+
+        let paints_button_background =
+            |selector: &'static str, expected: gpui::Rgba, cx: &mut gpui::VisualTestContext| {
+                let bounds = cx
+                    .debug_bounds(selector)
+                    .expect("gallery button must render");
+                cx.update(|window, _| {
+                    let bounds = bounds.scale(window.scale_factor());
+                    window.painted_quads_for_test().iter().any(|quad| {
+                        quad.visible_bounds == bounds
+                            && quad.background == gpui::Background::from(expected)
+                    })
+                })
+            };
+        let paints_focus_ring = |expected: gpui::Rgba, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx
+                .debug_bounds("gallery-button-0-4-keyboard-focus")
+                .expect("gallery focus ring must render");
+            cx.update(|window, _| {
+                let bounds = bounds.scale(window.scale_factor());
+                window.painted_quads_for_test().iter().any(|quad| {
+                    quad.visible_bounds.intersects(&bounds) && quad.border_color == expected.into()
+                })
+            })
+        };
+
+        assert!(paints_button_background(
+            "gallery-button-0-1",
+            active_hover,
+            cx,
+        ));
+        assert!(paints_focus_ring(active_focus, cx));
+        let toggle = cx
+            .debug_bounds("gallery-activity-preview-toggle")
+            .expect("Gallery must offer an inactive-window preview");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(paints_button_background(
+            "gallery-button-0-1",
+            inactive_hover,
+            cx,
+        ));
+        assert!(!paints_focus_ring(active_focus, cx));
+        assert!(
+            cx.debug_bounds("gallery-synthetic-activity-status")
+                .is_some()
+        );
+        assert_eq!(settings.snapshot().candidate.preferences, preferences);
+
+        let reset = cx
+            .debug_bounds("gallery-activity-preview-toggle")
+            .expect("Gallery must offer the native-activity reset");
+        cx.simulate_click(reset.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(paints_button_background(
+            "gallery-button-0-1",
+            active_hover,
+            cx,
+        ));
+        assert!(paints_focus_ring(active_focus, cx));
+        assert!(
+            cx.debug_bounds("gallery-synthetic-activity-status")
+                .is_none()
+        );
+        assert_eq!(settings.snapshot().candidate.preferences, preferences);
     }
 }

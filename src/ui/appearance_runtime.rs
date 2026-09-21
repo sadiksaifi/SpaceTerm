@@ -17,17 +17,70 @@ use crate::appearance::{
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
 
-use super::appearance::{ChromeAppearance, InstalledChrome};
+use super::appearance::{ChromeAppearance, InstalledChrome, settings};
 
 #[derive(Clone)]
 pub(crate) struct InstalledAppearance(pub(crate) Arc<ResolvedAppearance>);
 impl Global for InstalledAppearance {}
+
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccessibilityPreviewFact {
+    ReduceTransparency,
+    IncreaseContrast,
+    ShowBorders,
+    ReduceMotion,
+    DifferentiateWithoutColor,
+}
+
+#[cfg(feature = "appearance-exerciser")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AccessibilityPreviewOverride {
+    reduce_transparency: Option<bool>,
+    increase_contrast: Option<bool>,
+    show_borders: Option<bool>,
+    reduce_motion: Option<bool>,
+    differentiate_without_color: Option<bool>,
+}
+
+#[cfg(feature = "appearance-exerciser")]
+impl AccessibilityPreviewOverride {
+    fn apply(self, mut capabilities: CompositionCapabilities) -> CompositionCapabilities {
+        capabilities.reduce_transparency = self
+            .reduce_transparency
+            .unwrap_or(capabilities.reduce_transparency);
+        capabilities.increase_contrast = self
+            .increase_contrast
+            .unwrap_or(capabilities.increase_contrast);
+        capabilities.show_borders = self.show_borders.unwrap_or(capabilities.show_borders);
+        capabilities.reduce_motion = self.reduce_motion.unwrap_or(capabilities.reduce_motion);
+        capabilities.differentiate_without_color = self
+            .differentiate_without_color
+            .unwrap_or(capabilities.differentiate_without_color);
+        capabilities
+    }
+
+    fn set(&mut self, fact: AccessibilityPreviewFact, enabled: bool) {
+        let value = Some(enabled);
+        match fact {
+            AccessibilityPreviewFact::ReduceTransparency => self.reduce_transparency = value,
+            AccessibilityPreviewFact::IncreaseContrast => self.increase_contrast = value,
+            AccessibilityPreviewFact::ShowBorders => self.show_borders = value,
+            AccessibilityPreviewFact::ReduceMotion => self.reduce_motion = value,
+            AccessibilityPreviewFact::DifferentiateWithoutColor => {
+                self.differentiate_without_color = value;
+            }
+        }
+    }
+}
 
 pub(crate) struct AppearanceRuntime {
     pub(crate) settings: UserSettings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
     progress_motion: spaceterm_ui::ProgressMotion,
+    #[cfg(feature = "appearance-exerciser")]
+    accessibility_preview: AccessibilityPreviewOverride,
     _tasks: Vec<Task<()>>,
     _observation: Option<Box<dyn SystemAppearanceSubscription>>,
 }
@@ -41,7 +94,6 @@ pub(crate) fn install(
 ) -> Result<(), SettingsError> {
     let fonts = capture_fonts(cx);
     let observation = platform.observe();
-    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
@@ -75,7 +127,9 @@ pub(crate) fn install(
         settings,
         platform,
         fonts,
-        progress_motion,
+        progress_motion: spaceterm_ui::ProgressMotion::Standard,
+        #[cfg(feature = "appearance-exerciser")]
+        accessibility_preview: AccessibilityPreviewOverride::default(),
         _tasks: tasks,
         _observation: observation,
     });
@@ -92,7 +146,6 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             runtime.progress_motion,
         )
     };
-    let progress_motion = resolved_progress_motion(platform.prefers_reduced_motion());
     let catalog = SchemeCatalog::from_custom_schemes(&candidate.custom_schemes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
@@ -102,19 +155,29 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         })
         .ok_or(SettingsError::RevisionExhausted)?;
     let accessibility = platform.accessibility_display_options();
+    let capabilities = CompositionCapabilities {
+        native_window_transparency: platform.supports_native_window_transparency(),
+        reduce_transparency: accessibility.reduce_transparency,
+        increase_contrast: accessibility.increase_contrast,
+        show_borders: accessibility.show_borders,
+        reduce_motion: platform.prefers_reduced_motion(),
+        differentiate_without_color: accessibility.differentiate_without_color,
+    };
+    #[cfg(feature = "appearance-exerciser")]
+    let capabilities = cx
+        .global::<AppearanceRuntime>()
+        .accessibility_preview
+        .apply(capabilities);
     let resolved = catalog
         .resolve(
             generation,
             &candidate.preferences,
-            SystemAppearance::from(platform.system_appearance()).with_composition(
-                CompositionCapabilities::new(
-                    platform.supports_native_window_transparency(),
-                    accessibility.allows_transparency(),
-                ),
-            ),
+            SystemAppearance::from(platform.system_appearance()).with_composition(capabilities),
             &fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;
+    let progress_motion =
+        resolved_progress_motion(resolved.chrome.composition.capabilities.reduce_motion);
     let changes = cx
         .try_global::<InstalledAppearance>()
         .map(|previous| AppearanceChangeSet::between(&previous.0, &resolved));
@@ -137,16 +200,45 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             || changes.window_composition
     });
     if chrome_changed || progress_motion_changed {
-        let prepared = ChromeAppearance::prepare(&resolved.chrome);
-        let controls = super::control_theme_catalog::catalog(&prepared, progress_motion)
-            .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get()));
+        let (prepared, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        let (settings_prepared, settings_inactive) =
+            settings::prepare_variants(&resolved.chrome, prepared.clone(), inactive.clone());
+        let controls = Box::new(
+            super::control_theme_catalog::catalog(&prepared, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let inactive_controls = Box::new(
+            super::control_theme_catalog::catalog(&inactive, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let settings_controls = Box::new(
+            super::control_theme_catalog::catalog(&settings_prepared.chrome, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
+        let settings_inactive_controls = Box::new(
+            super::control_theme_catalog::catalog(&settings_inactive.chrome, progress_motion)
+                .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
+        );
         if cx.has_global::<InstalledAppearance>() {
-            spaceterm_ui::replace_control_theme_catalog(cx, controls)
-                .map_err(|_| SettingsError::Invalid)?;
+            spaceterm_ui::replace_scoped_control_theme_catalogs(
+                cx,
+                controls,
+                inactive_controls,
+                settings_controls,
+                settings_inactive_controls,
+            )
+            .map_err(|_| SettingsError::Invalid)?;
         }
 
         if chrome_changed {
-            cx.set_global(InstalledChrome(Arc::new(prepared)));
+            cx.set_global(InstalledChrome {
+                active: Arc::new(prepared),
+                inactive: Arc::new(inactive),
+            });
+            cx.set_global(settings::InstalledSettingsChrome {
+                active: Arc::new(settings_prepared),
+                inactive: Arc::new(settings_inactive),
+            });
         }
     }
     if changes.is_none_or(|changes| changes.native_appearance) {
@@ -170,6 +262,38 @@ pub(crate) fn progress_motion(cx: &App) -> spaceterm_ui::ProgressMotion {
         .map_or(spaceterm_ui::ProgressMotion::Standard, |runtime| {
             runtime.progress_motion
         })
+}
+
+#[cfg(feature = "appearance-exerciser")]
+pub(crate) fn set_accessibility_preview(
+    fact: AccessibilityPreviewFact,
+    enabled: bool,
+    cx: &mut App,
+) -> Result<(), SettingsError> {
+    let previous = {
+        let runtime = cx.global_mut::<AppearanceRuntime>();
+        let previous = runtime.accessibility_preview;
+        runtime.accessibility_preview.set(fact, enabled);
+        previous
+    };
+    if let Err(error) = refresh(cx) {
+        cx.global_mut::<AppearanceRuntime>().accessibility_preview = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "appearance-exerciser")]
+pub(crate) fn reset_accessibility_preview(cx: &mut App) -> Result<(), SettingsError> {
+    let previous = {
+        let runtime = cx.global_mut::<AppearanceRuntime>();
+        std::mem::take(&mut runtime.accessibility_preview)
+    };
+    if let Err(error) = refresh(cx) {
+        cx.global_mut::<AppearanceRuntime>().accessibility_preview = previous;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Called only at startup or an explicit font reload. No frame or timer enumerates fonts.

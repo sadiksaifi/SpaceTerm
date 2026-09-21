@@ -1,7 +1,7 @@
+use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use super::workspace_chrome::{
-    ICON_SIZE as WORKSPACE_CHROME_ICON_SIZE, TOGGLE_SIZE, WorkspaceChromeIdentity,
-    WorkspaceChromeLayout,
+    TOGGLE_SIZE, WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatusHosts,
 };
 #[cfg(test)]
 use super::workspace_sidebar::{
@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use super::directory_picker::{DirectoryPicker, DirectoryPickerEvent};
 use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
 use super::remote_workspace_flow::{
@@ -71,6 +72,7 @@ use crate::terminal::{
     TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
 };
 use gpui::prelude::*;
+
 use gpui::{
     Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
     px, rgba,
@@ -455,6 +457,7 @@ impl WorkspaceManager {
         };
         cx.observe_window_activation(window, |manager, window, cx| {
             manager.restore_remote_workspace_focus_after_activation(window, cx);
+            cx.notify();
         })
         .detach();
 
@@ -751,14 +754,9 @@ impl WorkspaceManager {
             .iter()
             .enumerate()
             .map(|(index, workspace)| {
-                let active = workspace.id() == self.workspaces.active_workspace_id();
-                let icon = if active {
-                    IconName::Check
-                } else {
-                    match workspace.location() {
-                        WorkspaceLocation::Local => IconName::Terminal,
-                        WorkspaceLocation::Remote { .. } => IconName::Globe,
-                    }
+                let icon = match workspace.location() {
+                    WorkspaceLocation::Local => IconName::Terminal,
+                    WorkspaceLocation::Remote { .. } => IconName::Globe,
                 };
                 let item = ComboBoxItem::new(
                     WorkspaceSwitcherChoice::Workspace(workspace.id()),
@@ -766,9 +764,6 @@ impl WorkspaceManager {
                 )
                 .leading_icon(move |foreground, size| {
                     div()
-                        .when(active, |icon| {
-                            icon.debug_selector(|| "workspace-switcher-active-marker".to_owned())
-                        })
                         .child(Icon::new(icon, size, foreground))
                         .into_any_element()
                 })
@@ -2933,10 +2928,16 @@ impl WorkspaceManager {
             appearance.colors.title_bar_inactive_background
         };
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        let chip_inset = frame.sidebar_chip_inset();
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
-        let chrome_icon_size = appearance.spacing(WORKSPACE_CHROME_ICON_SIZE);
-        let placeholder_color = gpui_color(appearance.colors.text_placeholder);
+        let chrome_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
+        let switcher_colors = appearance.host_colors(spaceterm_ui::ControlHost::TitleBar);
+        let switcher_foreground = gpui_color(switcher_colors.text);
+        let switcher_icon_foreground = gpui_color(switcher_colors.icon);
+        let placeholder_color = gpui_color(
+            appearance
+                .host_colors(spaceterm_ui::ControlHost::Floating)
+                .text_placeholder,
+        );
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let (toggle_icon, toggle_label) =
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
@@ -2948,9 +2949,27 @@ impl WorkspaceManager {
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
         let new_workspace_shortcut = presentation.shortcut(&NewWorkspace);
         let new_remote_workspace_shortcut = presentation.shortcut(&NewRemoteWorkspace);
+        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity());
+        let switcher_surface =
+            super::tab_manager::active_tab_surface(appearance, window.is_window_active());
+        let title_bar_host =
+            appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
+        let switcher_status_hosts = WorkspaceChromeStatusHosts::new(
+            switcher_surface
+                .fill
+                .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
+            switcher_surface
+                .hover_fill
+                .or(switcher_surface.fill)
+                .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
+        );
+        let switcher_accessibility_name = collapsed_identity.as_ref().map_or_else(
+            || "Switch Workspace".to_owned(),
+            |(identity, _)| identity.accessibility_name(),
+        );
         let chooser = ComboBox::new(
             "workspace-switcher",
-            "Switch Workspace",
+            switcher_accessibility_name,
             Some(WorkspaceSwitcherChoice::Workspace(
                 self.workspaces.active_workspace_id(),
             )),
@@ -2958,6 +2977,32 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
         )
         .handle(self.workspace_switcher.clone())
+        .when(sidebar_visible, |chooser| chooser.ghost_trigger())
+        .when(!sidebar_visible, |chooser| {
+            let normal = spaceterm_ui::ButtonPaint::new(
+                gpui_color(switcher_surface.fill.unwrap_or(Color::rgba(0))),
+                switcher_foreground,
+                gpui_color(switcher_surface.rim.unwrap_or(Color::rgba(0))),
+            );
+            let hovered = spaceterm_ui::ButtonPaint::new(
+                gpui_color(
+                    switcher_surface
+                        .hover_fill
+                        .or(switcher_surface.fill)
+                        .unwrap_or(Color::rgba(0)),
+                ),
+                switcher_foreground,
+                gpui_color(
+                    switcher_surface
+                        .hover_rim
+                        .or(switcher_surface.rim)
+                        .unwrap_or(Color::rgba(0)),
+                ),
+            );
+            chooser.trigger_surface(spaceterm_ui::ButtonVariantStyle::new(
+                normal, hovered, hovered, normal,
+            ))
+        })
         .input_leading(move |size| {
             Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
@@ -2967,6 +3012,7 @@ impl WorkspaceManager {
             "No Workspaces",
             "No matching Workspaces",
         ))
+        .menu_with_filter_header()
         .fallback(ComboBoxFallback::pinned_rows(move |query| {
             let name = query.trim().to_owned();
             let local = ComboBoxItem::new(
@@ -3008,7 +3054,7 @@ impl WorkspaceManager {
         // The chooser takes the top chrome's icon size rather than the selector's own, so the
         // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
         // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
-        .icon_trigger(move |foreground, _| {
+        .icon_trigger(move |_, _| {
             // The same selector the chip's glyph carries: they are the one chooser icon in its two
             // states, so a test can hold them to one size.
             div()
@@ -3017,7 +3063,7 @@ impl WorkspaceManager {
                 .child(Icon::custom(
                     CustomIconName::RectangleStack,
                     chrome_icon_size,
-                    foreground,
+                    switcher_icon_foreground,
                 ))
                 .into_any_element()
         })
@@ -3025,24 +3071,20 @@ impl WorkspaceManager {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        // The chooser's panel spans exactly the width a selected Workspace row's chip spans, so the
-        // list it opens lines up with the list it came from.
-        .panel_width(self.sidebar.read(cx).layout().width - chip_inset - chip_inset)
         .debug_selector("workspace-switcher")
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .debug_selector("workspace-switcher-tooltip")
                 .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
         )
-        .when(!sidebar_visible, |chooser| {
-            let (identity, tooltip) = self.workspace_chrome_identity();
+        .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
             chooser
                 .custom_trigger(identity.render(
-                    gpui_color(appearance.colors.row_selected_foreground),
+                    switcher_foreground,
                     appearance,
-                    top_chrome_background,
+                    switcher_status_hosts,
                 ))
-                .custom_trigger_content_height(top_chrome_height - frame.space() * 2.0)
+                .custom_trigger_height(top_chrome_height - frame.space() * 2.0)
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
@@ -3116,19 +3158,22 @@ impl WorkspaceManager {
                 .unwrap_or_default()
         });
 
-        div()
-            .id("workspace-top-chrome")
-            .debug_selector(|| "workspace-top-chrome".to_owned())
-            .absolute()
-            .top_0()
-            .left_0()
-            .w(layout.width)
-            .h(top_chrome_height)
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                top_chrome_background,
-            )))
-            .child(drag_region)
+        spaceterm_ui::ControlHost::TitleBar
+            .mount(
+                div()
+                    .id("workspace-top-chrome")
+                    .debug_selector(|| "workspace-top-chrome".to_owned())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(layout.width)
+                    .h(top_chrome_height)
+                    .bg(gpui_color(appearance.surface(
+                        crate::appearance::SurfaceRole::Base,
+                        top_chrome_background,
+                    )))
+                    .child(drag_region),
+            )
             .into_any_element()
     }
 
@@ -3188,6 +3233,13 @@ impl Drop for WorkspaceManager {
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let activity = super::appearance::window_activity(window);
+        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
+    }
+}
+
+impl WorkspaceManager {
+    fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.workspaces.len() > 0);
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
@@ -3226,7 +3278,11 @@ impl Render for WorkspaceManager {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .font(super::appearance::chrome(cx).regular.clone())
+            .chrome_text(
+                super::appearance::chrome(cx)
+                    .typography
+                    .style(TextRole::Body),
+            )
             .child(active_tab_manager)
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())

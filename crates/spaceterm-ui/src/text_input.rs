@@ -313,6 +313,11 @@ impl TextInputTheme {
         self
     }
 
+    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.frame = self.frame.focus_ring_width(width);
+        self
+    }
+
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
         Self {
             metrics: self.metrics.scaled(spacing_scale),
@@ -1997,7 +2002,7 @@ impl TextInput {
         if self.autoscroll_task.is_some() {
             return;
         }
-        let metrics = cx.global::<TextInputTheme>().metrics;
+        let metrics = crate::floating_surface::hosted_text_input_theme(cx).metrics;
         self.autoscroll_generation = Some(generation);
         self.autoscroll_task = Some(cx.spawn(async move |input, cx| {
             loop {
@@ -2374,7 +2379,11 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
+        let scroll = self.reconcile_scroll(
+            &line,
+            bounds,
+            crate::floating_surface::hosted_text_input_theme(cx).metrics,
+        );
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
         let display_range =
             self.display_offset_for_source(range.start)..self.display_offset_for_source(range.end);
@@ -2397,7 +2406,11 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
+        let scroll = self.reconcile_scroll(
+            &line,
+            bounds,
+            crate::floating_surface::hosted_text_input_theme(cx).metrics,
+        );
         let index = self
             .source_offset_for_display(line.closest_index_for_x(point.x - bounds.left() + scroll));
         Some(byte_offset_to_utf16(&self.buffer.text, index))

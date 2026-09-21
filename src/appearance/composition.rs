@@ -16,7 +16,11 @@ pub(crate) enum WindowBackgroundAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionCapabilities {
     pub(crate) native_window_transparency: bool,
-    pub(crate) accessibility_allows_transparency: bool,
+    pub(crate) reduce_transparency: bool,
+    pub(crate) increase_contrast: bool,
+    pub(crate) show_borders: bool,
+    pub(crate) reduce_motion: bool,
+    pub(crate) differentiate_without_color: bool,
 }
 
 impl CompositionCapabilities {
@@ -26,8 +30,16 @@ impl CompositionCapabilities {
     ) -> Self {
         Self {
             native_window_transparency,
-            accessibility_allows_transparency,
+            reduce_transparency: !accessibility_allows_transparency,
+            increase_contrast: false,
+            show_borders: false,
+            reduce_motion: false,
+            differentiate_without_color: false,
         }
+    }
+
+    const fn accessibility_allows_transparency(self) -> bool {
+        !self.reduce_transparency
     }
 }
 
@@ -63,6 +75,22 @@ pub(crate) struct SurfaceMaterials {
 impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
     pub(crate) const OPAQUE: Self = Self { glass: 0 };
+
+    /// Returns the same material policy with only a share of its requested transmission.
+    ///
+    /// A nested application surface can retain more of its semantic color than the window sheet
+    /// without inventing another transparency preference. Accessibility-forced opaque materials
+    /// remain opaque because their requested transmission is already zero.
+    pub(crate) fn with_transmission_share(self, share: f32) -> Self {
+        let share = if share.is_finite() {
+            share.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            glass: (f32::from(self.glass) * share).round() as u8,
+        }
+    }
 
     /// What a resting surface still paints at the maximum setting, and what a floating one does.
     ///
@@ -384,6 +412,8 @@ impl SurfaceMaterials {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedWindowComposition {
+    /// Platform capabilities captured with this resolved presentation.
+    pub(crate) capabilities: CompositionCapabilities,
     pub(crate) requested: WindowBackgroundAppearance,
     /// Effective native Operating-System Window backdrop.
     pub(crate) effective: WindowBackgroundAppearance,
@@ -406,7 +436,8 @@ impl ResolvedWindowComposition {
             WindowBackgroundAppearance::Transparent
         };
         let requested_materials = SurfaceMaterials::derive(preferences.transparency);
-        let floating_materials = if capabilities.accessibility_allows_transparency {
+        let accessibility_allows_transparency = capabilities.accessibility_allows_transparency();
+        let floating_materials = if accessibility_allows_transparency {
             requested_materials
         } else {
             SurfaceMaterials::OPAQUE
@@ -414,9 +445,10 @@ impl ResolvedWindowComposition {
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
         let native_enabled = capabilities.native_window_transparency
-            && capabilities.accessibility_allows_transparency
+            && accessibility_allows_transparency
             && !requested_materials.is_opaque();
         Self {
+            capabilities,
             requested,
             effective: if native_enabled {
                 requested
@@ -445,6 +477,7 @@ macro_rules! resting_fill_roles {
             badge_background,
             preview_background,
             element_background,
+            segmented_track_background,
             element_hover,
             element_active,
             element_selected,
@@ -467,12 +500,14 @@ macro_rules! resting_fill_roles {
             row_background,
             row_hover_background,
             row_selected_background,
+            navigation_selected_background,
             row_selected_hover_background,
             toggle_on_background,
             toggle_on_hover_background,
             toggle_on_pressed_background,
             toggle_on_disabled_background,
             toggle_off_background,
+            progress_track,
             toggle_off_hover_background,
             toggle_off_pressed_background,
             toggle_off_disabled_background,
@@ -619,6 +654,72 @@ mod tests {
     use crate::appearance::{ChromeColors, Color};
 
     #[test]
+    fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
+        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let capabilities = CompositionCapabilities {
+            increase_contrast: true,
+            ..CompositionCapabilities::new(true, true)
+        };
+        let increased = ResolvedWindowComposition::resolve(&preferences, capabilities);
+        let ordinary = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities::new(true, true),
+        );
+        assert_eq!(increased.effective, ordinary.effective);
+        assert_eq!(increased.materials, ordinary.materials);
+        assert_eq!(increased.floating_materials, ordinary.floating_materials);
+        assert!(increased.floating_blur);
+
+        let reduced = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities {
+                reduce_transparency: true,
+                ..capabilities
+            },
+        );
+        assert_eq!(reduced.effective, WindowBackgroundAppearance::Opaque);
+        assert!(reduced.materials.is_opaque());
+        assert!(reduced.floating_materials.is_opaque());
+        assert!(!reduced.floating_blur);
+    }
+
+    #[test]
+    fn non_transparency_accessibility_capabilities_do_not_change_composition() {
+        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let baseline = ResolvedWindowComposition::resolve(
+            &preferences,
+            CompositionCapabilities::new(true, true),
+        );
+        let capabilities = CompositionCapabilities {
+            native_window_transparency: true,
+            reduce_transparency: false,
+            increase_contrast: false,
+            show_borders: true,
+            reduce_motion: true,
+            differentiate_without_color: true,
+        };
+
+        let resolved = ResolvedWindowComposition::resolve(&preferences, capabilities);
+
+        assert_eq!(
+            (
+                resolved.requested,
+                resolved.effective,
+                resolved.materials,
+                resolved.floating_materials,
+                resolved.floating_blur,
+            ),
+            (
+                baseline.requested,
+                baseline.effective,
+                baseline.materials,
+                baseline.floating_materials,
+                baseline.floating_blur,
+            )
+        );
+    }
+
+    #[test]
     fn decorative_edges_keep_exact_opaque_and_transparent_authorship() {
         let host = Color::rgb(0x202020);
         let authored = Color::rgba(0x90a0b080);
@@ -711,6 +812,39 @@ mod tests {
             (paint.resize_dragged, colors.resize_dragged),
         ] {
             assert_eq!(actual, semantic, "semantic signal must stay authored");
+        }
+    }
+
+    #[test]
+    fn support_role_fallbacks_follow_the_same_surface_transforms_as_their_sources() {
+        let colors = super::super::builtin::chrome_base(super::super::Appearance::Dark);
+        for presentation in [
+            colors.opaque_presentation(),
+            colors.floating_presentation(),
+            colors.material_presentation(SurfaceMaterials::derive(0.6)),
+        ] {
+            assert_eq!(
+                presentation.progress_track,
+                presentation.toggle_off_background
+            );
+            assert_eq!(presentation.progress_indicator, presentation.text_accent);
+            assert_eq!(presentation.focus_ring, presentation.border_focused);
+            assert_eq!(
+                presentation.navigation_selected_background,
+                presentation.row_selected_background
+            );
+            assert_eq!(
+                presentation.navigation_selected_foreground,
+                presentation.row_selected_foreground
+            );
+            assert_eq!(
+                presentation.navigation_selected_secondary,
+                presentation.row_selected_secondary
+            );
+            assert_eq!(
+                presentation.navigation_selected_icon,
+                presentation.row_selected_icon
+            );
         }
     }
 

@@ -30,6 +30,7 @@ use crate::settings::{PreviewToken, SchemeImport};
 
 use super::WorkspaceManager;
 use super::appearance_runtime::{self, AppearanceRuntime};
+use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 const ENABLE_VARIABLE: &str = "SPACETERM_APPEARANCE_EXERCISER";
 
@@ -86,6 +87,11 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     if !cx.has_global::<AppearanceRuntime>() {
         return Err(anyhow::anyhow!("appearance runtime is unavailable"));
     }
+    // The Workspace hides native titlebar text, but development automation and accessibility
+    // clients still need a stable Operating-System window identity.
+    workspace.update(cx, |_, window, _| {
+        window.set_window_title("Appearance Workspace");
+    })?;
     let bounds = Bounds::centered(None, size(px(920.0), px(420.0)), cx);
     let appearance = cx.open_window(
         WindowOptions {
@@ -151,6 +157,8 @@ impl AppearanceExerciser {
             },
         )
         .detach();
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
         let settings = Self::settings(cx);
         let initial = settings
             .export_document()
@@ -399,6 +407,91 @@ impl AppearanceExerciser {
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
+        cx.notify();
+    }
+
+    fn toggle_accessibility_preview(
+        &mut self,
+        fact: appearance_runtime::AccessibilityPreviewFact,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let capabilities = appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities;
+        let enabled = match fact {
+            appearance_runtime::AccessibilityPreviewFact::ReduceTransparency => {
+                capabilities.reduce_transparency
+            }
+            appearance_runtime::AccessibilityPreviewFact::IncreaseContrast => {
+                capabilities.increase_contrast
+            }
+            appearance_runtime::AccessibilityPreviewFact::ShowBorders => capabilities.show_borders,
+            appearance_runtime::AccessibilityPreviewFact::ReduceMotion => {
+                capabilities.reduce_motion
+            }
+            appearance_runtime::AccessibilityPreviewFact::DifferentiateWithoutColor => {
+                capabilities.differentiate_without_color
+            }
+        };
+        self.status = if appearance_runtime::set_accessibility_preview(fact, !enabled, cx).is_ok() {
+            format!(
+                "{label} preview {}; System Settings unchanged",
+                if enabled { "off" } else { "on" }
+            )
+        } else {
+            format!("{label} preview rejected")
+        };
+        cx.notify();
+    }
+
+    fn toggle_reduce_transparency_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ReduceTransparency,
+            "Reduce Transparency",
+            cx,
+        );
+    }
+
+    fn toggle_increase_contrast_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::IncreaseContrast,
+            "Increase Contrast",
+            cx,
+        );
+    }
+
+    fn toggle_show_borders_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ShowBorders,
+            "Show Borders",
+            cx,
+        );
+    }
+
+    fn toggle_reduce_motion_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::ReduceMotion,
+            "Reduce Motion",
+            cx,
+        );
+    }
+
+    fn toggle_differentiate_without_color_preview(&mut self, cx: &mut Context<Self>) {
+        self.toggle_accessibility_preview(
+            appearance_runtime::AccessibilityPreviewFact::DifferentiateWithoutColor,
+            "Differentiate Without Color",
+            cx,
+        );
+    }
+
+    fn reset_accessibility_previews(&mut self, cx: &mut Context<Self>) {
+        self.status = if appearance_runtime::reset_accessibility_preview(cx).is_ok() {
+            String::from("Accessibility previews reset to live system settings")
+        } else {
+            String::from("Accessibility preview reset rejected")
+        };
         cx.notify();
     }
 
@@ -672,8 +765,15 @@ impl AppearanceExerciser {
 }
 
 impl Render for AppearanceExerciser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::appearance::chrome(cx).clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let activity = super::appearance::window_activity(window);
+        activity.mount(activity.with_scope(|| self.render_chrome(cx)))
+    }
+}
+
+impl AppearanceExerciser {
+    fn render_chrome(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = super::appearance::shared_chrome(cx);
         let background = rgba(
             appearance
                 .surface(
@@ -697,6 +797,24 @@ impl Render for AppearanceExerciser {
                         let _ = weak.update(cx, handler);
                     })
             };
+        let accessibility_action =
+            |id: &'static str, label: String, handler: fn(&mut Self, &mut Context<Self>)| {
+                let weak = weak.clone();
+                Button::new(id, label)
+                    .debug_selector(id)
+                    .size(ButtonSize::Small)
+                    .variant(ButtonVariant::Secondary)
+                    .on_activate(move |_, _, cx| {
+                        let _ = weak.update(cx, handler);
+                    })
+            };
+        let capabilities = appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities;
+        let preview_label = |label: &str, enabled: bool| {
+            format!("Preview {label}: {}", if enabled { "On" } else { "Off" })
+        };
         let checkbox_weak = weak.clone();
         let checkbox = Checkbox::new(
             "appearance-checkbox",
@@ -728,14 +846,48 @@ impl Render for AppearanceExerciser {
             .p(appearance.spacing(14.0))
             .bg(background)
             .text_color(foreground)
-            .text_size(appearance.text_size(13.0))
-            .font(appearance.regular.clone())
-            .child(div().font(appearance.heading.clone()).text_size(appearance.text_size(16.0)).child("SpaceTerm Appearance Exerciser"))
+            .chrome_text(appearance.typography.style(TextRole::Body))
+            .child(div().chrome_text(appearance.typography.style(TextRole::Title)).child("SpaceTerm Appearance Exerciser"))
             .child(div().debug_selector({
                 let generation = appearance_runtime::current(cx).generation.get();
                 move || format!("appearance-diagnostics-generation-{generation}")
-            }).text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
-            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.height(32.0, 13.0)).child(self.editor.clone()))
+            }).chrome_text(appearance.typography.style(TextRole::Secondary)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
+            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.spacing(32.0)).child(self.editor.clone()))
+            .child(div().text_color(muted).child("Synthetic accessibility previews; System Settings remain unchanged"))
+            .child(div().flex().flex_wrap().gap(px(8.0))
+                .child(accessibility_action(
+                    "appearance-preview-reduce-transparency",
+                    preview_label("Reduce Transparency", capabilities.reduce_transparency),
+                    Self::toggle_reduce_transparency_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-increase-contrast",
+                    preview_label("Increase Contrast", capabilities.increase_contrast),
+                    Self::toggle_increase_contrast_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-show-borders",
+                    preview_label("Show Borders", capabilities.show_borders),
+                    Self::toggle_show_borders_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-reduce-motion",
+                    preview_label("Reduce Motion", capabilities.reduce_motion),
+                    Self::toggle_reduce_motion_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-preview-differentiate-without-color",
+                    preview_label(
+                        "Differentiate Without Color",
+                        capabilities.differentiate_without_color,
+                    ),
+                    Self::toggle_differentiate_without_color_preview,
+                ))
+                .child(accessibility_action(
+                    "appearance-reset-accessibility-previews",
+                    String::from("Reset Accessibility Previews to System Settings"),
+                    Self::reset_accessibility_previews,
+                )))
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(action("appearance-apply", "Apply JSON Preview", Self::apply_editor))
                 .child(
@@ -783,8 +935,8 @@ impl Render for AppearanceExerciser {
                     .child(checkbox)
                     .child(notification_switch),
             )
-            .child(div().text_size(appearance.text_size(12.0)).whitespace_normal().child(self.status.clone()))
-            .child(div().text_size(appearance.text_size(11.0)).text_color(muted).whitespace_normal().child(
+            .child(div().chrome_text(appearance.typography.style(TextRole::Body)).whitespace_normal().child(self.status.clone()))
+            .child(div().chrome_text(appearance.typography.style(TextRole::Secondary)).text_color(muted).whitespace_normal().child(
                 "The JSON editor is a bounded single-line development field. Export, edit or paste a native settings/color package, then use the matching action. Preview never writes; Commit uses the isolated retained Config root."
             ));
         spaceterm_ui::ModalLayer::new(content)
@@ -797,7 +949,7 @@ impl Render for AppearanceDialogBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = super::appearance::chrome(cx);
         div()
-            .text_size(appearance.text_size(13.0))
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .child("This body verifies elevated surfaces, text, borders and focus presentation.")
     }
 }
@@ -820,6 +972,8 @@ impl AppearanceFixtures {
             },
         )
         .detach();
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
         Self {
             window_appearance,
             floating: cx.new(|cx| floating_fixtures::FloatingFixtures::new(window, cx)),
@@ -893,8 +1047,15 @@ impl AppearanceFixtures {
 }
 
 impl Render for AppearanceFixtures {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::appearance::chrome(cx).clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let activity = super::appearance::window_activity(window);
+        activity.mount(activity.with_scope(|| self.render_chrome(cx)))
+    }
+}
+
+impl AppearanceFixtures {
+    fn render_chrome(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = super::appearance::shared_chrome(cx);
         let weak = cx.weak_entity();
         let modal_action =
             |id: &'static str,
@@ -939,12 +1100,10 @@ impl Render for AppearanceFixtures {
             .p(appearance.spacing(16.0))
             .bg(rgba(appearance.surface(crate::appearance::SurfaceRole::Sheet, appearance.colors.background).rgba_hex()))
             .text_color(rgba(appearance.colors.text.rgba_hex()))
-            .text_size(appearance.text_size(13.0))
-            .font(appearance.regular.clone())
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .child(
                 div()
-                    .font(appearance.heading.clone())
-                    .text_size(appearance.text_size(16.0))
+                    .chrome_text(appearance.typography.style(TextRole::Title))
                     .child("Obscured Controls and Modal Fixtures"),
             )
             .child(self.input.clone())
@@ -973,7 +1132,7 @@ impl Render for AppearanceFixtures {
             )
             .child(
                 div()
-                    .text_size(appearance.text_size(11.0))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
                     .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
                     .whitespace_normal()
                     .child("Open each modal to verify that the input, combo box and menu remain safely obscured and cannot receive interaction through the scrim."),

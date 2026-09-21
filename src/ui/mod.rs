@@ -3,12 +3,23 @@ pub(crate) mod appearance;
 pub(crate) mod appearance_exerciser;
 pub(crate) mod appearance_runtime;
 mod button_theme;
+pub(crate) mod chrome_geometry;
+pub(crate) mod chrome_icons;
+mod chrome_semantic_pairs;
+mod chrome_state;
+pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
 mod directory_picker;
 #[cfg(test)]
 mod floating_surface_tests;
+#[cfg(test)]
+mod light_hover_tests;
+#[cfg(test)]
+mod light_inactive_tests;
+#[cfg(test)]
+mod light_theme_preservation_tests;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
@@ -140,13 +151,27 @@ pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
-    spaceterm_ui::init(
+    let installed = cx.global::<appearance::InstalledChrome>();
+    let motion = appearance_runtime::progress_motion(cx);
+    let active = Box::new(control_theme_catalog::catalog(&installed.active, motion));
+    let inactive = Box::new(control_theme_catalog::catalog(&installed.inactive, motion));
+    let settings = cx.global::<appearance::settings::InstalledSettingsChrome>();
+    let settings_active = Box::new(control_theme_catalog::catalog(
+        &settings.active.chrome,
+        motion,
+    ));
+    let settings_inactive = Box::new(control_theme_catalog::catalog(
+        &settings.inactive.chrome,
+        motion,
+    ));
+    spaceterm_ui::init_scoped_control_theme_catalogs(
         cx,
-        control_theme_catalog::catalog(
-            appearance::chrome(cx),
-            appearance_runtime::progress_motion(cx),
-        ),
-    )
+        active,
+        inactive,
+        settings_active,
+        settings_inactive,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

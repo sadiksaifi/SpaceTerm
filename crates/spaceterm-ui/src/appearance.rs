@@ -4,23 +4,48 @@ const SYSTEM_UI_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// The resolved fonts used by reusable chrome controls.
 ///
-/// Sizes and line heights remain semantic metrics of each control family. The three fonts carry
-/// the complete effective family, fallback, feature, weight, and style choices used for shaping.
+/// Sizes and line heights remain semantic metrics of each control family. Each font carries the
+/// complete effective family, fallback, feature, weight, and style choices used for shaping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlTypography {
     regular: Font,
     emphasis: Font,
+    section: Font,
     heading: Font,
+    shortcut: Font,
+    caption: Font,
+    badge: Font,
 }
 
 impl ControlTypography {
     /// Creates a complete resolved typography catalog.
     pub fn new(regular: Font, emphasis: Font, heading: Font) -> Self {
+        let shortcut = regular.clone();
+        let caption = regular.clone();
+        let badge = emphasis.clone();
         Self {
             regular,
+            section: emphasis.clone(),
             emphasis,
             heading,
+            shortcut,
+            caption,
+            badge,
         }
+    }
+
+    /// Sets the distinct font used by group headings in command and menu surfaces.
+    pub fn section(mut self, section: Font) -> Self {
+        self.section = section;
+        self
+    }
+
+    /// Supplies the fonts used by compact semantic text roles.
+    pub fn semantic_fonts(mut self, shortcut: Font, caption: Font, badge: Font) -> Self {
+        self.shortcut = shortcut;
+        self.caption = caption;
+        self.badge = badge;
+        self
     }
 
     /// Returns the font used for ordinary labels, values, and editable text.
@@ -33,9 +58,29 @@ impl ControlTypography {
         &self.emphasis
     }
 
+    /// Returns the font used for group headings in command and menu surfaces.
+    pub fn section_font(&self) -> &Font {
+        &self.section
+    }
+
     /// Returns the font used for modal and major chrome headings.
     pub fn heading(&self) -> &Font {
         &self.heading
+    }
+
+    /// Returns the font used for keyboard equivalents.
+    pub fn shortcut(&self) -> &Font {
+        &self.shortcut
+    }
+
+    /// Returns the font used for compact explanatory text.
+    pub fn caption(&self) -> &Font {
+        &self.caption
+    }
+
+    /// Returns the font used for compact tabular labels.
+    pub fn badge(&self) -> &Font {
+        &self.badge
     }
 }
 

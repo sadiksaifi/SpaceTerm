@@ -323,7 +323,7 @@ impl SegmentedMetrics {
                 spacing_scale,
             ),
             vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
-            radius: crate::appearance::scale_metric(self.radius, spacing_scale),
+            radius: self.radius,
             border_width: self.border_width,
             focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
             preview_gap: crate::appearance::scale_metric(self.preview_gap, spacing_scale),
@@ -369,6 +369,8 @@ pub struct SegmentedControlTheme {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
+    track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
 
@@ -387,8 +389,36 @@ impl SegmentedControlTheme {
             track_background,
             track_border,
             focus_border,
+            focus_ring_width: px(1.0),
+            track_shadow: ControlShadow::none(),
             selected_shadow: ControlShadow::none(),
         }
+    }
+
+    /// Sets the focus-ring width independently of the track border and radius.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
+    }
+
+    /// Adds the application-owned elevation treatment to the track and selected option.
+    pub fn track_elevation(
+        mut self,
+        shadow: ControlShadow,
+        track_border: Option<Rgba>,
+        selected_border: Option<Rgba>,
+    ) -> Self {
+        self.track_shadow = shadow;
+        if let Some(border) = track_border {
+            self.track_border = border;
+        }
+        if let Some(border) = selected_border {
+            self.paints.normal.selected.border = border;
+            self.paints.hovered.selected.border = border;
+            self.paints.pressed.selected.border = border;
+            self.paints.disabled.selected.border = border;
+        }
+        self
     }
 
     /// Resolves value and interaction together, with disabled state taking precedence.
@@ -432,6 +462,8 @@ impl SegmentedControlTheme {
             track_background: self.track_background,
             track_border: self.track_border,
             focus_border: self.focus_border,
+            focus_ring_width: self.focus_ring_width,
+            track_shadow: self.track_shadow,
             selected_shadow: self.selected_shadow,
         }
     }
@@ -548,6 +580,9 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
     }
 
     /// Distributes the options evenly across the available width.
+    /// Otherwise, the track fits its options even inside a stretching parent.
+    /// A full-width track retains enough width for every label and the themed option minimum,
+    /// overflowing a smaller host rather than letting its options escape the track.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
         self
@@ -588,6 +623,36 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .unwrap_or_else(default_theme)
             .resolve(self.size);
         let metrics = style.metrics;
+        let label_font = crate::control_typography(cx).regular().clone();
+        let minimum_option_width = if self.full_width {
+            // Every segment must fit the widest label before sharing the available width equally.
+            self.options
+                .iter()
+                .fold(metrics.minimum_option_width, |width, option| {
+                    let label_width = window
+                        .text_system()
+                        .shape_line(
+                            option.label.clone(),
+                            metrics.font_size,
+                            &[gpui::TextRun {
+                                len: option.label.len(),
+                                font: label_font.clone(),
+                                color: rgba(0).into(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            None,
+                        )
+                        .width;
+                    width.max(
+                        label_width.ceil()
+                            + (metrics.horizontal_padding + metrics.border_width) * 2.0,
+                    )
+                })
+        } else {
+            metrics.minimum_option_width
+        };
         let enabled = !self.disabled && self.on_change.is_some();
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             SegmentedControlState::new(window, cx)
@@ -672,9 +737,10 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 let refine_interaction = option_enabled;
                 #[cfg(feature = "appearance-exerciser")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
+                // Selection changes the chip, never the label's glyphs or advance widths.
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
                     paint,
-                    font: crate::control_typography(cx).regular().clone(),
+                    font: label_font.clone(),
                     font_size: metrics.font_size,
                     line_height: metrics.line_height,
                 };
@@ -699,7 +765,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .items_center()
                     .justify_center()
                     .gap(metrics.preview_gap)
-                    .min_w(metrics.minimum_option_width)
+                    .min_w(minimum_option_width)
                     .min_h(metrics.option_height)
                     .px(metrics.horizontal_padding)
                     .py(metrics.vertical_padding)
@@ -711,7 +777,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .text_color(paint.label)
                     .text_size(metrics.font_size)
                     .line_height(gpui::relative(metrics.line_height))
-                    .font(crate::control_typography(cx).regular().clone())
+                    .font(label_font.clone())
                     .cursor_default()
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
@@ -785,7 +851,19 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .flex_row()
             .flex_shrink_0()
             .gap(metrics.option_gap)
-            .when(self.full_width, |track| track.w_full())
+            .when(self.full_width, |track| {
+                let option_count = self.options.len() as f32;
+                let inset = if card {
+                    px(0.0)
+                } else {
+                    metrics.border_width * 4.0
+                };
+                track.w_full().min_w(
+                    minimum_option_width * option_count
+                        + metrics.option_gap * (option_count - 1.0)
+                        + inset,
+                )
+            })
             .when(right_to_left, |track| track.flex_row_reverse())
             .when(!card, |track| {
                 track
@@ -794,6 +872,11 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .border(metrics.border_width)
                     .border_color(style.track_border)
                     .bg(style.track_background)
+                    .when(enabled, |track| {
+                        track
+                            .shadow(style.track_shadow.layers())
+                            .shadow_outside_only()
+                    })
             })
             .cursor_default()
             .block_mouse_except_scroll()
@@ -844,17 +927,25 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 track.child(focus_outline(
                     metrics,
                     style.focus_border,
+                    style.focus_ring_width,
                     format!("{selector}-keyboard-focus"),
                 ))
             });
 
-        if let Some(tooltip) = self.tooltip {
+        let control = if let Some(tooltip) = self.tooltip {
             tooltip
                 .attach(track, TooltipTargetVisibility::Visible)
                 .disabled(!enabled)
                 .into_any_element()
         } else {
             track.into_any_element()
+        };
+        if self.full_width {
+            control
+        } else {
+            // A row wrapper keeps the painted track intrinsic in block and column parents.
+            // Focus, hit testing, and tooltip bounds stay on the track rather than the wrapper.
+            div().flex().child(control).into_any_element()
         }
     }
 }
@@ -900,6 +991,8 @@ struct SegmentedStyle {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
+    track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
 
@@ -925,8 +1018,13 @@ impl SegmentedPaintRefinement {
     }
 }
 
-fn focus_outline(metrics: SegmentedMetrics, color: Rgba, selector: String) -> impl IntoElement {
-    let offset = metrics.focus_gap + metrics.border_width;
+fn focus_outline(
+    metrics: SegmentedMetrics,
+    color: Rgba,
+    width: Pixels,
+    selector: String,
+) -> impl IntoElement {
+    let offset = metrics.focus_gap + width;
     div()
         .debug_selector(move || selector)
         .absolute()
@@ -935,7 +1033,7 @@ fn focus_outline(metrics: SegmentedMetrics, color: Rgba, selector: String) -> im
         .bottom(-offset)
         .left(-offset)
         .rounded(metrics.radius + metrics.border_width + metrics.focus_gap)
-        .border(metrics.border_width)
+        .border(width)
         .border_color(color)
 }
 

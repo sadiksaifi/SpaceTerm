@@ -126,8 +126,8 @@ fn spaceterm_light_chrome() -> ChromeColors {
 /// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
 /// alone.
 ///
-/// Cards and floating surfaces lighten in both appearances. Interaction fills move toward text:
-/// lighter in Dark and darker in Light. Tabs and navigation rows share that selection direction.
+/// Cards and floating surfaces lighten in both appearances. Light selections share one brighter
+/// fill across navigation, popup rows, and segmented options; action presses move toward text.
 ///
 /// Every resting surface, separator, text gray, and shadow is authored with equal channels:
 /// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
@@ -153,15 +153,21 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell: 0x171717,
             shell_inactive: 0x161616,
             raised: 0x202020,
-            field: 0x1c1c1c,
-            control_fill: None,
-            hover: 0x1d1d1d,
-            pressed: 0x242424,
+            field: 0x262626,
+            control_fill: Some(0x272727),
+            segmented_track: None,
+            control_hover: 0x2f2f2f,
+            control_pressed: 0x363636,
+            ghost_hover: 0x1b1b1b,
+            ghost_pressed: 0x212121,
             selected: 0x2e2e2e,
             selected_inactive: 0x1c1c1c,
             row_hover: 0x282828,
             row_selected: 0x323232,
+            row_selected_hover: None,
+            navigation_selected: None,
             tab_active: 0x2e2e2e,
+            tab_active_hover: None,
             row_selected_text: 0xf2f2f2,
             row_selected_secondary: 0xbcbcbc,
             text: 0xe4e4e4,
@@ -169,13 +175,17 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             text_muted: 0x999999,
             text_placeholder: 0x9a9a9a,
             text_disabled: 0x606060,
-            separator: 0x2d2d2d,
-            separator_quiet: 0x262626,
-            separator_disabled: 0x222222,
-            field_outline: 0x2f2f2f,
-            control_outline: 0x313131,
-            control_outline_strong: 0x3e3e3e,
-            tab_separator: 0x363636,
+            separator: Color::rgb(0x2d2d2d),
+            separator_quiet: Color::rgb(0x262626),
+            separator_disabled: Color::rgb(0x222222),
+            field_outline: Color::rgb(0x2f2f2f),
+            control_outline: Color::rgb(0x313131),
+            control_outline_strong: Color::rgb(0x3e3e3e),
+            tab_separator: Color::rgb(0x363636),
+            // Dark states a selected chip with its fill alone.
+            selected_rim: Color::rgba(0),
+            selected_rim_hover: Color::rgba(0),
+            selected_rim_inactive: Color::rgba(0),
             mark_outline: 0x767676,
             mark_outline_strong: 0x898989,
             mark_track: 0x202020,
@@ -199,36 +209,47 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shadow: 0x00000080,
         },
         Appearance::Light => ChromePalette {
-            root: 0xebebeb,
-            shell: 0xf1f1f1,
-            shell_inactive: 0xefefef,
-            raised: 0xf8f8f8,
-            field: 0xffffff,
-            control_fill: Some(0xededed),
-            hover: 0xe3e3e3,
-            pressed: 0xdcdcdc,
-            selected: 0xd6d6d6,
-            selected_inactive: 0xececec,
-            row_hover: 0xe9e9e9,
-            row_selected: 0xdfdfdf,
-            tab_active: 0xe4e4e4,
+            root: 0xe5e5e5,
+            shell: 0xe5e5e5,
+            shell_inactive: 0xe5e5e5,
+            raised: 0xfafafa,
+            field: 0xfafafa,
+            control_fill: Some(0xfafafa),
+            segmented_track: Some(0xe5e5e5),
+            control_hover: 0xe9e9e9,
+            control_pressed: 0xdcdcdc,
+            ghost_hover: 0xd2d2d2,
+            ghost_pressed: 0xc4c4c4,
+            selected: 0xfafafa,
+            selected_inactive: 0xf4f4f4,
+            row_hover: 0xf4f4f4,
+            row_selected: 0xfafafa,
+            row_selected_hover: Some(0xfafafa),
+            navigation_selected: Some(0xfafafa),
+            tab_active: 0xfafafa,
+            tab_active_hover: Some(0xfafafa),
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
             text_secondary: 0x585858,
-            text_muted: 0x6e6e6e,
+            text_muted: 0x666666,
             text_placeholder: 0x717171,
-            text_disabled: 0xa5a5a5,
-            separator: 0xe6e6e6,
-            separator_quiet: 0xeeeeee,
-            separator_disabled: 0xf2f2f2,
-            field_outline: 0xdadada,
-            control_outline: 0xd8d8d8,
-            control_outline_strong: 0xc6c6c6,
-            tab_separator: 0xcbcbcb,
-            mark_outline: 0x858585,
+            text_disabled: 0x828282,
+            // Light authors every boundary as ink, so one value states the same step on the base,
+            // on the content tone, and on whatever the desktop transmits through them.
+            separator: Color::rgba(0x0000001a),
+            separator_quiet: Color::rgba(0x0000000f),
+            separator_disabled: Color::rgba(0x0000000a),
+            field_outline: Color::rgba(0x0000002b),
+            control_outline: Color::rgba(0x0000002b),
+            control_outline_strong: Color::rgba(0x00000040),
+            tab_separator: Color::rgba(0x00000028),
+            selected_rim: Color::rgba(0x0000001a),
+            selected_rim_hover: Color::rgba(0x0000002b),
+            selected_rim_inactive: Color::rgba(0x0000000f),
+            mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
-            mark_track: 0xe8e8e8,
+            mark_track: 0xe5e5e5,
             mark_indicator: 0x595959,
             mark_indicator_strong: 0x474747,
             scrollbar_thumb: 0x808080,
@@ -262,10 +283,19 @@ struct ChromePalette {
     /// Menus, popovers, dialogs, tooltips, and the cards one run of Settings Rows rests on.
     raised: u32,
     field: u32,
-    /// Light controls use a dedicated fill; Dark retains the compiler's root-derived default.
+    /// The resting fill of an ordinary bordered control.
+    ///
+    /// Floating preparation may strengthen the equivalent overlay without changing this authored
+    /// composite when a transmitting host would otherwise make its content unreadable.
     control_fill: Option<u32>,
-    hover: u32,
-    pressed: u32,
+    /// An explicit track gives selected chips their own host, independent of button fills.
+    segmented_track: Option<u32>,
+    /// Filled and unfilled controls have independent interaction steps.
+    control_hover: u32,
+    control_pressed: u32,
+    /// Interaction steps for a control with no resting fill, taken from its host surface.
+    ghost_hover: u32,
+    ghost_pressed: u32,
     /// Persistent selection: a neutral rung, never an accent.
     selected: u32,
     /// The Active Tab's chip in an unfocused window: the same shape, a shorter step off the bar.
@@ -277,9 +307,12 @@ struct ChromePalette {
     row_hover: u32,
     /// Persistent row selection is stronger than hover on both hosts, without a decorative rim.
     row_selected: u32,
+    row_selected_hover: Option<u32>,
+    navigation_selected: Option<u32>,
     /// The Active Tab, authored apart from the list-row fills but stepping the same way from the
     /// title bar that a selected row steps from its own surface.
     tab_active: u32,
+    tab_active_hover: Option<u32>,
     /// The label on a selected chip, which is the strongest text in a navigation list.
     row_selected_text: u32,
     /// Path, machine, and count text on a selected chip, lifted so the chip never reads dimmer
@@ -290,20 +323,33 @@ struct ChromePalette {
     text_muted: u32,
     text_placeholder: u32,
     text_disabled: u32,
-    /// Structural dividers, and the hairline around raised surfaces.
-    separator: u32,
+    /// The hairline around a raised surface, and the outer edge of a structural region.
+    ///
+    /// Boundaries may be authored as ink rather than as a gray. A gray states one step off one
+    /// host, so a palette whose surfaces sit at different weights needs a different gray for each.
+    /// Ink over the final host states the same step on every one of them, and keeps stating it when
+    /// the host transmits the desktop.
+    separator: Color,
     /// Separators inside an already-bounded surface.
-    separator_quiet: u32,
-    separator_disabled: u32,
-    field_outline: u32,
-    control_outline: u32,
-    control_outline_strong: u32,
+    separator_quiet: Color,
+    separator_disabled: Color,
+    field_outline: Color,
+    control_outline: Color,
+    control_outline_strong: Color,
     /// The short hairline between two neighbouring inactive Tabs.
     ///
     /// It is authored apart from `separator` because a full-length divider disappears at this
     /// length, and apart from `control_outline` because retuning an outlined action must not move
     /// the Tab strip. It sits a visible step off both title-bar surfaces and well under the titles.
-    tab_separator: u32,
+    tab_separator: Color,
+    /// The rim a persistent selection carries, at rest, on hover, and in an unfocused window.
+    ///
+    /// A selection that shares its appearance's content tone cannot state its shape with fill
+    /// alone, because the surfaces it lands on carry that tone too. Where the fill already states
+    /// its shape, the rim is absent rather than decorative.
+    selected_rim: Color,
+    selected_rim_hover: Color,
+    selected_rim_inactive: Color,
     /// Checkbox and switch outlines, which must survive a quiet separator.
     mark_outline: u32,
     mark_outline_strong: u32,
@@ -355,23 +401,24 @@ impl ChromePalette {
             link_text_hover: opaque(self.accent_hover),
             link_text_pressed: opaque(self.accent_pressed),
 
-            border: opaque(self.separator),
-            border_variant: opaque(self.separator_quiet),
-            border_disabled: opaque(self.separator_disabled),
-            input_border: opaque(self.field_outline),
-            outline_border: opaque(self.control_outline),
-            outline_hover_border: opaque(self.control_outline_strong),
+            border: Some(self.separator),
+            border_variant: Some(self.separator_quiet),
+            border_disabled: Some(self.separator_disabled),
+            input_border: Some(self.field_outline),
+            outline_border: Some(self.control_outline),
+            outline_hover_border: Some(self.control_outline_strong),
             // A press is carried by the fill. Thickening the ring as well would make an
             // outlined action jump against the quiet separators around it.
-            outline_pressed_border: opaque(self.control_outline),
-            outline_disabled_border: opaque(self.separator_disabled),
+            outline_pressed_border: Some(self.control_outline),
+            outline_disabled_border: Some(self.separator_disabled),
 
             element_background: self.control_fill.map(Color::rgb),
-            element_hover: opaque(self.hover),
-            element_active: opaque(self.pressed),
+            segmented_track_background: self.segmented_track.map(Color::rgb),
+            element_hover: opaque(self.control_hover),
+            element_active: opaque(self.control_pressed),
             element_selected: opaque(self.selected),
-            ghost_element_hover: opaque(self.hover),
-            ghost_element_active: opaque(self.pressed),
+            ghost_element_hover: opaque(self.ghost_hover),
+            ghost_element_active: opaque(self.ghost_pressed),
             selection_background: opaque(self.selected),
             row_background: opaque(self.shell),
             // A persistent list row is authored apart from the shared selection rung. Deriving it
@@ -379,24 +426,28 @@ impl ChromePalette {
             // fill a segmented option needs against its own track, and those surfaces differ.
             row_hover_background: opaque(self.row_hover),
             row_selected_background: opaque(self.row_selected),
-            // Built-in rows use fill and text for selection. Custom appearances may author rims.
-            row_selected_border: translucent(0),
-            row_selected_hover_border: translucent(0),
+            row_selected_hover_background: self.row_selected_hover.map(Color::rgb),
+            navigation_selected_background: self.navigation_selected.map(Color::rgb),
+            // A rim appears only where the fill cannot state the chip's shape by itself, and it
+            // steps up on hover because the fill of a selected row has nowhere left to move.
+            row_selected_border: Some(self.selected_rim),
+            row_selected_hover_border: Some(self.selected_rim_hover),
             row_selected_foreground: opaque(self.row_selected_text),
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
             row_selected_hover_secondary: opaque(self.row_selected_secondary),
-            // Tabs share the row selection direction but use a smaller contrast step.
+            // Tabs and navigation rows share the appearance's selection direction.
             tab_active_background: opaque(self.tab_active),
+            tab_active_hover_background: self.tab_active_hover.map(Color::rgb),
             // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
-            // hover identically. The chip's shape is its fill; no hairline is drawn around it.
+            // hover identically, and both take the same rim.
             tab_active_foreground: opaque(self.row_selected_text),
-            tab_active_border: translucent(0),
+            tab_active_border: Some(self.selected_rim),
             tab_active_hover_foreground: opaque(self.row_selected_text),
             tab_inactive_selected_background: opaque(self.selected_inactive),
             tab_inactive_selected_foreground: opaque(self.text_secondary),
-            tab_inactive_selected_border: translucent(0),
-            tab_separator: opaque(self.tab_separator),
+            tab_inactive_selected_border: Some(self.selected_rim_inactive),
+            tab_separator: Some(self.tab_separator),
 
             primary_background: opaque(self.emphasis),
             primary_hover_background: opaque(self.emphasis_hover),
@@ -491,7 +542,7 @@ fn spaceterm_dark_terminal() -> TerminalColors {
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0x242424),
-        background: Color::rgb(0xfbfbfb),
+        background: Color::rgb(0xfafafa),
         normal: [
             0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
         ]
@@ -685,9 +736,9 @@ mod tests {
 
     /// The Active Tab and selected rows carry the same content hierarchy with distinct materials.
     ///
-    /// Both move toward text without a decorative outline. An unfocused Tab uses a smaller step.
+    /// Light adds quiet rims; Dark keeps fill-only chips. An unfocused Tab uses a smaller step.
     #[test]
-    fn the_active_tab_should_share_borderless_row_selection_direction() {
+    fn the_active_tab_should_share_row_selection_direction_and_theme_edge_policy() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance).opaque_presentation();
 
@@ -713,18 +764,31 @@ mod tests {
                     "{appearance:?} should give the Active Tab and a selected row one {role}"
                 );
             }
-            assert_ne!(
-                colors.tab_active_background, colors.row_selected_background,
-                "{appearance:?} should tune the Active Tab for its title-bar host"
+            assert_eq!(
+                colors.tab_active_background == colors.row_selected_background,
+                appearance == Appearance::Light,
+                "Light should share its selected fill across Tab and row hosts"
             );
-            assert_ne!(
-                colors.tab_active_hover_background, colors.tab_active_background,
-                "{appearance:?} Active Tab should answer hover"
-            );
-            assert_ne!(
-                colors.row_selected_hover_background, colors.row_selected_background,
-                "{appearance:?} selected row should answer hover"
-            );
+            if appearance == Appearance::Light {
+                assert_eq!(
+                    colors.tab_active_hover_background,
+                    colors.tab_active_background
+                );
+                assert_eq!(
+                    colors.row_selected_hover_background,
+                    colors.row_selected_background
+                );
+                assert_ne!(colors.row_selected_hover_border, colors.row_selected_border);
+            } else {
+                assert_ne!(
+                    colors.tab_active_hover_background,
+                    colors.tab_active_background
+                );
+                assert_ne!(
+                    colors.row_selected_hover_background,
+                    colors.row_selected_background
+                );
+            }
             for (role, border) in [
                 ("selected row", colors.row_selected_border),
                 ("selected row hover", colors.row_selected_hover_border),
@@ -735,15 +799,17 @@ mod tests {
                 ),
             ] {
                 assert_eq!(
-                    border.a, 0,
-                    "{appearance:?} built-in {role} should state its shape without an outline"
+                    border.a > 0,
+                    appearance == Appearance::Light,
+                    "{appearance:?} built-in {role} should follow its theme edge policy"
                 );
             }
 
             let bar = weight(colors.title_bar_background);
             let focused = weight(colors.tab_active_background) - bar;
             let unfocused = weight(colors.tab_inactive_selected_background) - bar;
-            let row = weight(colors.row_selected_background) - weight(colors.panel_background);
+            let row =
+                weight(colors.navigation_selected_background) - weight(colors.panel_background);
             assert!(
                 focused * row > 0.0 && unfocused * row > 0.0,
                 "{appearance:?} should keep Tab states in the row selection direction, got \
@@ -781,7 +847,7 @@ mod tests {
                 ("field", colors.input_border, colors.input_background),
                 ("resize handle", colors.resize_idle, colors.background),
             ] {
-                let ratio = border.contrast_ratio(surface);
+                let ratio = border.source_over(surface).contrast_ratio(surface);
                 assert!(
                     ratio < 2.0,
                     "{appearance:?} {role} separator outlines its region at {ratio}"
@@ -808,11 +874,8 @@ mod tests {
         }
     }
 
-    /// Rows step consistently from every built-in host without introducing hue.
-    ///
-    /// Persistent rows can rest on the chrome shell or on a raised menu. Hover and selection must
-    /// move in the same direction from both hosts, with selection taking the stronger step, so the
-    /// same interaction never reads as a lift in one list and a recess in another.
+    /// Authored navigation lifts off the shell without hue. Light popup hosts are prepared
+    /// separately from the raised card role, which matches the authored navigation selection.
     #[test]
     fn the_row_ladder_should_step_consistently_from_shell_and_raised_surfaces() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -833,6 +896,10 @@ mod tests {
                 ("shell", colors.panel_background),
                 ("raised surface", colors.elevated_surface_background),
             ] {
+                if appearance == Appearance::Light && host_name == "raised surface" {
+                    assert_eq!(colors.row_selected_background, host);
+                    continue;
+                }
                 let hover_step = weight(colors.row_hover_background) - weight(host);
                 let selection_step = weight(colors.row_selected_background) - weight(host);
                 assert!(

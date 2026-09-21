@@ -19,11 +19,8 @@ fn paint(colors: &ChromeColors) -> ModalPaint {
         gpui_color(colors.text),
         gpui_color(colors.text_muted),
         gpui_color(colors.info),
-        gpui_color(colors.info_background),
         gpui_color(colors.warning),
-        gpui_color(colors.warning_background),
         gpui_color(colors.error),
-        gpui_color(colors.error_background),
     )
 }
 

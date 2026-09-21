@@ -2,6 +2,9 @@ use gpui::{Rgba, px, rgba};
 use spaceterm_ui::{MenuMetrics, MenuPaint, MenuSizes, MenuTheme};
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::{ChromeIcons, IconRole};
+use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
 #[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
@@ -9,11 +12,51 @@ pub(super) fn theme(colors: &ChromeColors) -> MenuTheme {
 }
 
 /// Keeps a trigger's host treatment independent from rows on the shared floating material.
+#[cfg(test)]
 pub(super) fn themed_with_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
     row_colors: &ChromeColors,
 ) -> MenuTheme {
+    prepared_with_rows(
+        reference,
+        colors,
+        row_colors,
+        None,
+        &ChromeTypography::default(),
+        &ChromeIcons::default(),
+        super::control_theme_catalog::OverlayRowPolicy::default(),
+    )
+}
+
+pub(super) fn prepared_with_rows(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+    row_colors: &ChromeColors,
+    unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
+    typography: &ChromeTypography,
+    icons: &ChromeIcons,
+    row_policy: super::control_theme_catalog::OverlayRowPolicy,
+) -> MenuTheme {
+    let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+        reference, row_colors, row_policy,
+    );
+    let rows = unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
+        rows.unfocused_selection(super::control_theme_catalog::overlay_list_rows_with_policy(
+            unfocused_reference,
+            unfocused_paint,
+            row_policy,
+        ))
+    });
+    let destructive = destructive_rows(reference, row_colors, row_policy);
+    let destructive =
+        unfocused_rows.map_or(destructive, |(unfocused_reference, unfocused_paint)| {
+            destructive.unfocused_selection(destructive_rows(
+                unfocused_reference,
+                unfocused_paint,
+                row_policy,
+            ))
+        });
     let paint = MenuPaint::new(
         gpui_color(colors.text),
         gpui_color(colors.icon),
@@ -22,10 +65,8 @@ pub(super) fn themed_with_rows(
         gpui_color(colors.ghost_element_selected_foreground),
         gpui_color(colors.error),
     )
-    .rows(super::control_theme_catalog::overlay_list_rows(
-        reference, row_colors,
-    ))
-    .destructive_rows(destructive_rows(reference, row_colors))
+    .rows(rows)
+    .destructive_rows(destructive)
     .hover_background(gpui_color(colors.ghost_element_hover))
     .hover_foreground(gpui_color(colors.ghost_element_hover_foreground))
     .trigger(
@@ -33,78 +74,70 @@ pub(super) fn themed_with_rows(
         gpui_color(colors.ghost_element_hover),
         gpui_color(colors.border_transparent),
     )
-    .focus_border(gpui_color(colors.border_focused));
+    // Menu and picker triggers use ghost fill feedback for focus and open state.
+    .focus_border(rgba(0));
 
     MenuTheme::new(
         paint,
-        MenuSizes::new(metrics(200.0), metrics(224.0), metrics(264.0)),
+        MenuSizes::new(
+            metrics(200.0, typography, icons),
+            metrics(224.0, typography, icons),
+            metrics(264.0, typography, icons),
+        ),
     )
 }
 
 fn destructive_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
+    policy: super::control_theme_catalog::OverlayRowPolicy,
 ) -> spaceterm_ui::ListRowPaints {
-    use super::control_theme_catalog::{OverlayRow, relative_edge};
-    use spaceterm_ui::{ListRowPaint, ListRowPaints};
-    let surfaces = (
-        reference.elevated_surface_background,
-        colors.elevated_surface_background,
+    let mut destructive = reference.clone();
+    macro_rules! error_content {
+        ($($field:ident),+ $(,)?) => { $(destructive.$field = reference.error;)+ };
+    }
+    error_content!(
+        row_foreground,
+        row_secondary,
+        row_icon,
+        row_match,
+        row_hover_foreground,
+        row_hover_secondary,
+        row_hover_icon,
+        row_hover_match,
+        row_selected_foreground,
+        row_selected_secondary,
+        row_selected_icon,
+        row_selected_match,
+        row_selected_hover_foreground,
+        row_selected_hover_secondary,
+        row_selected_hover_icon,
+        row_selected_hover_match
     );
-    let row = |pick: fn(&ChromeColors) -> (Color, Color)| {
-        let (fill, border) = pick(reference);
-        let row = OverlayRow::resolve(
-            (fill, surfaces.0),
-            (pick(colors).0, surfaces.1),
-            [reference.error; 4],
-            border,
-        );
-        let [foreground, _, icon, _] = row.content;
-        let fill = row.fill;
-        let border = row.border;
-        ListRowPaint::new(
-            gpui_color(fill),
-            gpui_color(foreground),
-            gpui_color(foreground),
-            gpui_color(icon),
-            gpui_color(foreground),
-            gpui_color(border),
-        )
-    };
-    ListRowPaints::new(
-        row(|c| (c.elevated_surface_background, c.row_border)),
-        row(|c| (c.row_hover_background, c.row_hover_border)),
-        row(|c| (c.row_selected_background, c.row_selected_border)),
-        row(|c| (c.row_selected_hover_background, c.row_selected_hover_border)),
-        ListRowPaint::new(
-            gpui_color(if surfaces.0 == surfaces.1 {
-                surfaces.1
-            } else {
-                Color::rgba(0)
-            }),
-            gpui_color(reference.text_disabled),
-            gpui_color(reference.text_disabled),
-            gpui_color(reference.icon_disabled),
-            gpui_color(reference.text_disabled),
-            gpui_color(if surfaces.0 == surfaces.1 {
-                reference.row_border
-            } else {
-                relative_edge(surfaces.0, reference.row_border)
-            }),
-        ),
-    )
+    super::control_theme_catalog::overlay_list_rows_with_policy(&destructive, colors, policy)
 }
 
-fn metrics(width: f32) -> MenuMetrics {
+fn metrics(width: f32, typography: &ChromeTypography, icons: &ChromeIcons) -> MenuMetrics {
+    let body = typography.style(TextRole::Body);
+    let shortcut = typography.style(TextRole::Shortcut);
+    let section = typography.style(TextRole::Section);
     MenuMetrics::new(px(width), px(26.0))
         .trigger_height(px(28.0))
         .horizontal_padding(px(6.0))
         .indicator_width(px(16.0))
         .gap(px(6.0))
-        .trigger_corner_radius(px(8.0))
-        .font_sizes(px(12.0), px(11.0))
+        .trigger_corner_radius(RadiusRole::Control.pixels())
+        .font_sizes(body.size, shortcut.size)
+        .section_font_size(section.size)
         .submenu_gap(px(2.0))
-        .decoration_metrics(px(14.0), px(1.0))
+        .decoration_metrics(icons.metrics(IconRole::Row).glyph_size, px(HAIRLINE))
+        .trigger_icon_size(icons.metrics(IconRole::Control).glyph_size)
+        .text_geometry(
+            body.line_height,
+            shortcut.line_height,
+            section.line_height,
+            icons.metrics(IconRole::Row).baseline_center,
+        )
 }
 
 fn gpui_color(color: Color) -> Rgba {
@@ -116,6 +149,18 @@ mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
     use spaceterm_ui::ListRowPaint;
+
+    #[test]
+    fn menu_trigger_feedback_does_not_borrow_the_accent_focus_ring() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let colors = builtin_chrome_base(appearance).opaque_presentation();
+            let different_focus = ChromeColors {
+                focus_ring: Color::rgb(0xff00ff),
+                ..colors.clone()
+            };
+            assert_eq!(theme(&colors), theme(&different_focus));
+        }
+    }
 
     fn expected_row(
         colors: &ChromeColors,
@@ -142,7 +187,11 @@ mod tests {
     fn destructive_menu_rows_use_neutral_overlay_surfaces_and_semantic_content() {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
-            let rows = destructive_rows(&colors, &colors);
+            let rows = destructive_rows(
+                &colors,
+                &colors,
+                super::super::control_theme_catalog::OverlayRowPolicy::default(),
+            );
 
             assert_eq!(
                 rows.resolve(true, false, false),
@@ -186,14 +235,18 @@ mod tests {
             );
             assert_eq!(
                 rows.resolve(false, true, true),
-                ListRowPaint::new(
-                    gpui_color(colors.elevated_surface_background),
-                    gpui_color(colors.text_disabled),
-                    gpui_color(colors.text_disabled),
-                    gpui_color(colors.icon_disabled),
-                    gpui_color(colors.text_disabled),
-                    gpui_color(colors.row_border),
+                expected_row(
+                    &colors,
+                    colors.row_selected_background,
+                    colors.text_disabled,
+                    colors.icon_disabled,
+                    colors.row_selected_border,
                 )
+            );
+            assert_ne!(
+                rows.resolve(false, true, true),
+                rows.resolve(false, false, true),
+                "disabling a destructive row must preserve its selection"
             );
             assert_ne!(
                 rows.resolve(true, false, false),

@@ -6,6 +6,46 @@ use gpui::{
 
 use super::*;
 
+#[test]
+fn density_scales_segment_bounds_but_not_radius() {
+    let original = test_theme().resolve(SegmentedSize::Regular).metrics;
+    let comfortable = test_theme()
+        .scaled_metrics(1.0, 1.25)
+        .resolve(SegmentedSize::Regular)
+        .metrics;
+
+    assert!(comfortable.option_height > original.option_height);
+    assert_eq!(comfortable.radius, original.radius);
+}
+
+#[test]
+fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
+    let shadow = ControlShadow::single(crate::ControlShadowLayer::new(
+        rgba(0x11111159).into(),
+        px(0.0),
+        px(1.0),
+        px(2.0),
+        px(-1.0),
+    ));
+    let track_border = rgba(0x00000026);
+    let selected_border = rgba(0x00000026);
+    let theme = test_theme().track_elevation(shadow, Some(track_border), Some(selected_border));
+    let style = theme.resolve(SegmentedSize::Regular);
+
+    assert_eq!(style.track_shadow, shadow);
+    assert_eq!(style.track_border, track_border);
+    assert_eq!(style.selected_shadow, ControlShadow::none());
+    for paints in [
+        theme.paints.normal,
+        theme.paints.hovered,
+        theme.paints.pressed,
+        theme.paints.disabled,
+    ] {
+        assert_eq!(paints.selected.border, selected_border);
+        assert_eq!(paints.unselected.border, rgba(0x00000000));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Light,
@@ -34,6 +74,165 @@ fn test_theme() -> SegmentedControlTheme {
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SizingHost {
+    Block,
+    Row,
+    Column,
+}
+
+struct SizingRoot {
+    host: SizingHost,
+    host_width: Pixels,
+    full_width: bool,
+    size: SegmentedSize,
+    right_to_left: bool,
+}
+
+impl Render for SizingRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .debug_selector(|| "sizing-host".to_owned())
+            .w(self.host_width)
+            .when(matches!(self.host, SizingHost::Row), |host| host.flex())
+            .when(matches!(self.host, SizingHost::Column), |host| {
+                host.flex().flex_col()
+            })
+            .child(
+                SegmentedControl::new(
+                    "sizing-control",
+                    "Selection",
+                    &true,
+                    vec![
+                        SegmentedOption::new(false, "Off").debug_selector("sizing-off"),
+                        SegmentedOption::new(true, "Comfortable").debug_selector("sizing-on"),
+                    ],
+                )
+                .unwrap()
+                .size(self.size)
+                .full_width(self.full_width)
+                .right_to_left(self.right_to_left)
+                .debug_selector("sizing-control")
+                .on_change(|_, _, _| {}),
+            )
+    }
+}
+
+#[gpui::test]
+fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) {
+    for scale in [1.0, 1.25] {
+        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
+            for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+                for right_to_left in [false, true] {
+                    let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+                        host,
+                        host_width: px(320.0),
+                        full_width: false,
+                        size,
+                        right_to_left,
+                    });
+                    cx.run_until_parked();
+                    let track = cx.debug_bounds("sizing-control").unwrap();
+                    let off = cx.debug_bounds("sizing-off").unwrap();
+                    let on = cx.debug_bounds("sizing-on").unwrap();
+                    let left = off.left().min(on.left()) - track.left();
+                    let right = track.right() - off.right().max(on.right());
+                    let inset = if size == SegmentedSize::Regular {
+                        px(2.0)
+                    } else {
+                        px(0.0)
+                    };
+                    assert_eq!(
+                        (left, right),
+                        (inset, inset),
+                        "intrinsic track must not retain parent slack: {host:?}/{size:?}/rtl={right_to_left}/scale={scale}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn full_width_track_distributes_all_available_width_between_options(cx: &mut TestAppContext) {
+    for scale in [1.0, 1.25] {
+        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
+            for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+                for right_to_left in [false, true] {
+                    let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+                        host,
+                        host_width: px(320.0),
+                        full_width: true,
+                        size,
+                        right_to_left,
+                    });
+                    cx.run_until_parked();
+                    let host_bounds = cx.debug_bounds("sizing-host").unwrap();
+                    let track = cx.debug_bounds("sizing-control").unwrap();
+                    let off = cx.debug_bounds("sizing-off").unwrap();
+                    let on = cx.debug_bounds("sizing-on").unwrap();
+                    let left = off.left().min(on.left()) - track.left();
+                    let right = track.right() - off.right().max(on.right());
+                    let inset = if size == SegmentedSize::Regular {
+                        px(2.0)
+                    } else {
+                        px(0.0)
+                    };
+                    assert_eq!(track.size.width, host_bounds.size.width);
+                    let device_pixel = cx.update(|window, _| px(1.0 / window.scale_factor()));
+                    assert!(
+                        (off.size.width - on.size.width).abs() <= device_pixel,
+                        "equal segments may differ only by device-pixel rounding: {off:?}, {on:?}"
+                    );
+                    assert_eq!(
+                        (left, right),
+                        (inset, inset),
+                        "full-width track must have symmetric insets: {host:?}/{size:?}/rtl={right_to_left}/scale={scale}"
+                    );
+                    cx.update(|window, _| {
+                        window.activate_window();
+                        window.focus_next();
+                    });
+                    cx.run_until_parked();
+                    assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
+                    let ring = cx.debug_bounds("sizing-control-keyboard-focus").unwrap();
+                    assert_eq!(track.left() - ring.left(), ring.right() - track.right());
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn narrow_full_width_track_contains_equal_options_and_their_labels(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+        let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+            host: SizingHost::Block,
+            host_width: px(40.0),
+            full_width: true,
+            size,
+            right_to_left: false,
+        });
+        cx.run_until_parked();
+        let track = cx.debug_bounds("sizing-control").unwrap();
+        let off = cx.debug_bounds("sizing-off").unwrap();
+        let on = cx.debug_bounds("sizing-on").unwrap();
+        let label = cx.debug_bounds("sizing-on-label").unwrap();
+        assert_eq!(off.size.width, on.size.width);
+        assert!(
+            track.right() >= on.right(),
+            "track {track:?} must contain both options, including {on:?}"
+        );
+        assert!(
+            on.left() <= label.left() && label.right() <= on.right(),
+            "option {on:?} must contain label {label:?}"
+        );
+    }
+}
+
 struct TestRoot {
     current: Mode,
     size: SegmentedSize,
@@ -43,11 +242,13 @@ struct TestRoot {
     right_to_left: bool,
     changes: Rc<RefCell<Vec<SegmentedChange<Mode>>>>,
     other_focus: FocusHandle,
+    preview_font: Rc<RefCell<Option<gpui::Font>>>,
 }
 
 impl Render for TestRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let changes = Rc::clone(&self.changes);
+        let preview_font = Rc::clone(&self.preview_font);
         let control = SegmentedControl::new(
             "test-segmented",
             "Appearance",
@@ -55,8 +256,23 @@ impl Render for TestRoot {
             vec![
                 SegmentedOption::new(Mode::Light, "Light")
                     .debug_selector("test-segmented-light")
-                    .preview(|color, extent| {
-                        div().w(extent).h(extent).bg(color).into_any_element()
+                    .preview(move |color, extent| {
+                        let preview_font = Rc::clone(&preview_font);
+                        div()
+                            .w(extent)
+                            .h(extent)
+                            .bg(color)
+                            .child(
+                                gpui::canvas(
+                                    move |_, window, _| {
+                                        *preview_font.borrow_mut() =
+                                            Some(window.text_style().font());
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .size_full(),
+                            )
+                            .into_any_element()
                     }),
                 SegmentedOption::new(Mode::Dark, "Dark").debug_selector("test-segmented-dark"),
             ]
@@ -101,10 +317,36 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     (root, changes, cx)
+}
+
+#[gpui::test]
+fn selection_keeps_the_rendered_segment_font_stable(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.size = SegmentedSize::Card;
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let before = root.read_with(cx, |root, _| root.preview_font.borrow().clone().unwrap());
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.current = Mode::Light;
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let after = root.read_with(cx, |root, _| root.preview_font.borrow().clone().unwrap());
+    assert_eq!(
+        after, before,
+        "selection must not reshape the segment's text"
+    );
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -115,6 +357,47 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_mouse_move(position, None, Modifiers::none());
     cx.simulate_click(position, Modifiers::none());
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn selection_keeps_segment_and_label_geometry_stable(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+        cx.update(|_, cx| {
+            root.update(cx, |root, cx| {
+                root.size = size;
+                root.current = Mode::Dark;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let selectors = [
+            "test-segmented",
+            "test-segmented-light",
+            "test-segmented-light-label",
+            "test-segmented-dark",
+            "test-segmented-dark-label",
+            "test-segmented-auto",
+            "test-segmented-auto-label",
+        ];
+        let before = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+        for mode in [Mode::Light, Mode::Auto, Mode::Dark] {
+            cx.update(|_, cx| {
+                root.update(cx, |root, cx| {
+                    root.current = mode;
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            for (selector, expected) in selectors.into_iter().zip(before) {
+                assert_eq!(
+                    cx.debug_bounds(selector).unwrap(),
+                    expected,
+                    "{selector} moved or resized after selection changed to {mode:?} ({size:?})"
+                );
+            }
+        }
+    }
 }
 
 fn focus_control(cx: &mut VisualTestContext) {
@@ -427,6 +710,7 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();

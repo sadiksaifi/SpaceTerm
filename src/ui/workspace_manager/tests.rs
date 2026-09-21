@@ -299,6 +299,67 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     assert_eq!(row.size.height, px(SIDEBAR_ROW_HEIGHT));
 }
 
+#[gpui::test]
+fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.chrome.typography.base_size = 24.0;
+        preferences.chrome.density = density;
+        let resolved = crate::appearance::SchemeCatalog::default()
+            .resolve(
+                crate::appearance::AppearanceGeneration::INITIAL,
+                &preferences,
+                crate::appearance::SystemAppearance::unavailable()
+                    .with_composition(crate::appearance::CompositionCapabilities::new(true, true)),
+                &crate::appearance::AvailableFonts::default(),
+            )
+            .expect("maximum supported Chrome typography should resolve");
+        let (active, inactive) =
+            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+        cx.update(|window, cx| {
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        for id in [1, 2] {
+            let row_selector: &'static str = format!(
+                "workspace-row-{id}-{}",
+                if id == 2 { "active" } else { "inactive" }
+            )
+            .leak();
+            let name_selector: &'static str = format!("workspace-row-name-{id}").leak();
+            let detail_selector: &'static str = format!("workspace-row-path-{id}").leak();
+            let row = cx.debug_bounds(row_selector).expect("Workspace row");
+            let name = cx.debug_bounds(name_selector).expect("Workspace name");
+            let detail = cx.debug_bounds(detail_selector).expect("Workspace detail");
+            assert!(
+                name.top() >= row.top() && detail.bottom() <= row.bottom(),
+                "{density:?} row {id} must contain its semantic line boxes: row={row:?}, name={name:?}, detail={detail:?}"
+            );
+        }
+        let first = cx
+            .debug_bounds("workspace-row-1-inactive")
+            .expect("first Workspace row");
+        let second = cx
+            .debug_bounds("workspace-row-2-active")
+            .expect("second Workspace row");
+        assert!(
+            first.bottom() <= second.top(),
+            "{density:?} adjacent Workspace targets must not overlap: first={first:?}, second={second:?}"
+        );
+    }
+}
+
 #[test]
 fn remote_home_labels_should_ignore_trailing_separators_without_changing_tooltip_paths() {
     let location = WorkspaceLocation::Remote {
@@ -4469,7 +4530,12 @@ fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &m
     let (manager, _, cx) = workspace_manager(cx);
     assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
 
-    let expected = px(super::WORKSPACE_CHROME_ICON_SIZE);
+    let expected = cx.update(|_, cx| {
+        crate::ui::appearance::chrome(cx)
+            .icons
+            .metrics(crate::ui::chrome_icons::IconRole::Chrome)
+            .glyph_size
+    });
     let opened = cx.debug_bounds("workspace-switcher-icon").unwrap();
     assert_eq!(
         opened.size,
@@ -5358,11 +5424,47 @@ fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut Tes
     }
 }
 
-/// Visible workspace and Tab surfaces align across density and text-size changes.
 #[gpui::test]
-fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext) {
+fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    let surface = |selector: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads_for_test()
+                .into_iter()
+                .find(|quad| quad.visible_bounds == bounds)
+                .map(|quad| quad.background)
+        })
+    };
+    let resting = surface("workspace-switcher", cx);
+    let switcher = cx.debug_bounds("workspace-switcher").unwrap();
+    cx.simulate_mouse_move(switcher.center(), None, Modifiers::none());
+    redraw(cx);
+    assert_ne!(
+        surface("workspace-switcher", cx),
+        resting,
+        "expanded switcher needs Ghost hover feedback"
+    );
+
+    click("toggle-sidebar-button", cx);
+    cx.simulate_mouse_move(point(px(0.0), px(200.0)), None, Modifiers::none());
+    redraw(cx);
+    let tab = surface("tab-item-1-chip", cx).expect("active Tab surface");
+    assert_eq!(
+        surface("workspace-switcher", cx),
+        Some(tab),
+        "collapsed switcher must share active Tab material"
+    );
+}
+
+/// The collapsed switcher matches the Tab surface height across appearance scales.
+#[gpui::test]
+fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
+    assert!(cx.debug_bounds("workspace-switcher-chip").is_none());
 
     for (text_scale, spacing_scale) in [(1.0, 1.0), (1.0, 1.25), (24.0 / 13.0, 1.25)] {
         cx.update(|window, cx| {
@@ -5371,15 +5473,22 @@ fn collapsed_workspace_chip_should_match_tab_chip_height(cx: &mut TestAppContext
                 spacing_scale,
                 ..crate::ui::appearance::ChromeAppearance::default()
             };
-            cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+            cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+                appearance,
+            )));
             window.refresh();
         });
         cx.run_until_parked();
-        let workspace = cx.debug_bounds("workspace-switcher-chip").unwrap();
+        let workspace = cx.debug_bounds("workspace-chip").unwrap();
         let tab = cx.debug_bounds("tab-item-1-chip").unwrap();
-        assert_eq!(workspace.size.height, tab.size.height);
-        assert_eq!(workspace.top(), tab.top());
-        assert_eq!(workspace.bottom(), tab.bottom());
+        let switcher = cx.debug_bounds("workspace-switcher").unwrap();
+        assert_eq!(
+            (switcher.top(), switcher.bottom()),
+            (tab.top(), tab.bottom()),
+            "switcher and Tab surface edges must align at text scale {text_scale}, spacing scale {spacing_scale}"
+        );
+        assert_eq!(workspace.center().y, tab.center().y);
+        assert!(workspace.top() >= tab.top() && workspace.bottom() <= tab.bottom());
     }
 }
 
@@ -5432,7 +5541,9 @@ fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
         ..crate::ui::appearance::ChromeAppearance::default()
     };
     cx.update(|window, cx| {
-        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
         window.refresh();
     });
     cx.run_until_parked();
@@ -6095,14 +6206,21 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         (1, true)
     );
 
-    let sidebar = cx
-        .debug_bounds("workspace-sidebar")
-        .expect("the Workspace sidebar should render");
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the New Workspace ComboBox panel should render");
-    let space = frame_space(cx);
-    assert_eq!(panel.size.width, sidebar.size.width - space - space);
+    let workspace = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace root should render");
+    assert!(panel.left() >= workspace.left() && panel.right() <= workspace.right());
+    assert!(panel.size.width >= px(240.0) && panel.size.width <= px(420.0));
+    let remote_label = cx
+        .debug_bounds("combo-box-row-2-label")
+        .expect("the Remote Workspace label should render");
+    let remote_shortcut = cx
+        .debug_bounds("combo-box-row-2-shortcut")
+        .expect("the Remote Workspace shortcut should render");
+    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
     let chooser = cx
         .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
@@ -7311,6 +7429,60 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
 }
 
 #[gpui::test]
+fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    right_click("workspace-row-1-active", cx);
+    click("workspace-menu-row-rename", cx);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let line_height = cx.update(|window, cx| {
+            let mut preferences = crate::appearance::AppearancePreferences::default();
+            preferences.chrome.typography.base_size = 24.0;
+            preferences.chrome.density = density;
+            let resolved = crate::appearance::SchemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &preferences,
+                    crate::appearance::SystemAppearance::unavailable().with_composition(
+                        crate::appearance::CompositionCapabilities::new(true, true),
+                    ),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("maximum supported Chrome typography should resolve");
+            let (active, inactive) =
+                crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+            let line_height = active
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Navigation)
+                .line_height;
+            cx.set_global(crate::ui::appearance::InstalledChrome {
+                active: Arc::new(active),
+                inactive: Arc::new(inactive),
+            });
+            window.refresh();
+            line_height
+        });
+        cx.run_until_parked();
+
+        let frame = cx
+            .debug_bounds("workspace-rename-input-1")
+            .expect("inline rename frame");
+        let input = cx
+            .debug_bounds("workspace-rename-input")
+            .expect("inline rename input");
+        assert!(
+            frame.size.height >= line_height
+                && input.top() >= frame.top()
+                && input.bottom() <= frame.bottom(),
+            "{density:?} inline rename must contain its {line_height:?} Navigation line: frame={frame:?}, input={input:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
@@ -7391,7 +7563,9 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
             spaceterm_ui::replace_control_theme_catalog(cx, catalog),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
-        cx.set_global(crate::ui::appearance::InstalledChrome(Arc::new(appearance)));
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
         window.refresh();
     });
     cx.run_until_parked();
@@ -8107,9 +8281,27 @@ fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_quer
         let matched = cx.debug_bounds("workspace-switcher-result-1").unwrap();
         let local = cx.debug_bounds("workspace-switcher-create-local").unwrap();
         let remote = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
-        assert!(matched.bottom() <= local.top());
+        let separator = cx
+            .debug_bounds("workspace-switcher-create-local-group-separator")
+            .expect("the creation group must be separated from matching Workspaces");
+        assert!(matched.bottom() <= separator.top());
+        assert!(separator.bottom() <= local.top());
         assert!(local.bottom() <= remote.top());
     }
+}
+
+#[gpui::test]
+fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut TestAppContext) {
+    let (_manager, _, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+
+    let panel = cx.debug_bounds("combo-box-panel").unwrap();
+    let remote_label = cx.debug_bounds("combo-box-row-2-label").unwrap();
+    let remote_shortcut = cx.debug_bounds("combo-box-row-2-shortcut").unwrap();
+
+    assert!(panel.size.width > px(240.0));
+    assert!(panel.size.width <= px(420.0));
+    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
 }
 
 #[gpui::test]
@@ -8466,9 +8658,12 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     open_workspace_switcher(cx);
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
-    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let marker = cx.debug_bounds("combo-box-row-0-check").unwrap();
+    let identity = cx.debug_bounds("combo-box-row-0-identity-icon").unwrap();
     let first = cx.debug_bounds("workspace-switcher-result-1").unwrap();
     assert!(first.contains(&marker.center()));
+    assert!(marker.right() < identity.left());
+    assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(1)
@@ -8476,9 +8671,12 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     open_workspace_switcher(cx);
-    let marker = cx.debug_bounds("workspace-switcher-active-marker").unwrap();
+    let marker = cx.debug_bounds("combo-box-row-1-check").unwrap();
+    let identity = cx.debug_bounds("combo-box-row-1-identity-icon").unwrap();
     let second = cx.debug_bounds("workspace-switcher-result-2").unwrap();
     assert!(second.contains(&marker.center()));
+    assert!(marker.right() < identity.left());
+    assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(2)
@@ -8665,7 +8863,8 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
     assert!(first.top() >= list.top());
     assert!(
         cx.debug_bounds("workspace-sidebar-focus-indicator")
-            .is_some()
+            .is_none(),
+        "collection rows must not paint a focus ring"
     );
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
@@ -8849,7 +9048,8 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
     );
     assert!(
         cx.debug_bounds("workspace-sidebar-focus-indicator")
-            .is_some()
+            .is_none(),
+        "restored collection focus must not add a row focus ring"
     );
     cx.simulate_keystrokes("shift-f10");
     cx.run_until_parked();

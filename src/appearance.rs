@@ -12,9 +12,10 @@ macro_rules! chrome_color_fields {
             tab_active_background, tab_inactive_background,
             text, text_secondary, text_muted, text_placeholder, text_disabled,
             text_accent, link_text, link_text_hover, link_text_pressed, link_text_disabled,
-            icon, icon_muted, icon_disabled, border, border_variant, border_focused, border_selected, border_disabled,
+            icon, icon_muted, icon_disabled, border, border_variant, border_focused, focus_ring, border_selected, border_disabled,
             border_transparent,
-            element_background, element_hover, element_active, element_selected,
+            element_background, segmented_track_background,
+            element_hover, element_active, element_selected,
             element_disabled, element_foreground,
             element_hover_foreground, element_active_foreground,
             element_disabled_foreground,
@@ -83,6 +84,8 @@ macro_rules! chrome_color_fields {
             selection_disabled_icon,
             selection_disabled_border,
             toggle_off_background,
+            progress_track,
+            progress_indicator,
             toggle_off_mark,
             toggle_off_border,
             toggle_off_label,
@@ -130,6 +133,10 @@ macro_rules! chrome_color_fields {
             row_selected_foreground,
             row_selected_secondary,
             row_selected_icon,
+            navigation_selected_background,
+            navigation_selected_foreground,
+            navigation_selected_secondary,
+            navigation_selected_icon,
             row_selected_match,
             row_selected_border,
             row_selected_hover_background,
@@ -192,7 +199,7 @@ mod scheme;
 mod tests;
 
 pub(crate) use crate::theme::Color;
-pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
+pub(crate) use compiler::{CaptionPaint, ColorProvenance, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     WindowBackgroundAppearance,
@@ -208,13 +215,18 @@ pub(crate) use preferences::{
 };
 pub(crate) use resolution::{
     AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
-    ResolvedAppearance, ResolvedChromeAppearance, ResolvedFontDescriptor,
+    ResolvedAppearance, ResolvedChromeAppearance, ResolvedChromeTypography, ResolvedFontDescriptor,
     ResolvedTerminalAppearance, ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use scheme::{
     Appearance, CatalogError, ChromeColors, CustomScheme, SchemeCatalog, SchemeId, SchemeKind,
     SchemeSummary, TerminalColors,
 };
+
+/// The definition whose presentation policy ships as SpaceTerm's Dark identity.
+pub(crate) use builtin::dark_chrome_id as builtin_dark_chrome;
+/// The definition whose presentation policy ships as SpaceTerm's Light identity.
+pub(crate) use builtin::light_chrome_id as builtin_light_chrome;
 
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]

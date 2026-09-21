@@ -116,6 +116,7 @@ pub struct ButtonPaint {
     foreground: Rgba,
     icon_foreground: Rgba,
     border: Rgba,
+    shadow: crate::ControlShadow,
 }
 
 impl ButtonPaint {
@@ -126,6 +127,7 @@ impl ButtonPaint {
             foreground,
             icon_foreground: foreground,
             border,
+            shadow: crate::ControlShadow::none(),
         }
     }
 
@@ -206,6 +208,8 @@ impl ButtonVariantStyle {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ButtonMetrics {
     height: Pixels,
+    icon_button_size: Option<Pixels>,
+    icon_baseline_center: Option<Pixels>,
     horizontal_padding: Pixels,
     gap: Pixels,
     corner_radius: Pixels,
@@ -220,6 +224,8 @@ impl ButtonMetrics {
     pub fn new(height: Pixels) -> Self {
         Self {
             height,
+            icon_button_size: None,
+            icon_baseline_center: None,
             horizontal_padding: px(8.0),
             gap: px(6.0),
             corner_radius: px(5.0),
@@ -228,6 +234,22 @@ impl ButtonMetrics {
             single_line_height: 1.0,
             multiline_line_height: 1.2,
         }
+    }
+
+    /// Overrides the square pointer target used only by icon buttons.
+    ///
+    /// Text buttons keep `height`; this lets an application apply its icon hit-target policy
+    /// without changing label geometry. The resolved target is already density-aware, so metric
+    /// scaling leaves an explicit override unchanged.
+    pub fn icon_button_size(mut self, size: Pixels) -> Self {
+        self.icon_button_size = Some(size.max(px(0.0)));
+        self
+    }
+
+    /// Sets the center-above-baseline metric for icons paired with this size's text label.
+    pub fn icon_baseline_center(mut self, center: Pixels) -> Self {
+        self.icon_baseline_center = Some(center);
+        self
     }
 
     /// Sets horizontal padding for text buttons.
@@ -275,12 +297,16 @@ impl ButtonMetrics {
                 text_scale,
                 spacing_scale,
             ),
+            icon_button_size: self.icon_button_size,
+            icon_baseline_center: self
+                .icon_baseline_center
+                .map(|center| crate::appearance::scale_metric(center, text_scale)),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: crate::appearance::scale_metric(self.corner_radius, spacing_scale),
+            corner_radius: self.corner_radius,
             border_width: self.border_width,
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
             single_line_height: self.single_line_height,
@@ -389,6 +415,7 @@ pub struct ButtonTheme {
     variants: ButtonVariants,
     sizes: ButtonSizes,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
 }
 
 impl ButtonTheme {
@@ -398,7 +425,14 @@ impl ButtonTheme {
             variants,
             sizes,
             focus_border,
+            focus_ring_width: px(1.0),
         }
+    }
+
+    /// Sets the focus-ring width independently of every button border and radius.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
     }
 
     /// Returns the resolved state paints for a semantic variant.
@@ -406,9 +440,54 @@ impl ButtonTheme {
         self.variants.resolve(variant)
     }
 
+    /// Adds the application's raised treatment to ordinary buttons. Pressed and disabled
+    /// controls do not cast the resting shadow.
+    pub fn secondary_elevation(
+        mut self,
+        shadow: crate::ControlShadow,
+        border: Option<Rgba>,
+    ) -> Self {
+        let ordinary = &mut self.variants.secondary;
+        for paint in [&mut ordinary.normal, &mut ordinary.hovered] {
+            paint.shadow = shadow;
+            if let Some(border) = border {
+                paint.border = border;
+            }
+        }
+        ordinary.pressed.shadow = crate::ControlShadow::none();
+        if let Some(border) = border {
+            ordinary.pressed.border = border;
+        }
+        ordinary.disabled.shadow = crate::ControlShadow::none();
+        self
+    }
+
+    /// Sets ordinary-control borders without changing fills, shadows, or focus indicators.
+    pub fn secondary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
+        let ordinary = &mut self.variants.secondary;
+        ordinary.normal.border = borders.normal;
+        ordinary.hovered.border = borders.hovered;
+        ordinary.pressed.border = borders.pressed;
+        ordinary.disabled.border = borders.disabled;
+        self
+    }
+
     /// Returns the outer side length of an icon button in this theme.
     pub fn icon_button_size(self, size: ButtonSize) -> Pixels {
-        self.sizes.resolve(size).height
+        let metrics = self.sizes.resolve(size);
+        metrics.icon_button_size.unwrap_or(metrics.height)
+    }
+
+    /// Returns the keyboard focus-ring paint.
+    #[cfg(test)]
+    pub(crate) fn focus_border(self) -> Rgba {
+        self.focus_border
+    }
+
+    /// Returns the keyboard focus-ring width in stable logical points.
+    #[cfg(test)]
+    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
+        self.focus_ring_width
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -427,7 +506,10 @@ impl ButtonTheme {
             pressed: variant.pressed,
             disabled: variant.disabled,
             focus_border: self.focus_border,
+            focus_ring_width: self.focus_ring_width,
             height: metrics.height,
+            icon_button_size: metrics.icon_button_size.unwrap_or(metrics.height),
+            icon_baseline_center: metrics.icon_baseline_center,
             horizontal_padding: metrics.horizontal_padding,
             gap: metrics.gap,
             corner_radius: match shape {
@@ -477,7 +559,10 @@ struct ButtonStyle {
     pressed: ButtonPaint,
     disabled: ButtonPaint,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
     height: Pixels,
+    icon_button_size: Pixels,
+    icon_baseline_center: Option<Pixels>,
     horizontal_padding: Pixels,
     gap: Pixels,
     corner_radius: Pixels,
@@ -872,7 +957,21 @@ impl RenderOnce for Button {
         let style = self.core.resolve_style(cx);
         let full_width = self.full_width;
         let multiline = self.multiline;
+        let has_leading = self.leading.is_some();
         let has_trailing = self.trailing.is_some();
+        let icon_offset = if has_leading || has_trailing {
+            style.icon_baseline_center.map(|center| {
+                crate::icon::text_alignment_offset(
+                    crate::control_typography(cx).regular(),
+                    style.font_size,
+                    style.font_size * style.single_line_height,
+                    center,
+                    window,
+                )
+            })
+        } else {
+            None
+        };
         let content = move |_foreground, icon_foreground| {
             div()
                 .flex()
@@ -882,7 +981,12 @@ impl RenderOnce for Button {
                 .gap(style.gap)
                 .when(full_width, |content| content.w_full())
                 .when_some(self.leading, |content, build| {
-                    content.child(build(icon_foreground))
+                    content.child(
+                        div()
+                            .relative()
+                            .when_some(icon_offset, |icon, offset| icon.top(offset))
+                            .child(build(icon_foreground)),
+                    )
                 })
                 .child(
                     div()
@@ -899,7 +1003,12 @@ impl RenderOnce for Button {
                     content.child(div().flex_grow())
                 })
                 .when_some(self.trailing, |content, build| {
-                    content.child(build(icon_foreground))
+                    content.child(
+                        div()
+                            .relative()
+                            .when_some(icon_offset, |icon, offset| icon.top(offset))
+                            .child(build(icon_foreground)),
+                    )
                 })
                 .into_any_element()
         };
@@ -968,6 +1077,12 @@ impl IconButton {
         self
     }
 
+    /// Overrides the outer pointer-target side length for a semantic mark with its own metrics.
+    pub fn target_size(mut self, size: Pixels) -> Self {
+        self.core.icon_button_size = Some(size.max(px(0.0)));
+        self
+    }
+
     /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
@@ -989,6 +1104,12 @@ impl IconButton {
     /// Controls whether keyboard traversal may stop on this button.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
+        self
+    }
+
+    /// Controls whether the click that activates an inactive native window can invoke the action.
+    pub fn accept_first_mouse(mut self, accept: bool) -> Self {
+        self.core.accept_first_mouse = accept;
         self
     }
 
@@ -1063,7 +1184,9 @@ struct ButtonCore {
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
+    accept_first_mouse: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    icon_button_size: Option<Pixels>,
     #[cfg(feature = "appearance-exerciser")]
     preview_state: Option<crate::ControlPreviewState>,
 }
@@ -1086,7 +1209,9 @@ impl ButtonCore {
             modal_borderless: false,
             modal_press_owner: None,
             preserve_ancestor_hover: false,
+            accept_first_mouse: true,
             contextual_style: None,
+            icon_button_size: None,
             #[cfg(feature = "appearance-exerciser")]
             preview_state: None,
         }
@@ -1104,6 +1229,9 @@ impl ButtonCore {
             style.pressed = paints.pressed;
             style.disabled = paints.disabled;
             style.focus_border = focus_border;
+        }
+        if let Some(icon_button_size) = self.icon_button_size {
+            style.icon_button_size = icon_button_size;
         }
         style
     }
@@ -1153,8 +1281,8 @@ impl ButtonCore {
             .unwrap_or((pressed, hovered, focused));
         let paint = resolve_paint(style, enabled, pressed, hovered);
         let focus_ring = focused.then_some(style.focus_border);
-        let focus_ring_offset = style.border_width * 2.0;
-        let focus_ring_position = focus_ring_offset + style.border_width;
+        let focus_ring_gap = px(2.0);
+        let focus_ring_position = focus_ring_gap + style.focus_ring_width;
         let border_color = if self.modal_borderless {
             paint.background
         } else {
@@ -1167,6 +1295,7 @@ impl ButtonCore {
         let up_state = state.clone();
         let exit_state = state.clone();
         let on_pointer_activate = self.on_activate.clone();
+        let accept_first_mouse = self.accept_first_mouse;
         let role = self.role;
         let pointer_tracker = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -1184,6 +1313,7 @@ impl ButtonCore {
                     if !phase.capture()
                         || event.button != MouseButton::Left
                         || !down_hitbox.is_hovered(window)
+                        || (event.first_mouse && !accept_first_mouse)
                     {
                         return;
                     }
@@ -1266,7 +1396,9 @@ impl ButtonCore {
             .when(layout.multiline, |button| {
                 button.min_h(style.height).py(style.gap)
             })
-            .when(layout.icon_only, |button| button.w(style.height))
+            .when(layout.icon_only, |button| {
+                button.h(style.icon_button_size).w(style.icon_button_size)
+            })
             .when(!layout.icon_only, |button| {
                 button.px(style.horizontal_padding)
             })
@@ -1275,6 +1407,8 @@ impl ButtonCore {
             .border(style.border_width)
             .border_color(border_color)
             .bg(paint.background)
+            .shadow(paint.shadow.layers())
+            .shadow_outside_only()
             .text_color(paint.foreground)
             .text_size(style.font_size)
             .font(font)
@@ -1333,8 +1467,8 @@ impl ButtonCore {
                         .right(-focus_ring_position)
                         .bottom(-focus_ring_position)
                         .left(-focus_ring_position)
-                        .rounded(style.corner_radius + focus_ring_offset)
-                        .border(style.border_width)
+                        .rounded(style.corner_radius + focus_ring_gap)
+                        .border(style.focus_ring_width)
                         .border_color(ring_color),
                 )
             })
@@ -1695,6 +1829,37 @@ mod tests {
     }
 
     #[test]
+    fn icon_target_override_does_not_change_or_density_scale_text_button_height() {
+        let metrics = ButtonMetrics::new(px(20.0))
+            .icon_button_size(px(28.0))
+            .corner_radius(px(6.0));
+        let theme = ButtonTheme::new(
+            ButtonVariants::new(
+                test_variant_style(),
+                test_variant_style(),
+                test_variant_style(),
+                test_variant_style(),
+                test_variant_style(),
+                test_variant_style(),
+                test_variant_style(),
+            ),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
+            rgba(0x00aaffff),
+        )
+        .scaled_metrics(1.0, 1.25);
+        let style = theme.resolve(
+            ButtonVariant::Secondary,
+            ButtonSize::Compact,
+            ButtonShape::Rounded,
+        );
+
+        assert_eq!(style.height, px(22.0));
+        assert_eq!(style.icon_button_size, px(28.0));
+        assert_eq!(style.corner_radius, px(6.0));
+        assert_eq!(theme.icon_button_size(ButtonSize::Compact), px(28.0));
+    }
+
+    #[test]
     fn typed_tooltip_should_integrate_with_text_and_icon_buttons() {
         let button =
             Button::new("button", "Button").tooltip(Tooltip::new("button-tooltip", "Button help"));
@@ -1702,6 +1867,16 @@ mod tests {
             .tooltip(Tooltip::new("icon-tooltip", "Icon help"));
 
         assert!(button.core.tooltip.is_some() && icon.core.tooltip.is_some());
+    }
+
+    #[test]
+    fn icon_button_can_take_a_semantic_target_size_without_changing_its_size_role() {
+        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
+            .size(ButtonSize::Compact)
+            .target_size(px(28.0));
+
+        assert_eq!(icon.core.size, ButtonSize::Compact);
+        assert_eq!(icon.core.icon_button_size, Some(px(28.0)));
     }
 
     #[test]
@@ -1769,6 +1944,40 @@ mod tests {
     struct PaintProbeRoot {
         icon_color: Rc<Cell<Rgba>>,
         disabled: bool,
+    }
+
+    #[test]
+    fn ordinary_button_elevation_keeps_the_border_and_drops_nonresting_shadows() {
+        let border = rgba(0x12345678);
+        let shadow = crate::ControlShadow::single(crate::ControlShadowLayer::new(
+            rgba(0x87654321).into(),
+            px(0.0),
+            px(1.0),
+            px(2.0),
+            px(-1.0),
+        ));
+        let disabled_border = test_theme()
+            .paints(ButtonVariant::Secondary)
+            .disabled
+            .border;
+        let paints = test_theme()
+            .secondary_elevation(shadow, Some(border))
+            .paints(ButtonVariant::Secondary);
+
+        assert_eq!(
+            [
+                (paints.normal.border, paints.normal.shadow),
+                (paints.hovered.border, paints.hovered.shadow),
+                (paints.pressed.border, paints.pressed.shadow),
+                (paints.disabled.border, paints.disabled.shadow),
+            ],
+            [
+                (border, shadow),
+                (border, shadow),
+                (border, crate::ControlShadow::none()),
+                (disabled_border, crate::ControlShadow::none()),
+            ]
+        );
     }
     impl Render for PaintProbeRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

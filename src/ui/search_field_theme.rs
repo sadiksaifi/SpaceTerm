@@ -5,28 +5,31 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_icons::{ChromeIcons, IconRole, MarkRole};
+use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
 /// The height of one search field, matching the navigation entries a sidebar field sits above so
 /// the column runs on one rhythm from its first row to its last.
 const FIELD_HEIGHT: f32 = 28.0;
-/// The radius of the sidebar chip the field shares its column with.
-const FIELD_RADIUS: f32 = 6.0;
-/// The body size chrome sets its labels and editable values in, and the compact line box the
-/// editor's caret and selection take inside the field.
-const TEXT_SIZE: f32 = 12.0;
-const LINE_HEIGHT: f32 = 16.0;
-/// The glyph size the navigation icons take, so one icon column runs the height of the sidebar.
-const ICON_SIZE: f32 = 13.0;
+/// The ordinary control radius, which the sidebar chip this field shares its column with also
+/// takes. It is named through the shared scale so the two cannot drift apart by one point.
+const FIELD_RADIUS: f32 = RadiusRole::Control.points();
 /// The clear mark: a compact disc struck through by a glyph that keeps a ring of fill around it
 /// while staying heavy enough to read at a glance. The pointer target around the mark stays larger
 /// and invisible, so a small affordance is still comfortable to hit, and the inset is measured to
 /// that target rather than to the mark, which sits nearer the field's trailing edge than the
 /// leading glyph sits to its own.
-const CLEAR_MARK_SIZE: f32 = 12.0;
-const CLEAR_GLYPH_SIZE: f32 = 7.0;
 const CLEAR_TRAILING_INSET: f32 = 2.0;
 
-pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> SearchFieldTheme {
+pub(super) fn prepared(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+    typography: &ChromeTypography,
+    icons: &ChromeIcons,
+) -> SearchFieldTheme {
+    let body = typography.style(TextRole::Body);
+    let clear = icons.mark_metrics(MarkRole::Clear);
     SearchFieldTheme::new(
         FieldFrameTheme::new(
             gpui_color(colors.input_background),
@@ -35,7 +38,9 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> SearchF
             gpui_color(colors.input_invalid_border),
             gpui_color(colors.input_disabled_background),
             gpui_color(colors.input_disabled_border),
-        ),
+        )
+        .focus_ring(gpui_color(colors.focus_ring))
+        .corner_radius(px(FIELD_RADIUS)),
         SearchFieldPaint::new(
             // The glyph reads as part of the prompt the placeholder states, not as a control.
             gpui_color(colors.input_placeholder),
@@ -44,10 +49,16 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> SearchF
         ),
         SearchFieldMetrics::new(px(FIELD_HEIGHT))
             .spacing(px(8.0), px(7.0), px(FIELD_RADIUS))
-            .text_geometry(px(TEXT_SIZE), px(LINE_HEIGHT), px(ICON_SIZE))
+            .text_geometry(
+                body.size,
+                body.line_height,
+                icons.metrics(IconRole::Row).glyph_size,
+            )
+            .icon_baseline_center(icons.metrics(IconRole::Row).baseline_center)
             .clear_mark(
-                px(CLEAR_MARK_SIZE),
-                px(CLEAR_GLYPH_SIZE),
+                clear.disc_diameter,
+                clear.glyph_size,
+                clear.target_size,
                 px(CLEAR_TRAILING_INSET),
             ),
     )
@@ -87,4 +98,51 @@ fn clear_glyph(reference: &ChromeColors) -> Color {
 
 fn gpui_color(color: Color) -> Rgba {
     rgba(color.rgba_hex())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appearance::{
+        ChromeDensity, FontStyle, ResolvedChromeTypography, ResolvedFontDescriptor,
+    };
+    use crate::ui::chrome_icons::{ChromeMarkMetrics, MarkRole};
+
+    fn descriptor() -> ResolvedFontDescriptor {
+        ResolvedFontDescriptor {
+            primary_family: ".SystemUIFont".to_owned(),
+            fallback_families: Vec::new(),
+            size: 13.0,
+            line_height: 13.0,
+            weight: 400,
+            style: FontStyle::Normal,
+            features: Vec::new(),
+            resolution_identity: "system-default".to_owned(),
+        }
+    }
+
+    #[test]
+    fn clear_mark_metrics_follow_body_size_and_density() {
+        let resolved = ResolvedChromeTypography {
+            body: descriptor(),
+            small: descriptor(),
+            control: descriptor(),
+            navigation: descriptor(),
+            caption: descriptor(),
+            heading: descriptor(),
+            shortcut: descriptor(),
+        };
+        let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Comfortable);
+        let icons = ChromeIcons::prepare(&typography, ChromeDensity::Comfortable);
+        let body_size = f32::from(typography.style(TextRole::Body).size);
+
+        assert_eq!(
+            icons.mark_metrics(MarkRole::Clear),
+            ChromeMarkMetrics {
+                disc_diameter: px(body_size.round()),
+                glyph_size: px((body_size * 0.58).round()),
+                target_size: px(28.0),
+            }
+        );
+    }
 }

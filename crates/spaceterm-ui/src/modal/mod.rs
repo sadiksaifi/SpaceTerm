@@ -710,38 +710,25 @@ pub struct ModalPaint {
     primary_text: Rgba,
     secondary_text: Rgba,
     informational: Rgba,
-    informational_background: Rgba,
     warning: Rgba,
-    warning_background: Rgba,
     critical: Rgba,
-    critical_background: Rgba,
 }
 
 impl ModalPaint {
     /// Creates the complete bounded modal paint catalog.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the bounded catalog requires every shared semantic paint"
-    )]
     pub fn new(
         primary_text: Rgba,
         secondary_text: Rgba,
         informational: Rgba,
-        informational_background: Rgba,
         warning: Rgba,
-        warning_background: Rgba,
         critical: Rgba,
-        critical_background: Rgba,
     ) -> Self {
         Self {
             primary_text,
             secondary_text,
             informational,
-            informational_background,
             warning,
-            warning_background,
             critical,
-            critical_background,
         }
     }
 }
@@ -811,7 +798,7 @@ impl ModalMetrics {
         }
     }
 
-    /// Returns a bounded large-text catalog by scaling every geometry and text metric together.
+    /// Returns a bounded large-text catalog while leaving the semantic control radius fixed.
     pub fn scaled(self, factor: f32) -> Self {
         let factor = if factor.is_finite() {
             factor.clamp(1.0, 2.0)
@@ -854,7 +841,7 @@ impl ModalMetrics {
                 200.0,
                 72.0,
             ),
-            control_radius: bounded_metric(self.control_radius * factor, 3.0, 14.0, 6.0),
+            control_radius: self.control_radius,
             progress_status_region_height: bounded_metric(
                 self.progress_status_region_height * factor,
                 32.0,
@@ -920,7 +907,7 @@ impl ModalMetrics {
             ),
             horizontal_action_threshold: self.horizontal_action_threshold * extent_scale,
             minimum_action_width: self.minimum_action_width * extent_scale,
-            control_radius: self.control_radius * spacing_scale,
+            control_radius: self.control_radius,
             progress_status_region_height: crate::appearance::scale_line_box(
                 self.progress_status_region_height,
                 self.body_size,
@@ -1046,8 +1033,9 @@ const MODAL_ROLE: FloatingRole = FloatingRole::Modal;
 
 /// Resolves the installed modal theme against the shared window-modal surface presentation.
 pub(super) fn modal_theme(cx: &gpui::App) -> ModalTheme {
-    let floating = crate::floating_surface::floating_theme(cx);
-    let mut theme = *cx.global::<ModalTheme>();
+    let floating = crate::floating_surface::floating_surface_theme(cx);
+    let mut theme = *crate::control_theme_catalog(cx)
+        .map_or_else(|| cx.global::<ModalTheme>(), |catalog| &catalog.modal);
     theme.shell = floating.shell(MODAL_ROLE);
     theme.scrim = floating.scrim();
     theme
@@ -1175,6 +1163,7 @@ mod tests {
                 metrics.progress_height_cap(),
                 metrics.progress_status_region_height(),
                 metrics.progress_detail_region_height(),
+                metrics.control_radius,
             ),
             (
                 px(1200.0),
@@ -1183,6 +1172,7 @@ mod tests {
                 px(600.0),
                 px(96.0),
                 px(72.0),
+                px(6.0),
             )
         );
     }

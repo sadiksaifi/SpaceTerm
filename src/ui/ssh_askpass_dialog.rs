@@ -1,5 +1,7 @@
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Render, Window, div, px};
+#[cfg(test)]
+use gpui::px;
+use gpui::{App, Context, Entity, Render, Window, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Dialog, DialogCloseDecision, DialogCompletion,
     DialogInitialFocus, DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId,
@@ -7,7 +9,7 @@ use spaceterm_ui::{
     TextInputEscapeBehavior, TextInputReturnBehavior, TextInputVariant,
 };
 
-use super::appearance::chrome;
+use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::appearance::Color;
 use crate::platform::ssh_askpass::{
     AskPassCompletion, AskPassConfirmationPresentation, AskPassPresentationError, AskPassRequest,
@@ -419,17 +421,18 @@ impl AskPassSecretBody {
 
 impl Render for AskPassSecretBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let input_focus = self.input.read(cx).focus_handle();
         div()
-            .font(appearance.regular.clone())
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .flex()
             .flex_col()
             .gap(appearance.spacing(12.0))
             .child(
                 div()
-                    .text_size(appearance.text_size(12.0))
-                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(colors.text_muted))
                     .whitespace_normal()
                     .child(self.detail.clone()),
             )
@@ -440,8 +443,8 @@ impl Render for AskPassSecretBody {
                     .gap(appearance.spacing(5.0))
                     .child(
                         div()
-                            .text_size(appearance.text_size(12.0))
-                            .text_color(gpui_color(appearance.colors.text_muted))
+                            .chrome_text(appearance.typography.style(TextRole::Body))
+                            .text_color(gpui_color(colors.text_muted))
                             .child(self.field_label),
                     )
                     .child(
@@ -458,11 +461,10 @@ impl Render for AskPassSecretBody {
                         .flex_shrink_0()
                         .flex()
                         .items_center()
-                        .overflow_hidden()
                         .px(appearance.spacing(8.0))
-                        .rounded(px(4.0))
-                        .text_size(appearance.text_size(13.0))
-                        .text_color(gpui_color(appearance.colors.text))
+                        .rounded(super::chrome_geometry::RadiusRole::Control.pixels())
+                        .chrome_text(appearance.typography.style(TextRole::Body))
+                        .text_color(gpui_color(colors.text))
                         .on_click(move |_, window, cx| {
                             input_focus.focus(window);
                             cx.stop_propagation();
@@ -473,8 +475,8 @@ impl Render for AskPassSecretBody {
                         field.child(
                             div()
                                 .debug_selector(|| "ssh-askpass-required-error".to_owned())
-                                .text_size(appearance.text_size(11.0))
-                                .text_color(gpui_color(appearance.colors.error))
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                .text_color(gpui_color(colors.error))
                                 .child(REQUIRED_SECRET_MESSAGE),
                         )
                     }),

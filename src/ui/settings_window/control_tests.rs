@@ -57,10 +57,11 @@ fn highlighted_row_materializes_against_its_card_host() {
         )
         .expect("built-in appearance should resolve");
     let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     let expected = appearance.materials.paint(
         SurfaceRole::Surface,
         appearance.colors.elevated_surface_background,
-        appearance.colors.row_selected_background,
+        colors.row_selected_background,
     );
 
     assert_eq!(
@@ -73,17 +74,18 @@ fn highlighted_row_materializes_against_its_card_host() {
 fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext) {
     use crate::appearance::Color;
     use crate::ui::appearance::ChromeAppearance;
+    use crate::ui::appearance::settings::SettingsAppearance;
     use gpui::{
         Context, DivInspectorState, IntoElement as _, ParentElement as _, Render, ScrollDelta,
         ScrollWheelEvent, Styled as _, TouchPhase, Window, div, point, px,
     };
     use std::cell::RefCell;
 
-    struct StepperCard(ChromeAppearance);
+    struct StepperCard(SettingsAppearance);
     impl Render for StepperCard {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
             let stepper = super::controls::Stepper::new("host-stepper", "Value", "1")
-                .render(&self.0)
+                .render(&self.0.chrome)
                 .into_any_element();
             div().size_full().p(px(20.0)).child(
                 super::controls::SettingsGroup::new(
@@ -111,7 +113,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
         )
         .unwrap()
     });
-    let (_, cx) = cx.add_window_view(|_, _| StepperCard(appearance));
+    let (_, cx) = cx.add_window_view(|_, _| StepperCard(SettingsAppearance::fallback(appearance)));
     cx.run_until_parked();
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);
@@ -128,17 +130,33 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
         window.toggle_inspector(cx);
     });
     cx.run_until_parked();
-    let bounds = cx
-        .debug_bounds("host-stepper")
-        .expect("Stepper must render in the card");
-    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    assert!(
+        cx.debug_bounds("host-stepper").is_some(),
+        "Stepper must render in the card"
+    );
+    let value = cx
+        .debug_bounds("host-stepper-value")
+        .expect("Stepper must render its leading readout");
+    let buttons = cx
+        .debug_bounds("host-stepper-buttons")
+        .expect("Stepper must render one joined button unit");
+    assert!(
+        value.size.width >= px(44.0),
+        "the Compact readout must reserve at least 44 points, got {value:?}"
+    );
+    assert_eq!(
+        buttons.size.width,
+        buttons.size.height * 2.0,
+        "the two Stepper buttons must divide one two-cell control-height unit"
+    );
+    cx.simulate_mouse_move(buttons.center(), None, Modifiers::none());
     cx.run_until_parked();
     for _ in 0..16 {
         if let Some(background) = observed
             .borrow()
             .iter()
             .rev()
-            .find(|style| style.bounds == bounds)
+            .find(|style| style.bounds == buttons)
             .map(|style| style.base_style.background.clone())
         {
             assert_eq!(
@@ -149,7 +167,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
             return;
         }
         cx.simulate_event(ScrollWheelEvent {
-            position: bounds.center(),
+            position: buttons.center(),
             delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
@@ -258,12 +276,9 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     );
 }
 
-/// Selecting with the pointer leaves no focus ring; reaching the list with the keyboard draws one.
-///
-/// A ring that an ordinary click leaves behind reads as an accessibility signal rather than as the
-/// resting selection, and the selected material already says which section is current.
+/// Pointer selection stays fill-only; keyboard navigation identifies its current target.
 #[gpui::test]
-fn pointer_selection_leaves_no_focus_ring_while_the_keyboard_draws_one(cx: &mut TestAppContext) {
+fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
     click("settings-navigation-settings-section-terminal", cx);
@@ -300,18 +315,21 @@ fn pointer_selection_leaves_no_focus_ring_while_the_keyboard_draws_one(cx: &mut 
         settings.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::ColorSchemes
     );
-    let chip = cx
-        .debug_bounds("settings-navigation-chip-settings-section-color-schemes")
-        .expect("the selected section should keep its own material");
-    let ring = cx
-        .debug_bounds("settings-navigation-focus-indicator")
-        .expect("the keyboard should report where it is in the list");
     assert!(
-        ring.left() < chip.left()
-            && ring.top() < chip.top()
-            && ring.right() > chip.right()
-            && ring.bottom() > chip.bottom(),
-        "focus should ride outside the chip it belongs to, got {ring:?} around {chip:?}"
+        cx.debug_bounds("settings-navigation-chip-settings-section-color-schemes")
+            .is_some(),
+        "keyboard navigation must retain the selected fill"
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-focus-indicator")
+            .is_some(),
+        "keyboard navigation must identify the focused section"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-navigation-focus-indicator")
+            .is_none()
     );
 }
 

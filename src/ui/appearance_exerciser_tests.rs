@@ -95,6 +95,57 @@ fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppConte
     );
 }
 
+#[gpui::test]
+fn accessibility_preview_controls_apply_and_reset_synthetic_facts(cx: &mut TestAppContext) {
+    use crate::appearance::Appearance;
+    use crate::platform::appearance::{AppearancePlatform, testing::RecordingAppearancePlatform};
+    use crate::ui::appearance_runtime;
+
+    let (settings, changed) =
+        crate::settings::UserSettings::load(Arc::new(ReadOnlyExerciserStorage));
+    let platform = RecordingAppearancePlatform::default();
+    platform.set_system_appearance(Some(Appearance::Dark));
+    cx.update(|cx| {
+        appearance_runtime::install(settings, changed, Rc::new(platform.clone()), cx).unwrap();
+        crate::ui::init(cx).unwrap();
+    });
+    let (exerciser, cx) = cx.add_window_view(super::AppearanceExerciser::new);
+    cx.run_until_parked();
+
+    click("appearance-preview-reduce-transparency", cx);
+
+    cx.update(|_, cx| {
+        assert!(
+            appearance_runtime::current(cx)
+                .chrome
+                .composition
+                .capabilities
+                .reduce_transparency
+        );
+    });
+    assert!(!platform.accessibility_display_options().reduce_transparency);
+    assert!(
+        cx.update(|_, cx| exerciser.read(cx).status.clone())
+            .contains("System Settings unchanged")
+    );
+
+    click("appearance-reset-accessibility-previews", cx);
+
+    cx.update(|_, cx| {
+        assert!(
+            !appearance_runtime::current(cx)
+                .chrome
+                .composition
+                .capabilities
+                .reduce_transparency
+        );
+    });
+    assert_eq!(
+        cx.update(|_, cx| exerciser.read(cx).status.clone()),
+        "Accessibility previews reset to live system settings"
+    );
+}
+
 struct ModalAppearanceRegressionFixture {
     input: Entity<TextInput>,
 }
@@ -160,7 +211,7 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
             spaceterm_ui::replace_control_theme_catalog(cx, controls),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
-        cx.set_global(InstalledChrome(Arc::new(appearance)));
+        cx.set_global(InstalledChrome::single(Arc::new(appearance)));
         window.refresh();
     });
     cx.run_until_parked();

@@ -12,7 +12,8 @@ use spaceterm_ui::{
     TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
 };
 
-use super::appearance::{ChromeAppearance, chrome};
+use super::appearance::ChromeAppearance;
+use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::appearance::Color;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::managed_hosts::{
@@ -653,9 +654,10 @@ impl SaveSettlement {
 
 impl Render for SshHostForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = chrome(cx).clone();
+        let appearance = super::appearance::shared_chrome(cx);
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         div()
-            .font(appearance.regular.clone())
+            .chrome_text(appearance.typography.style(TextRole::Body))
             .flex()
             .flex_col()
             .gap(appearance.spacing(16.0))
@@ -700,7 +702,7 @@ impl Render for SshHostForm {
                     )))
                     .child(
                         div()
-                            .w(appearance.text_size(144.0))
+                            .w(appearance.typography.style(TextRole::Body).size * 12.0)
                             .flex_shrink_0()
                             .child(form_field(
                                 &appearance,
@@ -740,8 +742,8 @@ impl Render for SshHostForm {
                 form.child(
                     div()
                         .debug_selector(|| "managed-ssh-host-backend-error".to_owned())
-                        .text_size(appearance.text_size(12.0))
-                        .text_color(gpui_color(appearance.colors.error))
+                        .chrome_text(appearance.typography.style(TextRole::Body))
+                        .text_color(gpui_color(colors.error))
                         .child(error),
                 )
             })
@@ -781,8 +783,9 @@ fn form_field(
     error_selector: &'static str,
     cx: &App,
 ) -> impl IntoElement {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
     div()
-        .font(appearance.regular.clone())
+        .chrome_text(appearance.typography.style(TextRole::Body))
         .flex()
         .flex_col()
         .gap(appearance.spacing(6.0))
@@ -791,14 +794,14 @@ fn form_field(
                 .flex()
                 .flex_row()
                 .items_center()
-                .text_size(appearance.text_size(12.0))
-                .text_color(gpui_color(appearance.colors.text_muted))
+                .chrome_text(appearance.typography.style(TextRole::Body))
+                .text_color(gpui_color(colors.text_muted))
                 .child(label)
                 .when(required, |label| {
                     label.child(
                         div()
                             .ml(px(3.0))
-                            .text_color(gpui_color(appearance.colors.error))
+                            .text_color(gpui_color(colors.error))
                             .child("*"),
                     )
                 }),
@@ -818,11 +821,10 @@ fn form_field(
             .flex_shrink_0()
             .flex()
             .items_center()
-            .overflow_hidden()
             .px(appearance.spacing(8.0))
-            .rounded(px(4.0))
-            .text_size(appearance.text_size(13.0))
-            .text_color(gpui_color(appearance.colors.text))
+            .rounded(super::chrome_geometry::RadiusRole::Control.pixels())
+            .chrome_text(appearance.typography.style(TextRole::Body))
+            .text_color(gpui_color(colors.text))
             .on_click(move |_, window, cx| {
                 input_focus.focus(window);
                 cx.stop_propagation();
@@ -833,8 +835,8 @@ fn form_field(
             field.child(
                 div()
                     .debug_selector(move || error_selector.to_owned())
-                    .text_size(appearance.text_size(12.0))
-                    .text_color(gpui_color(appearance.colors.error))
+                    .chrome_text(appearance.typography.style(TextRole::Body))
+                    .text_color(gpui_color(colors.error))
                     .child(error),
             )
         })

@@ -144,7 +144,6 @@ struct HostPickerRow {
     label: String,
     subtitle: String,
     managed: bool,
-    synthetic: bool,
     label_matched_indices: Vec<usize>,
     subtitle_matched_indices: Vec<usize>,
 }
@@ -162,21 +161,10 @@ impl HostPickerRow {
     }
 
     fn into_palette_item(self) -> CommandPaletteItem<SshHostPickerItemId> {
-        let status = if self.synthetic {
-            "Entered host"
-        } else if self.managed {
-            "Saved host"
-        } else {
-            "SSH config"
-        };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
             .matched_indices(self.label_matched_indices)
             .matched_description_indices(self.subtitle_matched_indices)
-            .leading_icon(|foreground, size| {
-                Icon::new(IconName::Server, size, foreground).into_any_element()
-            })
-            .trailing(CommandPaletteAccessory::Status(status.into()))
             .debug_selector(HOST_ROW_SELECTOR)
     }
 }
@@ -232,7 +220,6 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                 label: query.to_owned(),
                 subtitle: format!("Connect as {user} through {}", alias.as_str()),
                 managed: false,
-                synthetic: true,
                 label_matched_indices: (0..query.chars().count()).collect(),
                 subtitle_matched_indices: Vec::new(),
             },
@@ -251,7 +238,6 @@ fn configured_host_row(host: &DiscoveredSshHost) -> Option<HostPickerRow> {
         managed: host
             .provenance()
             .is_some_and(|provenance| provenance.source() == HostConfigSource::Managed),
-        synthetic: false,
         label_matched_indices: Vec::new(),
         subtitle_matched_indices: Vec::new(),
     })
@@ -658,7 +644,6 @@ mod tests {
             label: "sensitive-host".to_owned(),
             subtitle: "/sensitive/config".to_owned(),
             managed: false,
-            synthetic: false,
             label_matched_indices: Vec::new(),
             subtitle_matched_indices: Vec::new(),
         };

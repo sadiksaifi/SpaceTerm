@@ -68,15 +68,39 @@ fn readability_diagnostics(authored: &ChromeColors) -> Vec<ChromeReadabilityDiag
     .collect()
 }
 
+/// Semantic defaults for omitted statuses, adjusted against the definition's own background.
+/// Explicit authored values and overrides take precedence; no built-in Color Scheme is inherited.
+struct StatusSeeds {
+    success: Color,
+    warning: Color,
+    error: Color,
+}
+
+fn status_seeds(appearance: Appearance) -> StatusSeeds {
+    match appearance {
+        Appearance::Dark => StatusSeeds {
+            success: Color::rgb(0x32d74b),
+            warning: Color::rgb(0xff9f0a),
+            error: Color::rgb(0xff453a),
+        },
+        Appearance::Light => StatusSeeds {
+            success: Color::rgb(0x1e8a3b),
+            warning: Color::rgb(0xb25f00),
+            error: Color::rgb(0xc0332b),
+        },
+    }
+}
+
 /// Overrides precede authored values; missing roles follow the effective dependencies below.
-/// Only missing background uses an appearance-specific neutral seed. Missing text chooses a
-/// contrasting neutral; all other decisions follow this definition, never a built-in parent.
+/// Background, text, and omitted statuses use fallback seeds. Other missing roles derive from
+/// this definition's effective dependencies, never a built-in parent.
 pub(crate) fn compile_chrome(
     appearance: Appearance,
     authored: &ChromeColorOverrides,
     overrides: &ChromeColorOverrides,
 ) -> CompiledChrome {
     let mut provenance = BTreeMap::new();
+    let status_seed = status_seeds(appearance);
     macro_rules! resolve {
         ($role:ident, $fallback:expr) => {{
             let (value, origin) = if let Some(value) = overrides.$role {
@@ -134,13 +158,17 @@ pub(crate) fn compile_chrome(
     let border = resolve!(border, text.mix(background, 0.7));
     let border_variant = resolve!(border_variant, border);
     let border_focused = resolve!(border_focused, contrast(text_accent, background, 3.0));
-    let border_selected = resolve!(border_selected, border_focused);
+    let focus_ring = resolve!(focus_ring, border_focused);
+    // Selection remains independent of the keyboard-focus color.
+    let border_selected = resolve!(border_selected, border.mix(text, 0.35));
     let border_disabled = resolve!(border_disabled, border);
     let border_transparent = resolve!(border_transparent, Color::rgba(0));
     let element_background = resolve!(element_background, background);
+    let segmented_track_background = resolve!(segmented_track_background, element_background);
     let element_hover = resolve!(element_hover, element_background.mix(text, 0.08));
     let element_active = resolve!(element_active, element_background.mix(text, 0.14));
-    let element_selected = resolve!(element_selected, background.mix(text_accent, 0.16));
+    // Persistent selection follows the definition's foreground/background contrast.
+    let element_selected = resolve!(element_selected, background.mix(text, 0.16));
     let element_disabled = resolve!(element_disabled, background);
     let element_foreground = resolve!(element_foreground, contrast(text, element_background, 4.5));
     let element_hover_foreground =
@@ -185,9 +213,14 @@ pub(crate) fn compile_chrome(
         resolve!(ghost_element_disabled_foreground, text_disabled);
     let sidebar_focus = resolve!(sidebar_focus, border_focused);
     let info = resolve!(info, text_accent);
-    let success = resolve!(success, text_accent);
-    let warning = resolve!(warning, text_accent);
-    let error = resolve!(error, text_accent);
+    let status_surface = background.source_over(root_surface);
+    let readable_status = |seed: Color| {
+        seed.readable_preserving_chroma(&[status_surface], 3.0)
+            .unwrap_or_else(|| contrast(seed, status_surface, 3.0))
+    };
+    let success = resolve!(success, readable_status(status_seed.success));
+    let warning = resolve!(warning, readable_status(status_seed.warning));
+    let error = resolve!(error, readable_status(status_seed.error));
     let info_background = resolve!(info_background, info.multiply_opacity(0x1a));
     let info_border = resolve!(info_border, info);
     let success_background = resolve!(success_background, success.multiply_opacity(0x1a));
@@ -251,7 +284,8 @@ pub(crate) fn compile_chrome(
     );
     let resize_idle = resolve!(resize_idle, border);
     let resize_focused = resolve!(resize_focused, border_focused);
-    let resize_hovered = resolve!(resize_hovered, border_focused);
+    // Pointer hover strengthens the divider independently of its keyboard-focus indicator.
+    let resize_hovered = resolve!(resize_hovered, resize_idle.mix(text, 0.35));
     let resize_dragged = resolve!(resize_dragged, border_selected);
     let resize_disabled = resolve!(resize_disabled, border_disabled);
     let shadow = resolve!(shadow, Color::rgba(0x00000033));
@@ -383,6 +417,8 @@ pub(crate) fn compile_chrome(
     let selection_disabled_border =
         resolve!(selection_disabled_border, selection_disabled_background);
     let toggle_off_background = resolve!(toggle_off_background, input_background);
+    let progress_track = resolve!(progress_track, toggle_off_background);
+    let progress_indicator = resolve!(progress_indicator, text_accent);
     let toggle_off_mark = resolve!(
         toggle_off_mark,
         contrast(text, toggle_off_background.source_over(background), 4.5)
@@ -448,7 +484,8 @@ pub(crate) fn compile_chrome(
     );
     let toggle_off_disabled_border = resolve!(toggle_off_disabled_border, border_disabled);
     let toggle_off_disabled_label = resolve!(toggle_off_disabled_label, text_disabled);
-    let toggle_on_background = resolve!(toggle_on_background, text_accent);
+    // Enabled toggles share filled-action emphasis, not the link foreground.
+    let toggle_on_background = resolve!(toggle_on_background, primary_background);
     let toggle_on_mark = resolve!(
         toggle_on_mark,
         contrast(text, toggle_on_background.source_over(background), 4.5)
@@ -566,6 +603,13 @@ pub(crate) fn compile_chrome(
         )
     );
     let row_selected_icon = resolve!(row_selected_icon, row_selected_foreground);
+    let navigation_selected_background =
+        resolve!(navigation_selected_background, row_selected_background);
+    let navigation_selected_foreground =
+        resolve!(navigation_selected_foreground, row_selected_foreground);
+    let navigation_selected_secondary =
+        resolve!(navigation_selected_secondary, row_selected_secondary);
+    let navigation_selected_icon = resolve!(navigation_selected_icon, row_selected_icon);
     let row_selected_match = resolve!(
         row_selected_match,
         contrast(
@@ -725,10 +769,12 @@ pub(crate) fn compile_chrome(
         border,
         border_variant,
         border_focused,
+        focus_ring,
         border_selected,
         border_disabled,
         border_transparent,
         element_background,
+        segmented_track_background,
         element_hover,
         element_active,
         element_selected,
@@ -829,6 +875,8 @@ pub(crate) fn compile_chrome(
         selection_disabled_icon,
         selection_disabled_border,
         toggle_off_background,
+        progress_track,
+        progress_indicator,
         toggle_off_mark,
         toggle_off_border,
         toggle_off_label,
@@ -876,6 +924,10 @@ pub(crate) fn compile_chrome(
         row_selected_foreground,
         row_selected_secondary,
         row_selected_icon,
+        navigation_selected_background,
+        navigation_selected_foreground,
+        navigation_selected_secondary,
+        navigation_selected_icon,
         row_selected_match,
         row_selected_border,
         row_selected_hover_background,
@@ -1076,6 +1128,195 @@ mod tests {
             );
             assert!(result.colors.validate().is_ok());
         }
+    }
+
+    #[test]
+    fn sparse_support_roles_derive_from_their_exact_semantic_fallbacks() {
+        let compiled = compile_chrome(
+            Appearance::Dark,
+            &ChromeColorOverrides {
+                toggle_off_background: Some(Color::rgb(0x101112)),
+                text_accent: Some(Color::rgb(0x202122)),
+                border_focused: Some(Color::rgb(0x303132)),
+                row_selected_background: Some(Color::rgb(0x404142)),
+                row_selected_foreground: Some(Color::rgb(0x505152)),
+                row_selected_secondary: Some(Color::rgb(0x606162)),
+                row_selected_icon: Some(Color::rgb(0x707172)),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(compiled.colors.progress_track, Color::rgb(0x101112));
+        assert_eq!(compiled.colors.progress_indicator, Color::rgb(0x202122));
+        assert_eq!(compiled.colors.focus_ring, Color::rgb(0x303132));
+        assert_eq!(
+            compiled.colors.navigation_selected_background,
+            Color::rgb(0x404142)
+        );
+        assert_eq!(
+            compiled.colors.navigation_selected_foreground,
+            Color::rgb(0x505152)
+        );
+        assert_eq!(
+            compiled.colors.navigation_selected_secondary,
+            Color::rgb(0x606162)
+        );
+        assert_eq!(
+            compiled.colors.navigation_selected_icon,
+            Color::rgb(0x707172)
+        );
+        for role in [
+            "progress_track",
+            "progress_indicator",
+            "focus_ring",
+            "navigation_selected_background",
+            "navigation_selected_foreground",
+            "navigation_selected_secondary",
+            "navigation_selected_icon",
+        ] {
+            assert_eq!(compiled.provenance[role], ColorProvenance::Derived);
+        }
+    }
+
+    #[test]
+    fn segmented_track_falls_back_to_element_and_preserves_explicit_rgba() {
+        let element = Color::rgba(0x11223388);
+        let fallback = compile_chrome(
+            Appearance::Dark,
+            &ChromeColorOverrides {
+                element_background: Some(element),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(fallback.colors.segmented_track_background, element);
+        assert_eq!(
+            fallback.provenance["segmented_track_background"],
+            ColorProvenance::Derived
+        );
+
+        let authored = Color::rgba(0x44556699);
+        let explicit = compile_chrome(
+            Appearance::Light,
+            &ChromeColorOverrides {
+                segmented_track_background: Some(authored),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(explicit.colors.segmented_track_background, authored);
+        assert_eq!(
+            explicit.provenance["segmented_track_background"],
+            ColorProvenance::Authored
+        );
+
+        let overridden = Color::rgba(0x778899aa);
+        let explicit = compile_chrome(
+            Appearance::Light,
+            &ChromeColorOverrides {
+                segmented_track_background: Some(authored),
+                ..Default::default()
+            },
+            &ChromeColorOverrides {
+                segmented_track_background: Some(overridden),
+                ..Default::default()
+            },
+        );
+        assert_eq!(explicit.colors.segmented_track_background, overridden);
+        assert_eq!(
+            explicit.provenance["segmented_track_background"],
+            ColorProvenance::Overridden
+        );
+    }
+
+    #[test]
+    fn accent_changes_do_not_recolor_missing_status_selection_or_divider_hover_roles() {
+        let authored = ChromeColorOverrides {
+            background: Some(Color::rgb(0x101010)),
+            text: Some(Color::rgb(0xeeeeee)),
+            border: Some(Color::rgb(0x454545)),
+            ..Default::default()
+        };
+        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default()).colors;
+        let changed = compile_chrome(
+            Appearance::Dark,
+            &authored,
+            &ChromeColorOverrides {
+                text_accent: Some(Color::rgb(0xff00ff)),
+                ..Default::default()
+            },
+        )
+        .colors;
+        assert_eq!(changed.success, baseline.success);
+        assert_eq!(changed.warning, baseline.warning);
+        assert_eq!(changed.error, baseline.error);
+        assert_eq!(changed.element_selected, baseline.element_selected);
+        assert_eq!(changed.resize_hovered, baseline.resize_hovered);
+    }
+
+    #[test]
+    fn omitted_status_roles_remain_distinct_and_readable_on_midtones() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let background = Color::rgb(0x777777);
+            let colors = compile_chrome(
+                appearance,
+                &ChromeColorOverrides {
+                    background: Some(background),
+                    ..Default::default()
+                },
+                &Default::default(),
+            )
+            .colors;
+            let statuses = [colors.success, colors.warning, colors.error];
+
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status.contrast_ratio(background) >= 3.0),
+                "{appearance:?} status roles must remain readable: {statuses:?}"
+            );
+            assert!(
+                statuses[0] != statuses[1]
+                    && statuses[0] != statuses[2]
+                    && statuses[1] != statuses[2],
+                "{appearance:?} status roles must remain distinct: {statuses:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_status_values_remain_exact() {
+        let compiled = compile_chrome(
+            Appearance::Light,
+            &ChromeColorOverrides {
+                success: Some(Color::rgba(0x11223344)),
+                warning: Some(Color::rgba(0x55667788)),
+                error: Some(Color::rgba(0x99aabbcc)),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(compiled.colors.success, Color::rgba(0x11223344));
+        assert_eq!(compiled.colors.warning, Color::rgba(0x55667788));
+        assert_eq!(compiled.colors.error, Color::rgba(0x99aabbcc));
+    }
+
+    #[test]
+    fn omitted_toggle_on_background_derives_from_overridden_primary_background() {
+        let primary = Color::rgb(0x123456);
+        let compiled = compile_chrome(
+            Appearance::Dark,
+            &Default::default(),
+            &ChromeColorOverrides {
+                primary_background: Some(primary),
+                ..Default::default()
+            },
+        );
+        assert_eq!(compiled.colors.toggle_on_background, primary);
+        assert_eq!(
+            compiled.provenance["toggle_on_background"],
+            ColorProvenance::Derived
+        );
     }
 
     #[test]
@@ -1553,6 +1794,7 @@ mod tests {
                 for focused in [false, true] {
                     let caption = colors.caption(surface, focused);
                     assert_eq!(caption.background, surface);
+                    assert_eq!(caption.foreground, caption.control.icon);
                     for text in [
                         caption.foreground,
                         caption.secondary,

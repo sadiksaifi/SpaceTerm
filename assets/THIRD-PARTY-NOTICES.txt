@@ -27,6 +27,9 @@ SOFTWARE.
 
 Lucide Icons and Feather-derived icons
 --------------------------------------
+Source SVGs: https://github.com/lucide-icons/lucide/tree/1.34.0/icons
+Version: 1.34.0, commit 1a60fd28ed7111bbf6acedc0896f3d83cd73945a
+
 ISC License
 
 Copyright (c) 2026 Lucide Icons and Contributors
@@ -137,3 +140,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Blue Marble, 2012
+-----------------
+Source: https://www.nasa.gov/image-article/blue-marble-2012/
+Image credit: NASA/NOAA/GSFC/Suomi NPP/VIIRS/Norman Kuring
+
+The unmodified official NASA JPEG is embedded only in the development Appearance Acceptance
+Fixtures as a photographic backdrop. NASA's Images and Media Usage Guidelines state that NASA
+content generally is not subject to copyright in the United States and may be used for educational
+or informational purposes when NASA is acknowledged as the source and the use does not imply NASA
+endorsement:
+https://www.nasa.gov/nasa-brand-center/images-and-media/

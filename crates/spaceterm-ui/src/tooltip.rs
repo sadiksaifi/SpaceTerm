@@ -199,9 +199,9 @@ impl TooltipMetrics {
 
     /// Sets primary, secondary, and keyboard-equivalent font sizes.
     pub fn font_sizes(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
-        self.primary_font_size = bounded_metric(primary, 8.0, 20.0, 11.0);
-        self.secondary_font_size = bounded_metric(secondary, 8.0, 20.0, 10.0);
-        self.keyboard_font_size = bounded_metric(keyboard, 8.0, 20.0, 10.0);
+        self.primary_font_size = bounded_metric(primary, 8.0, 32.0, 11.0);
+        self.secondary_font_size = bounded_metric(secondary, 8.0, 32.0, 10.0);
+        self.keyboard_font_size = bounded_metric(keyboard, 8.0, 32.0, 10.0);
         self
     }
 
@@ -294,7 +294,8 @@ impl Global for TooltipTheme {}
 
 /// Resolves the installed tooltip theme against the shared floating surface presentation.
 fn tooltip_theme(cx: &App) -> TooltipTheme {
-    let mut theme = *cx.global::<TooltipTheme>();
+    let mut theme = *crate::control_theme_catalog(cx)
+        .map_or_else(|| cx.global::<TooltipTheme>(), |catalog| &catalog.tooltip);
     theme.shell = crate::floating_surface::shell(TOOLTIP_ROLE, cx);
     theme
 }
@@ -456,12 +457,13 @@ impl RenderOnce for TooltipTarget {
             let state = state.read(cx);
             if state.visible && state.target_bounds.is_some() {
                 let theme = tooltip_theme(cx);
+                let typography = crate::control_typography(cx);
                 TooltipOverlay::new(
                     owner,
                     render_surface(
                         &self.tooltip,
                         &theme,
-                        crate::control_typography(cx).regular().clone(),
+                        tooltip_fonts(&typography),
                         window.viewport_size(),
                     ),
                     theme.metrics,
@@ -489,9 +491,10 @@ impl RenderOnce for TooltipTarget {
 fn render_surface(
     tooltip: &Tooltip,
     theme: &TooltipTheme,
-    font: gpui::Font,
+    fonts: [gpui::Font; 3],
     viewport: Size<Pixels>,
 ) -> AnyElement {
+    let [primary_font, detail_font, keyboard_font] = fonts;
     let paint = theme.paint;
     let metrics = theme.metrics;
     let shell = theme.shell;
@@ -520,6 +523,7 @@ fn render_surface(
                     .whitespace_nowrap()
                     .text_size(metrics.keyboard_font_size)
                     .line_height(metrics.keyboard_line_height)
+                    .font(keyboard_font)
                     .text_color(paint.keyboard)
                     .child(keyboard),
             )
@@ -538,7 +542,7 @@ fn render_surface(
         .flex()
         .flex_col()
         .gap(metrics.content_gap)
-        .font(font)
+        .font(primary_font)
         .cursor_default()
         .child(primary)
         .when_some(tooltip.detail.clone(), |surface, detail| {
@@ -557,12 +561,21 @@ fn render_surface(
                         .whitespace_normal()
                         .text_size(metrics.secondary_font_size)
                         .line_height(metrics.secondary_line_height)
+                        .font(detail_font)
                         .text_color(paint.secondary)
                         .child(detail),
                 )
         });
 
     shell.mount(surface).into_any_element()
+}
+
+fn tooltip_fonts(typography: &crate::ControlTypography) -> [gpui::Font; 3] {
+    [
+        typography.regular().clone(),
+        typography.regular().clone(),
+        typography.shortcut().clone(),
+    ]
 }
 
 struct TooltipLayerElement {
@@ -1477,6 +1490,31 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_text_uses_body_secondary_and_shortcut_font_mapping() {
+        let regular = gpui::font("Regular");
+        let caption = gpui::font("Caption");
+        let badge = gpui::font("Badge");
+        let shortcut = gpui::font("Shortcut");
+        let typography =
+            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
+                .semantic_fonts(shortcut.clone(), caption, badge);
+
+        assert_eq!(
+            tooltip_fonts(&typography),
+            [regular.clone(), regular, shortcut]
+        );
+    }
+
+    #[test]
+    fn tooltip_metrics_preserve_large_prepared_semantic_font_sizes() {
+        let metrics = TooltipMetrics::new(px(480.0)).font_sizes(px(31.0), px(30.0), px(30.0));
+
+        assert_eq!(metrics.primary_font_size, px(31.0));
+        assert_eq!(metrics.secondary_font_size, px(30.0));
+        assert_eq!(metrics.keyboard_font_size, px(30.0));
+    }
+
+    #[test]
     fn placement_should_prefer_below_the_target() {
         let target = Bounds::new(point(px(100.0), px(100.0)), size(px(40.0), px(20.0)));
 
@@ -1568,11 +1606,11 @@ mod tests {
 
     #[test]
     fn theme_metrics_should_clamp_non_finite_and_out_of_range_values() {
-        let metrics = TooltipMetrics::new(px(f32::NAN)).font_sizes(px(2.0), px(30.0), px(11.0));
+        let metrics = TooltipMetrics::new(px(f32::NAN)).font_sizes(px(2.0), px(40.0), px(11.0));
 
         assert_eq!(metrics.maximum_width, px(320.0));
         assert_eq!(metrics.primary_font_size, px(8.0));
-        assert_eq!(metrics.secondary_font_size, px(20.0));
+        assert_eq!(metrics.secondary_font_size, px(32.0));
     }
 
     struct TestRoot {

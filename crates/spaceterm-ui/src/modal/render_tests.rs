@@ -234,11 +234,8 @@ fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x5599ffff),
-            rgba(0x5599ff22),
             rgba(0xffbb55ff),
-            rgba(0xffbb5522),
             rgba(0xff6677ff),
-            rgba(0xff667722),
         ),
         metrics,
     )
@@ -250,11 +247,8 @@ fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme
             rgba(0xffffffff),
             rgba(0xb0b0b8ff),
             rgba(0x5599ffff),
-            rgba(0x5599ff22),
             rgba(0xffbb55ff),
-            rgba(0xffbb5522),
             rgba(0xff6677ff),
-            rgba(0xff667722),
         ),
         metrics,
     )
@@ -7528,6 +7522,7 @@ fn dialog_owned_menu_escape_should_restore_inside_the_dialog_without_closing_it(
     let (root, cx) = dialog_menu_window(cx);
     cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
     cx.run_until_parked();
+    let previous_focus = cx.update(|window, cx| window.focused(cx)).unwrap();
     let trigger = cx
         .debug_bounds("dialog-owned-menu-trigger")
         .expect("dialog menu trigger should render");
@@ -7541,12 +7536,11 @@ fn dialog_owned_menu_escape_should_restore_inside_the_dialog_without_closing_it(
     cx.run_until_parked();
     assert!(cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
     assert!(!cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, _| previous_focus.is_focused(window)));
 
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    assert!(
-        cx.update(|window, cx| { crate::menu::window_menu_is_owned_by_current_modal(window, cx) })
-    );
+    assert!(!cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
 }
 
 #[gpui::test]

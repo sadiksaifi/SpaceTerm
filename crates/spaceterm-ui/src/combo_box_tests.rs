@@ -809,11 +809,8 @@ fn install_modal_test_support(cx: &mut TestAppContext) {
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
                     rgba(0x5599ffff),
-                    rgba(0x5599ff22),
                     rgba(0xffbb55ff),
-                    rgba(0xffbb5522),
                     rgba(0xff6677ff),
-                    rgba(0xff667722),
                 ),
                 crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
             ),
@@ -948,6 +945,88 @@ fn focus_trigger(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppContext) {
+    struct InsetTrigger;
+    impl Render for InsetTrigger {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            div().p(px(16.0)).child(
+                div().w(px(180.0)).child(
+                    ComboBox::new("ring-combo", "Choice", Some(1), "Choose", items())
+                        .bare_trigger()
+                        .debug_selector("combo-box-trigger")
+                        .on_accept(|_, _, _| {}),
+                ),
+            )
+        }
+    }
+    install_themes(cx);
+    let background = rgba(0x141415ff);
+    let ordinary = rgba(0x123456ff);
+    let focus = rgba(0xabcdefef);
+    let theme = ComboBoxTheme::new(
+        ComboBoxPaint::new(
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x606079ff),
+            rgba(0x252530ff),
+            rgba(0xffffffff),
+            background,
+            rgba(0x1c1c24ff),
+            ordinary,
+            focus,
+        ),
+        ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
+    )
+    .focus_ring_width(px(2.0));
+    cx.set_global(theme);
+    let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, _| window.focus_next());
+    cx.run_until_parked();
+
+    let trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("ComboBox trigger should reach the scene");
+    let ring = cx
+        .debug_bounds("combo-box-trigger-keyboard-focus")
+        .expect("focused ComboBox trigger should submit its outline");
+    let outset = px(3.0);
+    assert!(
+        ring.left() == trigger.left() - outset
+            && ring.top() == trigger.top() - outset
+            && ring.right() == trigger.right() + outset
+            && ring.bottom() == trigger.bottom() + outset,
+        "trigger={trigger:?}; ring={ring:?}"
+    );
+    assert!(
+        cx.update(|_, cx| {
+            crate::floating_surface::shell(crate::FloatingRole::Popover, cx).content_inset()
+        }) > px(0.0),
+        "the regression must exercise the ordinary nonzero popover content inset"
+    );
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quads = window.painted_quads_for_test();
+        let visible_border = |color: gpui::Rgba| {
+            quads
+                .iter()
+                .filter(|quad| quad.border_color == color.into())
+                .map(|quad| quad.visible_bounds)
+                .reduce(|bounds, next| bounds.union(&next))
+        };
+        let visible_background = quads
+            .iter()
+            .filter(|quad| quad.background == gpui::Background::from(background))
+            .map(|quad| quad.visible_bounds)
+            .reduce(|bounds, next| bounds.union(&next));
+        assert_eq!(visible_background, None);
+        assert_eq!(visible_border(ordinary), None);
+        assert_eq!(visible_border(focus), Some(ring.scale(scale)));
+    });
+}
+
+#[gpui::test]
 fn pointer_press_should_open_the_popup(cx: &mut TestAppContext) {
     let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
 
@@ -1000,6 +1079,39 @@ fn filter_editor_should_use_compact_text_and_caret_geometry(cx: &mut TestAppCont
     cx.simulate_input("remote");
     cx.run_until_parked();
     assert_eq!(cx.debug_bounds("combo-box-input").unwrap(), editor);
+}
+
+#[gpui::test]
+fn disclosure_should_stay_centered_when_label_geometry_changes(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let paint = ComboBoxPaint::new(
+        rgba(0xcdcdcdff),
+        rgba(0x878787ff),
+        rgba(0x606079ff),
+        rgba(0x252530ff),
+        rgba(0xffffffff),
+        rgba(0x141415ff),
+        rgba(0x1c1c24ff),
+        rgba(0x606079ff),
+        rgba(0x7e98e8ff),
+    );
+    let metrics = ComboBoxMetrics::new(px(240.0), px(40.0))
+        .font_sizes(px(17.0), px(11.0))
+        .text_geometry(px(23.0), px(15.0), px(12.0))
+        .icon_baseline_center(px(5.0));
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(paint, metrics));
+        window.refresh();
+    });
+    cx.run_until_parked();
+
+    let trigger = cx
+        .debug_bounds("combo-box-trigger")
+        .expect("combo box trigger should render");
+    let disclosure = cx
+        .debug_bounds("combo-box-trigger-disclosure")
+        .expect("combo box disclosure should render");
+    assert_eq!(disclosure.center().y, trigger.center().y);
 }
 
 #[gpui::test]
@@ -1409,6 +1521,69 @@ fn disabled_pinned_fallback_should_render_without_becoming_provisional(cx: &mut 
             .all(|event| !matches!(event, RecordedEvent::Accepted { .. }))
     );
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[cfg(feature = "appearance-exerciser")]
+#[gpui::test]
+fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigation(
+    cx: &mut TestAppContext,
+) {
+    let observed_icon = Rc::new(Cell::new(rgba(0)));
+    let rendered_icon = Rc::clone(&observed_icon);
+    let fixture_items = vec![
+        ComboBoxItem::new(1, "Preview: disabled selected row")
+            .disabled(true)
+            .preview_selected(true)
+            .leading_icon(move |foreground, size| {
+                rendered_icon.set(foreground);
+                div().size(size).bg(foreground).into_any_element()
+            })
+            .debug_selector("disabled-selected-preview"),
+        ComboBoxItem::new(2, "Enabled navigation target").debug_selector("enabled-preview-target"),
+    ];
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), fixture_items, false);
+    let normal = rgba(0x101010ff);
+    let disabled = rgba(0x606060ff);
+    let disabled_selected = rgba(0xd15ab1ff);
+    let row = |color| crate::ListRowPaint::new(color, color, color, color, color, color);
+    cx.update(|window, cx| {
+        let rows = crate::ListRowPaints::new(
+            row(normal),
+            row(normal),
+            row(normal),
+            row(normal),
+            row(disabled),
+        )
+        .disabled_selected(row(disabled_selected));
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                normal, normal, disabled, normal, normal, normal, normal, normal, normal,
+            )
+            .rows(rows),
+            ComboBoxMetrics::new(px(240.0), px(40.0)),
+        ));
+        window.refresh();
+    });
+
+    open_by_pointer(cx);
+    cx.run_until_parked();
+    assert_eq!(observed_icon.get(), disabled_selected);
+    events.borrow_mut().clear();
+
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 2,
+        source: ComboBoxActivationSource::Keyboard,
+        window_was_open: false,
+    }));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .all(|event| !matches!(event, RecordedEvent::Accepted { item_id: 1, .. })),
+        "the painted preview must not make its disabled item navigable or acceptable",
+    );
 }
 
 #[gpui::test]
@@ -2060,6 +2235,41 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn page_navigation_should_include_the_pinned_group_separator(cx: &mut TestAppContext) {
+    // The 213 px viewport fits seven plain 30 px rows, but not the extra 9 px separator.
+    for (selected, key, expected) in [(5, "pagedown", 100), (101, "pageup", 6)] {
+        let ordinary = (1..=10)
+            .map(|id| ComboBoxItem::new(id, format!("Workspace {id}")))
+            .collect();
+        let (root, events, _, cx) = combo_box_window(cx, Some(selected), ordinary, false);
+        root.update(cx, |root, cx| {
+            root.fallback = Some(ComboBoxFallback::pinned_rows(|_| {
+                vec![
+                    ComboBoxItem::new(100, "Local Workspace"),
+                    ComboBoxItem::new(101, "Remote Workspace"),
+                ]
+            }));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        open_by_pointer(cx);
+        cx.simulate_keystrokes(key);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let accepted = events.borrow().iter().find_map(|event| match event {
+            RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
+            _ => None,
+        });
+        assert_eq!(
+            accepted,
+            Some(expected),
+            "{key} must include the separator height"
+        );
+    }
+}
+
+#[gpui::test]
 fn repaired_provisional_item_should_be_revealed_after_a_long_model_update(cx: &mut TestAppContext) {
     let (root, _, _, cx) = combo_box_window(cx, Some(1), long_items(), false);
     open_by_pointer(cx);
@@ -2586,8 +2796,13 @@ fn a_marked_row_should_keep_its_own_leading_icon(cx: &mut TestAppContext) {
     let (_root, _events, _presses, cx) = combo_box_window(cx, Some(3), items(), false);
     open_by_pointer(cx);
 
-    assert!(cx.debug_bounds("combo-row-remote-icon").is_some());
-    assert_eq!(cx.debug_bounds("combo-box-row-2-check"), None);
+    let check = cx
+        .debug_bounds("combo-box-row-2-check")
+        .expect("the state gutter should keep the selected mark");
+    let identity = cx
+        .debug_bounds("combo-row-remote-icon")
+        .expect("the identity gutter should keep the row icon");
+    assert!(check.right() < identity.left());
 }
 
 #[gpui::test]

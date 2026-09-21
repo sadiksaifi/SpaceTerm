@@ -5,15 +5,32 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
+#[cfg(test)]
 pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
+    prepared(colors, &ChromeTypography::default(), false)
+}
+
+pub(super) fn prepared(
+    colors: &ChromeColors,
+    typography: &ChromeTypography,
+    show_borders: bool,
+) -> SegmentedControlTheme {
+    let border = |ordinary, accessible| {
+        if show_borders { accessible } else { ordinary }
+    };
+    let body_size = typography.style(TextRole::Body).size;
+    let body_line_height =
+        f32::from(typography.style(TextRole::Body).line_height) / f32::from(body_size);
     SegmentedControlTheme::new(
         SegmentedPaints::new(
             values(
                 paint(
                     colors.border_transparent,
                     colors.text_secondary,
-                    colors.border_transparent,
+                    border(colors.border_transparent, colors.ghost_element_border),
                 ),
                 paint(
                     colors.selection_background,
@@ -25,7 +42,7 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                 paint(
                     colors.ghost_element_hover,
                     colors.ghost_element_hover_foreground,
-                    colors.border_transparent,
+                    border(colors.border_transparent, colors.ghost_element_hover_border),
                 ),
                 paint(
                     colors.selection_hover_background,
@@ -37,7 +54,7 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                 paint(
                     colors.ghost_element_active,
                     colors.ghost_element_active_foreground,
-                    colors.border_variant,
+                    border(colors.border_variant, colors.ghost_element_active_border),
                 ),
                 paint(
                     colors.selection_pressed_background,
@@ -49,7 +66,10 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
                 paint(
                     colors.border_transparent,
                     colors.text_disabled,
-                    colors.border_transparent,
+                    border(
+                        colors.border_transparent,
+                        colors.ghost_element_disabled_border,
+                    ),
                 ),
                 paint(
                     colors.selection_disabled_background,
@@ -63,20 +83,20 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
             // height, so a segmented control lines up with buttons, steppers, and selectors.
             SegmentedMetrics::new(px(24.0), px(0.0), px(64.0), px(0.0))
                 .horizontal_padding(px(10.0))
-                .radius(px(5.0))
-                .typography(px(12.0), 1.2),
+                .radius(RadiusRole::Control.pixels())
+                .typography(body_size, body_line_height),
             // A card is a thumbnail with its name under it, sized so a row of them reads beside a
             // label rather than towering over it.
             SegmentedMetrics::new(px(20.0), px(38.0), px(72.0), px(8.0))
                 .horizontal_padding(px(10.0))
                 .vertical_padding(px(7.0))
-                .radius(px(7.0))
+                .radius(RadiusRole::Card.pixels())
                 .preview_gap(px(6.0))
-                .typography(px(11.0), 1.2),
+                .typography(body_size, body_line_height),
         ),
         gpui_color(colors.element_background),
-        gpui_color(colors.border),
-        gpui_color(colors.border_focused),
+        gpui_color(border(colors.border, colors.element_border)),
+        gpui_color(colors.focus_ring),
     )
     // A resting segment uses its fill and hairline for selection. A drop shadow remains visible
     // through translucent fills and makes the selected segment look recessed.
@@ -163,5 +183,41 @@ mod tests {
         for changed in [selected, unselected_label, hovered, selected_hovered] {
             assert_ne!(theme(&base), theme(&changed));
         }
+    }
+
+    #[test]
+    fn show_borders_should_outline_each_unselected_state() {
+        let colors = ChromeColors {
+            ghost_element_border: Color::rgb(0x112233),
+            ghost_element_hover_border: Color::rgb(0x223344),
+            ghost_element_active_border: Color::rgb(0x334455),
+            ghost_element_disabled_border: Color::rgb(0x445566),
+            element_border: Color::rgb(0x556677),
+            ..ChromeColors::default()
+        };
+        let theme = prepared(&colors, &ChromeTypography::default(), true);
+
+        assert_eq!(
+            theme.paint(false, true, false, false).border(),
+            gpui_color(colors.ghost_element_border)
+        );
+        assert_eq!(
+            theme.paint(false, true, true, false).border(),
+            gpui_color(colors.ghost_element_hover_border)
+        );
+        assert_eq!(
+            theme.paint(false, true, false, true).border(),
+            gpui_color(colors.ghost_element_active_border)
+        );
+        assert_eq!(
+            theme.paint(false, false, true, true).border(),
+            gpui_color(colors.ghost_element_disabled_border),
+            "disabled precedence should retain its Show Borders edge"
+        );
+        assert_ne!(
+            theme,
+            prepared(&colors, &ChromeTypography::default(), false),
+            "Show Borders must also replace the segmented track edge"
+        );
     }
 }

@@ -31,6 +31,9 @@ use crate::{
 const KEY_CONTEXT: &str = "SpaceTermComboBox";
 /// The open popup is an anchored popup, like the menus it sits beside.
 const COMBO_BOX_ROLE: FloatingRole = FloatingRole::Popover;
+const MENU_MINIMUM_WIDTH: f32 = 240.0;
+const MENU_MAXIMUM_WIDTH: f32 = 420.0;
+const MENU_SHORTCUT_GAP: f32 = 24.0;
 
 actions!(
     spaceterm_combo_box,
@@ -223,6 +226,8 @@ pub struct ComboBoxItem<I> {
     trailing: Option<ComboBoxAccessory>,
     shortcut: Option<SharedString>,
     debug_selector: Option<String>,
+    #[cfg(feature = "appearance-exerciser")]
+    preview_selected: bool,
 }
 
 impl<I> ComboBoxItem<I> {
@@ -238,6 +243,8 @@ impl<I> ComboBoxItem<I> {
             trailing: None,
             shortcut: None,
             debug_selector: None,
+            #[cfg(feature = "appearance-exerciser")]
+            preview_selected: false,
         }
     }
 
@@ -256,6 +263,15 @@ impl<I> ComboBoxItem<I> {
     /// Controls whether the item remains visible but is skipped by navigation and activation.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Paints this row as persistently selected in development acceptance fixtures.
+    ///
+    /// This does not make a disabled item eligible for navigation or activation.
+    #[cfg(feature = "appearance-exerciser")]
+    pub fn preview_selected(mut self, selected: bool) -> Self {
+        self.preview_selected = selected;
         self
     }
 
@@ -306,6 +322,14 @@ impl<I> ComboBoxItem<I> {
     /// Returns whether the item is visible but inert.
     pub const fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    fn paints_selected(&self, provisional: bool) -> bool {
+        #[cfg(feature = "appearance-exerciser")]
+        if self.preview_selected {
+            return true;
+        }
+        provisional
     }
 }
 
@@ -449,7 +473,11 @@ pub struct ComboBoxPaint {
     selected_foreground: Rgba,
     trigger_background: Rgba,
     trigger_hover_background: Rgba,
+    trigger_pressed_background: Rgba,
+    trigger_disabled_background: Rgba,
     trigger_border: Rgba,
+    trigger_state_borders: Option<crate::ControlBorderStates>,
+    trigger_shadow: crate::ControlShadow,
     focus_border: Rgba,
 }
 
@@ -483,7 +511,11 @@ impl ComboBoxPaint {
             selected_foreground,
             trigger_background,
             trigger_hover_background,
+            trigger_pressed_background: trigger_hover_background,
+            trigger_disabled_background: trigger_background,
             trigger_border,
+            trigger_state_borders: None,
+            trigger_shadow: crate::ControlShadow::none(),
             focus_border,
         }
     }
@@ -513,6 +545,47 @@ impl ComboBoxPaint {
         self
     }
 
+    /// Sets the pressed and disabled fills for the trigger independently from hover.
+    pub fn trigger_state_backgrounds(mut self, pressed: Rgba, disabled: Rgba) -> Self {
+        self.trigger_pressed_background = pressed;
+        self.trigger_disabled_background = disabled;
+        self
+    }
+
+    /// Adds the application-owned raised treatment to an ordinary trigger.
+    pub fn trigger_elevation(mut self, shadow: crate::ControlShadow, border: Option<Rgba>) -> Self {
+        self.trigger_shadow = shadow;
+        if let Some(border) = border {
+            self.trigger_border = border;
+        }
+        self
+    }
+
+    fn trigger_background(self, enabled: bool, open: bool) -> Rgba {
+        match (enabled, open) {
+            (false, _) => self.trigger_disabled_background,
+            (true, true) => self.trigger_pressed_background,
+            (true, false) => self.trigger_background,
+        }
+    }
+
+    fn trigger_edge(self, enabled: bool, open: bool) -> Rgba {
+        self.trigger_state_borders
+            .map_or(self.trigger_border, |borders| match (enabled, open) {
+                (false, _) => borders.disabled,
+                (true, true) => borders.pressed,
+                (true, false) => borders.normal,
+            })
+    }
+
+    fn trigger_shadow(self, enabled: bool, open: bool) -> crate::ControlShadow {
+        if enabled && !open {
+            self.trigger_shadow
+        } else {
+            crate::ControlShadow::none()
+        }
+    }
+
     fn trigger_leading_foreground(&self, icon_only: bool, enabled: bool) -> Rgba {
         match (icon_only, enabled) {
             (true, true) => self.trigger_icon_foreground,
@@ -535,15 +608,23 @@ pub struct ComboBoxMetrics {
     described_row_height: Pixels,
     panel_padding: Pixels,
     horizontal_padding: Pixels,
+    /// Always-reserved check or radio column.
     leading_width: Pixels,
+    /// Identity-icon column, reserved for every row when any visible item has an icon.
+    identity_icon_width: Pixels,
+    state_icon_gap: Pixels,
     gap: Pixels,
     trigger_corner_radius: Pixels,
     corner_radius: Pixels,
     border_width: Pixels,
     label_size: Pixels,
     secondary_size: Pixels,
-    line_height: Pixels,
+    label_line_height: Pixels,
+    secondary_line_height: Pixels,
     icon_size: Pixels,
+    trigger_icon_size: Pixels,
+    icon_baseline_center: Pixels,
+    group_separator_height: Pixels,
 }
 
 impl ComboBoxMetrics {
@@ -560,15 +641,21 @@ impl ComboBoxMetrics {
             described_row_height: px(46.0),
             panel_padding: shell.content_inset(),
             horizontal_padding: px(10.0),
-            leading_width: px(18.0),
-            gap: px(8.0),
+            leading_width: px(16.0),
+            identity_icon_width: px(18.0),
+            state_icon_gap: px(4.0),
+            gap: px(6.0),
             trigger_corner_radius: px(6.0),
             corner_radius: shell.corner_radius(),
             border_width: shell.hairline(),
             label_size: px(12.0),
             secondary_size: px(11.0),
-            line_height: px(16.0),
+            label_line_height: px(16.0),
+            secondary_line_height: px(15.0),
             icon_size: px(12.0),
+            trigger_icon_size: px(12.0),
+            icon_baseline_center: px(4.0),
+            group_separator_height: px(9.0),
         }
     }
 
@@ -606,6 +693,21 @@ impl ComboBoxMetrics {
         self
     }
 
+    /// Sets the state gutter, optional identity-icon gutter, and their two column gaps.
+    pub fn row_gutters(
+        mut self,
+        state_width: Pixels,
+        identity_icon_width: Pixels,
+        state_icon_gap: Pixels,
+        icon_text_gap: Pixels,
+    ) -> Self {
+        self.leading_width = state_width.max(px(0.0));
+        self.identity_icon_width = identity_icon_width.max(px(0.0));
+        self.state_icon_gap = state_icon_gap.max(px(0.0));
+        self.gap = icon_text_gap.max(px(0.0));
+        self
+    }
+
     /// Sets the corner radius of the trigger that opens the popup.
     pub fn trigger_shape(mut self, corner_radius: Pixels) -> Self {
         self.trigger_corner_radius = corner_radius;
@@ -619,10 +721,29 @@ impl ComboBoxMetrics {
         self
     }
 
-    /// Sets the shared text line height and chrome glyph size.
-    pub fn text_geometry(mut self, line_height: Pixels, icon_size: Pixels) -> Self {
-        self.line_height = line_height;
+    /// Sets the label and secondary line boxes and the chrome glyph size.
+    pub fn text_geometry(
+        mut self,
+        label_line_height: Pixels,
+        secondary_line_height: Pixels,
+        icon_size: Pixels,
+    ) -> Self {
+        self.label_line_height = label_line_height;
+        self.secondary_line_height = secondary_line_height;
         self.icon_size = icon_size;
+        self
+    }
+
+    /// Sets the nominal glyph size for trigger-leading content and the disclosure chevron.
+    pub fn trigger_icon_size(mut self, size: Pixels) -> Self {
+        self.trigger_icon_size = size.max(px(0.0));
+        self
+    }
+
+    /// Sets the center-above-baseline metric for row and labeled-trigger leading icons.
+    /// Trailing disclosures use the trigger's geometric center instead.
+    pub fn icon_baseline_center(mut self, center: Pixels) -> Self {
+        self.icon_baseline_center = center;
         self
     }
 
@@ -631,6 +752,8 @@ impl ComboBoxMetrics {
             .max(crate::appearance::normalized_scale(spacing_scale));
         let label_size = crate::appearance::scale_metric(self.label_size, text_scale);
         let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
+        let density_step = (crate::appearance::normalized_scale(spacing_scale) - 1.0).max(0.0);
         Self {
             panel_width: self.panel_width * width_scale,
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
@@ -648,19 +771,19 @@ impl ComboBoxMetrics {
             ),
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
-                self.line_height,
+                self.label_line_height,
                 text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
-                self.line_height,
+                self.label_line_height,
                 text_scale,
                 spacing_scale,
             ),
             described_row_height: crate::appearance::scale_line_box(
                 self.described_row_height,
-                self.line_height * 2.0,
+                self.label_line_height + self.secondary_line_height,
                 text_scale,
                 spacing_scale,
             ),
@@ -669,19 +792,30 @@ impl ComboBoxMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
-                .max(icon_size),
-            gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            trigger_corner_radius: crate::appearance::scale_metric(
-                self.trigger_corner_radius,
-                spacing_scale,
-            ),
+            leading_width: (self.leading_width + px(8.0) * density_step).max(icon_size),
+            identity_icon_width: (self.identity_icon_width + px(8.0) * density_step).max(icon_size),
+            state_icon_gap: self.state_icon_gap,
+            gap: self.gap,
+            trigger_corner_radius: self.trigger_corner_radius,
             corner_radius: self.corner_radius,
             border_width: self.border_width,
             label_size,
             secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
-            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
+            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
+            secondary_line_height: crate::appearance::scale_metric(
+                self.secondary_line_height,
+                text_scale,
+            ),
             icon_size,
+            trigger_icon_size,
+            icon_baseline_center: crate::appearance::scale_metric(
+                self.icon_baseline_center,
+                text_scale,
+            ),
+            group_separator_height: crate::appearance::scale_metric(
+                self.group_separator_height,
+                spacing_scale,
+            ),
         }
     }
 
@@ -691,6 +825,15 @@ impl ComboBoxMetrics {
         } else {
             self.row_height
         }
+    }
+
+    fn list_item_height(self, described: bool, separator_before: bool) -> Pixels {
+        self.row_height(described)
+            + if separator_before {
+                self.group_separator_height
+            } else {
+                px(0.0)
+            }
     }
 
     fn row_radius(self) -> Pixels {
@@ -707,6 +850,7 @@ pub struct ComboBoxTheme {
     paint: ComboBoxPaint,
     metrics: ComboBoxMetrics,
     shell: FloatingShell,
+    focus_ring_width: Pixels,
 }
 
 impl ComboBoxTheme {
@@ -716,7 +860,19 @@ impl ComboBoxTheme {
             paint,
             metrics,
             shell: crate::FloatingSurfaceTheme::default().shell(COMBO_BOX_ROLE),
+            focus_ring_width: px(1.0),
         }
+    }
+
+    /// Sets the focus-ring width independently of the trigger border and radius.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
+        self.focus_ring_width
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -731,19 +887,45 @@ impl ComboBoxTheme {
     pub fn custom_trigger_width(self, content_width: Pixels) -> Pixels {
         content_width + self.metrics.border_width * 2.0
     }
+
+    /// Sets interaction-state borders for non-custom triggers.
+    pub fn ordinary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
+        self.paint.trigger_state_borders = Some(borders);
+        self
+    }
+
+    /// Adds the shared ordinary-control elevation to non-custom triggers.
+    pub fn ordinary_elevation(
+        mut self,
+        shadow: crate::ControlShadow,
+        border: Option<Rgba>,
+    ) -> Self {
+        self.paint = self.paint.trigger_elevation(shadow, border);
+        self
+    }
 }
 
 impl Global for ComboBoxTheme {}
 
 /// Resolves the installed ComboBox theme against the shared anchored-popup surface.
 fn combo_box_theme(cx: &App) -> ComboBoxTheme {
-    let mut theme = *cx.global::<ComboBoxTheme>();
+    let mut theme = *crate::control_theme_catalog(cx).map_or_else(
+        || cx.global::<ComboBoxTheme>(),
+        |catalog| &catalog.combo_box,
+    );
     let shell = crate::floating_surface::shell(COMBO_BOX_ROLE, cx);
     theme.metrics.corner_radius = shell.corner_radius();
     theme.metrics.panel_padding = shell.content_inset();
     theme.metrics.border_width = shell.hairline();
     theme.shell = shell;
     theme
+}
+
+fn trigger_edges(paint: ComboBoxPaint, enabled: bool, focused: bool) -> (Rgba, Option<Rgba>) {
+    (
+        paint.trigger_edge(enabled, false),
+        (enabled && focused && paint.focus_border.a > 0.0).then_some(paint.focus_border),
+    )
 }
 
 type AcceptanceHandler<I> = Rc<dyn Fn(&ComboBoxAcceptance<I>, &mut Window, &mut App)>;
@@ -753,6 +935,41 @@ enum ComboBoxTrigger {
     Text,
     Icon,
     Custom(AnyElement),
+}
+
+#[derive(Clone, Copy)]
+struct TriggerSurfacePaint {
+    backgrounds: [Rgba; 4],
+    borders: crate::ControlBorderStates,
+}
+
+impl From<crate::ButtonVariantStyle> for TriggerSurfacePaint {
+    fn from(states: crate::ButtonVariantStyle) -> Self {
+        Self {
+            backgrounds: [
+                states.normal(),
+                states.hovered(),
+                states.pressed(),
+                states.disabled(),
+            ]
+            .map(|paint| paint.background()),
+            borders: crate::ControlBorderStates::new(
+                states.normal().border(),
+                states.hovered().border(),
+                states.pressed().border(),
+                states.disabled().border(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum TriggerSurface {
+    #[default]
+    Standard,
+    Bare,
+    Ghost,
+    Contextual(TriggerSurfacePaint),
 }
 
 /// A reusable controlled ComboBox with a searchable anchored popup.
@@ -773,13 +990,14 @@ pub struct ComboBox<I: Clone + Eq + 'static> {
     busy: bool,
     placement: AnchoredPlacementConfig,
     panel_width: Option<Pixels>,
+    menu_with_filter_header: bool,
     full_width: bool,
     hug: bool,
-    bezel: bool,
+    trigger_surface: TriggerSurface,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
     trigger: ComboBoxTrigger,
-    custom_trigger_content_height: Option<Pixels>,
+    custom_trigger_height: Option<Pixels>,
     tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
     on_accept: Option<AcceptanceHandler<I>>,
@@ -808,13 +1026,14 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
             busy: false,
             placement: AnchoredPlacementConfig::default(),
             panel_width: None,
+            menu_with_filter_header: false,
             full_width: false,
             hug: false,
-            bezel: false,
+            trigger_surface: TriggerSurface::Standard,
             trigger_leading: None,
             input_leading: None,
             trigger: ComboBoxTrigger::Text,
-            custom_trigger_content_height: None,
+            custom_trigger_height: None,
             tooltip: None,
             debug_selector: None,
             on_accept: None,
@@ -866,6 +1085,13 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
+    /// Uses the menu-with-filter grammar: row-driven width, a 240-point minimum, a 420-point
+    /// truncation cap, and a 24-point minimum gap before keyboard equivalents.
+    pub fn menu_with_filter_header(mut self) -> Self {
+        self.menu_with_filter_header = true;
+        self
+    }
+
     /// Resolves logical Start and End placement right-to-left.
     pub fn right_to_left(mut self, right_to_left: bool) -> Self {
         self.placement = self.placement.direction(if right_to_left {
@@ -884,18 +1110,6 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
-    /// Draws a text trigger as a bezeled field rather than as a ghost control.
-    ///
-    /// A ghost trigger belongs in chrome, where it reads as an action. In a form it reads as a
-    /// value with no edge, which puts it optically short of the bezeled controls beside it even
-    /// though the two occupy the same width. The bezel takes the popup's border but keeps the
-    /// trigger's resting fill: the popup's surface is a covering material, and painted on a
-    /// resting surface in a translucent window it reads as a well rather than as a field.
-    pub fn bezel(mut self, bezel: bool) -> Self {
-        self.bezel = bezel;
-        self
-    }
-
     /// Makes a text trigger take only the width its own value needs.
     ///
     /// A trigger otherwise reserves the popup's width, which leaves its value and its chevron at
@@ -903,6 +1117,27 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
     /// reads as values rather than as fields. The popup keeps its own width either way.
     pub fn hug(mut self, hug: bool) -> Self {
         self.hug = hug;
+        self
+    }
+
+    /// Removes the trigger's ordinary fill, border, and shadow without changing its geometry,
+    /// focus ring, content, or interaction.
+    pub fn bare_trigger(mut self) -> Self {
+        self.trigger_surface = TriggerSurface::Bare;
+        self
+    }
+
+    /// Uses the current host's Ghost button surface, including hover, open, and disabled states.
+    /// Trigger content and popup presentation keep their own semantic colors.
+    pub fn ghost_trigger(mut self) -> Self {
+        self.trigger_surface = TriggerSurface::Ghost;
+        self
+    }
+
+    /// Uses contextual button backgrounds and borders for the trigger only, without a shadow.
+    /// Content colors, geometry, focus, and the popup remain independent of this surface.
+    pub fn trigger_surface(mut self, states: crate::ButtonVariantStyle) -> Self {
+        self.trigger_surface = TriggerSurface::Contextual(states.into());
         self
     }
 
@@ -939,9 +1174,9 @@ impl<I: Clone + Eq + 'static> ComboBox<I> {
         self
     }
 
-    /// Sets the custom content's height, excluding the trigger's focus border.
-    pub fn custom_trigger_content_height(mut self, height: Pixels) -> Self {
-        self.custom_trigger_content_height = Some(height.max(px(0.0)));
+    /// Sets the custom trigger's outer height, including its border but not its outset focus ring.
+    pub fn custom_trigger_height(mut self, height: Pixels) -> Self {
+        self.custom_trigger_height = Some(height.max(px(0.0)));
         self
     }
 
@@ -1219,6 +1454,7 @@ struct ComboBoxState<I: Clone + Eq + 'static> {
     trigger_bounds: Option<BoundsPixels>,
     placement: AnchoredPlacementConfig,
     panel_width: Option<Pixels>,
+    menu_with_filter_header: bool,
     trigger_focus: FocusHandle,
     popup_focus: FocusHandle,
     input: Entity<TextInput>,
@@ -1363,6 +1599,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             trigger_bounds: None,
             placement: AnchoredPlacementConfig::default(),
             panel_width: None,
+            menu_with_filter_header: false,
             trigger_focus,
             popup_focus,
             input,
@@ -1406,6 +1643,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         busy: bool,
         placement: AnchoredPlacementConfig,
         panel_width: Option<Pixels>,
+        menu_with_filter_header: bool,
         on_accept: Option<AcceptanceHandler<I>>,
         on_lifecycle: Option<LifecycleHandler>,
         window: &mut Window,
@@ -1434,6 +1672,7 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
         self.busy = busy;
         self.placement = placement;
         self.panel_width = panel_width;
+        self.menu_with_filter_header = menu_with_filter_header;
         self.on_accept = on_accept;
         self.on_lifecycle = on_lifecycle;
         self.trigger_focus = self.trigger_focus.clone().tab_stop(!disabled);
@@ -1777,13 +2016,17 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             metrics.row_height * 8.0
         };
         let top = |position: usize| {
-            self.matches
-                .iter()
-                .take(position)
-                .filter_map(|index| self.presented_items.get(*index))
-                .fold(px(0.0), |top, item| {
-                    top + metrics.row_height(item.description.is_some())
-                })
+            self.matches.iter().take(position).enumerate().fold(
+                px(0.0),
+                |top, (position, index)| {
+                    top + metrics.list_item_height(
+                        self.presented_items
+                            .get(*index)
+                            .is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, self.ordinary_match_count),
+                    )
+                },
+            )
         };
         let current_top = top(current);
         let target = if direction < 0 {
@@ -1878,6 +2121,7 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 self.busy,
                 self.placement,
                 self.panel_width,
+                self.menu_with_filter_header,
                 self.on_accept,
                 self.on_lifecycle,
                 window,
@@ -1904,7 +2148,8 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             window.refresh();
         }
         let theme = combo_box_theme(cx);
-        let font = crate::control_typography(cx).regular().clone();
+        let typography = crate::control_typography(cx);
+        let font = typography.regular().clone();
         let snapshot = state.read(cx);
         let open = snapshot.open;
         let enabled = !snapshot.disabled;
@@ -1955,10 +2200,43 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         .inset_0();
         let key_state = state.downgrade();
         let debug_selector = self.debug_selector;
+        let focus_selector = debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-keyboard-focus"))
+            .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
+        let disclosure_selector = debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-disclosure"))
+            .unwrap_or_else(|| format!("{}-disclosure", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
-        let paint = crate::floating_surface::hosted_combo_box_theme(cx)
+        let mut paint = crate::floating_surface::hosted_combo_box_theme(cx)
             .map_or(theme.paint, |theme| theme.paint);
+        let surface = match self.trigger_surface {
+            TriggerSurface::Ghost => Some(
+                crate::floating_surface::hosted_button_theme(cx)
+                    .paints(crate::ButtonVariant::Ghost)
+                    .into(),
+            ),
+            TriggerSurface::Contextual(states) => Some(states),
+            TriggerSurface::Standard | TriggerSurface::Bare => None,
+        };
+        if let Some(states) = surface {
+            let [normal, hovered, pressed, disabled] = states.backgrounds;
+            paint.trigger_background = normal;
+            paint.trigger_hover_background = hovered;
+            paint.trigger_pressed_background = pressed;
+            paint.trigger_disabled_background = disabled;
+            paint.trigger_state_borders = Some(states.borders);
+            paint.trigger_shadow = crate::ControlShadow::none();
+        }
         let metrics = theme.metrics;
+        let icon_offset = crate::icon::text_alignment_offset(
+            typography.regular(),
+            metrics.label_size,
+            metrics.label_line_height,
+            metrics.icon_baseline_center,
+            window,
+        );
         let (icon_trigger, custom_content) = match self.trigger {
             ComboBoxTrigger::Text => (false, None),
             ComboBoxTrigger::Icon => (true, None),
@@ -1966,9 +2244,17 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
         };
         let custom_trigger = custom_content.is_some();
         let text_trigger = !icon_trigger && !custom_trigger;
+        let bare_trigger = matches!(self.trigger_surface, TriggerSurface::Bare);
         let fill_parent = self.full_width && !icon_trigger;
         let hug = self.hug && !fill_parent;
-        let bezel = self.bezel && text_trigger;
+        let trigger_background = paint.trigger_background(enabled, open);
+        let trigger_shadow = paint.trigger_shadow(enabled, open);
+        let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
+        let trigger_border = if open {
+            paint.trigger_edge(enabled, true)
+        } else {
+            trigger_border
+        };
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1984,10 +2270,8 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .when(custom_trigger, |trigger| {
                 trigger
                     .h(self
-                        .custom_trigger_content_height
-                        .map_or(metrics.icon_trigger_size, |height| {
-                            height + metrics.border_width * 2.0
-                        }))
+                        .custom_trigger_height
+                        .unwrap_or(metrics.icon_trigger_size))
                     .min_w_0()
                     .when(fill_parent, |trigger| trigger.w_full())
             })
@@ -2008,30 +2292,46 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
             .items_center()
             .rounded(metrics.trigger_corner_radius)
             .border(metrics.border_width)
-            .border_color(if focused {
-                paint.focus_border
-            } else if bezel {
-                theme.shell.edge()
+            .border_color(if bare_trigger {
+                Rgba::default()
             } else {
-                paint.trigger_border
+                trigger_border
             })
-            .when(!custom_trigger, |trigger| {
-                trigger
-                    .bg(if open {
-                        paint.trigger_hover_background
-                    } else {
-                        paint.trigger_background
-                    })
-                    .when(enabled && !open, |trigger| {
-                        trigger.hover(move |style| style.bg(paint.trigger_hover_background))
-                    })
-            })
+            .when(
+                (!custom_trigger || surface.is_some()) && !bare_trigger,
+                |trigger| {
+                    trigger
+                        .bg(trigger_background)
+                        .shadow(trigger_shadow.layers())
+                        .shadow_outside_only()
+                        .when(enabled && !open, |trigger| {
+                            trigger
+                                .hover(move |style| {
+                                    let style = style.bg(paint.trigger_hover_background);
+                                    match paint.trigger_state_borders {
+                                        Some(borders) => style.border_color(borders.hovered),
+                                        None => style,
+                                    }
+                                })
+                                .active(move |style| {
+                                    let style = style
+                                        .bg(paint.trigger_pressed_background)
+                                        .shadow(Vec::new());
+                                    match paint.trigger_state_borders {
+                                        Some(borders) => style.border_color(borders.pressed),
+                                        None => style,
+                                    }
+                                })
+                        })
+                },
+            )
             .text_color(if enabled {
                 paint.foreground
             } else {
                 paint.disabled
             })
             .text_size(metrics.label_size)
+            .line_height(metrics.label_line_height)
             .font(font)
             .cursor_default()
             .when(enabled, |trigger| trigger.track_focus(&focus))
@@ -2039,10 +2339,19 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                 self.trigger_leading
                     .filter(|_| !custom_trigger)
                     .map(|leading| {
-                        leading(
+                        let icon = leading(
                             paint.trigger_leading_foreground(icon_trigger, enabled),
-                            metrics.icon_size,
-                        )
+                            metrics.trigger_icon_size,
+                        );
+                        if icon_trigger {
+                            icon
+                        } else {
+                            div()
+                                .relative()
+                                .top(icon_offset)
+                                .child(icon)
+                                .into_any_element()
+                        }
                     }),
             )
             .children(custom_content)
@@ -2056,11 +2365,31 @@ impl<I: Clone + Eq + 'static> RenderOnce for ComboBox<I> {
                             .truncate()
                             .child(label),
                     )
-                    .child(Icon::new(
-                        IconName::ChevronDown,
-                        metrics.icon_size,
-                        paint.muted,
-                    ))
+                    .child(
+                        div()
+                            .debug_selector(move || disclosure_selector)
+                            .child(Icon::new(
+                                IconName::ChevronDown,
+                                metrics.trigger_icon_size,
+                                paint.muted,
+                            )),
+                    )
+            })
+            .when_some(focus_ring, |trigger, ring_color| {
+                let gap = px(2.0);
+                let position = gap + theme.focus_ring_width;
+                trigger.child(
+                    div()
+                        .debug_selector(move || focus_selector.clone())
+                        .absolute()
+                        .top(-position)
+                        .right(-position)
+                        .bottom(-position)
+                        .left(-position)
+                        .rounded(metrics.trigger_corner_radius + gap)
+                        .border(theme.focus_ring_width)
+                        .border_color(ring_color),
+                )
             })
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -2181,15 +2510,21 @@ fn match_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<(usize, ComboBo
     .collect()
 }
 
+fn group_separator_before(position: usize, ordinary_match_count: usize) -> bool {
+    ordinary_match_count > 0 && position == ordinary_match_count
+}
+
 fn render_overlay<I: Clone + Eq + 'static>(
     state: Entity<ComboBoxState<I>>,
     input_leading: Option<InputIconBuilder>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let theme = combo_box_theme(cx);
-    let font = crate::control_typography(cx).regular().clone();
+    let typography = crate::control_typography(cx);
+    let font = typography.regular().clone();
     let snapshot = state.read(cx);
+    let collection_focused = snapshot.popup_focus.contains_focused(window, cx);
+    let theme = combo_box_theme(cx);
     let Some(target) = snapshot.trigger_bounds else {
         return div().into_any_element();
     };
@@ -2197,20 +2532,30 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let content_height = if snapshot.busy || snapshot.matches.is_empty() {
         theme.metrics.row_height
     } else {
-        snapshot.matches.iter().fold(px(0.0), |height, index| {
-            height
-                + snapshot
-                    .presented_items
-                    .get(*index)
-                    .map_or(theme.metrics.row_height, |item| {
-                        theme.metrics.row_height(item.description.is_some())
-                    })
-        })
-    };
-    let desired = size(
         snapshot
-            .panel_width
-            .unwrap_or_else(|| theme.metrics.panel_width.max(target.size.width)),
+            .matches
+            .iter()
+            .enumerate()
+            .fold(px(0.0), |height, (position, index)| {
+                height
+                    + theme.metrics.list_item_height(
+                        snapshot
+                            .presented_items
+                            .get(*index)
+                            .is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, snapshot.ordinary_match_count),
+                    )
+            })
+    };
+    let panel_width = snapshot.panel_width.unwrap_or_else(|| {
+        if snapshot.menu_with_filter_header {
+            natural_menu_width(&snapshot.presented_items, theme, &typography, window)
+        } else {
+            theme.metrics.panel_width.max(target.size.width)
+        }
+    });
+    let desired = size(
+        panel_width,
         theme.metrics.input_height
             + theme.metrics.border_width
             + content_height
@@ -2263,9 +2608,19 @@ fn render_overlay<I: Clone + Eq + 'static>(
     let matches = Rc::clone(&state.read(cx).matches);
     let match_highlights = Rc::clone(&state.read(cx).match_highlights);
     let items = Rc::clone(&state.read(cx).presented_items);
+    let identity_icons_reserved = items.iter().any(|item| item.leading_icon.is_some());
+    let icon_offset = crate::icon::text_alignment_offset(
+        typography.regular(),
+        theme.metrics.label_size,
+        theme.metrics.label_line_height,
+        theme.metrics.icon_baseline_center,
+        window,
+    );
     let selected = state.read(cx).selected.clone();
     let provisional = state.read(cx).provisional.clone();
     let hovered_row = state.read(cx).hovered_row.clone();
+    let ordinary_match_count = state.read(cx).ordinary_match_count;
+    let menu_with_filter_header = state.read(cx).menu_with_filter_header;
     let busy = state.read(cx).busy;
     let copy = state.read(cx).copy.clone();
     let list_state = state.read(cx).list.clone();
@@ -2315,6 +2670,8 @@ fn render_overlay<I: Clone + Eq + 'static>(
                 .and_then(|index| items.get(*index))
                 .map(|item| {
                     let highlights = match_highlights.get(position).cloned().unwrap_or_default();
+                    let provisional = provisional.as_ref() == Some(&item.id);
+                    let paints_selected = item.paints_selected(provisional);
                     render_row(
                         row_owner.clone(),
                         position,
@@ -2322,10 +2679,23 @@ fn render_overlay<I: Clone + Eq + 'static>(
                         &highlights,
                         ComboBoxRowState {
                             selected: selected.as_ref() == Some(&item.id),
-                            provisional: provisional.as_ref() == Some(&item.id),
+                            provisional: paints_selected,
                             hovered: hovered_row.as_ref() == Some(&item.id),
                         },
-                        theme,
+                        ComboBoxRowRenderContext {
+                            identity_icons_reserved,
+                            separator_before: group_separator_before(
+                                position,
+                                ordinary_match_count,
+                            ),
+                            shortcut_gap: menu_with_filter_header.then_some(
+                                (px(MENU_SHORTCUT_GAP) - theme.metrics.gap).max(px(0.0)),
+                            ),
+                            collection_focused,
+                            theme,
+                            label_font: typography.regular().clone(),
+                            icon_offset,
+                        },
                     )
                 })
                 .unwrap_or_else(|| div().into_any_element())
@@ -2344,7 +2714,7 @@ fn render_overlay<I: Clone + Eq + 'static>(
         .flex()
         .flex_col()
         .text_size(theme.metrics.label_size)
-        .line_height(theme.metrics.line_height)
+        .line_height(theme.metrics.label_line_height)
         .font(font)
         .block_mouse_except_scroll()
         .child(
@@ -2464,8 +2834,19 @@ fn status_row(
         .flex()
         .items_center()
         .text_size(theme.metrics.secondary_size)
+        .line_height(theme.metrics.secondary_line_height)
         .text_color(theme.paint.muted)
         .child(text)
+}
+
+struct ComboBoxRowRenderContext {
+    identity_icons_reserved: bool,
+    separator_before: bool,
+    shortcut_gap: Option<Pixels>,
+    collection_focused: bool,
+    theme: ComboBoxTheme,
+    label_font: gpui::Font,
+    icon_offset: Pixels,
 }
 
 fn render_row<I: Clone + Eq + 'static>(
@@ -2474,14 +2855,29 @@ fn render_row<I: Clone + Eq + 'static>(
     item: &ComboBoxItem<I>,
     highlights: &ComboBoxHighlights,
     state_paint: ComboBoxRowState,
-    theme: ComboBoxTheme,
+    context: ComboBoxRowRenderContext,
 ) -> AnyElement {
+    let ComboBoxRowRenderContext {
+        identity_icons_reserved,
+        separator_before,
+        shortcut_gap,
+        collection_focused,
+        theme,
+        label_font,
+        icon_offset,
+    } = context;
     let ComboBoxRowState {
         selected,
         provisional,
         hovered,
     } = state_paint;
-    let row_paint = resolve_row_paint(theme.paint.rows, !item.disabled, provisional, hovered);
+    let row_paint = resolve_row_paint(
+        theme.paint.rows,
+        !item.disabled,
+        provisional,
+        hovered,
+        collection_focused,
+    );
     let foreground = if item.disabled {
         theme.paint.disabled
     } else if hovered {
@@ -2505,6 +2901,9 @@ fn render_row<I: Clone + Eq + 'static>(
     let id = item.id.clone();
     let logical_name = item.label.clone();
     let debug_selector = item.debug_selector.clone();
+    let group_separator_selector = debug_selector
+        .as_ref()
+        .map_or_else(|| format!("combo-box-row-{position}"), Clone::clone);
     let hover_state = state.clone();
     let hover_tracking_state = state.clone();
     let mut row = div()
@@ -2548,19 +2947,14 @@ fn render_row<I: Clone + Eq + 'static>(
                 let _ = hover_state.update(cx, |state, cx| state.hover(&id, cx));
             })
         });
-    let mut leading = div()
+    let mut state_gutter = div()
         .w(theme.metrics.leading_width)
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center();
-    // The leading slot marks the current value, the way a platform selector does. An item that
-    // carries its own icon keeps it: the caller's meaning outranks the mark, and the highlighted
-    // row still shows which value is current.
-    if let Some(icon) = &item.leading_icon {
-        leading = leading.child(icon(icon_foreground, theme.metrics.icon_size));
-    } else if selected {
-        leading = leading
+    if selected {
+        state_gutter = state_gutter
             .debug_selector(move || format!("combo-box-row-{position}-check"))
             .child(Icon::new(
                 IconName::Check,
@@ -2568,31 +2962,62 @@ fn render_row<I: Clone + Eq + 'static>(
                 icon_foreground,
             ));
     }
-    row =
-        row.child(leading).child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .child(div().truncate().text_size(theme.metrics.label_size).child(
-                    highlighted_text(item.label.clone(), &highlights.label, matched),
-                ))
-                .when_some(item.description.clone(), |text, description| {
-                    text.child(
-                        div()
-                            .truncate()
-                            .text_size(theme.metrics.secondary_size)
-                            .text_color(secondary)
-                            .child(highlighted_text(
-                                description,
-                                &highlights.description,
-                                matched,
-                            )),
-                    )
-                }),
-        );
+    let mut gutters = div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(theme.metrics.state_icon_gap)
+        .relative()
+        .top(icon_offset)
+        .child(state_gutter);
+    if identity_icons_reserved {
+        let mut icon_gutter = div()
+            .debug_selector(move || format!("combo-box-row-{position}-identity-icon"))
+            .w(theme.metrics.identity_icon_width)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center();
+        if let Some(icon) = &item.leading_icon {
+            icon_gutter = icon_gutter.child(icon(icon_foreground, theme.metrics.icon_size));
+        }
+        gutters = gutters.child(icon_gutter);
+    }
+    row = row.child(gutters).child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .child(
+                div()
+                    .debug_selector(move || format!("combo-box-row-{position}-label"))
+                    .truncate()
+                    .text_size(theme.metrics.label_size)
+                    .line_height(theme.metrics.label_line_height)
+                    .font(label_font)
+                    .child(highlighted_text(
+                        item.label.clone(),
+                        &highlights.label,
+                        matched,
+                    )),
+            )
+            .when_some(item.description.clone(), |text, description| {
+                text.child(
+                    div()
+                        .truncate()
+                        .text_size(theme.metrics.secondary_size)
+                        .line_height(theme.metrics.secondary_line_height)
+                        .text_color(secondary)
+                        .child(highlighted_text(
+                            description,
+                            &highlights.description,
+                            matched,
+                        )),
+                )
+            }),
+    );
     if let Some(accessory) = item.trailing.clone() {
         let text = match accessory {
             ComboBoxAccessory::Text(text)
@@ -2604,6 +3029,7 @@ fn render_row<I: Clone + Eq + 'static>(
                 .debug_selector(move || format!("combo-box-row-{position}-accessory"))
                 .flex_shrink_0()
                 .text_size(theme.metrics.secondary_size)
+                .line_height(theme.metrics.secondary_line_height)
                 .text_color(secondary)
                 .child(text),
         );
@@ -2613,7 +3039,9 @@ fn render_row<I: Clone + Eq + 'static>(
             div()
                 .debug_selector(move || format!("combo-box-row-{position}-shortcut"))
                 .flex_shrink_0()
+                .when_some(shortcut_gap, |shortcut, gap| shortcut.ml(gap))
                 .text_size(theme.metrics.secondary_size)
+                .line_height(theme.metrics.secondary_line_height)
                 .text_color(secondary)
                 .child(shortcut),
         );
@@ -2702,7 +3130,102 @@ fn render_row<I: Clone + Eq + 'static>(
             .inset_0(),
         );
     }
-    row.into_any_element()
+    if separator_before {
+        div()
+            .w_full()
+            .h(theme
+                .metrics
+                .list_item_height(item.description.is_some(), separator_before))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(move || format!("{group_separator_selector}-group-separator"))
+                    .h(theme.metrics.group_separator_height)
+                    .mx(theme.metrics.panel_padding)
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .h(theme.shell.hairline())
+                            .w_full()
+                            .bg(theme.shell.divider()),
+                    ),
+            )
+            .child(row)
+            .into_any_element()
+    } else {
+        row.into_any_element()
+    }
+}
+
+fn natural_menu_width<I>(
+    items: &[ComboBoxItem<I>],
+    theme: ComboBoxTheme,
+    typography: &crate::ControlTypography,
+    window: &Window,
+) -> Pixels {
+    let measure = |text: &SharedString, size: Pixels, font: &gpui::Font| {
+        window
+            .text_system()
+            .shape_line(
+                text.clone(),
+                size,
+                &[gpui::TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: gpui::rgba(0).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+    };
+    let identity_icons_reserved = items.iter().any(|item| item.leading_icon.is_some());
+    let leading = theme.metrics.leading_width
+        + if identity_icons_reserved {
+            theme.metrics.state_icon_gap + theme.metrics.identity_icon_width
+        } else {
+            px(0.0)
+        };
+    let fixed = theme.metrics.border_width * 2.0
+        + theme.metrics.panel_padding * 2.0
+        + theme.metrics.horizontal_padding * 2.0
+        + leading
+        + theme.metrics.gap;
+    let widest = items.iter().fold(px(0.0), |widest, item| {
+        let label = measure(&item.label, theme.metrics.label_size, typography.regular());
+        let description = item.description.as_ref().map_or(px(0.0), |description| {
+            measure(
+                description,
+                theme.metrics.secondary_size,
+                typography.regular(),
+            )
+        });
+        let text = label.max(description);
+        let accessory = item.trailing.as_ref().map_or(px(0.0), |accessory| {
+            let text = match accessory {
+                ComboBoxAccessory::Text(text)
+                | ComboBoxAccessory::Status(text)
+                | ComboBoxAccessory::Shortcut(text) => text,
+            };
+            theme.metrics.gap + measure(text, theme.metrics.secondary_size, typography.regular())
+        });
+        let shortcut = item.shortcut.as_ref().map_or(px(0.0), |shortcut| {
+            px(MENU_SHORTCUT_GAP)
+                + measure(
+                    shortcut,
+                    theme.metrics.secondary_size,
+                    typography.shortcut(),
+                )
+        });
+        widest.max(fixed + text + accessory + shortcut)
+    });
+    widest
+        .max(px(MENU_MINIMUM_WIDTH))
+        .min(px(MENU_MAXIMUM_WIDTH))
 }
 
 fn highlighted_text(text: SharedString, ranges: &[Range<usize>], highlight: Rgba) -> AnyElement {
@@ -2721,8 +3244,9 @@ fn resolve_row_paint(
     enabled: bool,
     selected: bool,
     hovered: bool,
+    collection_focused: bool,
 ) -> Option<crate::ListRowPaint> {
-    rows.map(|rows| rows.resolve(enabled, selected, hovered))
+    rows.map(|rows| rows.resolve_for_collection(enabled, selected, hovered, collection_focused))
 }
 
 #[cfg(test)]
@@ -2737,6 +3261,32 @@ mod tests {
     }
 
     #[test]
+    fn density_scales_combo_bounds_but_not_trigger_radius() {
+        let paint = ComboBoxPaint::new(
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+            gpui::rgba(0),
+        );
+        let theme = ComboBoxTheme::new(
+            paint,
+            ComboBoxMetrics::new(px(240.0), px(28.0)).trigger_shape(px(6.0)),
+        );
+        let comfortable = theme.scaled_metrics(1.0, 1.25);
+
+        assert!(comfortable.metrics.trigger_height > theme.metrics.trigger_height);
+        assert_eq!(
+            comfortable.metrics.trigger_corner_radius,
+            theme.metrics.trigger_corner_radius
+        );
+    }
+
+    #[test]
     fn renderer_should_reach_selected_hovered_row_paint() {
         let normal = row_paint(10);
         let hovered = row_paint(20);
@@ -2746,7 +3296,7 @@ mod tests {
         let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
 
         assert_eq!(
-            resolve_row_paint(Some(rows), true, true, true),
+            resolve_row_paint(Some(rows), true, true, true, true),
             Some(selected_hovered)
         );
     }
@@ -2770,6 +3320,102 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_state_borders_keep_focus_separate_and_quieten_disabled_triggers() {
+        let fill = gpui::rgba(0xfafafaff);
+        let focus = gpui::rgba(0x0066ccff);
+        let normal = gpui::rgba(0x0000002b);
+        let interaction = gpui::rgba(0x00000040);
+        let disabled = gpui::rgba(0x0000000a);
+        let theme = ComboBoxTheme::new(
+            ComboBoxPaint::new(fill, fill, fill, fill, fill, fill, fill, normal, focus),
+            ComboBoxMetrics::new(px(240.0), px(28.0)),
+        )
+        .ordinary_borders(crate::ControlBorderStates::new(
+            normal,
+            interaction,
+            interaction,
+            disabled,
+        ));
+
+        assert_eq!(
+            trigger_edges(theme.paint, true, true),
+            (normal, Some(focus))
+        );
+        assert_eq!(theme.paint.trigger_edge(true, true), interaction);
+        assert_eq!(
+            theme.paint.trigger_state_borders.unwrap().hovered,
+            interaction
+        );
+        assert_eq!(trigger_edges(theme.paint, false, true), (disabled, None));
+    }
+
+    #[test]
+    fn focused_trigger_keeps_its_ordinary_border_below_the_focus_ring() {
+        let ordinary = gpui::rgba(0x112233ff);
+        let focus = gpui::rgba(0x445566ff);
+        let fill = gpui::rgba(0);
+        let paint = ComboBoxPaint::new(fill, fill, fill, fill, fill, fill, fill, ordinary, focus);
+
+        assert_eq!(trigger_edges(paint, true, false), (ordinary, None));
+        assert_eq!(trigger_edges(paint, true, true), (ordinary, Some(focus)));
+        assert_eq!(trigger_edges(paint, false, true), (ordinary, None));
+        assert_eq!(
+            trigger_edges(
+                ComboBoxPaint::new(
+                    fill,
+                    fill,
+                    fill,
+                    fill,
+                    fill,
+                    fill,
+                    fill,
+                    ordinary,
+                    gpui::rgba(0),
+                ),
+                true,
+                true,
+            ),
+            (ordinary, None),
+            "an inactive presentation must not submit a transparent focus primitive"
+        );
+    }
+
+    #[test]
+    fn ordinary_trigger_elevation_follows_enabled_and_open_state() {
+        let normal = gpui::rgba(0x111111ff);
+        let hovered = gpui::rgba(0x222222ff);
+        let pressed = gpui::rgba(0x333333ff);
+        let disabled = gpui::rgba(0x444444ff);
+        let border = gpui::rgba(0x555555ff);
+        let shadow = crate::ControlShadow::single(crate::ControlShadowLayer::new(
+            gpui::rgba(0x777777ff).into(),
+            px(0.0),
+            px(1.0),
+            px(2.0),
+            px(-1.0),
+        ));
+        let paint = ComboBoxPaint::new(
+            normal, normal, disabled, normal, normal, normal, hovered, normal, normal,
+        )
+        .trigger_state_backgrounds(pressed, disabled)
+        .trigger_elevation(shadow, Some(border));
+
+        assert_eq!(paint.trigger_background(true, false), normal);
+        assert_eq!(paint.trigger_background(true, true), pressed);
+        assert_eq!(paint.trigger_background(false, false), disabled);
+        assert_eq!(paint.trigger_border, border);
+        assert_eq!(paint.trigger_shadow(true, false), shadow);
+        assert_eq!(
+            paint.trigger_shadow(true, true),
+            crate::ControlShadow::none()
+        );
+        assert_eq!(
+            paint.trigger_shadow(false, false),
+            crate::ControlShadow::none()
+        );
+    }
+
+    #[test]
     fn row_hover_paint_should_not_replace_selection_paint() {
         let base = gpui::rgba(0x111111ff);
         let selected = gpui::rgba(0x222222ff);
@@ -2783,6 +3429,20 @@ mod tests {
         assert_eq!(paint.selected_foreground, base);
         assert_eq!(paint.selected_background, selected);
         assert_eq!(paint.trigger_hover_background, base);
+    }
+
+    #[test]
+    fn role_line_boxes_scale_independently_from_fixed_combo_extents() {
+        let metrics = ComboBoxMetrics::new(px(240.0), px(28.0))
+            .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
+            .text_geometry(px(18.0), px(15.0), px(14.0))
+            .scaled(1.5, 1.0);
+
+        assert_eq!(metrics.label_line_height, px(27.0));
+        assert_eq!(metrics.secondary_line_height, px(22.5));
+        assert_eq!(metrics.input_height, px(37.0));
+        assert_eq!(metrics.row_height, px(37.0));
+        assert_eq!(metrics.described_row_height, px(56.5));
     }
 
     #[test]

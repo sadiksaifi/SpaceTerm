@@ -53,12 +53,16 @@ use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
+use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::IconRole;
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
-    CARD_RADIUS, ROW_INSET, SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
-    gpui_color, reset_button, section_heading, text,
+    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
+    reset_button, row_horizontal_inset, section_heading,
 };
 use editor::{SaveStatus, SettingsEditor};
 use microphone::MicrophoneAccessRow;
@@ -86,11 +90,6 @@ const FOOTER_HEIGHT: f32 = 40.0;
 /// The height of one navigation entry and of the search field above it, so the sidebar runs on one
 /// rhythm from its first row to its last.
 const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
-/// The radius of the navigation chip and of the search field, and the air a focus ring keeps
-/// outside that chip.
-const NAVIGATION_CHIP_RADIUS: f32 = crate::ui::selection_chip::CHIP_RADIUS;
-const NAVIGATION_CHIP_RING_GAP: f32 = 2.0;
-
 /// The chip a navigation entry rests its hover and its current-section state on.
 ///
 /// It fills the entry rather than insetting further: the sidebar's own padding and the space
@@ -100,11 +99,19 @@ fn navigation_chip(
     selected: bool,
     available: bool,
     appearance: &ChromeAppearance,
+    selection_colors: &crate::appearance::ChromeColors,
 ) -> SelectionChip {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    let paint_colors = if selected { selection_colors } else { colors };
+    let paint = navigation_chip_paint(selected, available, paint_colors);
+    let paint = if selected {
+        paint.selected_on(appearance, colors.panel_background)
+    } else {
+        paint.raised_on(appearance, colors.panel_background)
+    };
     SelectionChip::new(
-        ChipShape::symmetric(px(0.0), px(0.0), appearance.spacing(NAVIGATION_CHIP_RADIUS)),
-        navigation_chip_paint(selected, available, &appearance.colors)
-            .raised_on(appearance, appearance.colors.panel_background),
+        ChipShape::symmetric(px(0.0), px(0.0), RadiusRole::Control.pixels()),
+        paint,
     )
 }
 
@@ -113,8 +120,8 @@ fn navigation_chip_paint(
     available: bool,
     colors: &crate::appearance::ChromeColors,
 ) -> ChipPaint {
-    // Hover changes the fill. The selected rim stays neutral, while keyboard focus has its own
-    // outset ring; a hover rim at the chip edge would look like persistent keyboard focus.
+    // Hover changes the fill. Keyboard focus has a separate neutral indicator, so pointer
+    // selection does not leave a focus-like rim behind it.
     if selected {
         ChipPaint {
             fill: Some(colors.row_selected_background),
@@ -411,6 +418,7 @@ impl SettingsWindow {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
             }
+            cx.notify();
         })
         .detach();
         cx.on_app_quit(|settings, cx| {
@@ -591,7 +599,12 @@ impl SettingsWindow {
         reset != *current
     }
 
-    fn row_reset(&self, row: SettingsRowId, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn row_reset(
+        &self,
+        row: SettingsRowId,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.differs_from_default(row) || !self.editor.editable() {
             return None;
         }
@@ -601,6 +614,10 @@ impl SettingsWindow {
             reset_button(
                 format!("{}-reset", row.descriptor().selector),
                 row.descriptor().label,
+                appearance
+                    .icons
+                    .mark_metrics(crate::ui::chrome_icons::MarkRole::Reset)
+                    .glyph_size,
                 true,
                 move |_, cx| {
                     let target = target.clone();
@@ -637,7 +654,19 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = crate::ui::appearance::chrome(cx).clone();
+        let activity = super::appearance::window_activity(window);
+        let scope = spaceterm_ui::ControlThemeScope::Settings;
+        activity.mount(
+            activity
+                .with_scope(|| scope.mount(scope.with_scope(|| self.render_chrome(window, cx)))),
+        )
+    }
+}
+
+impl SettingsWindow {
+    fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let settings = crate::ui::appearance::settings::shared(cx);
+        let appearance = &settings.chrome;
         self.sync_scrollbar(cx);
         let content = div()
             .debug_selector(|| "settings-window-surface".to_owned())
@@ -684,13 +713,8 @@ impl Render for SettingsWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Sheet,
-                appearance.colors.background,
-            )))
             .text_color(gpui_color(appearance.colors.text))
-            .text_size(appearance.text_size(text::BODY))
-            .font(appearance.regular.clone())
+            .chrome_text(appearance.typography.style(TextRole::Body))
             // Both columns run to the window's top edge beneath the transparent native titlebar.
             .child(
                 div()
@@ -698,11 +722,11 @@ impl Render for SettingsWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(&appearance, window, cx))
-                    .child(self.render_detail(&appearance, window, cx)),
+                    .child(self.render_sidebar(&settings, window, cx))
+                    .child(self.render_detail(&settings, window, cx)),
             )
-            .child(self.render_footer(&appearance, cx));
-        ModalLayer::new(content)
+            .child(self.render_footer(&settings, cx));
+        ModalLayer::new(content).into_any_element()
     }
 }
 
@@ -812,9 +836,10 @@ impl SettingsWindow {
     /// window-movement space; a hairline appears only once content has scrolled under it.
     fn render_detail_heading(
         &self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let section = self.active_section;
         let scrolled =
             self.scroll.max_offset().height > px(0.0) && self.scroll.offset().y < px(-0.5);
@@ -845,11 +870,8 @@ impl SettingsWindow {
                         .bottom_0()
                         .left_0()
                         .w_full()
-                        .h(appearance.spacing(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(appearance.materials.edge(
-                            appearance.colors.background,
-                            appearance.colors.border,
-                        ))),
+                        .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .bg(gpui_color(settings.separator(SettingsSurfaceRole::Canvas))),
                 )
             })
             .into_any_element()
@@ -909,12 +931,21 @@ impl SettingsWindow {
 
     fn render_sidebar(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let available = self.navigable_sections();
         let list_focused = self.navigation_has_visible_focus(window);
+        let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+        let selection_colors = if appearance.active && !list_focused {
+            appearance
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+                .clone()
+        } else {
+            panel_colors.clone()
+        };
         let entries = SettingsSectionId::ALL
             .iter()
             .map(|section| {
@@ -923,13 +954,13 @@ impl SettingsWindow {
                 let selected = self.active_section == section && has_matches;
                 let owner = cx.weak_entity();
                 let row_group = format!("settings-row-state-{}", section.selector());
-                let colors = &appearance.colors;
+                let colors = panel_colors;
                 let (foreground, icon, hover_foreground, hover_icon) = if selected {
                     (
-                        colors.row_selected_foreground,
-                        colors.row_selected_icon,
-                        colors.row_selected_hover_foreground,
-                        colors.row_selected_hover_icon,
+                        selection_colors.row_selected_foreground,
+                        selection_colors.row_selected_icon,
+                        selection_colors.row_selected_hover_foreground,
+                        selection_colors.row_selected_hover_icon,
                     )
                 } else {
                     (
@@ -941,7 +972,7 @@ impl SettingsWindow {
                 };
                 // The same chip the Workspace sidebar rests its current row on, so the two
                 // navigation surfaces read as one material rather than as two conventions.
-                let chip = navigation_chip(selected, has_matches, appearance);
+                let chip = navigation_chip(selected, has_matches, appearance, &selection_colors);
                 let chip_selector = format!("settings-navigation-chip-{}", section.selector());
                 div()
                     .id(SharedString::from(format!(
@@ -957,11 +988,30 @@ impl SettingsWindow {
                     .items_center()
                     .gap(appearance.spacing(7.0))
                     .w_full()
-                    .h(appearance.height(NAVIGATION_ROW_HEIGHT, text::BODY))
+                    .h(appearance
+                        .typography
+                        .style(TextRole::Navigation)
+                        .line_height
+                        + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
                     .px(appearance.spacing(8.0))
                     .cursor_default()
-                    .when(selected, |entry| entry.font(appearance.emphasis.clone()))
+                    .chrome_text(appearance.typography.style(TextRole::Navigation))
                     .child(chip.render(chip_selector, &row_group))
+                    .when(selected && list_focused && appearance.active, |entry| {
+                        entry.child(
+                            div()
+                                .debug_selector(|| "settings-navigation-focus-indicator".to_owned())
+                                .absolute()
+                                .inset_0()
+                                .rounded(RadiusRole::Control.pixels())
+                                .border(px(if appearance.capabilities.increase_contrast {
+                                    2.0
+                                } else {
+                                    HAIRLINE
+                                }))
+                                .border_color(gpui_color(colors.icon)),
+                        )
+                    })
                     .when(has_matches, |entry| {
                         entry
                             .hover(move |entry| entry.text_color(gpui_color(hover_foreground)))
@@ -976,14 +1026,7 @@ impl SettingsWindow {
                             })
                     })
                     .when(!has_matches, |entry| {
-                        entry.text_color(gpui_color(appearance.colors.text_disabled))
-                    })
-                    .when(selected && list_focused, |entry| {
-                        entry.child(chip.ring(
-                            appearance.spacing(NAVIGATION_CHIP_RING_GAP),
-                            appearance.colors.sidebar_focus,
-                            "settings-navigation-focus-indicator",
-                        ))
+                        entry.text_color(gpui_color(panel_colors.text_disabled))
                     })
                     .child(
                         div()
@@ -1006,26 +1049,36 @@ impl SettingsWindow {
                                     SettingsSectionId::ColorSchemes => IconName::Palette,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                 },
-                                appearance.text_size(13.0),
+                                appearance.icons.metrics(IconRole::Row).glyph_size,
                             )),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_size(appearance.text_size(text::BODY))
-                            .child(section.navigation_title()),
-                    )
+                    .child(div().min_w_0().flex_1().child(section.navigation_title()))
             })
             .collect::<Vec<_>>();
         let sidebar = div()
             .debug_selector(|| "settings-sidebar".to_owned())
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
-            .w(appearance.text_size(SIDEBAR_WIDTH))
+            .w(appearance.spacing(SIDEBAR_WIDTH))
             .h_full()
-            .bg(gpui_color(appearance.control_colors.panel_background))
+            .bg(gpui_color(
+                settings.surface(SettingsSurfaceRole::Sidebar).paint,
+            ))
+            // Paint the boundary inside the sidebar without changing column widths.
+            .when_some(settings.sidebar_edge(), |sidebar, edge| {
+                sidebar.child(
+                    div()
+                        .debug_selector(|| "settings-sidebar-divider".to_owned())
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .bg(gpui_color(edge)),
+                )
+            })
             .child(self.render_sidebar_titlebar(appearance, cx))
             .child(
                 div()
@@ -1091,26 +1144,27 @@ impl SettingsWindow {
 
     fn render_detail(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         // One section at a time: navigation selects a view rather than a scroll destination, so
         // nothing from a neighbouring section can scroll into this one.
-        let section = self.render_section(self.active_section, appearance, window, cx);
+        let section = self.render_section(self.active_section, settings, window, cx);
         let empty = self.rows_for(self.active_section).is_empty();
         let revealing = cx.weak_entity();
         div()
+            .debug_selector(|| "settings-canvas".to_owned())
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                appearance.colors.background,
-            )))
-            .child(self.render_detail_heading(appearance, cx))
+            .bg(gpui_color(
+                settings.surface(SettingsSurfaceRole::Canvas).paint,
+            ))
+            .child(self.render_detail_heading(settings, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1127,7 +1181,7 @@ impl SettingsWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .px(appearance.spacing(CARD_GUTTER))
+                            .px(card_gutter(appearance))
                             .pt(appearance.spacing(8.0))
                             .pb(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
@@ -1140,7 +1194,7 @@ impl SettingsWindow {
                                 detail.child(
                                     div()
                                         .debug_selector(|| "settings-no-results".to_owned())
-                                        .px(appearance.spacing(ROW_INSET))
+                                        .px(row_horizontal_inset(appearance))
                                         .text_color(gpui_color(appearance.colors.text_muted))
                                         .child(SharedString::from(format!(
                                             "No settings match “{}”.",
@@ -1157,10 +1211,11 @@ impl SettingsWindow {
     fn render_section(
         &mut self,
         section: SettingsSectionId,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let rows = self.rows_for(section);
         if rows.is_empty() {
             return div()
@@ -1182,7 +1237,7 @@ impl SettingsWindow {
             .into_iter()
             .map(|(title, members)| {
                 SettingsGroup::new(group_selector(section, title), title, members)
-                    .render(appearance)
+                    .render(settings)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -1213,7 +1268,9 @@ const CONTENT_GUTTER: f32 = 26.0;
 /// it holds by exactly that inset and a row's own fill can reach that edge. A card is a container
 /// rather than something to read, so this line belongs to the cards alone: everything a reader
 /// tracks down the page stays on [`CONTENT_GUTTER`].
-const CARD_GUTTER: f32 = CONTENT_GUTTER - ROW_INSET;
+fn card_gutter(appearance: &ChromeAppearance) -> Pixels {
+    appearance.spacing(CONTENT_GUTTER) - row_horizontal_inset(appearance)
+}
 
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
 ///
@@ -1257,6 +1314,13 @@ impl SettingsWindow {
             highlighted_appearance.colors.text = appearance.colors.row_selected_foreground;
             highlighted_appearance.colors.text_secondary = appearance.colors.row_selected_secondary;
             highlighted_appearance.colors.text_muted = appearance.colors.row_selected_secondary;
+            let card = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+            highlighted_appearance.card_controls.reference.text = card.row_selected_foreground;
+            highlighted_appearance
+                .card_controls
+                .reference
+                .text_secondary = card.row_selected_secondary;
+            highlighted_appearance.card_controls.reference.text_muted = card.row_selected_secondary;
             &highlighted_appearance
         } else {
             appearance
@@ -1264,7 +1328,7 @@ impl SettingsWindow {
         let control = self.render_control(row, content_appearance, cx);
         let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
             .layout(row_layout(row))
-            .reset(self.row_reset(row, cx))
+            .reset(self.row_reset(row, appearance, cx))
             .matched_indices(matched_indices)
             .highlighted(highlighted);
         if let Some(description) = self.row_description(row, cx) {
@@ -1345,7 +1409,9 @@ impl SettingsWindow {
     fn render_appearance_mode(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.editor.document().preferences.mode;
         let selector = "settings-appearance-mode";
-        let edge = crate::ui::appearance::chrome(cx).colors.border;
+        let edge = crate::ui::appearance::chrome(cx)
+            .host_colors(spaceterm_ui::ControlHost::Card)
+            .border;
         let owner = cx.weak_entity();
         let options = [
             AppearanceMode::Light,
@@ -1929,6 +1995,11 @@ impl SettingsWindow {
         } else {
             ("Retry", "settings-banner-retry")
         };
+        let pair = if critical {
+            appearance.semantic_text_pairs.warning_status
+        } else {
+            appearance.semantic_text_pairs.error_status
+        };
         Some(
             div()
                 .debug_selector(|| "settings-banner".to_owned())
@@ -1939,24 +2010,13 @@ impl SettingsWindow {
                 // The same inset notice the Color Schemes page carries, at the window's own scope
                 // rather than the page's. A strip ruled off across the pane would be the one square
                 // edge left on a surface made of cards.
-                .mx(appearance.spacing(CARD_GUTTER))
+                .mx(card_gutter(appearance))
                 .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
-                .rounded(appearance.spacing(CARD_RADIUS))
-                .bg(gpui_color(appearance.surface(
-                    crate::appearance::SurfaceRole::Surface,
-                    if critical {
-                        appearance.colors.warning_background
-                    } else {
-                        appearance.colors.error_background
-                    },
-                )))
-                .text_color(gpui_color(if critical {
-                    appearance.colors.warning
-                } else {
-                    appearance.colors.error
-                }))
-                .border_1()
+                .rounded(RadiusRole::Card.pixels())
+                .bg(gpui_color(pair.background))
+                .text_color(gpui_color(pair.primary))
+                .border(px(HAIRLINE))
                 .border_color(gpui_color(if critical {
                     appearance.colors.warning_border
                 } else {
@@ -1964,12 +2024,8 @@ impl SettingsWindow {
                 }))
                 .child(div().flex_none().mt(px(1.0)).child(Icon::new(
                     IconName::TriangleAlert,
-                    appearance.text_size(13.0),
-                    gpui_color(if critical {
-                        appearance.colors.warning
-                    } else {
-                        appearance.colors.error
-                    }),
+                    appearance.icons.metrics(IconRole::Status).glyph_size,
+                    gpui_color(pair.primary),
                 )))
                 .child(
                     div()
@@ -1980,12 +2036,13 @@ impl SettingsWindow {
                         .gap(appearance.spacing(2.0))
                         .child(
                             div()
-                                .font(appearance.emphasis.clone())
+                                .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
                                 .child(status.message()),
                         )
                         .child(
                             div()
-                                .text_size(appearance.text_size(text::SMALL))
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                .text_color(gpui_color(pair.secondary))
                                 .whitespace_normal()
                                 .child(explanation),
                         ),
@@ -2029,9 +2086,10 @@ impl SettingsWindow {
     /// thing left on that line. The save status is plain text and needs no such correction.
     fn render_footer(
         &mut self,
-        appearance: &ChromeAppearance,
+        settings: &SettingsAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let appearance = &settings.chrome;
         let status = self.editor.status();
         let owner = cx.weak_entity();
         div()
@@ -2040,19 +2098,31 @@ impl SettingsWindow {
             .flex_row()
             .w_full()
             .flex_none()
-            .h(appearance.height(FOOTER_HEIGHT, text::BODY))
+            .h(appearance.typography.style(TextRole::Secondary).line_height
+                + appearance.spacing(FOOTER_HEIGHT - 15.0))
             .child(
                 div()
+                    .relative()
                     .flex_none()
                     .h_full()
-                    .w(appearance.text_size(SIDEBAR_WIDTH))
+                    .w(appearance.spacing(SIDEBAR_WIDTH))
                     .border_t_1()
-                    .border_color(gpui_color(
-                        appearance
-                            .materials
-                            .edge(appearance.colors.panel_background, appearance.colors.border),
+                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Sidebar)))
+                    .bg(gpui_color(
+                        settings.surface(SettingsSurfaceRole::Sidebar).paint,
                     ))
-                    .bg(gpui_color(appearance.control_colors.panel_background)),
+                    .when_some(settings.sidebar_edge(), |footer, edge| {
+                        footer.child(
+                            div()
+                                .debug_selector(|| "settings-sidebar-footer-divider".to_owned())
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_0()
+                                .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                                .bg(gpui_color(edge)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2061,15 +2131,10 @@ impl SettingsWindow {
                     .min_w_0()
                     .h_full()
                     .border_t_1()
-                    .border_color(gpui_color(
-                        appearance
-                            .materials
-                            .edge(appearance.colors.background, appearance.colors.border),
+                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Canvas)))
+                    .bg(gpui_color(
+                        settings.surface(SettingsSurfaceRole::Canvas).paint,
                     ))
-                    .bg(gpui_color(appearance.surface(
-                        crate::appearance::SurfaceRole::Base,
-                        appearance.colors.background,
-                    )))
                     .items_center()
                     .justify_between()
                     .gap(appearance.spacing(CONTENT_GUTTER))
@@ -2096,7 +2161,7 @@ impl SettingsWindow {
                             .debug_selector(|| "settings-save-status".to_owned())
                             .min_w_0()
                             .truncate()
-                            .text_size(appearance.text_size(text::SMALL))
+                            .chrome_text(appearance.typography.style(TextRole::Secondary))
                             // The recovery banner owns semantic emphasis on its paired surface.
                             .text_color(gpui_color(appearance.colors.text_muted))
                             .child(status.message()),
@@ -2170,9 +2235,9 @@ fn mode_preview(palettes: &[Vec<Color>], edge: Color, extent: gpui::Pixels) -> i
         .flex_row()
         .w(width)
         .h(extent)
-        .rounded(px(4.0))
+        .rounded(RadiusRole::ControlSmall.pixels())
         .overflow_hidden()
-        .border_1()
+        .border(px(HAIRLINE))
         .border_color(gpui_color(edge))
         .children(palettes.iter().enumerate().map(|(index, swatches)| {
             let miniature = mode_miniature(swatches, width, extent);
@@ -2248,7 +2313,11 @@ fn settings_selector<I: Clone + Eq + 'static>(
     items: Vec<ComboBoxItem<I>>,
     appearance: &ChromeAppearance,
 ) -> ComboBox<I> {
-    let glyph = gpui_color(appearance.colors.icon_muted);
+    let glyph = gpui_color(
+        appearance
+            .host_colors(spaceterm_ui::ControlHost::Card)
+            .icon_muted,
+    );
     ComboBox::new(
         SharedString::from(selector.clone()),
         accessibility_name,
@@ -2257,10 +2326,8 @@ fn settings_selector<I: Clone + Eq + 'static>(
         items,
     )
     // The trigger takes the width of the value it shows, so the value and its chevron stay
-    // together at the row's right edge, and it carries a bezel so it ends where the steppers and
-    // segmented controls beside it end rather than optically short of them.
+    // together at the row's right edge. Its ordinary frame comes from the shared ComboBox theme.
     .hug(true)
-    .bezel(true)
     .input_leading(move |size| Icon::new(IconName::Search, size, glyph).into_any_element())
     .debug_selector(selector)
 }

@@ -25,6 +25,12 @@ const HOST_FIELD: gpui::Rgba = gpui::Rgba {
     b: 0.4,
     a: 1.0,
 };
+const SETTINGS_FIELD: gpui::Rgba = gpui::Rgba {
+    r: 0.8,
+    g: 0.7,
+    b: 0.6,
+    a: 1.0,
+};
 
 fn input_theme(background: gpui::Rgba, caret_width: Pixels) -> TextInputTheme {
     let text = rgba(0xffffffff);
@@ -59,6 +65,66 @@ fn test_catalog(hosted: bool, generation: u64, host_fill: gpui::Rgba) -> Control
 }
 
 type FieldObservations = Rc<RefCell<Vec<(&'static str, Option<Fill>)>>>;
+
+struct FloatingShellFixture {
+    role: FloatingRole,
+}
+
+impl Render for FloatingShellFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let shell = FloatingSurfaceTheme::default().shell(self.role);
+        div()
+            .p(px(20.0))
+            .child(shell.mount(div().w(px(200.0)).h(px(80.0))))
+    }
+}
+
+#[gpui::test]
+fn floating_shell_keeps_its_rounded_edge_without_a_straight_top_hairline(cx: &mut TestAppContext) {
+    let (root, cx) = cx.add_window_view(|_, _| FloatingShellFixture {
+        role: FloatingRole::Popover,
+    });
+    for role in [
+        FloatingRole::Popover,
+        FloatingRole::Command,
+        FloatingRole::Modal,
+        FloatingRole::Tooltip,
+        FloatingRole::Notice,
+        FloatingRole::Readout,
+    ] {
+        root.update(cx, |root, cx| {
+            root.role = role;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let top = px(20.0).scale(window.scale_factor());
+            let top_strip_bottom = px(22.0).scale(window.scale_factor());
+            let hairline = px(1.0).scale(window.scale_factor());
+            let minimum_line_width = px(100.0).scale(window.scale_factor());
+            let quads = window.painted_quads_for_test();
+            let straight_top_edges: Vec<_> = quads
+                .iter()
+                .filter(|quad| {
+                    quad.visible_bounds.origin.y >= top
+                        && quad.visible_bounds.bottom() <= top_strip_bottom
+                        && quad.visible_bounds.size.height == hairline
+                        && quad.visible_bounds.size.width >= minimum_line_width
+                })
+                .collect();
+            assert!(
+                straight_top_edges.is_empty(),
+                "{role:?} must not add a straight top hairline: {straight_top_edges:?}"
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.border_color == rgba(0xffffff26).into()),
+                "{role:?} must retain the shell's rounded outer edge"
+            );
+        });
+    }
+}
 
 struct RetainedField {
     id: &'static str,
@@ -101,6 +167,178 @@ type PhaseObservations = Rc<RefCell<Vec<(Phase, Option<Fill>)>>>;
 struct PhaseField {
     content: AnyElement,
     observations: PhaseObservations,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ActivityPhaseObservation {
+    phase: Phase,
+    field_fill: Option<Fill>,
+    button_normal: gpui::Rgba,
+    button_hovered: gpui::Rgba,
+    button_disabled: gpui::Rgba,
+    focus_border: gpui::Rgba,
+    focus_ring_width: Pixels,
+    activity: ControlWindowActivity,
+}
+
+type ActivityObservations = Rc<RefCell<Vec<ActivityPhaseObservation>>>;
+
+struct ActivityProbe {
+    content: AnyElement,
+    observations: ActivityObservations,
+}
+
+impl ActivityProbe {
+    fn record(&self, phase: Phase, cx: &App) {
+        let mut field = field_surface("activity-field", FieldState::default(), cx);
+        let button = ControlHost::Window.button_theme(cx);
+        let paints = button.paints(ButtonVariant::Secondary);
+        self.observations
+            .borrow_mut()
+            .push(ActivityPhaseObservation {
+                phase,
+                field_fill: field.style().background.clone(),
+                button_normal: paints.normal().background(),
+                button_hovered: paints.hovered().background(),
+                button_disabled: paints.disabled().background(),
+                focus_border: button.focus_border(),
+                focus_ring_width: button.resolved_focus_ring_width(),
+                activity: ControlWindowActivity::current(),
+            });
+    }
+}
+
+impl IntoElement for ActivityProbe {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ActivityProbe {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.record(Phase::Layout, cx);
+        (self.content.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.record(Phase::Prepaint, cx);
+        self.content.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.record(Phase::Paint, cx);
+        self.content.paint(window, cx);
+    }
+}
+
+struct ActivityFixture {
+    activity: ControlWindowActivity,
+    constructed: Rc<RefCell<Vec<ControlWindowActivity>>>,
+    observations: ActivityObservations,
+}
+
+struct ThemeScopeFixture {
+    scope: ControlThemeScope,
+    observations: PhaseObservations,
+}
+
+impl Render for ThemeScopeFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.scope.with_scope(|| {
+            self.scope.mount(PhaseField {
+                content: div().size_full().into_any_element(),
+                observations: Rc::clone(&self.observations),
+            })
+        })
+    }
+}
+
+impl Render for ActivityFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.activity.with_scope(|| {
+            self.constructed
+                .borrow_mut()
+                .push(ControlWindowActivity::current());
+            self.activity.mount(ActivityProbe {
+                content: div().size_full().into_any_element(),
+                observations: Rc::clone(&self.observations),
+            })
+        })
+    }
+}
+
+fn activity_button_theme(
+    normal: gpui::Rgba,
+    hovered: gpui::Rgba,
+    disabled: gpui::Rgba,
+    focus: gpui::Rgba,
+) -> ButtonTheme {
+    let text = rgba(0xffffffff);
+    let clear = rgba(0x00000000);
+    let state = ButtonVariantStyle::new(
+        ButtonPaint::new(normal, text, clear),
+        ButtonPaint::new(hovered, text, clear),
+        ButtonPaint::new(hovered, text, clear),
+        ButtonPaint::new(disabled, text, clear),
+    );
+    let metrics = ButtonMetrics::new(px(28.0));
+    ButtonTheme::new(
+        ButtonVariants::new(state, state, state, state, state, state, state),
+        ButtonSizes::new(metrics, metrics, metrics, metrics),
+        focus,
+    )
+}
+
+fn activity_catalog(
+    generation: u64,
+    field_fill: gpui::Rgba,
+    normal: gpui::Rgba,
+    hovered: gpui::Rgba,
+    disabled: gpui::Rgba,
+    focus: gpui::Rgba,
+    focus_ring_width: Pixels,
+) -> ControlThemeCatalog {
+    let mut catalog = test_catalog(false, generation, field_fill);
+    catalog.text_input = input_theme(field_fill, px(1.0));
+    catalog.button =
+        activity_button_theme(normal, hovered, disabled, focus).focus_ring_width(focus_ring_width);
+    catalog
 }
 
 impl PhaseField {
@@ -319,6 +557,210 @@ fn floating_theme_applies_one_sanitized_backdrop_alpha_limit_to_every_shell() {
             .backdrop_alpha_limit(),
         1.0
     );
+}
+
+#[test]
+fn window_activity_scope_is_reentrant_and_restores_its_caller() {
+    assert_eq!(
+        ControlWindowActivity::current(),
+        ControlWindowActivity::Active
+    );
+    ControlWindowActivity::Inactive.with_scope(|| {
+        assert_eq!(
+            ControlWindowActivity::current(),
+            ControlWindowActivity::Inactive
+        );
+        ControlWindowActivity::Active.with_scope(|| {
+            assert_eq!(
+                ControlWindowActivity::current(),
+                ControlWindowActivity::Active
+            );
+        });
+        assert_eq!(
+            ControlWindowActivity::current(),
+            ControlWindowActivity::Inactive
+        );
+    });
+    assert_eq!(
+        ControlWindowActivity::current(),
+        ControlWindowActivity::Active
+    );
+}
+
+#[test]
+fn control_theme_scope_is_reentrant_and_restores_its_caller() {
+    assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+    ControlThemeScope::Settings.with_scope(|| {
+        assert_eq!(ControlThemeScope::current(), ControlThemeScope::Settings);
+        ControlThemeScope::Application.with_scope(|| {
+            assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+        });
+        assert_eq!(ControlThemeScope::current(), ControlThemeScope::Settings);
+    });
+    assert_eq!(ControlThemeScope::current(), ControlThemeScope::Application);
+}
+
+#[gpui::test]
+fn settings_catalog_scope_is_isolated_and_retained_in_every_rendering_phase(
+    cx: &mut TestAppContext,
+) {
+    let application = activity_catalog(
+        1,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        ROOT_FIELD,
+        px(1.0),
+    );
+    let settings = activity_catalog(
+        1,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        SETTINGS_FIELD,
+        px(1.0),
+    );
+    cx.update(|cx| init(cx, application.clone())).unwrap();
+    cx.update(|cx| {
+        replace_scoped_control_theme_catalogs(
+            cx,
+            Box::new(application.clone()),
+            Box::new(application),
+            Box::new(settings.clone()),
+            Box::new(settings),
+        )
+    })
+    .unwrap();
+
+    let application_observations = PhaseObservations::default();
+    let settings_observations = PhaseObservations::default();
+    let _application_window = cx.add_window({
+        let observations = Rc::clone(&application_observations);
+        move |_, _| ThemeScopeFixture {
+            scope: ControlThemeScope::Application,
+            observations,
+        }
+    });
+    let _settings_window = cx.add_window({
+        let observations = Rc::clone(&settings_observations);
+        move |_, _| ThemeScopeFixture {
+            scope: ControlThemeScope::Settings,
+            observations,
+        }
+    });
+    cx.run_until_parked();
+
+    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+        assert!(
+            application_observations
+                .borrow()
+                .contains(&(phase, Some(ROOT_FIELD.into())))
+        );
+        assert!(
+            settings_observations
+                .borrow()
+                .contains(&(phase, Some(SETTINGS_FIELD.into())))
+        );
+    }
+}
+
+#[gpui::test]
+fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut TestAppContext) {
+    let active_fill = rgba(0x182433ff);
+    let inactive_fill = rgba(0x30343aff);
+    let active_normal = rgba(0x204060ff);
+    let active_hovered = rgba(0x306090ff);
+    let inactive_normal = rgba(0x383838ff);
+    let disabled = rgba(0x181818ff);
+    let active_focus = rgba(0x5599ffff);
+    let no_focus = rgba(0x00000000);
+    let active = activity_catalog(
+        1,
+        active_fill,
+        active_normal,
+        active_hovered,
+        disabled,
+        active_focus,
+        px(1.0),
+    );
+    let inactive = activity_catalog(
+        1,
+        inactive_fill,
+        inactive_normal,
+        inactive_normal,
+        disabled,
+        no_focus,
+        px(2.0),
+    );
+    cx.update(|cx| init(cx, active.clone()))
+        .expect("catalog should initialize");
+    assert_eq!(
+        cx.update(|cx| replace_control_theme_catalogs(cx, active, inactive)),
+        Ok(ControlThemeReplacement::Applied)
+    );
+
+    let active_constructed = Rc::new(RefCell::new(Vec::new()));
+    let inactive_constructed = Rc::new(RefCell::new(Vec::new()));
+    let active_observations = ActivityObservations::default();
+    let inactive_observations = ActivityObservations::default();
+    let _active_window = cx.add_window({
+        let constructed = Rc::clone(&active_constructed);
+        let observations = Rc::clone(&active_observations);
+        move |_, _| ActivityFixture {
+            activity: ControlWindowActivity::Active,
+            constructed,
+            observations,
+        }
+    });
+    let _inactive_window = cx.add_window({
+        let constructed = Rc::clone(&inactive_constructed);
+        let observations = Rc::clone(&inactive_observations);
+        move |_, _| ActivityFixture {
+            activity: ControlWindowActivity::Inactive,
+            constructed,
+            observations,
+        }
+    });
+    cx.run_until_parked();
+
+    assert!(!active_constructed.borrow().is_empty());
+    assert!(!inactive_constructed.borrow().is_empty());
+    assert!(
+        active_constructed
+            .borrow()
+            .iter()
+            .all(|activity| *activity == ControlWindowActivity::Active)
+    );
+    assert!(
+        inactive_constructed
+            .borrow()
+            .iter()
+            .all(|activity| *activity == ControlWindowActivity::Inactive)
+    );
+    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+        assert!(active_observations.borrow().iter().any(|observation| {
+            observation.phase == phase
+                && observation.activity == ControlWindowActivity::Active
+                && observation.field_fill == Some(active_fill.into())
+                && observation.button_normal == active_normal
+                && observation.button_hovered == active_hovered
+                && observation.button_disabled == disabled
+                && observation.focus_border == active_focus
+                && observation.focus_ring_width == px(1.0)
+        }));
+        assert!(inactive_observations.borrow().iter().any(|observation| {
+            observation.phase == phase
+                && observation.activity == ControlWindowActivity::Inactive
+                && observation.field_fill == Some(inactive_fill.into())
+                && observation.button_normal == inactive_normal
+                && observation.button_hovered == inactive_normal
+                && observation.button_disabled == disabled
+                && observation.focus_border == no_focus
+                && observation.focus_ring_width == px(2.0)
+        }));
+    }
 }
 
 #[gpui::test]
@@ -547,7 +989,7 @@ fn replacing_catalog_without_floating_overrides_should_remove_stale_host_present
 }
 
 #[gpui::test]
-fn scaling_catalog_should_preserve_role_materials_and_hairlines_while_growing_geometry(
+fn scaling_catalog_preserves_role_materials_radii_and_hairlines_while_growing_insets(
     cx: &mut TestAppContext,
 ) {
     let initial = test_catalog(true, 1, HOST_FIELD);
@@ -579,11 +1021,7 @@ fn scaling_catalog_should_preserve_role_materials_and_hairlines_while_growing_ge
         assert_eq!(scaled.edge(), original.edge(), "{role:?}");
         assert_eq!(scaled.divider(), original.divider(), "{role:?}");
         assert_eq!(scaled.hairline(), original.hairline(), "{role:?}");
-        assert_eq!(
-            scaled.corner_radius(),
-            original.corner_radius() * 1.25,
-            "{role:?}"
-        );
+        assert_eq!(scaled.corner_radius(), original.corner_radius(), "{role:?}");
         assert_eq!(
             scaled.content_inset(),
             original.content_inset() * 1.25,
@@ -591,7 +1029,7 @@ fn scaling_catalog_should_preserve_role_materials_and_hairlines_while_growing_ge
         );
         assert_eq!(
             scaled.nested_radius(),
-            original.nested_radius() * 1.25,
+            (original.corner_radius() - scaled.content_inset()).max(px(4.0)),
             "{role:?}"
         );
     }
@@ -601,6 +1039,12 @@ const PANEL_FIELD: gpui::Rgba = gpui::Rgba {
     r: 0.2,
     g: 0.6,
     b: 0.4,
+    a: 1.0,
+};
+const TITLE_BAR_FIELD: gpui::Rgba = gpui::Rgba {
+    r: 0.15,
+    g: 0.25,
+    b: 0.75,
     a: 1.0,
 };
 const CARD_FIELD: gpui::Rgba = gpui::Rgba {
@@ -626,14 +1070,17 @@ fn surface_host_catalog(
             input_theme(fill, px(6.0)),
         )
     };
+    let title_bar = controls(TITLE_BAR_FIELD);
     let panel = controls(panel);
     let card = controls(card);
-    catalog.resting_controls(panel, card)
+    catalog
+        .title_bar_controls(title_bar)
+        .resting_controls(panel, card)
 }
 
 struct NestedHostFixture {
-    fields: [Entity<RetainedField>; 7],
-    phases: [PhaseObservations; 7],
+    fields: [Entity<RetainedField>; 8],
+    phases: [PhaseObservations; 8],
 }
 
 impl NestedHostFixture {
@@ -641,6 +1088,7 @@ impl NestedHostFixture {
         Self {
             fields: [
                 "window-before",
+                "title-bar",
                 "panel",
                 "card",
                 "floating",
@@ -673,31 +1121,32 @@ impl Render for NestedHostFixture {
             .flex()
             .flex_col()
             .child(self.field(0))
+            .child(ControlHost::TitleBar.mount(self.field(1)))
             .child(
                 ControlHost::Panel.mount(
                     div()
                         .flex()
                         .flex_col()
-                        .child(self.field(1))
+                        .child(self.field(2))
                         .child(
                             ControlHost::Card.mount(
-                                div().flex().flex_col().child(self.field(2)).child(
+                                div().flex().flex_col().child(self.field(3)).child(
                                     FloatingSurfaceTheme::default()
                                         .shell(FloatingRole::Popover)
                                         .host(
                                             div()
                                                 .flex()
                                                 .flex_col()
-                                                .child(self.field(3))
-                                                .child(ControlHost::Window.mount(self.field(4))),
+                                                .child(self.field(4))
+                                                .child(ControlHost::Window.mount(self.field(5))),
                                         ),
                                 ),
                             ),
                         )
-                        .child(self.field(5)),
+                        .child(self.field(6)),
                 ),
             )
-            .child(self.field(6))
+            .child(self.field(7))
     }
 }
 
@@ -713,6 +1162,7 @@ fn control_hosts_resolve_nearest_material_in_all_phases_and_restore_siblings(
     cx.run_until_parked();
     let expected = [
         ROOT_FIELD,
+        TITLE_BAR_FIELD,
         PANEL_FIELD,
         CARD_FIELD,
         HOST_FIELD,
@@ -759,6 +1209,7 @@ fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_
     });
     cx.run_until_parked();
     for (id, expected) in [
+        ("title-bar", TITLE_BAR_FIELD),
         ("panel", CARD_FIELD),
         ("card", PANEL_FIELD),
         ("floating", HOST_FIELD),
@@ -778,7 +1229,7 @@ fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_
         replace_control_theme_catalog(cx, test_catalog(true, 3, HOST_FIELD)).unwrap()
     });
     cx.run_until_parked();
-    for id in ["panel", "card", "panel-after"] {
+    for id in ["title-bar", "panel", "card", "panel-after"] {
         assert!(
             observations
                 .borrow()
@@ -789,6 +1240,7 @@ fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_
     }
     cx.update(|_, cx| {
         let catalog = cx.global::<ControlThemeCatalog>();
+        assert!(catalog.hosted_controls(ControlHost::TitleBar).is_none());
         assert!(catalog.hosted_controls(ControlHost::Panel).is_none());
         assert!(catalog.hosted_controls(ControlHost::Card).is_none());
         assert!(catalog.hosted_controls(ControlHost::Floating).is_some());
@@ -800,6 +1252,7 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
     for host in [
         ControlHost::Window,
+        ControlHost::TitleBar,
         ControlHost::Panel,
         ControlHost::Card,
         ControlHost::Floating,
@@ -822,7 +1275,12 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
 fn resting_host_metrics_scale_once_with_the_complete_catalog() {
     let initial = surface_host_catalog(1, PANEL_FIELD, CARD_FIELD);
     let scaled = initial.clone().scale_metrics(1.5, 1.25);
-    for host in [ControlHost::Panel, ControlHost::Card, ControlHost::Floating] {
+    for host in [
+        ControlHost::TitleBar,
+        ControlHost::Panel,
+        ControlHost::Card,
+        ControlHost::Floating,
+    ] {
         let original = initial.hosted_controls(host).unwrap();
         assert_ne!(scaled.hosted_controls(host), Some(original));
         assert_eq!(

@@ -20,6 +20,47 @@ use crate::terminal::{
     SessionFailure, TerminalLaunchPlan, TerminalSessionFactory,
 };
 
+#[gpui::test]
+fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let active = super::super::appearance::ChromeAppearance::default();
+    let mut inactive = active.clone();
+    inactive.active = false;
+    let active_shell = active.floating_surfaces().shell(FloatingRole::Notice);
+    let inactive_shell = inactive.floating_surfaces().shell(FloatingRole::Notice);
+    assert_ne!(
+        active_shell, inactive_shell,
+        "the fixture must distinguish activity variants",
+    );
+
+    cx.update(|cx| {
+        spaceterm_ui::replace_control_theme_catalogs(
+            cx,
+            super::super::control_theme_catalog::catalog(
+                &active,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
+            super::super::control_theme_catalog::catalog(
+                &inactive,
+                spaceterm_ui::ProgressMotion::Standard,
+            ),
+        )
+        .expect("paired control catalogs should replace atomically");
+
+        assert_eq!(
+            spaceterm_ui::ControlWindowActivity::Active
+                .with_scope(|| floating_shell(FloatingRole::Notice, cx)),
+            active_shell,
+        );
+        assert_eq!(
+            spaceterm_ui::ControlWindowActivity::Inactive
+                .with_scope(|| floating_shell(FloatingRole::Notice, cx)),
+            inactive_shell,
+        );
+    });
+}
+
 #[test]
 fn active_application_with_non_key_window_suppresses_inactive_only_notification() {
     let activity = SurfaceActivity {
@@ -2456,7 +2497,9 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size
             ),
         )
         .unwrap();
-        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(chrome)));
+        cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
+            chrome,
+        )));
     });
     cx.simulate_resize(gpui::size(px(130.0), px(420.0)));
     cx.dispatch_action(OpenTerminalFind);
@@ -2490,6 +2533,59 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size
         label.size.height < px(70.0),
         "result words must not wrap one character per line"
     );
+}
+
+#[gpui::test]
+fn terminal_find_field_contains_maximum_chrome_line_height_in_both_densities(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, _) = connected_terminal_pane(cx);
+    cx.dispatch_action(OpenTerminalFind);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        let line_height = cx.update(|window, cx| {
+            let mut preferences = crate::appearance::AppearancePreferences::default();
+            preferences.chrome.typography.base_size = 24.0;
+            preferences.chrome.density = density;
+            publish_terminal_preferences(preferences, cx);
+            let resolved = super::super::appearance_runtime::current(cx);
+            let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let line_height = chrome
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Body)
+                .line_height;
+            spaceterm_ui::replace_control_theme_catalog(
+                cx,
+                super::super::control_theme_catalog::catalog(
+                    &chrome,
+                    spaceterm_ui::ProgressMotion::Standard,
+                ),
+            )
+            .unwrap();
+            cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
+                chrome,
+            )));
+            window.refresh();
+            line_height
+        });
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("terminal-find-field")
+            .expect("Terminal Find field");
+        let input = cx
+            .debug_bounds("terminal-find-input")
+            .expect("Terminal Find input");
+        assert!(
+            field.size.height >= line_height
+                && input.top() >= field.top()
+                && input.bottom() <= field.bottom(),
+            "{density:?} Terminal Find must contain its {line_height:?} Body line: field={field:?}, input={input:?}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -3916,7 +4012,11 @@ fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestA
     });
     cx.run_until_parked();
 
-    let expected_width = cx.update(|window, cx| chrome(cx).measure(MESSAGE, 13.0, window));
+    let expected_width = cx.update(|window, cx| {
+        chrome(cx)
+            .typography
+            .measure(TextRole::Body, MESSAGE, window)
+    });
     let wide_message = cx.debug_bounds("terminal-status-message").unwrap();
     let wide_shell = cx.debug_bounds("terminal-status").unwrap();
     assert!(
@@ -3965,7 +4065,7 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
         appearance.colors.warning_border = root_warning;
         appearance.floating_control_colors.warning = floating_warning;
         appearance.floating_control_colors.warning_border = floating_warning_border;
-        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+        cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
             appearance,
         )));
     });
@@ -4089,7 +4189,7 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
             ),
         )
         .unwrap();
-        cx.set_global(super::super::appearance::InstalledChrome(Arc::new(
+        cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
             appearance,
         )));
     });
@@ -5000,10 +5100,11 @@ fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppC
 
     cx.update(|window, cx| {
         let appearance = crate::ui::appearance::chrome(cx);
+        let caption = appearance.typography.style(TextRole::Caption);
         assert!(!crate::ui::terminal_status::reported_glyph_is_drawable(
             "🚀\u{200d}🚀",
-            &appearance.regular,
-            appearance.text_size(DEFAULT_FONT_SIZE),
+            &caption.font,
+            caption.size,
             window,
         ));
     });

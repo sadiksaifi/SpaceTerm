@@ -4,8 +4,9 @@ use std::{
 };
 
 use gpui::{
-    App, AssetSource, FontFallbacks, Global, IntoElement, ParentElement as _, Pixels, RenderOnce,
-    Rgba, SharedString, Styled as _, Window, div, font, prelude::FluentBuilder as _, svg,
+    App, AssetSource, FontFallbacks, Global, Hsla, IntoElement, ParentElement as _, Pixels,
+    RenderOnce, Rgba, SharedString, Styled as _, Window, canvas, div, font,
+    prelude::FluentBuilder as _,
 };
 
 /// The Lucide family embedded by `lucide-icons` 1.34.0.
@@ -101,6 +102,122 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
     ),
 ];
 
+const LUCIDE_ASSET_PREFIX: &str = "spaceterm-ui/lucide/";
+const MIN_LUCIDE_ARTWORK_SIZE: u8 = 8;
+const MAX_LUCIDE_ARTWORK_SIZE: u8 = 40;
+
+macro_rules! lucide_sources {
+    ($($variant:ident => $slug:literal),+ $(,)?) => {
+        const LUCIDE_SOURCES: &[(IconName, &str, &[u8])] = &[
+            $(
+                (
+                    IconName::$variant,
+                    $slug,
+                    include_bytes!(concat!("../assets/lucide/", $slug, ".svg")),
+                ),
+            )+
+        ];
+    };
+}
+
+lucide_sources! {
+    AppWindow => "app-window",
+    Check => "check",
+    ChevronDown => "chevron-down",
+    ChevronRight => "chevron-right",
+    ChevronUp => "chevron-up",
+    CircleAlert => "circle-alert",
+    CircleDot => "circle-dot",
+    Cog => "cog",
+    Columns2 => "columns-2",
+    Copy => "copy",
+    Ellipsis => "ellipsis",
+    ExternalLink => "external-link",
+    Eye => "eye",
+    Folder => "folder",
+    Globe => "globe",
+    ImageOff => "image-off",
+    Info => "info",
+    Maximize2 => "maximize-2",
+    Minimize2 => "minimize-2",
+    Minus => "minus",
+    Palette => "palette",
+    Pause => "pause",
+    Pencil => "pencil",
+    Pin => "pin",
+    PinOff => "pin-off",
+    Plus => "plus",
+    RotateCcw => "rotate-ccw",
+    RotateCw => "rotate-cw",
+    Rows2 => "rows-2",
+    Search => "search",
+    Shield => "shield",
+    Square => "square",
+    SquareCheckBig => "square-check-big",
+    SquarePlus => "square-plus",
+    SunMoon => "sun-moon",
+    Terminal => "terminal",
+    Trash2 => "trash-2",
+    TriangleAlert => "triangle-alert",
+    X => "x",
+}
+
+fn lucide_source(name: IconName) -> Option<(&'static str, &'static [u8])> {
+    let discriminant = std::mem::discriminant(&name);
+    LUCIDE_SOURCES
+        .iter()
+        .find(|(candidate, _, _)| std::mem::discriminant(candidate) == discriminant)
+        .map(|(_, slug, source)| (*slug, *source))
+}
+
+fn lucide_asset_path(
+    name: IconName,
+    nominal_size: Pixels,
+    artwork_size: Pixels,
+) -> Option<SharedString> {
+    let (slug, _) = lucide_source(name)?;
+    let artwork_size = f32::from(artwork_size).round();
+    if !(f32::from(MIN_LUCIDE_ARTWORK_SIZE)..=f32::from(MAX_LUCIDE_ARTWORK_SIZE))
+        .contains(&artwork_size)
+    {
+        return None;
+    }
+    let artwork_size = artwork_size as u8;
+    let stroke_width = normalized_stroke_width(nominal_size) as u8;
+    Some(format!("{LUCIDE_ASSET_PREFIX}{slug}/{artwork_size}/{stroke_width}.svg").into())
+}
+
+fn normalized_stroke_width(nominal_size: Pixels) -> f32 {
+    (f32::from(nominal_size) / 12.0).round().clamp(1.0, 2.0)
+}
+
+fn prepared_lucide_asset(path: &str) -> Option<Vec<u8>> {
+    let relative = path.strip_prefix(LUCIDE_ASSET_PREFIX)?;
+    let mut segments = relative.split('/');
+    let slug = segments.next()?;
+    let artwork_size = segments.next()?.parse::<u8>().ok()?;
+    let stroke_width = segments.next()?.strip_suffix(".svg")?.parse::<u8>().ok()?;
+    if segments.next().is_some()
+        || !(MIN_LUCIDE_ARTWORK_SIZE..=MAX_LUCIDE_ARTWORK_SIZE).contains(&artwork_size)
+        || !(1..=2).contains(&stroke_width)
+    {
+        return None;
+    }
+    let (_, _, source) = LUCIDE_SOURCES
+        .iter()
+        .find(|(_, candidate, _)| *candidate == slug)?;
+    let source = std::str::from_utf8(source).ok()?;
+    let source_width = f32::from(stroke_width) * 24.0 / f32::from(artwork_size);
+    Some(
+        source
+            .replace(
+                "stroke-width=\"2\"",
+                &format!("stroke-width=\"{source_width:.6}\""),
+            )
+            .into_bytes(),
+    )
+}
+
 /// The reusable UI crate's bundled assets, registered with GPUI's
 /// `Application::with_assets` before rendering custom icons.
 ///
@@ -111,6 +228,9 @@ pub struct EmbeddedAssets;
 
 impl AssetSource for EmbeddedAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = prepared_lucide_asset(path) {
+            return Ok(Some(Cow::Owned(bytes)));
+        }
         Ok(EMBEDDED_ICONS
             .iter()
             .find_map(|(name, bytes)| (*name == path).then_some(Cow::Borrowed(*bytes))))
@@ -131,6 +251,7 @@ impl AssetSource for EmbeddedAssets {
     }
 }
 
+#[derive(Clone, Copy)]
 enum IconSource {
     Lucide(IconName),
     Custom(CustomIconName),
@@ -145,6 +266,17 @@ pub struct Icon {
     source: IconSource,
     size: Pixels,
     tint: Option<Rgba>,
+    text_alignment: Option<IconTextAlignment>,
+    #[cfg(test)]
+    tint_observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
+}
+
+#[derive(Clone)]
+struct IconTextAlignment {
+    font: gpui::Font,
+    font_size: Pixels,
+    line_height: Pixels,
+    baseline_center: Pixels,
 }
 
 impl Icon {
@@ -154,6 +286,9 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: Some(tint),
+            text_alignment: None,
+            #[cfg(test)]
+            tint_observer: None,
         }
     }
 
@@ -163,6 +298,9 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: None,
+            text_alignment: None,
+            #[cfg(test)]
+            tint_observer: None,
         }
     }
 
@@ -172,6 +310,9 @@ impl Icon {
             source: IconSource::Custom(name),
             size,
             tint: None,
+            text_alignment: None,
+            #[cfg(test)]
+            tint_observer: None,
         }
     }
 
@@ -182,29 +323,80 @@ impl Icon {
             source: IconSource::Custom(name),
             size,
             tint: Some(tint),
+            text_alignment: None,
+            #[cfg(test)]
+            tint_observer: None,
         }
+    }
+
+    /// Aligns the icon box's center to a prepared text role's cap-height band.
+    ///
+    /// The caller supplies the role's center-above-baseline metric. Font ascent remains a renderer
+    /// fact and is resolved from the actual font and line height when the icon paints.
+    pub fn align_to_text(
+        mut self,
+        font: gpui::Font,
+        font_size: Pixels,
+        line_height: Pixels,
+        baseline_center: Pixels,
+    ) -> Self {
+        self.text_alignment = Some(IconTextAlignment {
+            font,
+            font_size,
+            line_height,
+            baseline_center,
+        });
+        self
+    }
+
+    #[cfg(test)]
+    fn observe_tint(mut self, observer: Arc<std::sync::Mutex<Vec<Hsla>>>) -> Self {
+        self.tint_observer = Some(observer);
+        self
     }
 }
 
 impl RenderOnce for Icon {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let artwork_size = optical_artwork_size(self.source, self.size);
+        let vertical_offset = self
+            .text_alignment
+            .map(|alignment| icon_text_offset(&alignment, window))
+            .unwrap_or_default();
         let content = match self.source {
-            IconSource::Lucide(name) => div()
-                .font({
-                    let mut icon_font = font(LUCIDE_FONT_FAMILY);
-                    icon_font.fallbacks = Some(EMPTY_FONT_FALLBACKS.clone());
-                    icon_font
-                })
-                .text_size(self.size)
-                .line_height(self.size)
-                .when_some(self.tint, |element, tint| element.text_color(tint))
-                .child(name.unicode().to_string())
+            IconSource::Lucide(name) => match lucide_asset_path(name, self.size, artwork_size) {
+                Some(path) => icon_svg(
+                    path,
+                    artwork_size,
+                    IconTint {
+                        explicit: self.tint,
+                        #[cfg(test)]
+                        observer: self.tint_observer.clone(),
+                    },
+                )
                 .into_any_element(),
-            IconSource::Custom(name) => svg()
-                .path(name.path())
-                .size(self.size)
-                .when_some(self.tint, |element, tint| element.text_color(tint))
-                .into_any_element(),
+                None => div()
+                    .font({
+                        let mut icon_font = font(LUCIDE_FONT_FAMILY);
+                        icon_font.fallbacks = Some(EMPTY_FONT_FALLBACKS.clone());
+                        icon_font
+                    })
+                    .text_size(artwork_size)
+                    .line_height(artwork_size)
+                    .when_some(self.tint, |element, tint| element.text_color(tint))
+                    .child(name.unicode().to_string())
+                    .into_any_element(),
+            },
+            IconSource::Custom(name) => icon_svg(
+                name.path().into(),
+                artwork_size,
+                IconTint {
+                    explicit: self.tint,
+                    #[cfg(test)]
+                    observer: self.tint_observer.clone(),
+                },
+            )
+            .into_any_element(),
         };
         div()
             .flex()
@@ -212,15 +404,103 @@ impl RenderOnce for Icon {
             .items_center()
             .justify_center()
             .size(self.size)
+            .relative()
+            .top(vertical_offset)
             .child(content)
     }
+}
+
+struct IconTint {
+    explicit: Option<Rgba>,
+    #[cfg(test)]
+    observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
+}
+
+impl IconTint {
+    fn resolve(&self, window: &Window) -> Hsla {
+        let tint = self
+            .explicit
+            .map(Into::into)
+            .unwrap_or_else(|| window.text_style().color);
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.lock().expect("tint observation lock").push(tint);
+        }
+        tint
+    }
+}
+
+fn icon_svg(path: SharedString, size: Pixels, tint: IconTint) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, cx| {
+            let tint = tint.resolve(window);
+            // Like GPUI's Svg element, an asset or raster failure omits the glyph. Canvas has no
+            // error channel through which to return a recoverable paint failure.
+            let _paint = window.paint_svg(bounds, path, Default::default(), tint, cx);
+        },
+    )
+    .size(size)
+}
+
+fn icon_text_offset(alignment: &IconTextAlignment, window: &Window) -> Pixels {
+    text_alignment_offset(
+        &alignment.font,
+        alignment.font_size,
+        alignment.line_height,
+        alignment.baseline_center,
+        window,
+    )
+}
+
+pub(crate) fn text_alignment_offset(
+    font: &gpui::Font,
+    font_size: Pixels,
+    line_height: Pixels,
+    baseline_center: Pixels,
+    window: &Window,
+) -> Pixels {
+    let font_id = window.text_system().resolve_font(font);
+    text_alignment_offset_from_metrics(
+        window.text_system().ascent(font_id, font_size),
+        window.text_system().descent(font_id, font_size),
+        line_height,
+        baseline_center,
+    )
+}
+
+fn text_alignment_offset_from_metrics(
+    ascent: Pixels,
+    descent: Pixels,
+    line_height: Pixels,
+    baseline_center: Pixels,
+) -> Pixels {
+    // GPUI's native shapers turn a platform font's signed descent into the positive line extent
+    // used by text paint. FontMetrics retains the platform sign, so match that paint convention.
+    let descent = gpui::px(f32::from(descent).abs());
+    let baseline = (line_height - ascent - descent) / 2.0 + ascent;
+    baseline - baseline_center - line_height / 2.0
+}
+
+/// Keeps an icon's semantic layout box while correcting artwork that occupies an unusually large
+/// share of the family's nominal square. Entries are admitted only by the chrome optical contract;
+/// call sites never compensate individual glyphs.
+fn optical_artwork_size(source: IconSource, nominal_size: Pixels) -> Pixels {
+    let scale = match source {
+        IconSource::Lucide(IconName::PinOff) => 0.85,
+        IconSource::Lucide(_) | IconSource::Custom(_) => 1.0,
+    };
+    gpui::px((f32::from(nominal_size) * scale).round())
 }
 
 pub use lucide_icons::Icon as IconName;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     use gpui::{
         Context, InteractiveElement as _, ParentElement as _, Render, TestAppContext, Window, size,
@@ -245,6 +525,59 @@ mod tests {
                         .child(Icon::new(name, logical_size, gpui::rgba(0x8f9aafff)))
                 }),
             )
+        }
+    }
+
+    struct InheritedIconTintRoot {
+        inherited: Arc<Mutex<Vec<Hsla>>>,
+        disabled: Arc<Mutex<Vec<Hsla>>>,
+        explicit: Arc<Mutex<Vec<Hsla>>>,
+        base: Hsla,
+        hovered: Hsla,
+        disabled_tint: Hsla,
+        explicit_tint: Rgba,
+    }
+
+    impl Render for InheritedIconTintRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .child(
+                    div()
+                        .id("inherited-icon-hover-target")
+                        .debug_selector(|| "inherited-icon-hover-target".to_owned())
+                        .group("inherited-icon-hover-group")
+                        .size(gpui::px(24.0))
+                        .child(
+                            div()
+                                .text_color(self.base)
+                                .group_hover("inherited-icon-hover-group", {
+                                    let hovered = self.hovered;
+                                    move |style| style.text_color(hovered)
+                                })
+                                .child(
+                                    Icon::inherited(IconName::Terminal, gpui::px(14.0))
+                                        .observe_tint(self.inherited.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_color(self.base)
+                                .group_hover("inherited-icon-hover-group", |style| {
+                                    style.text_color(gpui::rgba(0xffffffff))
+                                })
+                                .child(
+                                    Icon::new(IconName::Cog, gpui::px(14.0), self.explicit_tint)
+                                        .observe_tint(self.explicit.clone()),
+                                ),
+                        ),
+                )
+                .child(
+                    div().text_color(self.disabled_tint).child(
+                        Icon::inherited(IconName::Shield, gpui::px(14.0))
+                            .observe_tint(self.disabled.clone()),
+                    ),
+                )
         }
     }
 
@@ -286,47 +619,213 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn inherited_svg_icon_should_resolve_parent_tint_and_nonempty_artwork(cx: &mut TestAppContext) {
+        let inherited = Arc::new(Mutex::new(Vec::new()));
+        let disabled = Arc::new(Mutex::new(Vec::new()));
+        let explicit = Arc::new(Mutex::new(Vec::new()));
+        let base = gpui::rgba(0x4a90e2ff).into();
+        let hovered = gpui::rgba(0xe24a90ff).into();
+        let disabled_tint = gpui::rgba(0x727272ff).into();
+        let explicit_tint = gpui::rgba(0x24aa68ff);
+        let (_, cx) = cx.add_window_view({
+            let inherited = inherited.clone();
+            let disabled = disabled.clone();
+            let explicit = explicit.clone();
+            move |_, _| InheritedIconTintRoot {
+                inherited,
+                disabled,
+                explicit,
+                base,
+                hovered,
+                disabled_tint,
+                explicit_tint,
+            }
+        });
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("inherited-icon-hover-target")
+            .expect("hover target should be painted");
+        cx.simulate_mouse_move(
+            gpui::point(
+                bounds.origin.x + bounds.size.width + gpui::px(50.0),
+                bounds.origin.y + bounds.size.height + gpui::px(50.0),
+            ),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert_eq!(
+            inherited
+                .lock()
+                .expect("inherited tint observation lock")
+                .last()
+                .copied(),
+            Some(base),
+            "the SVG paint must receive the surrounding semantic foreground"
+        );
+        assert_eq!(
+            disabled
+                .lock()
+                .expect("disabled tint observation lock")
+                .last()
+                .copied(),
+            Some(disabled_tint),
+            "disabled inherited SVGs must receive their semantic parent tint"
+        );
+        assert_eq!(
+            explicit
+                .lock()
+                .expect("explicit tint observation lock")
+                .last()
+                .copied(),
+            Some(explicit_tint.into()),
+            "an explicit tint must override its parent state"
+        );
+
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            inherited
+                .lock()
+                .expect("inherited tint observation lock")
+                .last()
+                .copied(),
+            Some(hovered),
+            "an inherited SVG must follow its parent's live group-hover foreground"
+        );
+        assert_eq!(
+            explicit
+                .lock()
+                .expect("explicit tint observation lock")
+                .last()
+                .copied(),
+            Some(explicit_tint.into()),
+            "an explicit tint must remain unchanged across parent hover"
+        );
+
+        let path = lucide_asset_path(IconName::Terminal, gpui::px(14.0), gpui::px(14.0))
+            .expect("the product Terminal glyph is embedded");
+        let bytes = EmbeddedAssets
+            .load(&path)
+            .expect("asset lookup")
+            .expect("prepared Terminal glyph");
+        cx.update(|_, cx| {
+            let rendered = gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.into_owned())
+                .to_image_data(cx.svg_renderer())
+                .expect("inherited glyph must rasterize through GPUI");
+            assert!(
+                rendered
+                    .as_bytes(0)
+                    .expect("rasterized SVG frame")
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "the inherited glyph raster must contain painted pixels"
+            );
+        });
+    }
+
     #[test]
-    fn selected_icon_names_should_have_distinct_private_use_glyphs() {
-        let names = [
-            IconName::Folder,
-            IconName::Globe,
-            IconName::Terminal,
-            IconName::Pin,
-            IconName::PanelLeft,
-            IconName::TriangleAlert,
-            IconName::Search,
-            IconName::Plus,
-            IconName::SquarePlus,
-            IconName::Pencil,
-            IconName::RotateCw,
-            IconName::X,
-            IconName::Ellipsis,
-            IconName::Columns2,
-            IconName::Rows2,
-            IconName::Maximize2,
-            IconName::Minimize2,
-            IconName::ChevronUp,
-            IconName::ChevronDown,
-            IconName::ChevronRight,
-            IconName::Copy,
-            IconName::ExternalLink,
-            IconName::Eye,
-            IconName::Check,
-            IconName::CircleDot,
-            IconName::Info,
-            IconName::CircleAlert,
-            IconName::ImageOff,
-            IconName::Square,
-            IconName::SquareCheckBig,
-        ];
-        let glyphs = names
-            .into_iter()
-            .map(IconName::unicode)
+    fn embedded_product_lucide_sources_have_unique_round_trip_assets() {
+        let mut slugs = HashSet::new();
+        let glyphs = LUCIDE_SOURCES
+            .iter()
+            .map(|(name, slug, _)| {
+                assert!(
+                    slugs.insert(*slug),
+                    "duplicate embedded Lucide slug: {slug}"
+                );
+                let path = lucide_asset_path(*name, gpui::px(14.0), gpui::px(14.0))
+                    .expect("every embedded product glyph has an asset path");
+                assert_eq!(path, format!("{LUCIDE_ASSET_PREFIX}{slug}/14/1.svg"));
+                assert!(
+                    EmbeddedAssets.load(&path).expect("asset lookup").is_some(),
+                    "embedded product glyph must round-trip through the asset source: {slug}"
+                );
+                name.unicode()
+            })
             .collect::<HashSet<_>>();
 
-        assert_eq!(glyphs.len(), names.len());
+        assert_eq!(slugs.len(), LUCIDE_SOURCES.len());
+        assert_eq!(glyphs.len(), LUCIDE_SOURCES.len());
         assert!(glyphs.iter().all(|glyph| !glyph.is_whitespace()));
+    }
+
+    #[test]
+    fn pin_off_optical_correction_preserves_the_nominal_layout_box() {
+        assert_eq!(
+            optical_artwork_size(IconSource::Lucide(IconName::PinOff), gpui::px(15.0)),
+            gpui::px(13.0)
+        );
+        assert_eq!(
+            optical_artwork_size(IconSource::Lucide(IconName::Pin), gpui::px(15.0)),
+            gpui::px(15.0)
+        );
+    }
+
+    #[test]
+    fn prepared_lucide_assets_normalize_stroke_after_view_box_scaling() {
+        let path = lucide_asset_path(IconName::X, gpui::px(15.0), gpui::px(15.0))
+            .expect("the product X glyph is embedded");
+        let bytes = EmbeddedAssets
+            .load(&path)
+            .expect("asset lookup")
+            .expect("prepared Lucide asset");
+        let svg = std::str::from_utf8(&bytes).expect("official Lucide SVG is UTF-8");
+        assert!(svg.contains("stroke-width=\"1.600000\""));
+
+        let path = lucide_asset_path(IconName::PinOff, gpui::px(18.0), gpui::px(15.0))
+            .expect("the product PinOff glyph is embedded");
+        let bytes = EmbeddedAssets
+            .load(&path)
+            .expect("asset lookup")
+            .expect("prepared optical Lucide asset");
+        let svg = std::str::from_utf8(&bytes).expect("official Lucide SVG is UTF-8");
+        assert!(svg.contains("stroke-width=\"3.200000\""));
+        assert_eq!(normalized_stroke_width(gpui::px(17.0)), 1.0);
+        assert_eq!(normalized_stroke_width(gpui::px(18.0)), 2.0);
+
+        // Product roles can produce artwork from 9 through 36 points after the text-role clamp,
+        // glyph offsets, and PinOff optical correction. The embedded sources' nearest geometry is
+        // two view-box units from an edge. The normalized stroke keeps a positive geometric margin
+        // at both extremes; an antialiased outer raster pixel is therefore not evidence of clipping.
+        let edge_margin = |artwork_size: f32, stroke_width: f32| {
+            let source_width = stroke_width * 24.0 / artwork_size;
+            (2.0 - source_width / 2.0) * artwork_size / 24.0
+        };
+        assert!(edge_margin(9.0, 1.0) > 0.0);
+        assert!(edge_margin(36.0, 2.0) > 0.0);
+    }
+
+    #[test]
+    fn prepared_lucide_assets_reject_unbounded_or_unknown_requests() {
+        assert!(prepared_lucide_asset("spaceterm-ui/lucide/x/41/1.svg").is_none());
+        assert!(prepared_lucide_asset("spaceterm-ui/lucide/x/12/3.svg").is_none());
+        assert!(prepared_lucide_asset("spaceterm-ui/lucide/not-an-icon/12/1.svg").is_none());
+        assert!(lucide_asset_path(IconName::X, gpui::px(41.0), gpui::px(41.0)).is_none());
+        assert!(lucide_asset_path(IconName::PinOff, gpui::px(8.0), gpui::px(7.0)).is_none());
+    }
+
+    #[test]
+    fn text_alignment_normalizes_platform_descent_before_matching_text_paint() {
+        let negative_descent = text_alignment_offset_from_metrics(
+            gpui::px(12.3),
+            gpui::px(-3.3),
+            gpui::px(16.0),
+            gpui::px(4.0),
+        );
+        let positive_descent = text_alignment_offset_from_metrics(
+            gpui::px(12.3),
+            gpui::px(3.3),
+            gpui::px(16.0),
+            gpui::px(4.0),
+        );
+
+        assert_eq!(negative_descent, positive_descent);
+        assert!((f32::from(negative_descent) - 0.5).abs() < 0.001);
     }
 
     #[test]

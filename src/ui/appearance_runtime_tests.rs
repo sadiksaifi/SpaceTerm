@@ -162,7 +162,7 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
 }
 
 #[gpui::test]
-fn accessibility_display_options_suppress_and_restore_all_translucent_presentation(
+fn accessibility_display_options_keep_contrast_and_transparency_independent(
     cx: &mut TestAppContext,
 ) {
     let (_settings, platform) = start(cx);
@@ -173,24 +173,222 @@ fn accessibility_display_options_suppress_and_restore_all_translucent_presentati
     assert!(!before.chrome.composition.floating_materials.is_opaque());
     assert!(before.chrome.composition.floating_blur);
 
-    for suppress in [
-        |platform: &RecordingAppearancePlatform| platform.set_reduce_transparency(true),
-        |platform: &RecordingAppearancePlatform| platform.set_increase_contrast(true),
-    ] as [fn(&RecordingAppearancePlatform); 2]
-    {
-        suppress(&platform);
+    for reduce_transparency in [false, true] {
+        platform.set_increase_contrast(true);
+        platform.set_reduce_transparency(reduce_transparency);
         cx.run_until_parked();
         cx.update(|cx| {
             let current = current(cx);
-            assert!(current.chrome.composition.materials.is_opaque());
-            assert!(current.chrome.composition.floating_materials.is_opaque());
-            assert!(!current.chrome.composition.floating_blur);
+            assert_eq!(
+                current.chrome.composition.materials.is_opaque(),
+                reduce_transparency
+            );
+            assert_eq!(
+                current.chrome.composition.floating_materials.is_opaque(),
+                reduce_transparency
+            );
+            assert_eq!(
+                current.chrome.composition.floating_blur,
+                !reduce_transparency
+            );
+            let prepared = &cx.global::<InstalledChrome>().active;
+            let shell = prepared
+                .floating_surfaces()
+                .shell(spaceterm_ui::FloatingRole::Popover);
+            assert!(shell.backdrop_tone().a >= 0.95);
+            assert!(
+                prepared
+                    .colors
+                    .text
+                    .contrast_ratio(prepared.colors.background)
+                    >= 7.0
+            );
         });
         platform.set_reduce_transparency(false);
         platform.set_increase_contrast(false);
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(current(cx).chrome.composition, before.chrome.composition));
     }
+}
+
+#[gpui::test]
+fn non_material_accessibility_facts_are_retained_and_reprepare_chrome(cx: &mut TestAppContext) {
+    let (_settings, platform) = start(cx);
+    let before = cx.update(|cx| Arc::clone(&cx.global::<InstalledChrome>().active));
+
+    platform.set_show_borders(true);
+    platform.set_differentiate_without_color(true);
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        let resolved = current(cx);
+        assert_eq!(
+            (
+                resolved.chrome.composition.capabilities.reduce_transparency,
+                resolved.chrome.composition.capabilities.increase_contrast,
+                resolved.chrome.composition.capabilities.show_borders,
+                resolved.chrome.composition.capabilities.reduce_motion,
+                resolved
+                    .chrome
+                    .composition
+                    .capabilities
+                    .differentiate_without_color,
+            ),
+            (false, false, true, false, true)
+        );
+        assert!(!Arc::ptr_eq(
+            &before,
+            &cx.global::<InstalledChrome>().active
+        ));
+    });
+}
+
+#[gpui::test]
+fn window_activity_selects_an_immutable_prepared_variant_without_changing_settings(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::ControlWindowActivity::{Active, Inactive};
+    let (_, platform) = start(cx);
+    let resolved = cx.update(|cx| current(cx));
+    cx.update(|cx| {
+        let active = Active.with_scope(|| super::super::appearance::shared_chrome(cx));
+        let inactive = Inactive.with_scope(|| super::super::appearance::shared_chrome(cx));
+        assert!(active.active);
+        assert!(!inactive.active);
+        assert_eq!(
+            inactive.colors.primary_background,
+            inactive.colors.element_background
+        );
+        assert_eq!(inactive.colors.focus_ring.a, 0);
+        assert_eq!(active.colors.error, inactive.colors.error);
+        assert_eq!(
+            active.colors.element_disabled,
+            inactive.colors.element_disabled
+        );
+        assert_eq!(
+            active.colors.element_disabled_foreground,
+            inactive.colors.element_disabled_foreground
+        );
+        assert!(Arc::ptr_eq(&resolved, &current(cx)));
+        assert_eq!(super::super::appearance::chrome(cx), active.as_ref());
+        assert!(Arc::ptr_eq(&active, &cx.global::<InstalledChrome>().active));
+        assert!(Arc::ptr_eq(
+            &inactive,
+            &cx.global::<InstalledChrome>().inactive
+        ));
+    });
+    platform.set_show_borders(true);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        for variant in [Active, Inactive] {
+            variant.with_scope(|| {
+                let chrome = super::super::appearance::chrome(cx);
+                assert!(chrome.capabilities.show_borders);
+                assert!(
+                    chrome
+                        .colors
+                        .ghost_element_border
+                        .contrast_ratio(chrome.colors.background)
+                        >= 3.0
+                );
+            });
+        }
+    });
+}
+
+#[cfg(feature = "appearance-exerciser")]
+#[gpui::test]
+fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values(
+    cx: &mut TestAppContext,
+) {
+    let (settings, platform) = start(cx);
+    platform.set_native_window_transparency_supported(true);
+    platform.set_increase_contrast(true);
+    platform.set_show_borders(true);
+    platform.set_reduced_motion(true);
+    cx.run_until_parked();
+    let settings_before = settings.export_document().unwrap();
+    let generation_before = cx.update(|cx| current(cx).generation);
+
+    cx.update(|cx| {
+        set_accessibility_preview(AccessibilityPreviewFact::IncreaseContrast, false, cx).unwrap();
+        set_accessibility_preview(AccessibilityPreviewFact::ShowBorders, false, cx).unwrap();
+        set_accessibility_preview(
+            AccessibilityPreviewFact::DifferentiateWithoutColor,
+            true,
+            cx,
+        )
+        .unwrap();
+    });
+
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.native_window_transparency,
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, false, false, true, true)
+        );
+        assert!(current(cx).generation > generation_before);
+    });
+    assert_eq!(settings.export_document().unwrap(), settings_before);
+    assert_eq!(
+        (
+            platform.accessibility_display_options(),
+            platform.prefers_reduced_motion(),
+            platform.supports_native_window_transparency(),
+        ),
+        (
+            crate::platform::appearance::AccessibilityDisplayOptions {
+                reduce_transparency: false,
+                increase_contrast: true,
+                show_borders: true,
+                differentiate_without_color: false,
+            },
+            true,
+            true,
+        )
+    );
+
+    cx.update(|cx| {
+        set_accessibility_preview(AccessibilityPreviewFact::ReduceTransparency, true, cx).unwrap();
+        set_accessibility_preview(AccessibilityPreviewFact::ReduceMotion, false, cx).unwrap();
+    });
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, false, false, true)
+        );
+    });
+
+    cx.update(|cx| reset_accessibility_preview(cx).unwrap());
+
+    cx.update(|cx| {
+        let capabilities = current(cx).chrome.composition.capabilities;
+        assert_eq!(
+            (
+                capabilities.native_window_transparency,
+                capabilities.reduce_transparency,
+                capabilities.increase_contrast,
+                capabilities.show_borders,
+                capabilities.reduce_motion,
+                capabilities.differentiate_without_color,
+            ),
+            (true, false, true, true, true, false)
+        );
+    });
 }
 
 #[gpui::test]
@@ -211,6 +409,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
                 spaceterm_ui::ProgressMotion::Reduced,
             )
         );
+        assert!(current(cx).chrome.composition.capabilities.reduce_motion);
     });
 
     platform.set_reduced_motion(false);
@@ -224,6 +423,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
                 spaceterm_ui::ProgressMotion::Standard,
             )
         );
+        assert!(!current(cx).chrome.composition.capabilities.reduce_motion);
     });
 }
 
@@ -276,7 +476,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     let (settings, platform) = start(cx);
     let (chrome_before, controls_before) = cx.update(|cx| {
         (
-            Arc::clone(&cx.global::<InstalledChrome>().0),
+            Arc::clone(&cx.global::<InstalledChrome>().active),
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
                 .installed_generation(),
         )
@@ -290,7 +490,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     cx.update(|cx| {
         assert!(Arc::ptr_eq(
             &chrome_before,
-            &cx.global::<InstalledChrome>().0
+            &cx.global::<InstalledChrome>().active
         ));
         assert_eq!(
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
@@ -392,7 +592,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
     ] {
         // Compact density rests exactly on the host anchor.
         cx.update(|cx| {
-            cx.set_global(InstalledChrome(std::sync::Arc::new(
+            cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
                     text_scale: 1.0,
                     spacing_scale: 1.0,
@@ -413,7 +613,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
 
         // Comfortable density moves the row down by half of the height growth.
         cx.update(|cx| {
-            cx.set_global(InstalledChrome(std::sync::Arc::new(
+            cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
                     text_scale: 1.0,
                     spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
@@ -473,7 +673,7 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
             TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
             TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
         ));
-        cx.set_global(InstalledChrome(std::sync::Arc::new(
+        cx.set_global(InstalledChrome::single(std::sync::Arc::new(
             crate::ui::appearance::ChromeAppearance {
                 text_scale: 1.0,
                 spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(

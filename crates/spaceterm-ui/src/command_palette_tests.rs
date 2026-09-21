@@ -32,19 +32,31 @@ fn test_theme() -> CommandPaletteTheme {
 }
 
 #[test]
+fn density_scales_palette_bounds_but_not_accessory_radius() {
+    let theme = test_theme();
+    let comfortable = theme.scaled_metrics(1.0, 1.25);
+
+    assert!(comfortable.metrics.row_height > theme.metrics.row_height);
+    assert_eq!(
+        comfortable.metrics.accessory_radius,
+        theme.metrics.accessory_radius
+    );
+}
+
+#[test]
 fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
     let paint = test_theme().paint;
 
     assert_eq!(
-        paint.row_paint(false, false, false).foreground,
+        paint.row_paint(false, false, false, true).foreground,
         paint.foreground
     );
     assert_eq!(
-        paint.row_paint(false, true, false).foreground,
+        paint.row_paint(false, true, false, true).foreground,
         paint.selected_foreground
     );
     assert_eq!(
-        paint.row_paint(true, true, false).foreground,
+        paint.row_paint(true, true, false, true).foreground,
         paint.disabled
     );
 }
@@ -64,7 +76,7 @@ fn selected_hovered_row_should_preserve_the_complete_combined_paint() {
         row(0x808080ff),
     ));
 
-    assert_eq!(paint.row_paint(false, true, true), selected_hovered);
+    assert_eq!(paint.row_paint(false, true, true, true), selected_hovered);
 }
 
 fn items() -> Vec<CommandPaletteItem<u8>> {
@@ -138,6 +150,37 @@ fn presented_results_should_own_section_order_and_match_mapping() {
             ][..],
             Some(5),
         )
+    );
+}
+
+#[test]
+fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
+    let items = vec![
+        CommandPaletteItem::new(1, "SSH host list is incomplete").section("SSH Config Warning"),
+        CommandPaletteItem::new(2, "dev.example.com"),
+        CommandPaletteItem::new(3, "prod.example.com"),
+    ];
+    let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
+    let results = PresentedResults::new(&items, &matches);
+
+    assert_eq!(
+        results.rows(),
+        &[
+            PaletteRow::Section("SSH Config Warning".into()),
+            PaletteRow::Item {
+                position: 0,
+                single_line: true,
+            },
+            PaletteRow::Separator,
+            PaletteRow::Item {
+                position: 1,
+                single_line: true,
+            },
+            PaletteRow::Item {
+                position: 2,
+                single_line: true,
+            },
+        ]
     );
 }
 
@@ -484,6 +527,26 @@ fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut Test
         .expect("the open custom row icon was not refreshed");
     assert_eq!(default_icon.size, gpui::size(default_size, default_size));
     assert_eq!(scaled_icon.size, gpui::size(scaled_size, scaled_size));
+}
+
+#[test]
+fn role_line_boxes_scale_independently_from_fixed_palette_extents() {
+    let metrics = CommandPaletteMetrics::new(px(420.0), px(48.0))
+        .single_line_row_height(px(32.0))
+        .editor_height(px(42.0))
+        .section_spacing(px(20.0), px(9.0))
+        .footer_height(px(30.0))
+        .text_geometry(px(18.0), px(15.0), px(21.0), px(14.0))
+        .scaled(1.5, 1.0);
+
+    assert_eq!(metrics.body_line_height, px(27.0));
+    assert_eq!(metrics.secondary_line_height, px(22.5));
+    assert_eq!(metrics.section_line_height, px(31.5));
+    assert_eq!(metrics.input_height, px(51.0));
+    assert_eq!(metrics.row_height, px(64.5));
+    assert_eq!(metrics.single_line_row_height, px(41.0));
+    assert_eq!(metrics.section_height, px(31.5));
+    assert_eq!(metrics.footer_height, px(37.5));
 }
 
 #[gpui::test]
@@ -1456,6 +1519,48 @@ fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn applying_sectioned_results_should_keep_the_first_heading_above_initial_selection(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            (1..=8)
+                .map(|id| CommandPaletteItem::new(id, format!("Host {id}")).section("SSH config"))
+                .collect(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+    let (heading, selected, viewport) = palette.read_with(cx, |palette, _| {
+        (
+            palette.list.bounds_for_item(0),
+            palette.list.bounds_for_item(1),
+            palette.list.viewport_bounds(),
+        )
+    });
+    assert!(
+        heading.is_some_and(|bounds| {
+            bounds.top() >= viewport.top() && bounds.bottom() <= viewport.bottom()
+        }),
+        "the first section heading must remain visible above the initial selection"
+    );
+    assert!(
+        selected.is_some_and(|bounds| {
+            bounds.top() >= viewport.top() && bounds.bottom() <= viewport.bottom()
+        }),
+        "the initial selection must remain visible"
+    );
+}
+
 #[test]
 fn scored_queries_should_preserve_contiguous_section_order() {
     let items = vec![
@@ -2371,11 +2476,8 @@ fn modal_palette_window(
                     rgba(0xffffffff),
                     rgba(0xb0b0b8ff),
                     rgba(0x5599ffff),
-                    rgba(0x5599ff22),
                     rgba(0xffbb55ff),
-                    rgba(0xffbb5522),
                     rgba(0xff6677ff),
-                    rgba(0xff667722),
                 ),
                 crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
             ),

@@ -115,6 +115,8 @@ fn retired_override_collisions_merge_by_field_with_current_ids_winning() {
         ChromeColorOverrides {
             background: Some(Color::rgb(0x101112)),
             text: Some(Color::rgb(0x202122)),
+            progress_track: Some(Color::rgb(0x212223)),
+            navigation_selected_background: Some(Color::rgb(0x242526)),
             ..Default::default()
         },
     );
@@ -123,6 +125,7 @@ fn retired_override_collisions_merge_by_field_with_current_ids_winning() {
         ChromeColorOverrides {
             text: Some(Color::rgb(0x303132)),
             border: Some(Color::rgb(0x404142)),
+            navigation_selected_background: Some(Color::rgb(0x434445)),
             ..Default::default()
         },
     );
@@ -186,6 +189,11 @@ fn retired_override_collisions_merge_by_field_with_current_ids_winning() {
     assert_eq!(chrome.background, Some(Color::rgb(0x101112)));
     assert_eq!(chrome.text, Some(Color::rgb(0x303132)));
     assert_eq!(chrome.border, Some(Color::rgb(0x404142)));
+    assert_eq!(chrome.progress_track, Some(Color::rgb(0x212223)));
+    assert_eq!(
+        chrome.navigation_selected_background,
+        Some(Color::rgb(0x434445))
+    );
 
     assert!(
         !loaded
@@ -659,6 +667,42 @@ fn native_tab_separator_survives_export_and_reinstall_apart_from_outlined_contro
         before.chrome.provenance["tab_separator"],
         ColorProvenance::Authored
     );
+
+    let exported = export_schemes(&catalog, &[(SchemeKind::Chrome, scheme.id.clone())]).unwrap();
+    let reparsed = parse_color_document(exported.as_bytes()).unwrap();
+    assert_eq!(reparsed.schemes, parsed.schemes);
+    let mut fresh = SchemeCatalog::default();
+    let installed = fresh
+        .install_batch(&reparsed.schemes, fresh.revision(), &BTreeSet::new())
+        .unwrap();
+    assert_eq!(
+        selected(&fresh, installed[0].clone(), Appearance::Dark)
+            .chrome
+            .colors,
+        before.chrome.colors
+    );
+}
+
+#[test]
+fn native_support_roles_survive_definition_export_and_reinstall_with_authored_provenance() {
+    let bytes = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.support-roles","name":"Support roles","appearance":"dark","colors":{"progress_track":"#101112","progress_indicator":"#202122","focus_ring":"#303132","navigation_selected_background":"#404142","navigation_selected_foreground":"#505152","navigation_selected_secondary":"#606162","navigation_selected_icon":"#707172"}}]}"##;
+    let parsed = parse_color_document(bytes).unwrap();
+    let CustomScheme::Chrome(scheme) = &parsed.schemes[0] else {
+        panic!()
+    };
+    let catalog = SchemeCatalog::from_custom_schemes(&parsed.schemes).unwrap();
+    let before = selected(&catalog, scheme.id.clone(), Appearance::Dark);
+    for role in [
+        "progress_track",
+        "progress_indicator",
+        "focus_ring",
+        "navigation_selected_background",
+        "navigation_selected_foreground",
+        "navigation_selected_secondary",
+        "navigation_selected_icon",
+    ] {
+        assert_eq!(before.chrome.provenance[role], ColorProvenance::Authored);
+    }
 
     let exported = export_schemes(&catalog, &[(SchemeKind::Chrome, scheme.id.clone())]).unwrap();
     let reparsed = parse_color_document(exported.as_bytes()).unwrap();

@@ -9,14 +9,17 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px, rgba};
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonTheme, ButtonVariant, Icon, IconButton, IconName, Tooltip,
-    highlight_ranges,
+    Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
 
 #[cfg(test)]
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
+use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::{IconRole, InteractiveIconRole};
+use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, TextRole};
 
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
@@ -48,37 +51,54 @@ pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonV
 /// The width every scheme's color strip takes, so the names beside them share one column.
 const SWATCH_WIDTH: f32 = 88.0;
 
-/// The Settings type ramp.
-///
-/// Five sizes, each a clear step from the next, and every role on every page takes one of them.
-/// The ramp is monotone in rank: a page outranks a run of rows, a run outranks the settings inside
-/// it, and a setting outranks the guidance beside it. Nothing chooses a size of its own, so a new
-/// row cannot invent a fifth step and no two roles can land close enough to read as the same
-/// thing.
-pub(super) mod text {
-    /// The page's name, set as a large title at the head of the content surface.
-    pub(crate) const TITLE: f32 = 22.0;
-    /// The title of one run of related rows.
-    ///
-    /// It is larger and heavier than the labels under it: a heading that a label outweighs is not
-    /// a heading, and with nothing ruled off, rank is the only thing telling a reader where a run
-    /// begins.
-    pub(crate) const GROUP: f32 = 13.0;
-    /// One setting's label, one control's value, and one scheme's name.
-    pub(crate) const BODY: f32 = 12.0;
-    /// Guidance, metadata, and status: everything that explains something else.
-    pub(crate) const SMALL: f32 = 11.0;
-    /// A state a row carries, such as the scheme in use.
-    pub(crate) const BADGE: f32 = 10.0;
-}
-
 /// The horizontal breathing room every row keeps inside the card that holds it.
 ///
 /// Rows carry it rather than the card, so a fill a row paints, such as the one Settings Search
 /// leaves on the row it reveals, reaches the card's own edges while the text stays clear of them.
 /// The content column gives back exactly this much padding, so a group's title, a section's
 /// heading, and a row's label all start on one edge.
-pub(super) const ROW_INSET: f32 = 12.0;
+const COMPACT_ROW_HORIZONTAL_INSET: f32 = 12.0;
+const COMFORTABLE_ROW_HORIZONTAL_INSET: f32 = 14.0;
+const COMPACT_ROW_VERTICAL_INSET: f32 = 8.0;
+const COMFORTABLE_ROW_VERTICAL_INSET: f32 = 11.0;
+
+pub(super) fn row_horizontal_inset(appearance: &ChromeAppearance) -> gpui::Pixels {
+    px(if appearance.spacing_scale > 1.0 {
+        COMFORTABLE_ROW_HORIZONTAL_INSET
+    } else {
+        COMPACT_ROW_HORIZONTAL_INSET
+    })
+}
+
+/// Padding inside the card's border that leaves the requested visible inset from its outer edge.
+fn row_horizontal_padding(appearance: &ChromeAppearance) -> gpui::Pixels {
+    row_horizontal_inset(appearance) - px(HAIRLINE)
+}
+
+fn row_vertical_inset(appearance: &ChromeAppearance) -> gpui::Pixels {
+    px(if appearance.spacing_scale > 1.0 {
+        COMFORTABLE_ROW_VERTICAL_INSET
+    } else {
+        COMPACT_ROW_VERTICAL_INSET
+    })
+}
+
+fn stepper_readout_min_width(appearance: &ChromeAppearance) -> gpui::Pixels {
+    px(if appearance.spacing_scale > 1.0 {
+        48.0
+    } else {
+        44.0
+    })
+}
+
+fn stepper_separator(appearance: &ChromeAppearance, enabled: bool) -> Color {
+    let colors = &appearance.card_controls.colors;
+    if enabled {
+        colors.input_border
+    } else {
+        colors.input_disabled_border
+    }
+}
 
 /// The widest a run of explanatory prose is allowed to set.
 ///
@@ -103,8 +123,10 @@ const RESET_SIZE: ButtonSize = ButtonSize::Compact;
 /// moving the control centered beside it. The width comes from the control theme rather than a
 /// number of its own, so the slot scales with the button it holds instead of letting a larger
 /// button spill into the gap beside the label.
-fn reset_slot_width(cx: &App) -> gpui::Pixels {
-    cx.global::<ButtonTheme>().icon_button_size(RESET_SIZE)
+fn reset_slot_width(appearance: &ChromeAppearance) -> gpui::Pixels {
+    appearance
+        .icons
+        .interactive_target_size(InteractiveIconRole::Control)
 }
 
 /// The height of one line of a label, which the reset beside it is centered on.
@@ -112,7 +134,7 @@ fn reset_slot_width(cx: &App) -> gpui::Pixels {
 /// This is the default text line box at the label's size. The reset shares that one line instead
 /// of standing taller than it, and a label that wraps keeps the reset on its first line.
 fn label_line_height(appearance: &ChromeAppearance) -> gpui::Pixels {
-    appearance.text_size(text::BODY * 1.618)
+    appearance.typography.style(TextRole::Body).line_height
 }
 
 /// How a row arranges its label and its content.
@@ -127,18 +149,11 @@ pub(super) enum SettingsRowLayout {
     Full,
 }
 
-/// The radius and vertical padding of the card one run of rows rests on.
-///
-/// The radius is shared with the notices that sit in the same column, so a page of cards and the
-/// warnings above them are cut to one corner.
-pub(super) const CARD_RADIUS: f32 = 10.0;
-const CARD_PADDING_Y: f32 = 4.0;
-
 /// One titled run of related rows.
 ///
 /// The group uses the document surface and its text pair. Its title and surrounding space carry
-/// grouping without an enclosing outline, so the only strokes on a page belong to controls. The
-/// card remains as a clip for revealed rows.
+/// grouping. The fixed card edge and inset separators keep related rows legible without adding a
+/// shadow, and the card clips revealed-row fills to its outer corners.
 pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
@@ -154,11 +169,39 @@ impl SettingsGroup {
         }
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+    pub(super) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
+        let appearance = &settings.chrome;
         let selector = self.selector.clone();
         let title_selector = format!("{selector}-title");
-        let radius = appearance.spacing(CARD_RADIUS);
+        let radius = RadiusRole::Card.pixels();
         let card_selector = format!("{selector}-card");
+        let card_background = settings.surface(SettingsSurfaceRole::Card).paint;
+        let card_edge = settings.card_edge();
+        let row_separator = settings.separator(SettingsSurfaceRole::Card);
+        let row_inset = row_horizontal_padding(appearance);
+        let separator_selector = card_selector.clone();
+        let rows = self
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let separator_selector = separator_selector.clone();
+                div().relative().w_full().child(row).when(index > 0, |row| {
+                    row.child(
+                        div()
+                            .debug_selector(move || {
+                                format!("{separator_selector}-separator-{index}")
+                            })
+                            .absolute()
+                            .top_0()
+                            .left(row_inset)
+                            .right_0()
+                            .h(px(HAIRLINE))
+                            .bg(gpui_color(row_separator)),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         div()
             .debug_selector(move || selector.clone())
             .flex()
@@ -169,11 +212,10 @@ impl SettingsGroup {
                 // The title keeps the rows' inset so it starts on their left edge, and the inset
                 // sits on a wrapper so the title's own box is the type it sets, not the padding
                 // around it.
-                div().px(appearance.spacing(ROW_INSET)).child(
+                div().px(row_inset + px(HAIRLINE)).child(
                     div()
                         .debug_selector(move || title_selector.clone())
-                        .font(appearance.emphasis.clone())
-                        .text_size(appearance.text_size(text::GROUP))
+                        .chrome_text(appearance.typography.style(TextRole::Section))
                         .text_color(gpui_color(appearance.colors.text))
                         .child(self.title),
                 ),
@@ -186,17 +228,15 @@ impl SettingsGroup {
                         .flex()
                         .flex_col()
                         .w_full()
-                        .py(appearance.spacing(CARD_PADDING_Y))
                         .rounded(radius)
+                        .border(px(HAIRLINE))
+                        .border_color(gpui_color(card_edge))
                         // A revealed row fills to the card's own edges, so the card clips it back to
                         // its corners instead of letting a square fill escape a rounded shape.
                         .overflow_hidden()
                         // A card is a surface resting on the page's base, lighter or brighter than it.
-                        .bg(gpui_color(appearance.surface(
-                            crate::appearance::SurfaceRole::Surface,
-                            appearance.colors.elevated_surface_background,
-                        )))
-                        .children(self.rows),
+                        .bg(gpui_color(card_background))
+                        .children(rows),
                 ),
             )
     }
@@ -274,29 +314,35 @@ impl SettingsRow {
         self,
         appearance: &ChromeAppearance,
         window: &Window,
-        cx: &App,
+        _cx: &App,
     ) -> impl IntoElement {
         let selector = self.selector;
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let (foreground, secondary) = if self.highlighted {
             (
-                appearance.colors.row_selected_foreground,
-                appearance.colors.row_selected_secondary,
+                colors.row_selected_foreground,
+                colors.row_selected_secondary,
             )
         } else {
-            (appearance.colors.text, appearance.colors.text_muted)
+            (colors.text, colors.text_muted)
         };
         let matched = if self.highlighted {
-            appearance.colors.row_selected_match
+            colors.row_selected_match
         } else {
-            appearance.colors.row_match
+            colors.row_match
         };
         let label_selector = format!("{selector}-label");
         let reset_slot_selector = format!("{selector}-reset-slot");
+        let label_role = TextRole::Body;
         // Text left to size itself inside a row is measured once without a width and keeps that
         // answer, so it would neither wrap nor stay put. The label instead starts from the width
         // of its one line and gives up only what the reset's slot and the control need, and the
         // width it is left with is the one it wraps at.
-        let label_width = appearance.measure(self.label, text::BODY, window).ceil();
+        let label_width = appearance
+            .typography
+            .measure(label_role, self.label, window)
+            .ceil();
+        let reset_slot_width = reset_slot_width(appearance);
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         let description_selector = format!("{selector}-description");
@@ -308,7 +354,7 @@ impl SettingsRow {
                     let description_selector = description_selector.clone();
                     move || description_selector.clone()
                 })
-                .text_size(appearance.text_size(text::SMALL))
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(secondary))
                 .whitespace_normal()
                 .child(description)
@@ -323,9 +369,16 @@ impl SettingsRow {
             .description
             .as_ref()
             .filter(|_| !above)
-            .map(|description| appearance.measure(description, text::SMALL, window).ceil())
+            .map(|description| {
+                appearance
+                    .typography
+                    .measure(TextRole::Secondary, description, window)
+                    .ceil()
+            })
             .map_or(px(0.0), |width| {
-                width.max(label_width + appearance.spacing(RESET_GAP) + reset_slot_width(cx))
+                let label_with_reset =
+                    label_width + appearance.spacing(RESET_GAP) + reset_slot_width;
+                width.max(label_with_reset)
             });
         let label_ranges = highlight_ranges(self.label, &self.matched_indices);
         let label = (!full).then(|| {
@@ -353,7 +406,7 @@ impl SettingsRow {
                                 .flex_basis(label_width)
                                 .flex_shrink()
                                 .min_w_0()
-                                .text_size(appearance.text_size(text::BODY))
+                                .chrome_text(appearance.typography.style(label_role))
                                 .text_color(gpui_color(foreground))
                                 .whitespace_normal()
                                 .child(highlighted_label(self.label, &label_ranges, matched)),
@@ -365,7 +418,7 @@ impl SettingsRow {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .w(reset_slot_width(cx))
+                                .w(reset_slot_width)
                                 .h(label_line_height(appearance))
                                 .children(self.reset),
                         ),
@@ -400,9 +453,8 @@ impl SettingsRow {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(3.0))
-            .px(appearance.spacing(ROW_INSET))
-            .py(appearance.spacing(8.0))
-            .rounded(px(6.0))
+            .px(row_horizontal_padding(appearance))
+            .py(row_vertical_inset(appearance))
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(highlighted_row_background(appearance)))
             })
@@ -413,10 +465,11 @@ impl SettingsRow {
 }
 
 pub(super) fn highlighted_row_background(appearance: &ChromeAppearance) -> Color {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     appearance.materials.paint(
         crate::appearance::SurfaceRole::Surface,
-        appearance.colors.elevated_surface_background,
-        appearance.colors.row_selected_background,
+        colors.elevated_surface_background,
+        colors.row_selected_background,
     )
 }
 
@@ -455,17 +508,15 @@ pub(super) fn section_heading(
             div()
                 .debug_selector(move || format!("{selector}-title"))
                 .truncate()
-                .font(appearance.heading.clone())
-                .text_size(appearance.text_size(text::TITLE))
-                .line_height(gpui::relative(1.2))
+                .chrome_text(appearance.typography.style(TextRole::Title))
                 .text_color(gpui_color(appearance.colors.text))
                 .child(title),
         )
         .child(
             div()
                 .debug_selector(move || format!("{selector}-description"))
-                .max_w(appearance.text_size(PROSE_MEASURE))
-                .text_size(appearance.text_size(text::BODY))
+                .max_w(appearance.spacing(PROSE_MEASURE))
+                .chrome_text(appearance.typography.style(TextRole::Body))
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .whitespace_normal()
                 .child(description),
@@ -479,6 +530,7 @@ pub(super) fn section_heading(
 pub(super) fn reset_button(
     selector: String,
     setting: &'static str,
+    icon_size: gpui::Pixels,
     enabled: bool,
     on_reset: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -486,7 +538,7 @@ pub(super) fn reset_button(
     IconButton::new(
         icon_selector,
         SharedString::from(format!("Reset {setting} to default")),
-        move |foreground| Icon::new(IconName::RotateCcw, px(11.0), foreground).into_any_element(),
+        move |foreground| Icon::new(IconName::RotateCcw, icon_size, foreground).into_any_element(),
     )
     .variant(ButtonVariant::Ghost)
     .size(RESET_SIZE)
@@ -553,16 +605,20 @@ impl Stepper {
     }
 
     pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+        let text_style = appearance.typography.style(TextRole::Body).tabular();
+        let colors = &appearance.card_controls.colors;
         StepperElement {
-            width: appearance.text_size(132.0),
-            height: appearance.height(28.0, 12.0),
-            spacing: appearance.spacing(2.0),
-            font: appearance.tabular(),
-            font_size: appearance.text_size(text::BODY),
+            readout_min_width: stepper_readout_min_width(appearance),
+            control_height: appearance.typography.style(TextRole::Body).line_height
+                + appearance.spacing(12.0),
+            gap: appearance.spacing(8.0),
+            text_style,
+            icon_size: appearance.icons.metrics(IconRole::Control).glyph_size,
+            separator: gpui_color(stepper_separator(appearance, self.enabled)),
             foreground: gpui_color(if self.enabled {
-                appearance.colors.input_text
+                colors.input_text
             } else {
-                appearance.colors.input_disabled_text
+                colors.input_disabled_text
             }),
             control: self,
         }
@@ -572,11 +628,12 @@ impl Stepper {
 #[derive(IntoElement)]
 struct StepperElement {
     control: Stepper,
-    width: gpui::Pixels,
-    height: gpui::Pixels,
-    spacing: gpui::Pixels,
-    font: gpui::Font,
-    font_size: gpui::Pixels,
+    readout_min_width: gpui::Pixels,
+    control_height: gpui::Pixels,
+    gap: gpui::Pixels,
+    text_style: ChromeTextStyle,
+    icon_size: gpui::Pixels,
+    separator: Rgba,
     foreground: Rgba,
 }
 
@@ -584,6 +641,8 @@ impl gpui::RenderOnce for StepperElement {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let control = self.control;
         let accessibility_name = control.accessibility_name;
+        let button_extent = self.control_height;
+        let icon_size = self.icon_size;
         let step = |selector: String,
                     verb: &'static str,
                     icon: IconName,
@@ -593,10 +652,10 @@ impl gpui::RenderOnce for StepperElement {
             IconButton::new(
                 SharedString::from(selector.clone()),
                 SharedString::from(format!("{verb} {accessibility_name}")),
-                move |foreground| Icon::new(icon, px(11.0), foreground).into_any_element(),
+                move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
             )
             .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Compact)
+            .size(ButtonSize::Regular)
             .disabled(!enabled)
             .tab_stop(true)
             .debug_selector(selector)
@@ -607,53 +666,69 @@ impl gpui::RenderOnce for StepperElement {
             })
         };
         let selector = control.selector;
-        spaceterm_ui::field_surface(
-            selector,
-            spaceterm_ui::FieldState::default().disabled(!control.enabled),
-            cx,
-        )
-        .debug_selector(move || selector.to_owned())
-        .flex()
-        .flex_row()
-        .items_center()
-        .flex_none()
-        .w(self.width)
-        .gap(self.spacing)
-        .px(self.spacing)
-        .h(self.height)
-        .rounded(px(6.0))
-        .child(step(
-            format!("{selector}-decrease"),
-            "Decrease",
-            IconName::Minus,
-            -1,
-            control.enabled && control.can_decrease,
-            control.on_step.clone(),
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_align(gpui::TextAlign::Center)
-                // Tabular figures, so the readout holds still while a step runs: the digits of
-                // 9 and 10, or of 1.11 and 1.2, occupy the same width.
-                .font(self.font)
-                .text_size(self.font_size)
-                .text_color(self.foreground)
-                .debug_selector({
-                    let value_selector = format!("{selector}-value");
-                    move || value_selector.clone()
-                })
-                .child(control.value),
-        )
-        .child(step(
-            format!("{selector}-increase"),
-            "Increase",
-            IconName::Plus,
-            1,
-            control.enabled && control.can_increase,
-            control.on_step,
-        ))
+        div()
+            .debug_selector(move || selector.to_owned())
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .gap(self.gap)
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(self.readout_min_width)
+                    .text_align(gpui::TextAlign::Center)
+                    // Tabular figures, so the readout holds still while a step runs: the digits of
+                    // 9 and 10, or of 1.11 and 1.2, occupy the same width.
+                    .chrome_text(&self.text_style)
+                    .text_color(self.foreground)
+                    .debug_selector({
+                        let value_selector = format!("{selector}-value");
+                        move || value_selector.clone()
+                    })
+                    .child(control.value),
+            )
+            .child(
+                spaceterm_ui::field_surface(
+                    SharedString::from(format!("{selector}-buttons")),
+                    spaceterm_ui::FieldState::default().disabled(!control.enabled),
+                    cx,
+                )
+                .debug_selector(move || format!("{selector}-buttons"))
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .w(button_extent * 2.0)
+                .h(button_extent)
+                .rounded(RadiusRole::Control.pixels())
+                .child(step(
+                    format!("{selector}-decrease"),
+                    "Decrease",
+                    IconName::Minus,
+                    -1,
+                    control.enabled && control.can_decrease,
+                    control.on_step.clone(),
+                ))
+                .child(step(
+                    format!("{selector}-increase"),
+                    "Increase",
+                    IconName::Plus,
+                    1,
+                    control.enabled && control.can_increase,
+                    control.on_step,
+                ))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(button_extent)
+                        .w(px(HAIRLINE))
+                        .bg(self.separator),
+                ),
+            )
     }
 }
 
@@ -666,22 +741,31 @@ pub(super) fn swatch_strip(
     swatches: &[Color],
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+    let background = appearance.materials.paint(
+        crate::appearance::SurfaceRole::Surface,
+        colors.elevated_surface_background,
+        colors.element_background,
+    );
+    let border = appearance
+        .materials
+        .edge(colors.element_background, colors.border);
     div()
         .debug_selector(move || selector.clone())
         .flex()
         .flex_row()
         .flex_none()
         .items_center()
-        .w(appearance.text_size(SWATCH_WIDTH))
-        .h(appearance.text_size(14.0))
-        .rounded(px(4.0))
+        .w(appearance.spacing(SWATCH_WIDTH))
+        .h(appearance.spacing(14.0))
+        .rounded(RadiusRole::ControlSmall.pixels())
         .overflow_hidden()
         // A strip is bounded by a hairline rather than left to its own colors: a scheme is free to
         // open on a near-background color, and the built-in dark scheme does, which would otherwise
         // leave the strip looking short of the column every other strip fills.
-        .border_1()
-        .border_color(gpui_color(appearance.colors.border))
-        .bg(gpui_color(appearance.colors.element_background))
+        .border(px(HAIRLINE))
+        .border_color(gpui_color(border))
+        .bg(gpui_color(background))
         .children(
             swatches
                 .iter()
@@ -698,19 +782,17 @@ pub(super) fn badge(
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
+    let pair = appearance.semantic_text_pairs.badge;
     div()
         .flex_none()
         .flex()
         .items_center()
-        .h(appearance.text_size(16.0))
+        .h(appearance.spacing(16.0))
         .px(appearance.spacing(6.0))
-        .rounded(px(4.0))
-        .bg(gpui_color(appearance.surface(
-            crate::appearance::SurfaceRole::Surface,
-            appearance.colors.badge_background,
-        )))
-        .text_size(appearance.text_size(text::BADGE))
-        .text_color(gpui_color(appearance.colors.badge_foreground))
+        .rounded(RadiusRole::ControlSmall.pixels())
+        .bg(gpui_color(pair.background))
+        .chrome_text(appearance.typography.style(TextRole::Badge))
+        .text_color(gpui_color(pair.primary))
         .child(label.into())
 }
 
@@ -732,7 +814,7 @@ pub(super) fn action_button(
 
 #[cfg(test)]
 mod tests {
-    use super::text;
+    use super::*;
 
     #[test]
     fn field_action_preserves_a_light_field_and_opposite_hover_paint() {
@@ -764,24 +846,41 @@ mod tests {
         );
     }
 
-    /// The ramp is only a hierarchy while it stays ordered, and it is edited one constant at a
-    /// time.
     #[test]
-    fn the_type_ramp_stays_ordered_by_rank() {
-        let ramp = [
-            ("title", text::TITLE),
-            ("group", text::GROUP),
-            ("body", text::BODY),
-            ("small", text::SMALL),
-            ("badge", text::BADGE),
-        ];
-        for pair in ramp.windows(2) {
-            let (outer, outer_size) = pair[0];
-            let (inner, inner_size) = pair[1];
-            assert!(
-                outer_size > inner_size,
-                "{outer} should set above {inner}, got {outer_size} over {inner_size}"
-            );
-        }
+    fn stepper_divider_uses_materialized_card_field_state() {
+        let mut appearance = ChromeAppearance::default();
+        appearance.card_controls.reference.input_border = Color::rgb(0xabcdef);
+        appearance.card_controls.colors.input_border = Color::rgba(0xffffff18);
+        appearance.card_controls.colors.input_disabled_border = Color::rgba(0xffffff08);
+        assert_eq!(
+            super::stepper_separator(&appearance, true),
+            Color::rgba(0xffffff18)
+        );
+        assert_eq!(
+            super::stepper_separator(&appearance, false),
+            Color::rgba(0xffffff08)
+        );
+    }
+
+    #[test]
+    fn grouped_row_geometry_uses_exact_density_insets_and_a_fixed_card_radius() {
+        let compact = ChromeAppearance {
+            spacing_scale: 1.0,
+            ..ChromeAppearance::default()
+        };
+        let comfortable = ChromeAppearance {
+            spacing_scale: 1.25,
+            ..compact.clone()
+        };
+
+        assert_eq!(row_horizontal_inset(&compact), px(12.0));
+        assert_eq!(row_horizontal_padding(&compact), px(11.0));
+        assert_eq!(row_vertical_inset(&compact), px(8.0));
+        assert_eq!(row_horizontal_inset(&comfortable), px(14.0));
+        assert_eq!(row_horizontal_padding(&comfortable), px(13.0));
+        assert_eq!(row_vertical_inset(&comfortable), px(11.0));
+        assert_eq!(stepper_readout_min_width(&compact), px(44.0));
+        assert_eq!(stepper_readout_min_width(&comfortable), px(48.0));
+        assert_eq!(RadiusRole::Card.pixels(), px(8.0));
     }
 }

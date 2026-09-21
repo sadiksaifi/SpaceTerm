@@ -7,7 +7,10 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 
-use crate::tooltip::{Tooltip, TooltipTargetVisibility};
+use crate::{
+    ControlShadow,
+    tooltip::{Tooltip, TooltipTargetVisibility},
+};
 
 pub(crate) const INTERACTION_GROUP: &str = "spaceterm-toggle";
 
@@ -112,16 +115,22 @@ pub struct TogglePaint {
     foreground: Rgba,
     border: Rgba,
     label: Rgba,
+    shadow: ControlShadow,
+    thumb_shadow: ControlShadow,
+    thumb_border: Rgba,
 }
 
 impl TogglePaint {
     /// Creates resolved indicator and label paint.
-    pub const fn new(background: Rgba, foreground: Rgba, border: Rgba, label: Rgba) -> Self {
+    pub fn new(background: Rgba, foreground: Rgba, border: Rgba, label: Rgba) -> Self {
         Self {
             background,
             foreground,
             border,
             label,
+            shadow: ControlShadow::none(),
+            thumb_shadow: ControlShadow::none(),
+            thumb_border: Rgba::default(),
         }
     }
 
@@ -278,7 +287,7 @@ impl ToggleMetrics {
             switch_width: crate::appearance::scale_metric(self.switch_width, spacing_scale),
             switch_height: crate::appearance::scale_metric(self.switch_height, spacing_scale),
             label_gap: crate::appearance::scale_metric(self.label_gap, spacing_scale),
-            checkbox_radius: crate::appearance::scale_metric(self.checkbox_radius, spacing_scale),
+            checkbox_radius: self.checkbox_radius,
             switch_inset: crate::appearance::scale_metric(self.switch_inset, spacing_scale),
             border_width: self.border_width,
             focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
@@ -322,6 +331,7 @@ pub struct ToggleTheme {
     paints: TogglePaints,
     sizes: ToggleSizes,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
 }
 
 impl ToggleTheme {
@@ -331,7 +341,50 @@ impl ToggleTheme {
             paints,
             sizes,
             focus_border,
+            focus_ring_width: px(1.0),
         }
+    }
+
+    /// Sets the focus-ring width independently of toggle borders and geometry.
+    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
+        self.focus_ring_width = width.max(px(0.0));
+        self
+    }
+
+    /// Adds the application-owned elevation treatment to toggle subparts.
+    pub fn elevation(
+        mut self,
+        track_shadow: ControlShadow,
+        track_border: Option<Rgba>,
+        thumb_shadow: ControlShadow,
+        thumb_border: Option<Rgba>,
+    ) -> Self {
+        for paints in [
+            &mut self.paints.normal,
+            &mut self.paints.hovered,
+            &mut self.paints.pressed,
+        ] {
+            for paint in [&mut paints.off, &mut paints.on] {
+                paint.thumb_shadow = thumb_shadow;
+                if let Some(border) = track_border {
+                    paint.border = border;
+                }
+                if let Some(border) = thumb_border {
+                    paint.thumb_border = border;
+                }
+            }
+        }
+        self.paints.normal.off.shadow = track_shadow;
+        self.paints.hovered.off.shadow = track_shadow;
+        for paint in [&mut self.paints.disabled.off, &mut self.paints.disabled.on] {
+            if let Some(border) = track_border {
+                paint.border = border;
+            }
+            if let Some(border) = thumb_border {
+                paint.thumb_border = border;
+            }
+        }
+        self
     }
 
     /// Returns a copy with text and spacing metrics scaled independently.
@@ -369,6 +422,7 @@ impl ToggleTheme {
             disabled: self.paints.disabled.resolve(on),
             metrics: self.sizes.resolve(size),
             focus_border: self.focus_border,
+            focus_ring_width: self.focus_ring_width,
         }
     }
 }
@@ -828,6 +882,7 @@ struct ToggleStyle {
     disabled: TogglePaint,
     metrics: ToggleMetrics,
     focus_border: Rgba,
+    focus_ring_width: Pixels,
 }
 
 #[derive(Clone, Copy)]
@@ -835,7 +890,17 @@ struct TogglePaintRefinement(TogglePaint);
 
 impl TogglePaintRefinement {
     fn indicator(self, style: StyleRefinement) -> StyleRefinement {
-        style.bg(self.0.background).border_color(self.0.border)
+        style
+            .bg(self.0.background)
+            .border_color(self.0.border)
+            .shadow(self.0.shadow.layers())
+    }
+
+    fn thumb(self, style: StyleRefinement) -> StyleRefinement {
+        style
+            .bg(self.0.foreground)
+            .border_color(self.0.thumb_border)
+            .shadow(self.0.thumb_shadow.layers())
     }
 
     fn foreground_fill(self, style: StyleRefinement) -> StyleRefinement {
@@ -928,6 +993,8 @@ fn checkbox_indicator(
         .border(metrics.border_width)
         .border_color(paint.border)
         .bg(paint.background)
+        .shadow(paint.shadow.layers())
+        .shadow_outside_only()
         .when(enabled && !keyboard_pressed, |indicator| {
             indicator
                 .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
@@ -977,6 +1044,7 @@ fn checkbox_indicator(
                 metrics.checkbox_radius,
                 metrics,
                 style.focus_border,
+                style.focus_ring_width,
                 focus_selector,
             ))
         });
@@ -1029,6 +1097,8 @@ fn switch_indicator(
         .border(metrics.border_width)
         .border_color(paint.border)
         .bg(paint.background)
+        .shadow(paint.shadow.layers())
+        .shadow_outside_only()
         .when(enabled && !keyboard_pressed, |indicator| {
             indicator
                 .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
@@ -1042,15 +1112,15 @@ fn switch_indicator(
                 .left(thumb_offset)
                 .size(thumb_extent)
                 .rounded(thumb_extent / 2.0)
+                .border(metrics.border_width)
+                .border_color(paint.thumb_border)
                 .bg(paint.foreground)
+                .shadow(paint.thumb_shadow.layers())
+                .shadow_outside_only()
                 .when(enabled && !keyboard_pressed, |thumb| {
                     thumb
-                        .group_hover(INTERACTION_GROUP, move |style| {
-                            hovered.foreground_fill(style)
-                        })
-                        .group_active(INTERACTION_GROUP, move |style| {
-                            pressed.foreground_fill(style)
-                        })
+                        .group_hover(INTERACTION_GROUP, move |style| hovered.thumb(style))
+                        .group_active(INTERACTION_GROUP, move |style| pressed.thumb(style))
                 }),
         )
         .when(focused, |indicator| {
@@ -1058,6 +1128,7 @@ fn switch_indicator(
                 radius,
                 metrics,
                 style.focus_border,
+                style.focus_ring_width,
                 focus_selector,
             ))
         });
@@ -1068,9 +1139,10 @@ fn focus_outline(
     radius: Pixels,
     metrics: ToggleMetrics,
     color: Rgba,
+    width: Pixels,
     selector: String,
 ) -> impl IntoElement {
-    let offset = metrics.focus_gap + metrics.border_width;
+    let offset = metrics.focus_gap + width;
     div()
         .debug_selector(move || selector)
         .absolute()
@@ -1079,7 +1151,7 @@ fn focus_outline(
         .bottom(-offset)
         .left(-offset)
         .rounded(radius + metrics.focus_gap)
-        .border(metrics.border_width)
+        .border(width)
         .border_color(color)
 }
 
@@ -1199,6 +1271,81 @@ mod tests {
     }
 
     #[test]
+    fn density_scales_toggle_bounds_but_not_checkbox_radius() {
+        let scaled = test_theme().scaled_metrics(1.0, 1.25);
+        let original = test_theme().resolve(ToggleSize::Regular, false).metrics;
+        let comfortable = scaled.resolve(ToggleSize::Regular, false).metrics;
+
+        assert!(comfortable.checkbox_extent > original.checkbox_extent);
+        assert_eq!(comfortable.checkbox_radius, original.checkbox_radius);
+    }
+
+    #[test]
+    fn elevation_maps_track_and_thumb_ownership_across_toggle_states() {
+        let track_shadow = ControlShadow::single(crate::ControlShadowLayer::new(
+            rgba(0x11111159).into(),
+            px(0.0),
+            px(1.0),
+            px(2.0),
+            px(-1.0),
+        ));
+        let thumb_shadow = ControlShadow::single(crate::ControlShadowLayer::new(
+            rgba(0x22222259).into(),
+            px(0.0),
+            px(1.0),
+            px(2.0),
+            px(-1.0),
+        ));
+        let track_border = rgba(0x00000026);
+        let thumb_border = rgba(0x0000001f);
+        let theme = test_theme().elevation(
+            track_shadow,
+            Some(track_border),
+            thumb_shadow,
+            Some(thumb_border),
+        );
+
+        for (on, enabled, hovered, pressed) in [
+            (false, true, false, false),
+            (false, true, true, false),
+            (false, true, true, true),
+            (true, true, false, false),
+            (true, true, true, false),
+            (true, true, true, true),
+            (false, false, false, false),
+            (true, false, false, false),
+        ] {
+            let paint = theme.paint(on, enabled, hovered, pressed);
+            assert_eq!(
+                paint.border, track_border,
+                "track border must survive every state"
+            );
+            assert_eq!(
+                paint.thumb_border, thumb_border,
+                "thumb border must survive every state"
+            );
+            assert_eq!(
+                paint.shadow,
+                if enabled && !on && !pressed {
+                    track_shadow
+                } else {
+                    ControlShadow::none()
+                },
+                "only an enabled, unpressed off track is raised"
+            );
+            assert_eq!(
+                paint.thumb_shadow,
+                if enabled {
+                    thumb_shadow
+                } else {
+                    ControlShadow::none()
+                },
+                "the switch thumb is independently raised while enabled"
+            );
+        }
+    }
+
+    #[test]
     fn interaction_paint_should_refine_every_rendered_part() {
         let paint = TogglePaint::new(
             rgba(0x111111ff),
@@ -1213,10 +1360,18 @@ mod tests {
             StyleRefinement::default()
                 .bg(paint.background)
                 .border_color(paint.border)
+                .shadow(paint.shadow.layers())
         );
         assert_eq!(
             refinement.foreground_fill(StyleRefinement::default()),
             StyleRefinement::default().bg(paint.foreground)
+        );
+        assert_eq!(
+            refinement.thumb(StyleRefinement::default()),
+            StyleRefinement::default()
+                .bg(paint.foreground)
+                .border_color(paint.thumb_border)
+                .shadow(paint.thumb_shadow.layers())
         );
         // Both text refinements restate the metrics their base style uses, because GPUI replaces
         // an element's text style rather than merging it.

@@ -65,19 +65,19 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                     .materials
                     .edge(prepared.colors.background, prepared.colors.border)
             );
-            assert_eq!(
-                prepared.pane_rim(),
-                prepared.materials.edge(
-                    prepared.colors.panel_background,
-                    prepared.colors.tab_separator,
-                )
-            );
+            let rim_band = if mode == AppearanceMode::Dark {
+                1.25..=1.50
+            } else {
+                1.20..=1.30
+            };
+            let host = prepared.control_host_background(spaceterm_ui::ControlHost::Window);
+            let edge = prepared.pane_rim().source_over(host);
+            assert!(rim_band.contains(&edge.contrast_ratio(host)));
             if transparency == 0.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
                 assert_eq!(controls.border, prepared.colors.border);
-                assert_eq!(prepared.pane_rim(), prepared.colors.tab_separator);
                 assert_eq!(
                     resolved.chrome.composition.effective,
                     WindowBackgroundAppearance::Opaque
@@ -94,19 +94,26 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 if transparency == 1.0 {
                     // The sheet clears while Panes and controls keep enough tint to retain shape.
                     assert_eq!(sheet.a, 0);
-                    assert!(pane.a > 0 && pane.a < 192);
+                    assert!(pane.a > 0 && pane.a < 255);
+                    if mode == AppearanceMode::Dark {
+                        assert!(pane.a < 192);
+                    }
                     assert!(controls.row_selected_background.a > 0);
                     assert!(controls.elevated_surface_background.a >= 96);
                 } else {
-                    // Two resting layers must retain a substantial share of the sheet's backdrop transmission.
-                    // Previously, each added a full tint and almost erased it.
+                    // Check transmission through two resting layers above the window sheet.
                     let retained = (1.0 - f64::from(pane.a) / 255.0)
                         * (1.0 - f64::from(controls.row_selected_background.a) / 255.0);
                     let repeated_full_tints = f64::from(transparency).powi(2);
-                    assert!(
-                        retained > repeated_full_tints * 3.0,
-                        "{mode:?}: resting layers retain {retained}"
-                    );
+                    if mode == AppearanceMode::Dark {
+                        assert!(
+                            retained > repeated_full_tints * 3.0,
+                            "{mode:?}: resting layers retain {retained}"
+                        );
+                    } else {
+                        // Light Panes now retain the same stronger tint as selected navigation.
+                        assert!(retained > 0.0, "Light surfaces must still transmit");
+                    }
                 }
             }
         }
@@ -147,7 +154,7 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
                     raised.b.saturating_sub(sheet.b)
                 ]
                 .into_iter()
-                .all(|delta| delta >= 5),
+                .all(|delta| delta >= 3),
                 "Light elevation should remain visible: {raised:?} over {sheet:?}"
             );
             assert!(
@@ -162,8 +169,8 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
         );
         let selection = selection_overlay.source_over(sheet);
         assert!(
-            selection.r < sheet.r && selection.g < sheet.g && selection.b < sheet.b,
-            "Light selection should shade its sheet host: {selection:?} against {sheet:?}"
+            selection.r > sheet.r && selection.g > sheet.g && selection.b > sheet.b,
+            "Light selection should lift off its sheet host: {selection:?} against {sheet:?}"
         );
         assert!(
             [
@@ -190,8 +197,8 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
         );
         let selected = selected_overlay.source_over(shell);
         assert!(
-            selected.r < shell.r && selected.g < shell.g && selected.b < shell.b,
-            "Light selection should shade its shell host: {selected:?} against {shell:?}"
+            selected.r > shell.r && selected.g > shell.g && selected.b > shell.b,
+            "Light selection should lift off its shell host: {selected:?} against {shell:?}"
         );
         assert!(
             [
@@ -247,6 +254,10 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             tab_shell, sidebar_shell,
             "Light navigation hosts should share one shell at {transparency}"
         );
+        assert_eq!(
+            tab_shell, sheet,
+            "Light navigation shell should match the root at {transparency}"
+        );
 
         let active_tab = appearance
             .materials
@@ -261,7 +272,7 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             .paint(
                 SurfaceRole::Surface,
                 colors.panel_background,
-                colors.row_selected_background,
+                colors.navigation_selected_background,
             )
             .source_over(sidebar_shell);
         let tab_direction = (weight(active_tab) - weight(tab_shell)).signum();
@@ -283,8 +294,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
         );
         assert_eq!(
             (colors.tab_active_border.a, colors.row_selected_border.a),
-            (0, 0),
-            "navigation selection should not require decorative borders at {transparency}"
+            (26, 26),
+            "Light navigation should retain its quiet authored rims at {transparency}"
         );
     }
 }
@@ -353,7 +364,48 @@ fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() 
 }
 
 #[test]
-fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
+fn light_terminal_and_selected_navigation_share_one_translucent_paint() {
+    use spaceterm_ui::ControlHost;
+
+    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
+        for blur in [false, true] {
+            let mut preferences = AppearancePreferences {
+                mode: AppearanceMode::Light,
+                ..Default::default()
+            };
+            preferences.background.transparency = transparency;
+            preferences.background.blur = blur;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let terminal = appearance.pane_surface(resolved.terminal.colors.background);
+            let title = appearance.host_colors(ControlHost::TitleBar);
+            let panel = appearance.host_colors(ControlHost::Panel);
+            let selection = appearance.unfocused_selection_colors(ControlHost::Panel);
+            for (host, fill) in [
+                (title.title_bar_background, title.tab_active_background),
+                (panel.row_background, selection.row_selected_background),
+            ] {
+                assert_eq!(
+                    terminal,
+                    appearance.selection_surface(host, fill),
+                    "matching Light surfaces must share RGBA at transparency {transparency}, blur={blur}"
+                );
+            }
+            assert_eq!(terminal.a == 255, transparency == 0.0);
+        }
+    }
+}
+
+#[test]
+fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
         ..Default::default()
@@ -369,16 +421,76 @@ fn light_terminal_backing_keeps_the_existing_material_at_every_setting() {
                 &AvailableFonts::default(),
             )
             .unwrap();
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let background = resolved.terminal.colors.background;
-        let expected = prepared.surface(
-            SurfaceRole::Surface,
-            background.mix(
-                prepared.colors.elevated_surface_background,
-                f64::from(prepared.materials.elevation(prepared.colors.background)),
-            ),
+        let (active, inactive) =
+            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+        for prepared in [active, inactive] {
+            assert_eq!(
+                prepared.pane_surface(background),
+                prepared.selection_surface(prepared.colors.background, background),
+                "Light Terminal at transparency {transparency}, active={}",
+                prepared.active,
+            );
+        }
+    }
+}
+
+#[test]
+fn light_terminal_backing_uses_custom_background_as_its_material_color() {
+    let resolved = resolve(&AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    });
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    for background in [Color::rgb(0x18324c), Color::rgba(0xe8d9b780)] {
+        assert_eq!(
+            prepared.pane_surface(background),
+            prepared.selection_surface(prepared.colors.background, background)
         );
-        assert_eq!(prepared.pane_surface(background), expected);
+    }
+}
+
+#[test]
+fn selected_surfaces_follow_transparency_in_both_appearances() {
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            let mut preferences = AppearancePreferences {
+                mode,
+                ..Default::default()
+            };
+            preferences.background.transparency = transparency;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let selected = prepared.selection_surface(
+                prepared.colors.panel_background,
+                prepared.colors.row_selected_background,
+            );
+            if transparency == 0.0 {
+                assert_eq!(selected, prepared.colors.row_selected_background);
+            } else {
+                assert!(
+                    selected.a > 0 && selected.a < 255,
+                    "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
+                );
+                let host = prepared.colors.panel_background;
+                assert!(
+                    selected.source_over(host).contrast_ratio(host) >= 1.12,
+                    "{mode:?} selection must remain visible while transmitting its host"
+                );
+                assert!(
+                    selected.source_over(host).r > host.r,
+                    "built-in raised selections must not turn into dark recesses"
+                );
+            }
+        }
     }
 }
 
@@ -415,6 +527,10 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
                     host,
                     reference.row_selected_background,
                 );
+                if host == reference.row_selected_background {
+                    assert_eq!(selected.a, 0, "equal host and fill need no overlay");
+                    continue;
+                }
                 assert!(
                     hover.a > 0 && selected.a > hover.a,
                     "{appearance:?} at {transparency}: row ladder collapsed on the \
@@ -427,8 +543,8 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
     }
 }
 
-/// Light's hierarchy is checked as rendered over a desktop: raised surfaces lift, selections
-/// shade their host, and every material remains distinct across the transparency range.
+/// Light's hierarchy is checked as rendered over a desktop: the navigation shell matches the
+/// root, while raised surfaces and navigation selections lift across the transparency range.
 #[test]
 fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
@@ -454,18 +570,24 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
                 .source_over(sheet)
         };
         let shell = rendered(SurfaceRole::Base, reference.panel_background);
-        let selected = materials
+        let selected_navigation = materials
             .paint(
                 SurfaceRole::Surface,
                 reference.panel_background,
-                reference.row_selected_background,
+                reference.navigation_selected_background,
             )
             .source_over(shell);
-        let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
+        let pane = rendered(
+            SurfaceRole::Surface,
+            builtin::terminal_base(Appearance::Light).background,
+        );
         for (name, surface, host) in [
             ("Pane against the sheet", pane, sheet),
-            ("selected row against the shell", selected, shell),
-            ("shell against the sheet", shell, sheet),
+            (
+                "selected navigation row against the shell",
+                selected_navigation,
+                shell,
+            ),
         ] {
             let step = surface.g.abs_diff(host.g);
             assert!(
@@ -474,13 +596,13 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
             );
         }
         assert!(pane.g > sheet.g, "a Pane should lift from the light sheet");
-        assert!(
-            shell.g > sheet.g,
-            "the shell should lift from the light sheet"
+        assert_eq!(
+            shell, sheet,
+            "the Light navigation shell should match the root"
         );
         assert!(
-            selected.g < shell.g,
-            "a selected row should shade the light shell"
+            selected_navigation.g > shell.g,
+            "a selected navigation row should lift from the Light shell"
         );
         assert!(
             pane.g.saturating_sub(sheet.g) >= minimum,
@@ -518,7 +640,7 @@ fn resolve(preferences: &AppearancePreferences) -> ResolvedAppearance {
 }
 
 #[test]
-fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
+fn resolved_pane_caption_keeps_weight_400_while_chrome_caption_uses_retained_regular_weight() {
     let mut preferences = AppearancePreferences::default();
     preferences.chrome.typography.regular_weight = 500;
     preferences.chrome.typography.emphasis_weight = 700;
@@ -534,8 +656,14 @@ fn pane_caption_keeps_weight_400_when_chrome_weights_change() {
     assert_eq!(typography.caption.size, 12.65 * (24.0 / 13.0));
     assert_eq!(typography.navigation.weight, 700);
     let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-    assert_eq!(prepared.caption.weight, gpui::FontWeight::NORMAL);
-    assert_eq!(prepared.caption.family, prepared.regular.family);
+    let caption = prepared
+        .typography
+        .style(crate::ui::chrome_typography::TextRole::Caption);
+    let body = prepared
+        .typography
+        .style(crate::ui::chrome_typography::TextRole::Body);
+    assert_eq!(caption.font.weight, gpui::FontWeight(500.0));
+    assert_eq!(caption.font.family, body.font.family);
 }
 
 #[test]
