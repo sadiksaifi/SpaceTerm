@@ -249,8 +249,39 @@ fn prepare_variant(
         chrome.segmented_control_colors = window.segmented;
         chrome.window_control_fallbacks = window.fallback_families;
     }
+    let mut panel_authored = settings_authored.clone();
+    if chrome.built_in_dark {
+        // Navigation states belong to the sidebar, not the darker definition root.
+        // Rehost their existing contrast steps before preparing text and material paints.
+        for (name, fill) in [
+            ("row_background", &mut panel_authored.row_background),
+            (
+                "row_hover_background",
+                &mut panel_authored.row_hover_background,
+            ),
+            (
+                "row_selected_background",
+                &mut panel_authored.row_selected_background,
+            ),
+            (
+                "row_selected_hover_background",
+                &mut panel_authored.row_selected_hover_background,
+            ),
+            (
+                "navigation_selected_background",
+                &mut panel_authored.navigation_selected_background,
+            ),
+        ] {
+            if resolved.provenance.get(name) != Some(&ColorProvenance::Overridden)
+                && let Some(rehosted) =
+                    super::host_relative_fill(*fill, authored.panel_background, sidebar.semantic)
+            {
+                *fill = rehosted;
+            }
+        }
+    }
     chrome.panel_controls = prepare_state_control_host(
-        &settings_authored,
+        &panel_authored,
         (sidebar.semantic, sidebar.background),
         spaceterm_ui::ControlHost::Panel,
         chrome.materials,
@@ -311,6 +342,14 @@ fn prepare_surfaces(
     // inset groups sit between those tones rather than competing with selected controls.
     let sidebar_semantic = if chrome.built_in_light {
         chrome.colors.panel_background
+    } else if chrome.built_in_dark
+        && matches!(
+            resolved.provenance.get("panel_background"),
+            Some(ColorProvenance::Authored)
+        )
+    {
+        // The neutral sidebar needs enough tonal separation to survive window transmission.
+        root.mix(Color::rgb(0xffffff), 0.10)
     } else {
         settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance)
     };

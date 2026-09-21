@@ -196,6 +196,89 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
 }
 
 #[test]
+fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
+    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Sidebar};
+
+    for transparency in [0.0, 0.35] {
+        for blur in [false, true] {
+            let (resolved, _) = resolve_case(
+                Appearance::Dark,
+                ChromeDensity::Compact,
+                transparency,
+                blur,
+                true,
+            );
+            let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+            let (active, inactive) =
+                super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            for settings in [active, inactive] {
+                let sidebar = settings.surface(Sidebar);
+                let canvas = settings.surface(Canvas);
+                assert!(
+                    sidebar.background.r > canvas.background.r
+                        && sidebar.background.contrast_ratio(canvas.background) >= 1.15,
+                    "Dark Settings sidebar must separate by fill at {transparency}: {sidebar:?}, {canvas:?}"
+                );
+                assert_eq!(sidebar.paint.a, canvas.paint.a);
+                assert!(settings.sidebar_edge().is_none());
+                let colors = settings
+                    .chrome
+                    .host_colors(spaceterm_ui::ControlHost::Panel);
+                assert_eq!(
+                    colors.row_background, colors.panel_background,
+                    "resting navigation rows must not become dark tiles on the lighter sidebar"
+                );
+                if settings.chrome.active {
+                    let hover = settings
+                        .chrome
+                        .materials
+                        .paint(
+                            crate::appearance::SurfaceRole::Surface,
+                            sidebar.semantic,
+                            colors.row_hover_background,
+                        )
+                        .source_over(sidebar.background);
+                    let selected_colors = settings
+                        .chrome
+                        .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
+                    let selected = settings
+                        .chrome
+                        .selection_surface(
+                            sidebar.semantic,
+                            selected_colors.row_selected_background,
+                        )
+                        .source_over(sidebar.background);
+                    assert!(hover.r > sidebar.background.r);
+                    assert!(
+                        selected.r > hover.r,
+                        "selection must remain distinct from hover"
+                    );
+                    assert!(selected.contrast_ratio(sidebar.background) >= 1.15);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dark_settings_sidebar_preserves_an_explicit_panel_override() {
+    use super::appearance::settings::SettingsSurfaceRole::Sidebar;
+
+    let (mut resolved, _) =
+        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.35, true, true);
+    let panel = Color::rgb(0x243044);
+    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
+    chrome.colors.panel_background = panel;
+    chrome
+        .provenance
+        .insert("panel_background", ColorProvenance::Overridden);
+    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+    let (settings, _) =
+        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+    assert_eq!(settings.surface(Sidebar).semantic, panel);
+}
+
+#[test]
 fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_hosts() {
     use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
 
