@@ -30,6 +30,11 @@ impl ListRowPaint {
             border,
         }
     }
+
+    /// Returns the fill painted over the row's owning surface.
+    pub fn background(self) -> Rgba {
+        self.background
+    }
 }
 
 /// Bounded persistent-selection and pointer states shared by list controls.

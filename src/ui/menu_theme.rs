@@ -33,7 +33,7 @@ pub(super) fn prepared_with_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
     row_colors: &ChromeColors,
-    unfocused_row_colors: Option<&ChromeColors>,
+    unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
     row_policy: super::control_theme_catalog::OverlayRowPolicy,
@@ -41,15 +41,22 @@ pub(super) fn prepared_with_rows(
     let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
         reference, row_colors, row_policy,
     );
-    let rows = unfocused_row_colors.map_or(rows, |unfocused| {
+    let rows = unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
         rows.unfocused_selection(super::control_theme_catalog::overlay_list_rows_with_policy(
-            unfocused, unfocused, row_policy,
+            unfocused_reference,
+            unfocused_paint,
+            row_policy,
         ))
     });
     let destructive = destructive_rows(reference, row_colors, row_policy);
-    let destructive = unfocused_row_colors.map_or(destructive, |unfocused| {
-        destructive.unfocused_selection(destructive_rows(unfocused, unfocused, row_policy))
-    });
+    let destructive =
+        unfocused_rows.map_or(destructive, |(unfocused_reference, unfocused_paint)| {
+            destructive.unfocused_selection(destructive_rows(
+                unfocused_reference,
+                unfocused_paint,
+                row_policy,
+            ))
+        });
     let paint = MenuPaint::new(
         gpui_color(colors.text),
         gpui_color(colors.icon),

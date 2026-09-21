@@ -11,6 +11,23 @@ use super::{
     text_input_theme, toggle_theme, tooltip_theme,
 };
 
+pub(super) struct PopupUnfocusedRows {
+    pub(super) reference: crate::appearance::ChromeColors,
+    pub(super) paint: crate::appearance::ChromeColors,
+}
+
+pub(super) fn popup_unfocused_rows(
+    appearance: &super::appearance::ChromeAppearance,
+    popup: &crate::appearance::ChromeColors,
+) -> PopupUnfocusedRows {
+    let reference = appearance
+        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
+        .clone();
+    let mut paint = reference.clone();
+    paint.elevated_surface_background = popup.elevated_surface_background;
+    PopupUnfocusedRows { reference, paint }
+}
+
 pub(super) fn catalog(
     appearance: &super::appearance::ChromeAppearance,
     progress_motion: spaceterm_ui::ProgressMotion,
@@ -31,10 +48,7 @@ pub(super) fn catalog(
     let mut popup = host.clone();
     popup.elevated_surface_background =
         appearance.floating_surface(host.elevated_surface_background);
-    let mut unfocused_popup = appearance
-        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
-        .clone();
-    unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
+    let unfocused_rows = popup_unfocused_rows(appearance, &popup);
     let row_reference = host.clone();
     let row_policy = OverlayRowPolicy::prepared(appearance);
     let title_bar_controls = surface_control_themes(
@@ -79,7 +93,7 @@ pub(super) fn catalog(
             &row_reference,
             colors,
             &popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_rows.reference, &unfocused_rows.paint)),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -87,7 +101,7 @@ pub(super) fn catalog(
         command_palette_theme::prepared(
             &row_reference,
             &popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_rows.reference, &unfocused_rows.paint)),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -96,7 +110,7 @@ pub(super) fn catalog(
             &row_reference,
             colors,
             &popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_rows.reference, &unfocused_rows.paint)),
             &appearance.typography,
             &appearance.icons,
             row_policy,
@@ -136,7 +150,7 @@ pub(super) fn catalog(
                 &row_reference,
                 floating_controls,
                 &popup,
-                Some(&unfocused_popup),
+                Some((&unfocused_rows.reference, &unfocused_rows.paint)),
                 &appearance.typography,
                 &appearance.icons,
                 row_policy,
@@ -145,7 +159,7 @@ pub(super) fn catalog(
                 &row_reference,
                 floating_controls,
                 &popup,
-                Some(&unfocused_popup),
+                Some((&unfocused_rows.reference, &unfocused_rows.paint)),
                 &appearance.typography,
                 &appearance.icons,
                 row_policy,
@@ -239,10 +253,7 @@ pub(super) fn surface_control_themes(
     let icons = &appearance.icons;
     let show_borders = appearance.capabilities.show_borders;
     let row_policy = OverlayRowPolicy::prepared(appearance);
-    let mut unfocused_popup = appearance
-        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
-        .clone();
-    unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
+    let unfocused_rows = popup_unfocused_rows(appearance, popup);
     spaceterm_ui::SurfaceControlThemes::new(
         button_theme::prepared(&host.colors, typography, icons, show_borders),
         toggle_theme::prepared(&host.colors, typography),
@@ -256,7 +267,7 @@ pub(super) fn surface_control_themes(
             row_reference,
             &host.colors,
             popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_rows.reference, &unfocused_rows.paint)),
             typography,
             icons,
             row_policy,
@@ -265,7 +276,7 @@ pub(super) fn surface_control_themes(
             row_reference,
             &host.colors,
             popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_rows.reference, &unfocused_rows.paint)),
             typography,
             icons,
             row_policy,
@@ -375,13 +386,6 @@ impl OverlayRow {
             fill = compressed;
         }
         let mut backgrounds = row_backgrounds(fill, paint_surface);
-        if shared_neutral(backgrounds, minimum).is_none() {
-            fill = super::chrome_state::contrast_host(
-                reference.source_over(reference_surface),
-                minimum,
-            );
-            backgrounds = [fill; 2];
-        }
         if let Some(selection) = selection {
             fill = readable_selection_fill(
                 fill,
@@ -391,6 +395,13 @@ impl OverlayRow {
                 selection,
             );
             backgrounds = row_backgrounds(fill, paint_surface);
+        }
+        if shared_neutral(backgrounds, minimum).is_none() {
+            fill = super::chrome_state::contrast_host(
+                reference.source_over(reference_surface),
+                minimum,
+            );
+            backgrounds = [fill; 2];
         }
         Self {
             fill,
@@ -490,7 +501,17 @@ fn readable_selection_fill(
             + u32::from(candidate.g.abs_diff(reference.g))
             + u32::from(candidate.b.abs_diff(reference.b))
     };
-    [Color::rgb(0), Color::rgb(0xffffff)]
+    let mut endpoints = [Color::rgb(0), Color::rgb(0xffffff)];
+    endpoints.sort_by_key(|endpoint| distance(*endpoint));
+    for endpoint in endpoints {
+        if let Some(candidate) = (1..u8::MAX)
+            .map(|alpha| endpoint.with_alpha(alpha))
+            .find(|candidate| acceptable(*candidate))
+        {
+            return candidate;
+        }
+    }
+    endpoints
         .into_iter()
         .flat_map(|endpoint| {
             (0..=255).map(move |step| reference.mix(endpoint, f64::from(step) / 255.0))

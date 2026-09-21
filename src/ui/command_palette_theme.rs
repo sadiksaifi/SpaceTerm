@@ -26,7 +26,7 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> Command
 pub(super) fn prepared(
     reference: &ChromeColors,
     colors: &ChromeColors,
-    unfocused_colors: Option<&ChromeColors>,
+    unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
     row_policy: super::control_theme_catalog::OverlayRowPolicy,
@@ -47,10 +47,12 @@ pub(super) fn prepared(
             let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
                 reference, colors, row_policy,
             );
-            unfocused_colors.map_or(rows, |unfocused| {
+            unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
                 rows.unfocused_selection(
                     super::control_theme_catalog::overlay_list_rows_with_policy(
-                        unfocused, unfocused, row_policy,
+                        unfocused_reference,
+                        unfocused_paint,
+                        row_policy,
                     ),
                 )
             })

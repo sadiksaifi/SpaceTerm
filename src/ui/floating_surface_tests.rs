@@ -3280,6 +3280,34 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
     }
 }
 
+#[test]
+fn unfocused_popup_selection_keeps_transmitting_the_material() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for transparency in [0.35, 1.0] {
+            let (_, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+            let mut popup = prepared.floating_colors.clone();
+            popup.elevated_surface_background =
+                prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
+            let unfocused = super::control_theme_catalog::popup_unfocused_rows(&prepared, &popup);
+            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+                &unfocused.reference,
+                &unfocused.paint,
+                super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+            );
+            let selected = rows.resolve_for_collection(true, true, false, false);
+
+            assert!(
+                selected.background().a > 0.0 && selected.background().a < 1.0,
+                "{appearance:?} transparency={transparency}: unfocused popup selection must remain translucent: {selected:?}; reference={:?}; paint={:?}; surface={:?}",
+                unfocused.reference.row_selected_background,
+                unfocused.paint.row_selected_background,
+                unfocused.paint.elevated_surface_background,
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn installed_floating_catalog_uses_the_material_control_presentation(
     cx: &mut gpui::TestAppContext,
@@ -3291,9 +3319,10 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
     let mut popup = reference.clone();
     popup.elevated_surface_background =
         prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
-    let mut unfocused_popup = prepared
+    let unfocused_reference = prepared
         .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
         .clone();
+    let mut unfocused_popup = unfocused_reference.clone();
     unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
     let with_elevation = |theme: spaceterm_ui::SurfaceControlThemes| {
         theme.toggle_segmented_elevation(
@@ -3336,7 +3365,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
             reference,
             colors,
             &popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_reference, &unfocused_popup)),
             &prepared.typography,
             &prepared.icons,
             super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
@@ -3345,7 +3374,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
             reference,
             colors,
             &popup,
-            Some(&unfocused_popup),
+            Some((&unfocused_reference, &unfocused_popup)),
             &prepared.typography,
             &prepared.icons,
             super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
