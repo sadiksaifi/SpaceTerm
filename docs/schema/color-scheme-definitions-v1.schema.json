@@ -62,6 +62,7 @@
           "border_disabled",
           "border_transparent",
           "element_background",
+          "segmented_track_background",
           "element_hover",
           "element_active",
           "element_selected",

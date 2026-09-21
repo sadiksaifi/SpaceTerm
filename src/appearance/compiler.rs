@@ -164,6 +164,7 @@ pub(crate) fn compile_chrome(
     let border_disabled = resolve!(border_disabled, border);
     let border_transparent = resolve!(border_transparent, Color::rgba(0));
     let element_background = resolve!(element_background, background);
+    let segmented_track_background = resolve!(segmented_track_background, element_background);
     let element_hover = resolve!(element_hover, element_background.mix(text, 0.08));
     let element_active = resolve!(element_active, element_background.mix(text, 0.14));
     // Persistent selection follows the definition's foreground/background contrast.
@@ -768,6 +769,7 @@ pub(crate) fn compile_chrome(
         border_disabled,
         border_transparent,
         element_background,
+        segmented_track_background,
         element_hover,
         element_active,
         element_selected,
@@ -1169,6 +1171,57 @@ mod tests {
         ] {
             assert_eq!(compiled.provenance[role], ColorProvenance::Derived);
         }
+    }
+
+    #[test]
+    fn segmented_track_falls_back_to_element_and_preserves_explicit_rgba() {
+        let element = Color::rgba(0x11223388);
+        let fallback = compile_chrome(
+            Appearance::Dark,
+            &ChromeColorOverrides {
+                element_background: Some(element),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(fallback.colors.segmented_track_background, element);
+        assert_eq!(
+            fallback.provenance["segmented_track_background"],
+            ColorProvenance::Derived
+        );
+
+        let authored = Color::rgba(0x44556699);
+        let explicit = compile_chrome(
+            Appearance::Light,
+            &ChromeColorOverrides {
+                segmented_track_background: Some(authored),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(explicit.colors.segmented_track_background, authored);
+        assert_eq!(
+            explicit.provenance["segmented_track_background"],
+            ColorProvenance::Authored
+        );
+
+        let overridden = Color::rgba(0x778899aa);
+        let explicit = compile_chrome(
+            Appearance::Light,
+            &ChromeColorOverrides {
+                segmented_track_background: Some(authored),
+                ..Default::default()
+            },
+            &ChromeColorOverrides {
+                segmented_track_background: Some(overridden),
+                ..Default::default()
+            },
+        );
+        assert_eq!(explicit.colors.segmented_track_background, overridden);
+        assert_eq!(
+            explicit.provenance["segmented_track_background"],
+            ColorProvenance::Overridden
+        );
     }
 
     #[test]

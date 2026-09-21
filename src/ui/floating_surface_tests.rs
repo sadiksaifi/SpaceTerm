@@ -16,6 +16,142 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 ];
 
 #[test]
+fn light_selections_and_terminal_share_the_common_surface() {
+    let (resolved, prepared) =
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
+    let selected = Color::rgb(0xfafafa);
+    for (role, fill) in [
+        ("Tab", prepared.colors.tab_active_background),
+        (
+            "sidebar",
+            prepared.panel_controls.reference.row_selected_background,
+        ),
+        (
+            "unfocused sidebar",
+            prepared
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+                .row_selected_background,
+        ),
+        (
+            "unfocused popup",
+            prepared
+                .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
+                .row_selected_background,
+        ),
+        (
+            "menu",
+            prepared.floating_control_colors.row_selected_background,
+        ),
+        (
+            "window segment",
+            prepared.segmented_control_colors.selection_background,
+        ),
+        (
+            "panel segment",
+            prepared.panel_controls.segmented.selection_background,
+        ),
+        (
+            "card segment",
+            prepared.card_controls.segmented.selection_background,
+        ),
+        (
+            "floating segment",
+            prepared.floating_segmented_colors.selection_background,
+        ),
+        ("Terminal", resolved.terminal.colors.background),
+    ] {
+        assert_eq!(
+            fill, selected,
+            "Light {role} should share the selected surface"
+        );
+    }
+    // Menu, ComboBox and Command Palette rows share this final paint resolver. Its contrast
+    // policy must preserve the selected color, not only the prepared role inspected above.
+    let reference = &prepared.floating_colors;
+    let mut popup = reference.clone();
+    popup.elevated_surface_background =
+        prepared.floating_surface(prepared.colors.elevated_surface_background);
+    let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+        reference,
+        &popup,
+        super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+    );
+    let expected = [
+        selected,
+        reference.row_selected_foreground,
+        reference.row_selected_secondary,
+        reference.row_selected_icon,
+        reference.row_selected_match,
+        reference.row_selected_border,
+    ]
+    .map(|color| gpui::rgba(color.rgba_hex()));
+    assert_eq!(
+        rows.resolve(true, true, false),
+        spaceterm_ui::ListRowPaint::new(
+            expected[0],
+            expected[1],
+            expected[2],
+            expected[3],
+            expected[4],
+            expected[5],
+        ),
+        "Light popup rows must paint the common selected fill"
+    );
+}
+
+#[test]
+fn light_unfocused_navigation_keeps_its_selected_fill_with_transparency() {
+    for transparency in [0.0, 0.35, 1.0] {
+        let (_, prepared) = resolve_case(
+            Appearance::Light,
+            ChromeDensity::Compact,
+            transparency,
+            true,
+            true,
+        );
+        let panel = prepared.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
+        assert_eq!(
+            panel.row_selected_background,
+            Color::rgb(0xfafafa),
+            "unfocused sidebar at transparency {transparency}; active {:?}; host {:?}",
+            prepared.panel_controls.reference.row_selected_background,
+            prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
+        );
+        let chip = super::selection_chip::ChipPaint {
+            fill: Some(panel.row_selected_background),
+            hover_fill: Some(panel.row_selected_hover_background),
+            rim: Some(panel.row_selected_border),
+            hover_rim: Some(panel.row_selected_hover_border),
+        }
+        .selected_on(&prepared, panel.panel_background);
+        assert_eq!(chip.fill, Some(Color::rgb(0xfafafa)));
+        for (host, colors) in [
+            (
+                spaceterm_ui::ControlHost::Window,
+                &prepared.segmented_control_colors,
+            ),
+            (
+                spaceterm_ui::ControlHost::Panel,
+                &prepared.panel_controls.segmented,
+            ),
+            (
+                spaceterm_ui::ControlHost::Card,
+                &prepared.card_controls.segmented,
+            ),
+        ] {
+            let track = colors
+                .element_background
+                .source_over(prepared.control_host_background(host));
+            assert_eq!(
+                colors.selection_background.source_over(track),
+                Color::rgb(0xfafafa),
+                "selected segment on {host:?} at transparency {transparency}",
+            );
+        }
+    }
+}
+
+#[test]
 fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
     let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let background = Color::rgb(0xe5e5e5);
@@ -23,7 +159,10 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
     assert_eq!(prepared.colors.background, background);
     assert_eq!(prepared.colors.title_bar_background, background);
     assert_eq!(prepared.colors.panel_background, background);
-    assert_eq!(prepared.colors.elevated_surface_background, raised);
+    assert_eq!(
+        prepared.colors.elevated_surface_background,
+        Color::rgb(0xeaeaea)
+    );
     assert_eq!(prepared.colors.tab_active_background, raised);
     assert_eq!(
         prepared.panel_controls.reference.row_selected_background,
@@ -181,6 +320,11 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                 let primary_floor = if increase_contrast { 7.0 } else { 4.5 };
                 let secondary_floor = 4.5;
                 let icon_floor = if increase_contrast { 4.5 } else { 3.0 };
+                let selection_floor = if increase_contrast || appearance == Appearance::Dark {
+                    super::appearance::SUBDUED_SELECTION_CONTRAST
+                } else {
+                    1.12
+                };
 
                 for host in [
                     spaceterm_ui::ControlHost::Window,
@@ -237,16 +381,10 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                     ] {
                         let backgrounds = [
                             active
-                                .materials
-                                .paint(crate::appearance::SurfaceRole::Surface, semantic_host, fill)
+                                .selection_surface(semantic_host, fill)
                                 .source_over(host_background),
                             active
-                                .materials
-                                .paint(
-                                    crate::appearance::SurfaceRole::Surface,
-                                    active_colors.row_background,
-                                    fill,
-                                )
+                                .selection_surface(active_colors.row_background, fill)
                                 .source_over(row_host),
                         ];
                         let resting_backgrounds = [
@@ -271,8 +409,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                             backgrounds.into_iter().zip(resting_backgrounds)
                         {
                             assert!(
-                                background.contrast_ratio(resting)
-                                    >= super::appearance::SUBDUED_SELECTION_CONTRAST,
+                                background.contrast_ratio(resting) >= selection_floor,
                                 "{appearance:?}/{host:?}/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {resting:?}"
                             );
                             for (content, floor) in [
@@ -324,8 +461,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                     ] {
                         let background = fill.source_over(host);
                         assert!(
-                            background.contrast_ratio(host)
-                                >= super::appearance::SUBDUED_SELECTION_CONTRAST,
+                            background.contrast_ratio(host) >= selection_floor,
                             "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {host:?}"
                         );
                         for (content, floor) in [
@@ -2051,7 +2187,13 @@ fn floating_control_states_transmit_their_host_until_the_opaque_override() {
             assert!(paint.ghost_element_active.a < 255);
         }
         let segmented_selection = translucent.floating_segmented_colors.selection_background;
-        if translucent
+        if appearance == Appearance::Light {
+            assert_eq!(
+                segmented_selection,
+                Color::rgb(0xfafafa),
+                "Light floating selection must preserve the common selected surface"
+            );
+        } else if translucent
             .floating_fallbacks
             .contains(&FloatingControlFamily::Segmented)
         {
@@ -2234,6 +2376,10 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
                 ("segmented track", host.segmented.element_background),
                 ("segmented option", host.segmented.selection_background),
             ] {
+                if appearance == Appearance::Light && state == "segmented option" {
+                    assert_eq!(fill, Color::rgb(0xfafafa));
+                    continue;
+                }
                 assert!(
                     fill.a < 255,
                     "{appearance:?} {name} {state} must transmit its immediate host: {fill:?}"
@@ -2309,7 +2455,12 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
                 );
             }
             assert_eq!(
-                host.segmented.element_background, host.reference.element_background,
+                host.segmented.element_background,
+                if appearance == Appearance::Light {
+                    host.reference.segmented_track_background
+                } else {
+                    host.reference.element_background
+                },
                 "opaque segmented compilation keeps the actual track"
             );
             assert_eq!(

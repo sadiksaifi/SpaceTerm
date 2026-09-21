@@ -212,11 +212,13 @@ impl TabChromePresentation {
         appearance: &super::appearance::ChromeAppearance,
         cx: &App,
     ) -> SelectionChip {
-        SelectionChip::new(
-            tab_chip_shape(appearance, cx),
-            self.tab_chip_paint(active)
-                .raised_on(appearance, self.background),
-        )
+        let paint = self.tab_chip_paint(active);
+        let paint = if active {
+            paint.selected_on(appearance, self.background)
+        } else {
+            paint.raised_on(appearance, self.background)
+        };
+        SelectionChip::new(tab_chip_shape(appearance, cx), paint)
     }
 
     fn tab_chip_paint(&self, active: bool) -> ChipPaint {
@@ -2143,10 +2145,10 @@ mod tests {
                 chip.hover_fill, chip.fill,
                 "{appearance:?} Active Tab should answer hover"
             );
-            assert_ne!(
-                chip.fill,
-                Some(colors.row_selected_background),
-                "{appearance:?} Active Tab should be tuned independently of navigation rows"
+            assert_eq!(
+                chip.fill == Some(colors.row_selected_background),
+                appearance == Appearance::Light,
+                "Light should share its selected fill across Tab and row hosts"
             );
             let tab_step = i32::from(colors.tab_active_background.r)
                 - i32::from(colors.title_bar_background.r);

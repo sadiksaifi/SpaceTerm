@@ -126,8 +126,8 @@ fn spaceterm_light_chrome() -> ChromeColors {
 /// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
 /// alone.
 ///
-/// Cards and floating surfaces lighten in both appearances. Light navigation selections share the
-/// raised surface color; other interaction fills move toward text.
+/// Cards and floating surfaces lighten in both appearances. Light selections share one brighter
+/// fill across navigation, popup rows, and segmented options; action presses move toward text.
 ///
 /// Every resting surface, separator, text gray, and shadow is authored with equal channels:
 /// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
@@ -155,6 +155,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             raised: 0x202020,
             field: 0x1c1c1c,
             control_fill: Some(0x272727),
+            segmented_track: None,
             control_hover: 0x2f2f2f,
             control_pressed: 0x363636,
             ghost_hover: 0x1b1b1b,
@@ -205,17 +206,18 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             root: 0xe5e5e5,
             shell: 0xe5e5e5,
             shell_inactive: 0xe5e5e5,
-            raised: 0xfafafa,
+            raised: 0xeaeaea,
             field: 0xffffff,
-            control_fill: Some(0xededed),
-            control_hover: 0xdfdfdf,
-            control_pressed: 0xdadada,
+            control_fill: Some(0xfafafa),
+            segmented_track: Some(0xe5e5e5),
+            control_hover: 0xefefef,
+            control_pressed: 0xe0e0e0,
             ghost_hover: 0xdddddd,
             ghost_pressed: 0xd6d6d6,
-            selected: 0xd0d0d0,
-            selected_inactive: 0xececec,
-            row_hover: 0xdddddd,
-            row_selected: 0xd3d3d3,
+            selected: 0xfafafa,
+            selected_inactive: 0xf0f0f0,
+            row_hover: 0xf2f2f2,
+            row_selected: 0xfafafa,
             navigation_selected: Some(0xfafafa),
             tab_active: 0xfafafa,
             row_selected_text: 0x161616,
@@ -229,7 +231,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             separator_quiet: 0xdedede,
             separator_disabled: 0xdbdbdb,
             field_outline: 0xd0d0d0,
-            control_outline: 0xcecece,
+            control_outline: 0xd4d4d4,
             control_outline_strong: 0xc6c6c6,
             tab_separator: 0xc2c2c2,
             mark_outline: 0x7f7f7f,
@@ -273,6 +275,8 @@ struct ChromePalette {
     /// Floating preparation may strengthen the equivalent overlay without changing this authored
     /// composite when a transmitting host would otherwise make its content unreadable.
     control_fill: Option<u32>,
+    /// An explicit track gives selected chips their own host, independent of button fills.
+    segmented_track: Option<u32>,
     /// Filled and unfilled controls have independent interaction steps.
     control_hover: u32,
     control_pressed: u32,
@@ -381,6 +385,7 @@ impl ChromePalette {
             outline_disabled_border: opaque(self.separator_disabled),
 
             element_background: self.control_fill.map(Color::rgb),
+            segmented_track_background: self.segmented_track.map(Color::rgb),
             element_hover: opaque(self.control_hover),
             element_active: opaque(self.control_pressed),
             element_selected: opaque(self.selected),
@@ -506,7 +511,7 @@ fn spaceterm_dark_terminal() -> TerminalColors {
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0x242424),
-        background: Color::rgb(0xfbfbfb),
+        background: Color::rgb(0xfafafa),
         normal: [
             0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
         ]
@@ -728,9 +733,10 @@ mod tests {
                     "{appearance:?} should give the Active Tab and a selected row one {role}"
                 );
             }
-            assert_ne!(
-                colors.tab_active_background, colors.row_selected_background,
-                "{appearance:?} should tune the Active Tab for its title-bar host"
+            assert_eq!(
+                colors.tab_active_background == colors.row_selected_background,
+                appearance == Appearance::Light,
+                "Light should share its selected fill across Tab and row hosts"
             );
             assert_ne!(
                 colors.tab_active_hover_background, colors.tab_active_background,

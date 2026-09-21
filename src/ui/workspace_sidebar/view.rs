@@ -34,7 +34,11 @@ fn row_chip(
             hover_rim: appearance.active.then_some(colors.row_hover_border),
         }
     };
-    let paint = paint.raised_on(appearance, colors.row_background);
+    let paint = if selected {
+        paint.selected_on(appearance, colors.row_background)
+    } else {
+        paint.raised_on(appearance, colors.row_background)
+    };
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     SelectionChip::new(
         ChipShape::symmetric(

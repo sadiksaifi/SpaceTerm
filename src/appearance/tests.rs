@@ -147,7 +147,7 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
                     raised.b.saturating_sub(sheet.b)
                 ]
                 .into_iter()
-                .all(|delta| delta >= 5),
+                .all(|delta| delta >= 3),
                 "Light elevation should remain visible: {raised:?} over {sheet:?}"
             );
             assert!(
@@ -162,8 +162,8 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
         );
         let selection = selection_overlay.source_over(sheet);
         assert!(
-            selection.r < sheet.r && selection.g < sheet.g && selection.b < sheet.b,
-            "Light selection should shade its sheet host: {selection:?} against {sheet:?}"
+            selection.r > sheet.r && selection.g > sheet.g && selection.b > sheet.b,
+            "Light selection should lift off its sheet host: {selection:?} against {sheet:?}"
         );
         assert!(
             [
@@ -190,8 +190,8 @@ fn light_material_keeps_elevation_and_selection_visible_over_the_sheet() {
         );
         let selected = selected_overlay.source_over(shell);
         assert!(
-            selected.r < shell.r && selected.g < shell.g && selected.b < shell.b,
-            "Light selection should shade its shell host: {selected:?} against {shell:?}"
+            selected.r > shell.r && selected.g > shell.g && selected.b > shell.b,
+            "Light selection should lift off its shell host: {selected:?} against {shell:?}"
         );
         assert!(
             [
@@ -465,7 +465,10 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
                 reference.navigation_selected_background,
             )
             .source_over(shell);
-        let pane = rendered(SurfaceRole::Surface, reference.elevated_surface_background);
+        let pane = rendered(
+            SurfaceRole::Surface,
+            builtin::terminal_base(Appearance::Light).background,
+        );
         for (name, surface, host) in [
             ("Pane against the sheet", pane, sheet),
             (

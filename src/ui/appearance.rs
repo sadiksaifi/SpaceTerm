@@ -13,7 +13,7 @@ use super::{
 use gpui::{App, Font, FontWeight, Global, Pixels, Window, font, px, rgba};
 
 use crate::appearance::{
-    Appearance, ChromeColors, ChromeDensity, Color, CompositionCapabilities,
+    Appearance, ChromeColors, ChromeDensity, Color, ColorProvenance, CompositionCapabilities,
     ResolvedChromeAppearance, ResolvedFontDescriptor, SurfaceMaterials, SurfaceRole,
 };
 
@@ -199,6 +199,7 @@ impl Default for ChromeAppearance {
             &colors,
             &control_colors,
             SurfaceMaterials::OPAQUE,
+            false,
         );
         let window_control_fallbacks = segmented_compilation
             .used_host_fallback
@@ -241,10 +242,12 @@ impl Default for ChromeAppearance {
                 &floating_colors,
                 &floating_control_colors,
                 floating_materials,
+                false,
             )
             .colors,
             floating_raised_material,
             floating_raised_wash,
+            false,
         );
         let FloatingFieldResolution {
             reference: floating_field_reference,
@@ -2563,11 +2566,22 @@ fn resolve_material_segmented_colors(
     host: Color,
     floors: FloatingContrastFloors,
     accessible_boundaries: bool,
+    explicit_track: bool,
 ) -> ChromeColors {
     let hosts = [host; 2];
+    let reference_track = if explicit_track {
+        reference.segmented_track_background
+    } else {
+        reference.element_background
+    };
+    let paint_track = if explicit_track {
+        paint.segmented_track_background
+    } else {
+        paint.element_background
+    };
     let (track, [text_secondary, text_disabled]) = resolve_floating_frame(
-        reference.element_background,
-        paint.element_background,
+        reference_track,
+        paint_track,
         reference.background,
         hosts,
         [
@@ -2575,6 +2589,7 @@ fn resolve_material_segmented_colors(
             (reference.text_disabled, floors.disabled),
         ],
     );
+    paint.segmented_track_background = track;
     paint.element_background = track;
     paint.text_secondary = text_secondary;
     paint.text_disabled = text_disabled;
@@ -2703,18 +2718,29 @@ fn compile_segmented_control_colors(
     reference: &ChromeColors,
     paint: &ChromeColors,
     materials: SurfaceMaterials,
+    explicit_track: bool,
 ) -> SegmentedColorCompilation {
     let mut semantic = reference.clone();
     let mut candidate = semantic.clone();
     let mut feasible = true;
+    let authored_track = if explicit_track {
+        authored.segmented_track_background
+    } else {
+        authored.background
+    };
+    let reference_track = if explicit_track {
+        reference.segmented_track_background
+    } else {
+        reference.element_background
+    };
     macro_rules! rehost_option {
         ($($field:ident),+ $(,)?) => { $(
             if authored.$field.a == 0 {
                 candidate.$field = authored.$field;
             } else if let Some(fill) = host_relative_fill(
                 authored.$field,
-                authored.background,
-                reference.element_background,
+                authored_track,
+                reference_track,
             ) {
                 candidate.$field = fill;
             } else {
@@ -2737,12 +2763,18 @@ fn compile_segmented_control_colors(
     }
 
     let mut segmented = paint.clone();
-    segmented.border = materials.edge(reference.element_background, reference.border);
+    segmented.segmented_track_background = if explicit_track {
+        paint.segmented_track_background
+    } else {
+        paint.element_background
+    };
+    segmented.element_background = segmented.segmented_track_background;
+    segmented.border = materials.edge(reference_track, reference.border);
     let option = |target: Color| {
         if target.a == 0 {
             target
         } else {
-            materials.paint(SurfaceRole::Surface, reference.element_background, target)
+            materials.paint(SurfaceRole::Surface, reference_track, target)
         }
     };
     macro_rules! option_fill {
@@ -2758,13 +2790,16 @@ fn compile_segmented_control_colors(
         selection_pressed_background,
         selection_disabled_background,
     );
+    if explicit_track {
+        // An authored track defines the selected option's reference surface directly. Preserve
+        // its color instead of compressing the selection into the host's translucent ladder.
+        segmented.selection_background = semantic.selection_background;
+        segmented.selection_hover_background = semantic.selection_hover_background;
+        segmented.selection_pressed_background = semantic.selection_pressed_background;
+    }
 
     let filled_option = |fill: Color| {
-        if fill.a == 0 {
-            reference.element_background
-        } else {
-            fill
-        }
+        if fill.a == 0 { reference_track } else { fill }
     };
     segmented.border_variant = materials.edge(
         filled_option(semantic.ghost_element_active),
@@ -2798,7 +2833,8 @@ fn prepare_control_host(
 ) -> PreparedControlHost {
     let (reference, mut fallback_families) = rehost_control_reference(authored, host);
     let colors = reference.material_presentation(materials);
-    let segmented = compile_segmented_control_colors(authored, &reference, &colors, materials);
+    let segmented =
+        compile_segmented_control_colors(authored, &reference, &colors, materials, false);
     if segmented.used_host_fallback {
         fallback_families.push(FloatingControlFamily::Segmented);
     }
@@ -3236,12 +3272,12 @@ fn prepare_app_owned_tabs(
 
 fn prepare_state_control_host(
     authored: &ChromeColors,
-    host: Color,
-    final_host: Color,
+    (host, final_host): (Color, Color),
     host_role: spaceterm_ui::ControlHost,
     materials: SurfaceMaterials,
     state: ChromeStatePolicy,
     floors: FloatingContrastFloors,
+    explicit_segmented_track: bool,
 ) -> PreparedControlHost {
     let (mut reference, mut fallback_families) = rehost_control_reference(authored, host);
     if host_role == spaceterm_ui::ControlHost::Panel
@@ -3286,8 +3322,13 @@ fn prepare_state_control_host(
         }
     }
     let segmented_authored = state.colors(authored, authored.background);
-    let segmented =
-        compile_segmented_control_colors(&segmented_authored, &reference, &colors, materials);
+    let segmented = compile_segmented_control_colors(
+        &segmented_authored,
+        &reference,
+        &colors,
+        materials,
+        explicit_segmented_track,
+    );
     if segmented.used_host_fallback {
         fallback_families.push(FloatingControlFamily::Segmented);
     }
@@ -3297,6 +3338,7 @@ fn prepare_state_control_host(
         final_host,
         floors,
         state.capabilities.increase_contrast || state.capabilities.show_borders,
+        explicit_segmented_track,
     );
     let reference = with_final_host_content(reference, &colors);
     PreparedControlHost {
@@ -3365,7 +3407,7 @@ fn resolve_floating_segmented_colors(
     wash: Color,
 ) -> ChromeColors {
     let resolved = resolve_floating_segmented_colors_detailed(
-        authored, floors, reference, paint, material, wash,
+        authored, floors, reference, paint, material, wash, false,
     );
     let _pending_diagnostics = resolved.fallback_families;
     resolved.colors
@@ -3378,23 +3420,32 @@ fn resolve_floating_segmented_colors_detailed(
     mut paint: ChromeColors,
     material: Color,
     wash: Color,
+    explicit_track: bool,
 ) -> FloatingColorResolution {
     let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
     let mut fallback_families = Vec::new();
-    let semantic_track = host_relative_fill(
-        authored.element_background,
-        authored.background,
-        reference.elevated_surface_background,
-    )
-    .unwrap_or_else(|| {
-        fallback_families.push(FloatingControlFamily::Segmented);
-        reference.element_background
-    });
+    let semantic_track = if explicit_track {
+        reference.segmented_track_background
+    } else {
+        host_relative_fill(
+            authored.element_background,
+            authored.background,
+            reference.elevated_surface_background,
+        )
+        .unwrap_or_else(|| {
+            fallback_families.push(FloatingControlFamily::Segmented);
+            reference.element_background
+        })
+    };
     let track_overlay = equivalent_overlay(
         semantic_track,
         reference.elevated_surface_background,
-        paint.element_background.a,
+        if explicit_track {
+            paint.segmented_track_background.a
+        } else {
+            paint.element_background.a
+        },
     )
     .unwrap_or(semantic_track);
     let (track, [text_secondary, text_disabled]) = resolve_floating_frame(
@@ -3407,17 +3458,23 @@ fn resolve_floating_segmented_colors_detailed(
             (reference.text_disabled, floors.disabled),
         ],
     );
+    paint.segmented_track_background = track;
     paint.element_background = track;
     paint.text_secondary = text_secondary;
     paint.text_disabled = text_disabled;
     let track_backgrounds =
         host_backgrounds.map(|background| paint.element_background.source_over(background));
+    let option_reference_surface = if explicit_track {
+        semantic_track
+    } else {
+        reference.element_background
+    };
     macro_rules! state {
         ($fill:ident, $minimum:expr, $($content:ident),+ $(,)?) => {{
             let (fill, [$($content),+]) = resolve_floating_state(
                 reference.$fill,
                 paint.$fill,
-                reference.element_background,
+                option_reference_surface,
                 track_backgrounds,
                 [$(reference.$content),+],
                 $minimum,
@@ -3508,7 +3565,11 @@ fn resolve_floating_segmented_colors_detailed(
             authored.selection_pressed_background,
             authored.selection_disabled_background,
         ],
-        authored.background,
+        if explicit_track {
+            authored.segmented_track_background
+        } else {
+            authored.background
+        },
         semantic_track,
     );
     let segmented_resolution = resolve_floating_family_for_presentation(
@@ -3552,7 +3613,7 @@ fn resolve_floating_segmented_colors_detailed(
                 let (fill, [foreground], border) = resolve_floating_frame_with_boundary(
                     reference.$fill,
                     paint.$fill,
-                    reference.element_background,
+                    option_reference_surface,
                     track_backgrounds,
                     [(reference.$foreground, $minimum)],
                     paint.$border,
@@ -3654,6 +3715,20 @@ impl ChromeAppearance {
             spaceterm_ui::ControlHost::TitleBar => &self.title_bar_controls.reference,
             spaceterm_ui::ControlHost::Card => &self.card_controls.reference,
             spaceterm_ui::ControlHost::Floating => &self.floating_colors,
+        }
+    }
+
+    /// A Light selected chip retains its authored color instead of compressing into the glass
+    /// ladder. The surrounding host can still transmit the desktop; selection stays identifiable.
+    /// Inactive windows and Increase Contrast retain their separate material preparation.
+    pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
+        if self.appearance == Appearance::Light
+            && self.active
+            && !self.capabilities.increase_contrast
+        {
+            color
+        } else {
+            self.materials.paint(SurfaceRole::Surface, host, color)
         }
     }
 
@@ -3870,6 +3945,10 @@ impl ChromeAppearance {
 
     fn prepare_variant(resolved: &ResolvedChromeAppearance, active: bool) -> Self {
         let capabilities = resolved.composition.capabilities;
+        let explicit_segmented_track = matches!(
+            resolved.provenance.get("segmented_track_background"),
+            Some(ColorProvenance::Authored | ColorProvenance::Overridden)
+        );
         let state = ChromeStatePolicy {
             active,
             capabilities,
@@ -3982,6 +4061,7 @@ impl ChromeAppearance {
             &colors,
             &control_colors,
             resolved.composition.materials,
+            explicit_segmented_track,
         );
         let mut window_control_fallbacks = segmented_compilation
             .used_host_fallback
@@ -3999,20 +4079,24 @@ impl ChromeAppearance {
             window_host,
             floating_contrast_floors,
             capabilities.increase_contrast || capabilities.show_borders,
+            explicit_segmented_track,
         );
         let panel_controls = prepare_state_control_host(
             &authored,
-            colors.panel_background,
-            non_floating_control_host_background(
-                resolved.composition.materials,
-                &colors,
-                spaceterm_ui::ControlHost::Panel,
-                active,
+            (
+                colors.panel_background,
+                non_floating_control_host_background(
+                    resolved.composition.materials,
+                    &colors,
+                    spaceterm_ui::ControlHost::Panel,
+                    active,
+                ),
             ),
             spaceterm_ui::ControlHost::Panel,
             resolved.composition.materials,
             state,
             floating_contrast_floors,
+            explicit_segmented_track,
         );
         let card_host = non_floating_control_host_background(
             resolved.composition.materials,
@@ -4022,30 +4106,33 @@ impl ChromeAppearance {
         );
         let card_controls = prepare_state_control_host(
             &authored,
-            colors.elevated_surface_background,
-            card_host,
+            (colors.elevated_surface_background, card_host),
             spaceterm_ui::ControlHost::Card,
             resolved.composition.materials,
             state,
             floating_contrast_floors,
+            explicit_segmented_track,
         );
         let title_bar_controls = prepare_state_control_host(
             &authored,
-            if active {
-                colors.title_bar_background
-            } else {
-                colors.title_bar_inactive_background
-            },
-            non_floating_control_host_background(
-                resolved.composition.materials,
-                &colors,
-                spaceterm_ui::ControlHost::TitleBar,
-                active,
+            (
+                if active {
+                    colors.title_bar_background
+                } else {
+                    colors.title_bar_inactive_background
+                },
+                non_floating_control_host_background(
+                    resolved.composition.materials,
+                    &colors,
+                    spaceterm_ui::ControlHost::TitleBar,
+                    active,
+                ),
             ),
             spaceterm_ui::ControlHost::TitleBar,
             resolved.composition.materials,
             state,
             floating_contrast_floors,
+            explicit_segmented_track,
         );
         let FloatingColorResolution {
             colors: floating_control_colors,
@@ -4070,10 +4157,12 @@ impl ChromeAppearance {
                 &floating_colors,
                 &floating_control_colors,
                 resolved.composition.floating_materials,
+                explicit_segmented_track,
             )
             .colors,
             floating_raised_material,
             floating_raised_wash,
+            explicit_segmented_track,
         );
         let FloatingFieldResolution {
             reference: floating_field_reference,
@@ -4455,8 +4544,7 @@ mod typography_tests {
         ] {
             let prepared = super::prepare_state_control_host(
                 &authored,
-                host,
-                host,
+                (host, host),
                 spaceterm_ui::ControlHost::Panel,
                 SurfaceMaterials::OPAQUE,
                 super::ChromeStatePolicy {
@@ -4464,6 +4552,7 @@ mod typography_tests {
                     capabilities: CompositionCapabilities::default(),
                 },
                 super::FloatingContrastFloors::STANDARD,
+                false,
             );
             for (fill, actual) in [
                 (

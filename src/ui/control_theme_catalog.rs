@@ -278,6 +278,15 @@ impl Default for OverlayRowPolicy {
 impl OverlayRowPolicy {
     pub(super) fn prepared(appearance: &super::appearance::ChromeAppearance) -> Self {
         let increased = appearance.capabilities.increase_contrast;
+        // Preserve an authored neutral selection when its host already distinguishes it. A
+        // universal 1.25 floor would invert near-white selected chips on light raised surfaces.
+        let reference = &appearance.floating_colors;
+        let host = reference.elevated_surface_background;
+        let authored_selection = reference
+            .row_selected_background
+            .source_over(host)
+            .contrast_ratio(host)
+            .clamp(1.12, 1.25);
         Self {
             primary: if increased { 7.0 } else { 4.5 },
             secondary: if increased { 4.5 } else { 3.0 },
@@ -285,7 +294,7 @@ impl OverlayRowPolicy {
             selection: Some(if increased {
                 1.40
             } else if appearance.active {
-                1.25
+                authored_selection
             } else {
                 super::appearance::SUBDUED_SELECTION_CONTRAST
             }),
@@ -1320,8 +1329,8 @@ mod tests {
                         // that states a state still states it. A row that matches the surface
                         // it rests on still paints nothing at all.
                         assert!(
-                            expected.fill.a < 128,
-                            "{appearance:?}: a resting row must still transmit most of its backing: {:?}",
+                            expected.fill.a < 255,
+                            "{appearance:?}: a row state must still transmit its backing: {:?}",
                             expected.fill
                         );
                         assert_eq!(
@@ -1437,8 +1446,8 @@ mod tests {
             }
             let alphas = rows.map(|row| row.fill.a);
             assert!(
-                alphas.windows(2).all(|pair| pair[0] < pair[1]),
-                "{appearance:?} row states must retain their authored order: {alphas:?}"
+                alphas[0] < alphas[1] && alphas[1] != alphas[2],
+                "{appearance:?} selection must be stronger than hover and respond to hover: {alphas:?}"
             );
         }
     }

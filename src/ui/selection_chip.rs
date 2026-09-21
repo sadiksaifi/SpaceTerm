@@ -48,6 +48,21 @@ pub(crate) struct ChipPaint {
 }
 
 impl ChipPaint {
+    pub(crate) fn selected_on(
+        self,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        semantic_host: Color,
+    ) -> Self {
+        let mut paint = self.raised_on(appearance, semantic_host);
+        paint.fill = self
+            .fill
+            .map(|fill| appearance.selection_surface(semantic_host, fill));
+        paint.hover_fill = self
+            .hover_fill
+            .map(|fill| appearance.selection_surface(semantic_host, fill));
+        paint
+    }
+
     /// Ties a chip to a translucent window without giving up what it describes.
     ///
     /// Each fill is relative to its host. Custom rims are relative to their state fill, so their

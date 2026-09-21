@@ -78,12 +78,13 @@ pub(super) fn prepare(
             result.colors_mut(host),
             inactive_colors,
             active.capabilities.increase_contrast,
+            semantic_host,
             |fill| {
-                let surface = materials
-                    .paint(SurfaceRole::Surface, semantic_host, fill)
+                let surface = active
+                    .selection_surface(semantic_host, fill)
                     .source_over(final_host);
-                let row = materials
-                    .paint(SurfaceRole::Surface, active_colors.row_background, fill)
+                let row = active
+                    .selection_surface(active_colors.row_background, fill)
                     .source_over(row_host);
                 [surface, row]
             },
@@ -101,6 +102,7 @@ pub(super) fn prepare(
         &mut result.floating,
         &inactive.floating_colors,
         active.capabilities.increase_contrast,
+        active.floating_colors.elevated_surface_background,
         |fill| hosts.map(|host| fill.source_over(host)),
     );
     result
@@ -122,6 +124,7 @@ fn prepare_colors(
     active: &mut ChromeColors,
     inactive: &ChromeColors,
     increase_contrast: bool,
+    semantic_host: Color,
     backgrounds: impl Fn(Color) -> [Color; 2] + Copy,
 ) {
     let primary = if increase_contrast { 7.0 } else { 4.5 };
@@ -136,6 +139,8 @@ fn prepare_colors(
             (&mut active.row_selected_icon, icon),
             (&mut active.row_selected_match, primary),
         ],
+        increase_contrast,
+        semantic_host,
         backgrounds,
     );
     prepare_state(
@@ -147,6 +152,8 @@ fn prepare_colors(
             (&mut active.row_selected_hover_icon, icon),
             (&mut active.row_selected_hover_match, primary),
         ],
+        increase_contrast,
+        semantic_host,
         backgrounds,
     );
     active.row_selected_border = inactive.row_selected_border;
@@ -157,18 +164,37 @@ fn prepare_state<const N: usize>(
     target_fill: &mut Color,
     inactive_fill: Color,
     mut content: [(&mut Color, f64); N],
+    increase_contrast: bool,
+    semantic_host: Color,
     backgrounds: impl Fn(Color) -> [Color; 2],
 ) {
+    let active_fill = *target_fill;
     let proposals = content.each_ref().map(|(color, floor)| (**color, *floor));
     let hosts = backgrounds(Color::rgba(0));
+    let selection_floor = if increase_contrast {
+        super::SUBDUED_SELECTION_CONTRAST
+    } else {
+        active_fill
+            .source_over(semantic_host)
+            .contrast_ratio(semantic_host)
+            .clamp(1.12, super::SUBDUED_SELECTION_CONTRAST)
+    };
+    let inactive_keeps_direction = backgrounds(active_fill)
+        .into_iter()
+        .zip(backgrounds(inactive_fill))
+        .zip(hosts)
+        .all(|((active, inactive), host)| {
+            let host = super::relative_luminance(host);
+            let active_delta = super::relative_luminance(active) - host;
+            let inactive_delta = super::relative_luminance(inactive) - host;
+            active_delta * inactive_delta >= 0.0
+        });
     let resolve = |fill: Color| {
         let backgrounds = backgrounds(fill);
         if backgrounds
             .into_iter()
             .zip(hosts)
-            .any(|(background, host)| {
-                background.contrast_ratio(host) < super::SUBDUED_SELECTION_CONTRAST
-            })
+            .any(|(background, host)| background.contrast_ratio(host) < selection_floor)
         {
             return None;
         }
@@ -181,7 +207,12 @@ fn prepare_state<const N: usize>(
         resolved.map(|resolved| (fill, resolved))
     };
 
-    let prepared = resolve(inactive_fill).or_else(|| {
+    let dimmed = if inactive_keeps_direction {
+        resolve(inactive_fill)
+    } else {
+        None
+    };
+    let prepared = dimmed.or_else(|| resolve(active_fill)).or_else(|| {
         [Color::rgb(0), Color::rgb(0xffffff)]
             .into_iter()
             .filter_map(|endpoint| {

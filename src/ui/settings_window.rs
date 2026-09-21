@@ -102,10 +102,15 @@ fn navigation_chip(
 ) -> SelectionChip {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
     let paint_colors = if selected { selection_colors } else { colors };
+    let paint = navigation_chip_paint(selected, available, paint_colors);
+    let paint = if selected {
+        paint.selected_on(appearance, colors.panel_background)
+    } else {
+        paint.raised_on(appearance, colors.panel_background)
+    };
     SelectionChip::new(
         ChipShape::symmetric(px(0.0), px(0.0), RadiusRole::Control.pixels()),
-        navigation_chip_paint(selected, available, paint_colors)
-            .raised_on(appearance, colors.panel_background),
+        paint,
     )
 }
 

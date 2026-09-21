@@ -14,7 +14,8 @@ macro_rules! chrome_color_fields {
             text_accent, link_text, link_text_hover, link_text_pressed, link_text_disabled,
             icon, icon_muted, icon_disabled, border, border_variant, border_focused, focus_ring, border_selected, border_disabled,
             border_transparent,
-            element_background, element_hover, element_active, element_selected,
+            element_background, segmented_track_background,
+            element_hover, element_active, element_selected,
             element_disabled, element_foreground,
             element_hover_foreground, element_active_foreground,
             element_disabled_foreground,
@@ -198,7 +199,7 @@ mod scheme;
 mod tests;
 
 pub(crate) use crate::theme::Color;
-pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
+pub(crate) use compiler::{CaptionPaint, ColorProvenance, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     WindowBackgroundAppearance,

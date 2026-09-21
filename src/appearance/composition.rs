@@ -461,6 +461,7 @@ macro_rules! resting_fill_roles {
             badge_background,
             preview_background,
             element_background,
+            segmented_track_background,
             element_hover,
             element_active,
             element_selected,
