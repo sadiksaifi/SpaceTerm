@@ -2235,6 +2235,41 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn page_navigation_should_include_the_pinned_group_separator(cx: &mut TestAppContext) {
+    // The 213 px viewport fits seven plain 30 px rows, but not the extra 9 px separator.
+    for (selected, key, expected) in [(5, "pagedown", 100), (101, "pageup", 6)] {
+        let ordinary = (1..=10)
+            .map(|id| ComboBoxItem::new(id, format!("Workspace {id}")))
+            .collect();
+        let (root, events, _, cx) = combo_box_window(cx, Some(selected), ordinary, false);
+        root.update(cx, |root, cx| {
+            root.fallback = Some(ComboBoxFallback::pinned_rows(|_| {
+                vec![
+                    ComboBoxItem::new(100, "Local Workspace"),
+                    ComboBoxItem::new(101, "Remote Workspace"),
+                ]
+            }));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        open_by_pointer(cx);
+        cx.simulate_keystrokes(key);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let accepted = events.borrow().iter().find_map(|event| match event {
+            RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
+            _ => None,
+        });
+        assert_eq!(
+            accepted,
+            Some(expected),
+            "{key} must include the separator height"
+        );
+    }
+}
+
+#[gpui::test]
 fn repaired_provisional_item_should_be_revealed_after_a_long_model_update(cx: &mut TestAppContext) {
     let (root, _, _, cx) = combo_box_window(cx, Some(1), long_items(), false);
     open_by_pointer(cx);

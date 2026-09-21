@@ -827,6 +827,15 @@ impl ComboBoxMetrics {
         }
     }
 
+    fn list_item_height(self, described: bool, separator_before: bool) -> Pixels {
+        self.row_height(described)
+            + if separator_before {
+                self.group_separator_height
+            } else {
+                px(0.0)
+            }
+    }
+
     fn row_radius(self) -> Pixels {
         (self.corner_radius - self.panel_padding).max(px(0.0))
     }
@@ -2007,13 +2016,17 @@ impl<I: Clone + Eq + 'static> ComboBoxState<I> {
             metrics.row_height * 8.0
         };
         let top = |position: usize| {
-            self.matches
-                .iter()
-                .take(position)
-                .filter_map(|index| self.presented_items.get(*index))
-                .fold(px(0.0), |top, item| {
-                    top + metrics.row_height(item.description.is_some())
-                })
+            self.matches.iter().take(position).enumerate().fold(
+                px(0.0),
+                |top, (position, index)| {
+                    top + metrics.list_item_height(
+                        self.presented_items
+                            .get(*index)
+                            .is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, self.ordinary_match_count),
+                    )
+                },
+            )
         };
         let current_top = top(current);
         let target = if direction < 0 {
@@ -2497,6 +2510,10 @@ fn match_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<(usize, ComboBo
     .collect()
 }
 
+fn group_separator_before(position: usize, ordinary_match_count: usize) -> bool {
+    ordinary_match_count > 0 && position == ordinary_match_count
+}
+
 fn render_overlay<I: Clone + Eq + 'static>(
     state: Entity<ComboBoxState<I>>,
     input_leading: Option<InputIconBuilder>,
@@ -2521,20 +2538,13 @@ fn render_overlay<I: Clone + Eq + 'static>(
             .enumerate()
             .fold(px(0.0), |height, (position, index)| {
                 height
-                    + snapshot
-                        .presented_items
-                        .get(*index)
-                        .map_or(theme.metrics.row_height, |item| {
-                            theme.metrics.row_height(item.description.is_some())
-                        })
-                    + if position == snapshot.ordinary_match_count
-                        && snapshot.ordinary_match_count > 0
-                        && snapshot.matches.len() > snapshot.ordinary_match_count
-                    {
-                        theme.metrics.group_separator_height
-                    } else {
-                        px(0.0)
-                    }
+                    + theme.metrics.list_item_height(
+                        snapshot
+                            .presented_items
+                            .get(*index)
+                            .is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, snapshot.ordinary_match_count),
+                    )
             })
     };
     let panel_width = snapshot.panel_width.unwrap_or_else(|| {
@@ -2674,9 +2684,10 @@ fn render_overlay<I: Clone + Eq + 'static>(
                         },
                         ComboBoxRowRenderContext {
                             identity_icons_reserved,
-                            separator_before: position == ordinary_match_count
-                                && ordinary_match_count > 0
-                                && matches.len() > ordinary_match_count,
+                            separator_before: group_separator_before(
+                                position,
+                                ordinary_match_count,
+                            ),
                             shortcut_gap: menu_with_filter_header.then_some(
                                 (px(MENU_SHORTCUT_GAP) - theme.metrics.gap).max(px(0.0)),
                             ),
@@ -3122,8 +3133,9 @@ fn render_row<I: Clone + Eq + 'static>(
     if separator_before {
         div()
             .w_full()
-            .h(theme.metrics.group_separator_height
-                + theme.metrics.row_height(item.description.is_some()))
+            .h(theme
+                .metrics
+                .list_item_height(item.description.is_some(), separator_before))
             .flex()
             .flex_col()
             .child(
