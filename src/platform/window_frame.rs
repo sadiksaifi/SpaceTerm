@@ -37,6 +37,7 @@ impl TrafficLightPlacement {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct WindowFrameGeometry {
     outer_corner_radius: Option<f32>,
+    outer_edge_width: f32,
     workspace_traffic_lights: Option<TrafficLightPlacement>,
     settings_traffic_lights: Option<TrafficLightPlacement>,
 }
@@ -45,9 +46,16 @@ impl WindowFrameGeometry {
     pub(crate) const fn new(outer_corner_radius: Option<f32>) -> Self {
         Self {
             outer_corner_radius,
+            outer_edge_width: 0.0,
             workspace_traffic_lights: None,
             settings_traffic_lights: None,
         }
+    }
+
+    /// Records the edge the window paints over the outermost points of its own content.
+    pub(crate) const fn with_outer_edge_width(mut self, width: f32) -> Self {
+        self.outer_edge_width = width;
+        self
     }
 
     pub(crate) const fn with_traffic_lights(
@@ -62,6 +70,11 @@ impl WindowFrameGeometry {
 
     pub(crate) const fn outer_corner_radius(self) -> Option<f32> {
         self.outer_corner_radius
+    }
+
+    /// Width of the window's own edge inside its content bounds; zero when the host paints none.
+    pub(crate) const fn outer_edge_width(self) -> f32 {
+        self.outer_edge_width
     }
 
     pub(crate) fn workspace_traffic_light_position(

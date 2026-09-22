@@ -184,9 +184,10 @@ fn init_with_text_direction(
     cx: &mut App,
     direction: spaceterm_ui::TextDirection,
 ) -> gpui::Result<()> {
-    cx.set_global(crate::platform::window_frame::WindowFrameGeometry::new(
-        Some(16.0),
-    ));
+    cx.set_global(
+        crate::platform::window_frame::WindowFrameGeometry::new(Some(16.0))
+            .with_outer_edge_width(1.0),
+    );
     initialize_controls(cx)?;
     crate::desktop_profile::testing_profile(direction).install(cx);
     Ok(())

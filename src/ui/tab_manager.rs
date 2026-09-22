@@ -85,17 +85,17 @@ const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 /// paint moves inward. The insets are what the eye actually measures:
 ///
 /// - vertically the chip faces the window's top edge and, below the strip, the Pane's own surface,
-///   so it carries a whole frame space on each side;
-/// - horizontally it faces another chip, so each side carries half and the visible gap between two
-///   Tabs is one frame space again.
+///   so it carries a whole frame space on each side of the band beneath the window's edge;
+/// - horizontally it faces another chip, so each side carries a share and the visible gap between
+///   two Tabs is one frame space again.
 ///
 /// The radius comes from the frame's one radius family, so a Tab, a selected sidebar row, and a
 /// floating Pane read as the same shape at three sizes rather than as cousins.
 fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
     let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     ChipShape {
-        inset_leading: frame.half_space(),
-        inset_trailing: frame.half_space(),
+        inset_leading: frame.strip_chip_leading_inset(),
+        inset_trailing: frame.strip_chip_trailing_inset(),
         inset_y: frame.space(),
         radius: frame.chip_radius(),
     }
@@ -1493,10 +1493,16 @@ impl TabManager {
         let create_manager = manager.clone();
         #[cfg(test)]
         let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
+        // The window paints its own edge over the top of the bar, so the Tabs and the create
+        // control centre in the band beneath it, on the line the top-left chrome shares.
         let content = div()
             .relative()
             .size_full()
             .min_w_0()
+            .pt(
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .window_edge(),
+            )
             .flex()
             .flex_row()
             .items_center()
@@ -1663,8 +1669,8 @@ impl Render for TabManager {
                     .border_color(gpui_color(
                         appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface),
                     ))
-                    .border_b(frame.space())
-                    .border_r(frame.space())
+                    .border_b(frame.window_edge_inset())
+                    .border_r(frame.window_edge_inset())
                     .border_l(frame.stage_leading_inset(self.sidebar_visible))
                     .child(
                         div()
@@ -3094,46 +3100,49 @@ mod tests {
             .debug_bounds("tab-item-2-chip")
             .expect("the Active Tab chip was not rendered");
 
-        // The bar absorbs the Workspace frame's top space, so the strip is taller than the base
-        // title-bar height and a Tab grows with it.
-        let bar_height = cx.update(|_, cx| {
+        // The bar carries the window's own edge above a band, and a Tab fills that band.
+        let (bar_height, band_height) = cx.update(|_, cx| {
             let appearance = crate::ui::appearance::chrome(cx);
-            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                .top_chrome_height(appearance.top_height())
+            let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+            (
+                frame.top_chrome_height(appearance.top_height()),
+                frame.top_band_height(appearance.top_height()),
+            )
         });
         assert_eq!(
             (active_item.size.height, bar.size.height),
-            (bar_height, bar_height),
-            "a Tab should keep the full height of the bar as its hit target"
+            (band_height, bar_height),
+            "a Tab should keep the full height of the bar's band as its hit target"
         );
-        assert!(bar_height > px(TAB_BAR_HEIGHT));
-        let (space, half_space) = cx.update(|_, cx| {
+        let (space, leading, trailing, window_edge) = cx.update(|_, cx| {
             let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
                 crate::ui::appearance::chrome(cx),
                 cx,
             );
-            (frame.space(), frame.half_space())
+            (
+                frame.space(),
+                frame.strip_chip_leading_inset(),
+                frame.strip_chip_trailing_inset(),
+                frame.window_edge(),
+            )
         });
         assert_eq!(
             active_chip,
             gpui::bounds(
-                gpui::point(
-                    active_item.origin.x + half_space,
-                    active_item.origin.y + space,
-                ),
+                gpui::point(active_item.origin.x + leading, active_item.origin.y + space,),
                 gpui::size(
-                    active_item.size.width - half_space - half_space,
+                    active_item.size.width - leading - trailing,
                     active_item.size.height - space - space,
                 ),
             ),
             "the Active Tab material should float inside its item"
         );
         // The visible distance between two Tabs, and between a Tab and the strip's own edges, is
-        // the frame's one space.
+        // the frame's one space. Above the chip, the window paints its own edge first.
         assert_eq!(
             (
                 active_chip.left() - inactive_chip.right(),
-                active_chip.top() - bar.top(),
+                active_chip.top() - bar.top() - window_edge,
                 bar.bottom() - active_chip.bottom(),
             ),
             (space, space, space),
@@ -3154,6 +3163,15 @@ mod tests {
                 "{stale} should no longer be drawn beside the chip"
             );
         }
+    }
+
+    /// The part of the Tab bar beneath the window's own edge, where every top control centres.
+    fn top_band_height(cx: &mut VisualTestContext) -> Pixels {
+        cx.update(|_, cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_band_height(appearance.top_height())
+        })
     }
 
     fn leaked_selector(selector: String) -> &'static str {
@@ -4468,7 +4486,12 @@ mod tests {
                 let bar = cx.debug_bounds("tab-bar").unwrap();
                 assert_eq!(area.left(), strip.right());
                 assert!(area.right() <= bar.right());
-                assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
+                // The create control fills the band beneath the window's own edge.
+                assert_eq!(
+                    area.size,
+                    gpui::size(px(TAB_BAR_HEIGHT), top_band_height(cx))
+                );
+                assert_eq!(area.bottom(), bar.bottom());
                 assert_eq!(button.center(), area.center());
                 assert_eq!(button.size, gpui::size(px(28.0), px(28.0)));
                 if width == 1200.0 {
@@ -4510,7 +4533,12 @@ mod tests {
         let bar = cx.debug_bounds("tab-bar").unwrap();
         assert_eq!(area.left(), strip.right());
         assert!(area.right() <= bar.right());
-        assert_eq!(area.size, gpui::size(px(TAB_BAR_HEIGHT), bar.size.height));
+        // The create control fills the band beneath the window's own edge.
+        assert_eq!(
+            area.size,
+            gpui::size(px(TAB_BAR_HEIGHT), top_band_height(cx))
+        );
+        assert_eq!(area.bottom(), bar.bottom());
         assert_eq!(button.center(), area.center());
         let active = cx.debug_bounds("tab-item-21-active").unwrap();
         assert!(active.left() >= strip.left());

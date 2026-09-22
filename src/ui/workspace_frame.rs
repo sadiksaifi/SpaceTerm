@@ -2,9 +2,16 @@
 //! breathes with, fixed selection geometry, the Pane corner derived from its native container, and
 //! the top chrome height that absorbs the frame's top edge.
 //!
-//! Every visible gap in the Workspace is that one measurement: the Pane stage's perimeter, the
-//! space between Split Panes at any nesting depth, and the margin on both sides of a sidebar item's
-//! chip. They are literally equal rather than sums that happen to agree.
+//! Every visible gap in the Workspace reads as that one measurement: the Pane stage's perimeter,
+//! the space between Split Panes at any nesting depth, the margin on both sides of a sidebar item's
+//! chip, and the air above and below a Tab's chip. They are literally equal rather than sums that
+//! happen to agree, except the gap between Split Panes, which is two points narrower so it looks
+//! equal. That gap is a lighter band between two darker Panes, and it opens wider where rounded
+//! Pane corners meet, so at the same measurement it reads wider than every other gap.
+//!
+//! The eye measures a gap between two painted edges. Where a surface faces the window's outer edge,
+//! the window paints its own edge over the outermost point of the content, so that inset carries
+//! the edge's width in addition to the gap.
 //!
 //! The frame has no top edge to paint. The space that would sit between the titlebar and the Pane
 //! belongs to the top chrome's height instead, so the Tab strip breathes with the same measurement
@@ -30,7 +37,15 @@ pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
 }
 
 /// The Compact-density measurement of every visible gap in the Workspace.
-const SPACE: f32 = RadiusRole::Control.points();
+const SPACE: f32 = 5.0;
+/// How much shorter a top chip is than the base top-chrome height, at Compact density.
+///
+/// A chip's height is a control size, not a gap, so the frame's gap never resizes a Tab.
+const TOP_CHIP_TRIM: f32 = 6.0;
+/// How much narrower the gap between Split Panes is than every other gap, at every density.
+///
+/// The eye reads the Split gap as wider at the same measurement, so it gives these points back.
+const SPLIT_GAP_OPTICAL_TRIM: f32 = 2.0;
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
 
@@ -38,13 +53,15 @@ const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WorkspaceFrame {
     space: Pixels,
-    half_space: Pixels,
+    window_edge: Pixels,
+    strip_chip_leading_inset: Pixels,
+    top_chip_trim: Pixels,
     pane_radius: Pixels,
     chip_radius: Pixels,
 }
 
 impl WorkspaceFrame {
-    /// Resolves the frame for a Chrome density scale and the hosting window's corner.
+    /// Resolves the frame for a Chrome density scale and the hosting window's geometry.
     ///
     /// Each length is rounded to a whole point so Comfortable density never leaves a fractional,
     /// blurry edge between a Pane and the base surface.
@@ -55,18 +72,24 @@ impl WorkspaceFrame {
             1.0
         };
         let space = (SPACE * scale).round();
+        let window_edge = match window.outer_edge_width() {
+            width if width.is_finite() && width >= 0.0 => width.round(),
+            _ => 0.0,
+        };
         // Selection is a fixed semantic control radius. A Pane is the native window corner carried
-        // inward by the density-scaled frame space, so its radius follows the changing inset
-        // instead of selecting an independent density-scaled value.
+        // inward by its window-edge inset, so its radius follows the changing inset instead of
+        // selecting an independent density-scaled value.
         let chip_radius = RadiusRole::Control.points();
         let window_radius = match window.outer_corner_radius() {
             Some(radius) if radius.is_finite() && radius >= 0.0 => radius,
             Some(_) | None => FALLBACK_WINDOW_RADIUS,
         };
-        let pane_radius = pane_radius(window_radius, space);
+        let pane_radius = pane_radius(window_radius, space + window_edge);
         Self {
             space: px(space),
-            half_space: px((space / 2.0).round()),
+            window_edge: px(window_edge),
+            strip_chip_leading_inset: px((space / 2.0).floor()),
+            top_chip_trim: px((TOP_CHIP_TRIM * scale).round()),
             pane_radius: px(pane_radius),
             chip_radius: px(chip_radius),
         }
@@ -93,25 +116,51 @@ impl WorkspaceFrame {
         self.space
     }
 
-    /// What each of two neighbouring chips contributes to the gap between them.
+    /// The width of the edge the window paints over the outermost point of its content.
+    pub(crate) const fn window_edge(self) -> Pixels {
+        self.window_edge
+    }
+
+    /// The inset of a surface that faces the window's outer edge.
     ///
-    /// Chips in one strip are inset inside their own items, so both sides of a boundary contribute
-    /// and the visible gap is [`WorkspaceFrame::space`] again.
-    pub(crate) const fn half_space(self) -> Pixels {
-        self.half_space
+    /// The window's own edge is the painted surface on that side, so the inset carries the edge
+    /// and then the one visible gap.
+    pub(crate) fn window_edge_inset(self) -> Pixels {
+        self.window_edge + self.space
+    }
+
+    /// What a chip in a strip keeps on its leading side of the gap to its neighbour.
+    ///
+    /// Chips in one strip are inset inside their own items, so both sides of a boundary contribute.
+    /// The two shares split one whole-point gap, so the visible gap between two chips is
+    /// [`WorkspaceFrame::space`] again even when that gap is odd.
+    pub(crate) const fn strip_chip_leading_inset(self) -> Pixels {
+        self.strip_chip_leading_inset
+    }
+
+    /// What a chip in a strip keeps on its trailing side of the gap to its neighbour.
+    pub(crate) fn strip_chip_trailing_inset(self) -> Pixels {
+        self.space - self.strip_chip_leading_inset
     }
 
     /// Base surface between two Split Panes; it also owns the Split's resize hit target.
-    pub(crate) const fn pane_gap(self) -> Pixels {
-        self.space
+    ///
+    /// It is two points narrower than [`WorkspaceFrame::space`], so it looks equal to the
+    /// gaps at the window edge and around the top chrome.
+    pub(crate) fn pane_gap(self) -> Pixels {
+        self.space - px(SPLIT_GAP_OPTICAL_TRIM)
     }
 
-    /// The margin a sidebar item's chip keeps on both of its sides.
+    /// The margin a sidebar item's chip keeps on its leading side, facing the window edge.
+    pub(crate) fn sidebar_chip_leading_inset(self) -> Pixels {
+        self.window_edge_inset()
+    }
+
+    /// The margin a sidebar item's chip keeps on its trailing side, facing the Pane.
     ///
-    /// A row's chip faces the window edge on one side and the Pane beside the sidebar on the other.
-    /// Both neighbours are painted surfaces rather than chips, so the chip carries the whole gap on
-    /// each side and the stage adds nothing where they meet.
-    pub(crate) const fn sidebar_chip_inset(self) -> Pixels {
+    /// The Pane beside the sidebar is a painted surface rather than a chip, so the chip carries the
+    /// whole gap and the stage adds nothing where they meet.
+    pub(crate) const fn sidebar_chip_trailing_inset(self) -> Pixels {
         self.space
     }
 
@@ -122,16 +171,31 @@ impl WorkspaceFrame {
     /// into one gap of twice the size. Without a sidebar the stage carries the window-edge
     /// perimeter itself.
     pub(crate) fn stage_leading_inset(self, sidebar_visible: bool) -> Pixels {
-        if sidebar_visible { px(0.0) } else { self.space }
+        if sidebar_visible {
+            px(0.0)
+        } else {
+            self.window_edge_inset()
+        }
     }
 
     /// The height of the top chrome, which absorbs the frame's top space.
     ///
-    /// Nothing is painted between the titlebar and the Pane: the Tab strip simply grows by the
-    /// frame's measurement, so its chips keep the same air above and below that every other gap
-    /// in the Workspace has.
+    /// Nothing is painted between the titlebar and the Pane. The chrome is the window's own edge
+    /// over a band, and every top control centres in that band. The band holds one
+    /// [`WorkspaceFrame::top_chip_height`] chip with one visible gap above it and one between it
+    /// and the Pane.
     pub(crate) fn top_chrome_height(self, base_height: Pixels) -> Pixels {
-        base_height + self.space
+        self.window_edge + self.top_band_height(base_height)
+    }
+
+    /// The part of the top chrome beneath the window's own edge, where every top control centres.
+    pub(crate) fn top_band_height(self, base_height: Pixels) -> Pixels {
+        self.space + self.top_chip_height(base_height) + self.space
+    }
+
+    /// The height of a chip riding the top chrome's band: the Active Tab and the collapsed switcher.
+    pub(crate) fn top_chip_height(self, base_height: Pixels) -> Pixels {
+        base_height - self.top_chip_trim
     }
 
     /// Corner radius of every floating Pane surface.
@@ -151,7 +215,7 @@ impl WorkspaceFrame {
     /// preceding control to the first chip is one [`WorkspaceFrame::space`], and the first Tab's
     /// paint lines up with the Pane beneath it.
     pub(crate) fn chip_strip_leading_offset(self) -> Pixels {
-        px(0.0) - self.half_space
+        px(0.0) - self.strip_chip_leading_inset
     }
 }
 
@@ -162,9 +226,14 @@ mod tests {
     use crate::ui::appearance::ChromeAppearance;
 
     const STANDARD_WINDOW_RADIUS: f32 = 16.0;
+    const STANDARD_WINDOW_EDGE: f32 = 1.0;
 
     fn window(radius: Option<f32>) -> WindowFrameGeometry {
         WindowFrameGeometry::new(radius)
+    }
+
+    fn standard_window() -> WindowFrameGeometry {
+        window(Some(STANDARD_WINDOW_RADIUS)).with_outer_edge_width(STANDARD_WINDOW_EDGE)
     }
 
     fn frame(density: ChromeDensity, window: WindowFrameGeometry) -> WorkspaceFrame {
@@ -174,13 +243,16 @@ mod tests {
     #[test]
     fn every_density_should_resolve_whole_point_metrics() {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            for window in [window(Some(STANDARD_WINDOW_RADIUS)), window(None)] {
+            for window in [standard_window(), window(None)] {
                 let frame = frame(density, window);
                 for metric in [
                     frame.space(),
-                    frame.half_space(),
+                    frame.window_edge_inset(),
+                    frame.strip_chip_leading_inset(),
+                    frame.strip_chip_trailing_inset(),
                     frame.pane_gap(),
-                    frame.sidebar_chip_inset(),
+                    frame.sidebar_chip_leading_inset(),
+                    frame.sidebar_chip_trailing_inset(),
                     frame.pane_radius(),
                     frame.chip_radius(),
                 ] {
@@ -194,28 +266,31 @@ mod tests {
 
     #[test]
     fn comfortable_density_should_not_shrink_the_frame() {
-        let window = window(Some(STANDARD_WINDOW_RADIUS));
-        let compact = frame(ChromeDensity::Compact, window);
-        let comfortable = frame(ChromeDensity::Comfortable, window);
+        let compact = frame(ChromeDensity::Compact, standard_window());
+        let comfortable = frame(ChromeDensity::Comfortable, standard_window());
         assert!(comfortable.space() > compact.space());
-        assert_eq!((compact.space(), comfortable.space()), (px(6.0), px(8.0)));
+        assert_eq!((compact.space(), comfortable.space()), (px(5.0), px(6.0)));
     }
 
-    /// Every visible gap in the Workspace is the same measurement, not a sum that agrees.
+    /// Every visible gap in the Workspace is the same measurement, not a sum that agrees. The
+    /// Split gap alone gives back two points so it looks equal.
     #[test]
     fn every_visible_gap_should_be_one_measurement() {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
+            let frame = frame(density, standard_window());
             let space = frame.space();
+            let edge = frame.window_edge();
+            assert_eq!(edge, px(STANDARD_WINDOW_EDGE));
             assert_eq!(
                 (
-                    frame.pane_gap(),
-                    frame.sidebar_chip_inset(),
-                    frame.stage_leading_inset(false),
-                    frame.top_chrome_height(px(36.0)) - px(36.0),
-                    frame.half_space() * 2.0,
+                    frame.pane_gap() + px(SPLIT_GAP_OPTICAL_TRIM),
+                    frame.sidebar_chip_trailing_inset(),
+                    frame.sidebar_chip_leading_inset() - edge,
+                    frame.stage_leading_inset(false) - edge,
+                    frame.window_edge_inset() - edge,
+                    frame.strip_chip_leading_inset() + frame.strip_chip_trailing_inset(),
                 ),
-                (space, space, space, space, space),
+                (space, space, space, space, space, space),
                 "{density:?} gaps should be one measurement"
             );
             assert_eq!(
@@ -223,24 +298,41 @@ mod tests {
                 px(0.0),
                 "{density:?} the sidebar chip's own margin is the whole gap beside the Pane"
             );
-            assert_eq!(
-                frame.chip_strip_leading_offset(),
-                px(0.0) - frame.half_space(),
-                "{density:?} a strip pulls its first chip's inset back"
-            );
         }
     }
 
-    /// Two neighbouring chips each contribute half of one visible gap.
+    /// A top chip keeps one gap below the window edge and one above the Pane, at its own height.
+    #[test]
+    fn top_chrome_should_hold_its_chip_between_two_visible_gaps() {
+        let base = px(36.0);
+        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+            let frame = frame(density, standard_window());
+            assert_eq!(
+                frame.top_chrome_height(base),
+                frame.window_edge() + frame.space() + frame.top_chip_height(base) + frame.space(),
+                "{density:?} a top chip should sit between two visible gaps"
+            );
+        }
+        assert_eq!(
+            frame(ChromeDensity::Compact, standard_window()).top_chip_height(base),
+            px(30.0),
+            "the gap never resizes a top chip"
+        );
+    }
+
+    /// Two neighbouring chips each contribute a share of one visible gap.
     #[test]
     fn paired_chips_should_sum_to_one_visible_gap() {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let frame = frame(density, window(Some(STANDARD_WINDOW_RADIUS)));
-            assert_eq!(frame.half_space() + frame.half_space(), frame.space());
+            let frame = frame(density, standard_window());
+            assert_eq!(
+                frame.strip_chip_trailing_inset() + frame.strip_chip_leading_inset(),
+                frame.space()
+            );
             // A chip's paint starts on its strip's leading edge, so the control before the strip
             // supplies the whole gap by itself.
             assert_eq!(
-                frame.chip_strip_leading_offset() + frame.half_space(),
+                frame.chip_strip_leading_offset() + frame.strip_chip_leading_inset(),
                 px(0.0),
                 "{density:?} a first chip should paint on the strip edge"
             );
@@ -250,15 +342,14 @@ mod tests {
     /// Pane corners stay concentric with the native window while selection uses one fixed role.
     #[test]
     fn pane_radius_follows_its_inset_while_selection_radius_stays_fixed() {
-        let window = window(Some(STANDARD_WINDOW_RADIUS));
-        let compact = frame(ChromeDensity::Compact, window);
-        let comfortable = frame(ChromeDensity::Comfortable, window);
+        let compact = frame(ChromeDensity::Compact, standard_window());
+        let comfortable = frame(ChromeDensity::Comfortable, standard_window());
         for (density, frame) in [
             (ChromeDensity::Compact, compact),
             (ChromeDensity::Comfortable, comfortable),
         ] {
             assert_eq!(
-                frame.pane_radius() + frame.space(),
+                frame.pane_radius() + frame.window_edge_inset(),
                 px(STANDARD_WINDOW_RADIUS),
                 "{density:?} Pane corners should stay concentric with the window corner"
             );
@@ -273,13 +364,13 @@ mod tests {
         );
         assert_eq!(
             (compact.pane_radius(), comfortable.pane_radius()),
-            (px(10.0), px(8.0)),
+            (px(10.0), px(9.0)),
             "the Pane radius must derive from each density's actual inset"
         );
     }
 
     #[test]
-    fn invalid_or_missing_corner_facts_should_use_the_portable_fallback() {
+    fn invalid_or_missing_window_facts_should_use_the_portable_fallback() {
         let unavailable = frame(ChromeDensity::Compact, window(None));
         for radius in [f32::NAN, -1.0] {
             assert_eq!(
@@ -287,6 +378,16 @@ mod tests {
                 unavailable
             );
         }
+        for edge in [f32::NAN, -1.0] {
+            assert_eq!(
+                frame(
+                    ChromeDensity::Compact,
+                    window(None).with_outer_edge_width(edge)
+                ),
+                unavailable
+            );
+        }
+        assert_eq!(unavailable.window_edge(), px(0.0));
         assert_eq!(
             frame(ChromeDensity::Compact, window(Some(0.0))).pane_radius(),
             RadiusRole::Control.pixels()

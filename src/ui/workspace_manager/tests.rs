@@ -44,11 +44,11 @@ fn top_chrome_height(cx: &mut VisualTestContext) -> Pixels {
     })
 }
 
-/// The air between a row's content and either edge of the row.
-fn row_padding(cx: &mut VisualTestContext) -> Pixels {
+/// The air between a row's content and the row's trailing edge.
+fn row_trailing_padding(cx: &mut VisualTestContext) -> Pixels {
     cx.update(|_, cx| {
         let appearance = crate::ui::appearance::chrome(cx);
-        WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
+        WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_trailing_inset()
             + appearance.spacing(crate::ui::workspace_sidebar::SIDEBAR_ROW_CHIP_PADDING)
     })
 }
@@ -291,7 +291,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
     // Canvas children removed this frame can leave historical GPUI debug bounds behind.
     // The name occupying all available width verifies the machine and its gap are gone.
-    assert_eq!(name.right(), row.right() - row_padding(cx));
+    assert_eq!(name.right(), row.right() - row_trailing_padding(cx));
     let counts = cx.debug_bounds("workspace-counts-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
     assert!(counts.right() <= row.right());
@@ -5316,6 +5316,7 @@ fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext
 fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let space = frame_space(cx);
+    let window_edge_inset = workspace_frame(cx).window_edge_inset();
     let chrome_height = top_chrome_height(cx);
 
     for sidebar_visible in [true, false] {
@@ -5344,13 +5345,17 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
         };
 
         // The Pane's leading neighbour is the sidebar chip when the sidebar is shown and the window
-        // edge when it is hidden. Either way exactly one space is painted between them.
-        let leading_neighbour = if sidebar_visible {
-            cx.debug_bounds("workspace-row-selection-1")
-                .expect("the Active Workspace chip was rendered")
-                .right()
+        // edge when it is hidden. Either way exactly one space is painted between them; the window
+        // paints its own edge inside the window-facing insets.
+        let (leading_neighbour, leading_inset) = if sidebar_visible {
+            (
+                cx.debug_bounds("workspace-row-selection-1")
+                    .expect("the Active Workspace chip was rendered")
+                    .right(),
+                space,
+            )
         } else {
-            root.left()
+            (root.left(), window_edge_inset)
         };
         assert_eq!(
             (
@@ -5364,10 +5369,10 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
             (
                 content_left,
                 root.origin.y + chrome_height,
-                space,
+                leading_inset,
                 px(0.0),
-                space,
-                space,
+                window_edge_inset,
+                window_edge_inset,
             ),
             "sidebar visible: {sidebar_visible}"
         );
@@ -6006,22 +6011,24 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         .expect("the Active Workspace selection was not rendered");
 
     let space = frame_space(cx);
+    let window_edge = workspace_frame(cx).window_edge();
     assert_eq!(
         selection,
         gpui::bounds(
             point(
-                third_row.origin.x + space,
+                third_row.origin.x + window_edge + space,
                 third_row.origin.y + px(SIDEBAR_ROW_SELECTION_INSET_Y),
             ),
             gpui::size(
-                third_row.size.width - space - space,
+                third_row.size.width - window_edge - space - space,
                 third_row.size.height - px(SIDEBAR_ROW_SELECTION_INSET_Y * 2.0),
             ),
         ),
         "the selected Workspace material should float inside its row"
     );
     // The chip's two margins are the frame's one measurement, and each is measured to the surface
-    // actually beside it: the window edge on one side, the floating Pane on the other.
+    // actually beside it: the window's own painted edge on one side, the floating Pane on the
+    // other.
     let pane = cx
         .debug_bounds("pane-surface-1")
         .expect("the floating Pane surface was rendered");
@@ -6030,7 +6037,7 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         .expect("the Workspace manager was rendered");
     assert_eq!(
         (
-            selection.left() - root.left(),
+            selection.left() - root.left() - window_edge,
             pane.left() - selection.right(),
         ),
         (space, space),

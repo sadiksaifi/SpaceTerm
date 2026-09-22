@@ -625,14 +625,18 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
 
     let _ = start(cx);
     cx.update(|cx| {
-        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
-        ));
+        cx.set_global(
+            WindowFrameGeometry::new(Some(16.0))
+                .with_outer_edge_width(1.0)
+                .with_traffic_lights(
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                ),
+        );
     });
 
     for (role, owner, compact_height) in [
-        ("workspace", WindowTrafficLightOwner::workspace(), px(42.0)),
+        ("workspace", WindowTrafficLightOwner::workspace(), px(41.0)),
         ("settings", WindowTrafficLightOwner::settings(), px(36.0)),
     ] {
         // Compact density rests exactly on the host anchor.
@@ -705,8 +709,8 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
     }
 }
 
-/// The workspace anchor carries the frame's top space while the settings anchor does not, so the
-/// two windows keep distinct rows at every density.
+/// The workspace anchor carries the window's own edge above its band while the settings anchor
+/// does not, so the two windows keep distinct rows at every density.
 #[gpui::test]
 fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut TestAppContext) {
     use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
@@ -714,10 +718,14 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
 
     let _ = start(cx);
     cx.update(|cx| {
-        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
-        ));
+        cx.set_global(
+            WindowFrameGeometry::new(Some(16.0))
+                .with_outer_edge_width(1.0)
+                .with_traffic_lights(
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                ),
+        );
         cx.set_global(InstalledChrome::single(std::sync::Arc::new(
             crate::ui::appearance::ChromeAppearance {
                 text_scale: 1.0,
@@ -744,7 +752,7 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
     );
     assert!(
         workspace.y > settings.y,
-        "workspace chrome carries the frame's top space, got {workspace:?} and {settings:?}"
+        "workspace chrome carries the window edge, got {workspace:?} and {settings:?}"
     );
 }
 
@@ -756,10 +764,14 @@ fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
 
     let _ = start(cx);
     cx.update(|cx| {
-        cx.set_global(WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
-        ));
+        cx.set_global(
+            WindowFrameGeometry::new(Some(16.0))
+                .with_outer_edge_width(1.0)
+                .with_traffic_lights(
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                ),
+        );
     });
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
     let mut owner = WindowTrafficLightOwner::workspace();

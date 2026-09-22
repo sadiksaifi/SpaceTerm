@@ -3084,7 +3084,7 @@ impl WorkspaceManager {
                     appearance,
                     switcher_status_hosts,
                 ))
-                .custom_trigger_height(top_chrome_height - frame.space() * 2.0)
+                .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
                 .full_width(true)
                 .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
         })
