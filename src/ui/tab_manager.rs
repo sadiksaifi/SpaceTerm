@@ -4063,176 +4063,100 @@ mod tests {
     }
 
     #[gpui::test]
-    fn local_running_command_should_replace_only_reported_activity_glyphs(cx: &mut TestAppContext) {
+    fn local_status_follows_reported_activity_and_command_lifetime(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
-        assert_running_command_status(&manager, &records, false, cx);
+        assert_reported_activity_lifecycle(&manager, &records, false, cx);
     }
 
     #[gpui::test]
-    fn remote_running_command_should_replace_only_reported_activity_glyphs(
-        cx: &mut TestAppContext,
-    ) {
+    fn remote_status_follows_reported_activity_and_command_lifetime(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
-        assert_running_command_status(&manager, &records, true, cx);
+        assert_reported_activity_lifecycle(&manager, &records, true, cx);
     }
 
-    fn assert_running_command_status(
+    fn assert_reported_activity_lifecycle(
         manager: &Entity<TabManager>,
         records: &TestTerminalSessionRecords,
         remote: bool,
         cx: &mut VisualTestContext,
     ) {
         use super::super::terminal_status::TerminalProgress;
-        use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
+        use crate::terminal::metadata::{MetadataTracker, TerminalMetadataContext};
+        use std::time::{Duration, Instant};
 
-        report_metadata(records, 1, 1, |metadata| {
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("✳ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Running,
+        let epoch = Instant::now();
+        let context = if remote {
+            remote_metadata_context("/srv/app")
+        } else {
+            TerminalMetadataContext::local(
+                crate::local_path::LocalPathSemantics::Posix,
+                "/tmp/app",
+                Default::default(),
+            )
+        };
+        let mut tracker = MetadataTracker::new_with_context(context, "zsh", epoch);
+        let publish = |tracker: &MetadataTracker, cx: &mut VisualTestContext| {
+            records.report_metadata(1, |metadata| {
+                let revision = metadata.revision;
+                *metadata = (*tracker.snapshot()).clone();
+                metadata.revision = revision;
             });
-            metadata.command_activity = false;
-        });
-        cx.run_until_parked();
-        let delayed = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
-        assert_eq!(
-            delayed.glyph.as_ref().map(|glyph| glyph.as_ref()),
-            Some("✳")
-        );
-        assert_eq!(delayed.progress, TerminalProgress::None);
+            cx.run_until_parked();
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            })
+        };
 
-        // A meaningful program glyph remains authoritative after the command activity delay.
-        report_metadata(records, 1, 2, |metadata| {
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("✳ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Running,
-            });
-            metadata.command_activity = true;
-        });
-        cx.run_until_parked();
-        let running = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
-        assert_eq!(
-            running.glyph.as_ref().map(|glyph| glyph.as_ref()),
-            Some("✳")
-        );
-        assert_eq!(running.progress, TerminalProgress::Running);
+        tracker.apply_semantic_prompt("C;cmdline=interactive", epoch);
+        tracker.set_reported_title("agent", epoch);
+        tracker.advance_status(epoch + Duration::from_secs(60));
+        assert_eq!(publish(&tracker, cx).progress, TerminalProgress::None);
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
 
-        // A generic animated title frame remains visible until command activity crosses its
-        // delay, so a short command does not flicker through the fallback Session icon.
-        report_metadata(records, 1, 3, |metadata| {
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("◐ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Running,
-            });
-            metadata.command_activity = false;
-        });
-        cx.run_until_parked();
-        let pending = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
+        let started = epoch + Duration::from_secs(61);
+        tracker.set_reported_title("◐ agent", started);
+        let pending = publish(&tracker, cx);
         assert_eq!(
             pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
             Some("◐")
         );
         assert_eq!(pending.progress, TerminalProgress::None);
+        tracker.set_reported_title("◑ agent", started + Duration::from_millis(100));
+        tracker.advance_status(started + Duration::from_millis(200));
+        assert_eq!(
+            publish(&tracker, cx).progress,
+            TerminalProgress::TitleActivity
+        );
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+
+        tracker.set_reported_title("π - agent", started + Duration::from_secs(1));
+        let ready = publish(&tracker, cx);
+        assert_eq!(ready.glyph.as_ref().map(|glyph| glyph.as_ref()), Some("π"));
+        assert_eq!(ready.progress, TerminalProgress::None);
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
 
-        // Once the delay elapses, the reported frame yields to one stable native spinner in each
-        // host.
-        report_metadata(records, 1, 4, |metadata| {
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("◐ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Running,
-            });
-            metadata.command_activity = true;
-        });
-        cx.run_until_parked();
-        let animated = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
-        assert_eq!(animated.glyph, None);
-        assert_eq!(animated.progress, TerminalProgress::Running);
+        tracker.apply_progress_report(3, None, started + Duration::from_secs(2));
+        assert_eq!(
+            publish(&tracker, cx).progress,
+            TerminalProgress::Indeterminate
+        );
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+        tracker.apply_progress_report(0, None, started + Duration::from_secs(3));
+        assert_eq!(publish(&tracker, cx).progress, TerminalProgress::None);
 
-        // Explicit OSC progress still outranks a meaningful title glyph.
-        report_metadata(records, 1, 5, |metadata| {
-            use crate::terminal::metadata::ProgressMetadata;
-
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("✳ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Running,
-            });
-            metadata.command_activity = true;
-            metadata.progress = ProgressMetadata::Indeterminate;
-        });
-        cx.run_until_parked();
-        let explicit = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
-        assert_eq!(
-            explicit.glyph.as_ref().map(|glyph| glyph.as_ref()),
-            Some("✳")
-        );
-        assert_eq!(explicit.progress, TerminalProgress::Indeterminate);
-        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
-        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
-
-        report_metadata(records, 1, 6, |metadata| {
-            if remote {
-                metadata.context = remote_metadata_context("/srv/app");
-            }
-            metadata.title.value = Arc::from("✳ build");
-            metadata.title.provenance = TitleProvenance::TerminalControl;
-            metadata.command = Some(CommandMetadata {
-                line: Arc::from("cargo test"),
-                state: CommandState::Finished {
-                    exit_status: Some(0),
-                    duration: std::time::Duration::from_secs(1),
-                },
-            });
-            metadata.command_activity = false;
-        });
-        cx.run_until_parked();
-        let finished = manager.read_with(cx, |manager, cx| {
-            manager.tabs.active_tab().read(cx).tab_identity()
-        });
-        assert_eq!(
-            finished.glyph.as_ref().map(|glyph| glyph.as_ref()),
-            Some("✳")
-        );
+        tracker.apply_semantic_prompt("D;0", started + Duration::from_secs(4));
+        let finished = publish(&tracker, cx);
+        assert_eq!(finished.glyph, None);
         assert_eq!(finished.progress, TerminalProgress::None);
+        tracker.apply_semantic_prompt("C;cmdline=ls", started + Duration::from_secs(5));
+        let next = publish(&tracker, cx);
+        assert_eq!(next.activity.as_ref(), "ls");
+        assert_eq!(next.glyph, None);
+        assert_eq!(next.progress, TerminalProgress::None);
     }
 
     /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.

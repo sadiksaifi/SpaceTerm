@@ -952,6 +952,76 @@ fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn remote_restart_resets_caption_before_successor_output_and_preserves_screen(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
+
+    let (pane, cx, records) = connected_remote_terminal_pane(cx);
+    let session_id = records.starts().last().unwrap().session_id;
+    let mut old_screen = remote_directory_screen(90, "/old/project");
+    let metadata = Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata);
+    metadata.title.value = Arc::from("π previous agent");
+    metadata.title.provenance = TitleProvenance::TerminalControl;
+    metadata.progress = ProgressMetadata::Indeterminate;
+    records
+        .event_sender(session_id)
+        .unwrap()
+        .try_send(SessionEvent::Screen(Arc::clone(&old_screen)))
+        .unwrap();
+    cx.run_until_parked();
+
+    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
+    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+    assert_eq!(
+        cx.executor().block(
+            factory
+                .revalidate_remote_child_launch()
+                .expect("remote restart must require revalidation"),
+        ),
+        Ok(())
+    );
+    let prepared_launch = factory.prepare_child_launch().unwrap();
+    let prepared = pane
+        .read_with(cx, |pane, _| {
+            pane.prepare_remote_restart(factory, 8, prepared_launch)
+        })
+        .unwrap();
+    let caption_changes = Rc::new(Cell::new(0));
+    let observed_changes = Rc::clone(&caption_changes);
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if matches!(event, TerminalPaneEvent::CaptionChanged) {
+                observed_changes.set(observed_changes.get() + 1);
+            }
+        })
+        .detach();
+    });
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.commit_remote_restart(prepared, window, cx).unwrap()
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(records.starts().len(), 2);
+    pane.read_with(cx, |pane, _| {
+        assert!(Arc::ptr_eq(&pane.screen, &old_screen));
+        let caption = pane.caption();
+        assert_eq!(
+            caption.progress,
+            super::super::terminal_status::TerminalProgress::None
+        );
+        assert_eq!(caption.glyph, None);
+        assert_eq!(caption.label.as_ref(), "project on remote");
+        assert_eq!(caption.directory.as_ref(), "~/project");
+        assert_eq!(caption.origin.user.as_ref(), "tester");
+        assert!(!caption.running);
+    });
+    assert_eq!(caption_changes.get(), 1);
+}
+
+#[gpui::test]
 fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
     cx: &mut TestAppContext,
 ) {

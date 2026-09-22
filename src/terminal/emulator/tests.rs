@@ -1041,6 +1041,87 @@ fn erased_cells_preserve_explicit_background_sources() {
 }
 
 #[test]
+fn title_animation_requires_changing_frames_and_releases_without_shell_completion() {
+    let epoch = Instant::now();
+    let mut emulator = emulator(12, 3);
+    emulator.feed_at("\x1b]2;◐ agent\x07".as_bytes(), epoch);
+    assert!(!emulator.metadata().title_activity);
+    emulator.feed_at(
+        "\x1b]2;◑ agent\x07".as_bytes(),
+        epoch + Duration::from_millis(100),
+    );
+    assert!(!emulator.metadata().title_activity);
+    emulator.advance_metadata_status(epoch + Duration::from_millis(200));
+    assert!(emulator.metadata().title_activity);
+
+    emulator.feed_at(
+        "\x1b]2;✳ agent\x07".as_bytes(),
+        epoch + Duration::from_millis(300),
+    );
+    assert!(!emulator.metadata().title_activity);
+    assert_eq!(emulator.metadata_status_deadline(), None);
+}
+
+#[test]
+fn explicit_progress_clear_retires_prior_title_activity() {
+    let epoch = Instant::now();
+    let mut emulator = emulator(12, 3);
+    emulator.feed_at("\x1b]2;◐ agent\x07".as_bytes(), epoch);
+    emulator.feed_at(
+        "\x1b]2;◑ agent\x07".as_bytes(),
+        epoch + Duration::from_millis(100),
+    );
+    emulator.advance_metadata_status(epoch + Duration::from_millis(200));
+    assert!(emulator.metadata().title_activity);
+    emulator.feed_at(b"\x1b]9;4;3\x07", epoch + Duration::from_millis(250));
+    emulator.feed_at(b"\x1b]9;4;0\x07", epoch + Duration::from_millis(300));
+    assert_eq!(emulator.metadata().progress, ProgressMetadata::None);
+    assert!(!emulator.metadata().title_activity);
+    assert_eq!(emulator.metadata_status_deadline(), None);
+}
+
+#[test]
+fn unchanged_title_frames_expire_without_clearing_explicit_progress() {
+    let epoch = Instant::now();
+    let mut emulator = emulator(12, 3);
+    emulator.feed_at("\x1b]2;◐ agent\x07".as_bytes(), epoch);
+    emulator.feed_at(
+        "\x1b]2;◑ agent\x07".as_bytes(),
+        epoch + Duration::from_millis(100),
+    );
+    emulator.advance_metadata_status(epoch + Duration::from_millis(200));
+    assert!(emulator.metadata().title_activity);
+    emulator.feed_at(
+        "\x1b]2;◑ agent\x07\x1b]9;4;3\x07".as_bytes(),
+        epoch + Duration::from_millis(1500),
+    );
+    emulator.advance_metadata_status(epoch + Duration::from_millis(2100));
+    assert!(!emulator.metadata().title_activity);
+    assert_eq!(
+        emulator.metadata().progress,
+        ProgressMetadata::Indeterminate
+    );
+    emulator.feed_at(b"\x1b]9;4;0\x07", epoch + Duration::from_millis(2200));
+    assert_eq!(emulator.metadata_status_deadline(), None);
+}
+
+#[test]
+fn static_title_frames_and_unrelated_titles_do_not_imply_activity() {
+    let epoch = Instant::now();
+    let mut emulator = emulator(12, 3);
+    for (millis, title) in [(0, "◐ one"), (300, "◐ one"), (600, "◑ two"), (900, "⠋ two")] {
+        emulator.feed_at(
+            format!("\x1b]2;{title}\x07").as_bytes(),
+            epoch + Duration::from_millis(millis),
+        );
+        emulator.advance_metadata_status(epoch + Duration::from_millis(millis + 200));
+        assert!(!emulator.metadata().title_activity, "{title}");
+    }
+    emulator.advance_metadata_status(epoch + Duration::from_secs(4));
+    assert_eq!(emulator.metadata_status_deadline(), None);
+}
+
+#[test]
 fn title_only_osc_sequence_publishes_a_screen_snapshot() {
     let mut emulator = emulator(12, 3);
     let first = emulator.snapshot().unwrap().unwrap();
@@ -1538,6 +1619,42 @@ fn bell_and_command_completion_publish_typed_attention_once() {
             },
         ]
     );
+}
+
+#[test]
+fn command_completion_attention_is_independent_of_stream_chunking() {
+    let epoch = Instant::now();
+    let stream = b"\x1b]133;C;cmdline=first\x07\x1b]133;D;0\x07\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;C;cmdline=second\x07\x1b]133;D;7\x07\x1b]133;A\x07\x1b]133;C;cmdline=third\x07";
+    let expected = vec![
+        AttentionEvent::CommandFinished {
+            exit_status: Some(0),
+            duration: Duration::ZERO,
+        },
+        AttentionEvent::CommandFinished {
+            exit_status: Some(7),
+            duration: Duration::ZERO,
+        },
+    ];
+
+    for split in 0..=stream.len() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed_at(&stream[..split], epoch);
+        emulator.feed_at(&stream[split..], epoch);
+        assert_eq!(emulator.take_attention_events(), expected, "split {split}");
+    }
+
+    let mut emulator = emulator(10, 2);
+    for byte in stream {
+        emulator.feed_at(std::slice::from_ref(byte), epoch);
+    }
+    assert_eq!(emulator.take_attention_events(), expected);
+}
+
+#[test]
+fn command_completion_without_a_running_command_does_not_request_attention() {
+    let mut emulator = emulator(10, 2);
+    emulator.feed(b"\x1b]133;D;0\x07");
+    assert!(emulator.take_attention_events().is_empty());
 }
 
 #[test]

@@ -1180,17 +1180,6 @@ impl TerminalEmulator {
         }
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
-        let command_was_finished =
-            self.metadata
-                .snapshot()
-                .command
-                .as_ref()
-                .is_some_and(|command| {
-                    matches!(
-                        command.state,
-                        crate::terminal::metadata::CommandState::Finished { .. }
-                    )
-                });
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         if self.graphics_reservation.is_none() && starts_apc(self.previous_feed_byte, bytes) {
             self.graphics_reservation = Some(GraphicsReservation::default());
@@ -1205,32 +1194,42 @@ impl TerminalEmulator {
         for event in self.pending_metadata.borrow_mut().drain(..) {
             match event {
                 MetadataEvent::Title(title) => {
-                    self.metadata.set_reported_title(&title);
+                    self.metadata.set_reported_title(&title, now);
                 }
                 MetadataEvent::Directory(directory) => {
                     self.metadata.set_reported_directory(&directory);
                 }
                 MetadataEvent::SemanticPrompt(value) => {
+                    let was_running =
+                        self.metadata
+                            .snapshot()
+                            .command
+                            .as_ref()
+                            .is_some_and(|command| {
+                                command.state == crate::terminal::metadata::CommandState::Running
+                            });
                     self.metadata.apply_semantic_prompt(&value, now);
+                    // One read may contain several commands, or a completion followed by a new
+                    // command. Publish each accepted transition before the next event replaces it.
+                    if was_running
+                        && let Some(command) = &self.metadata.snapshot().command
+                        && let crate::terminal::metadata::CommandState::Finished {
+                            exit_status,
+                            duration,
+                        } = command.state
+                    {
+                        self.pending_attention
+                            .borrow_mut()
+                            .push(AttentionEvent::CommandFinished {
+                                exit_status,
+                                duration,
+                            });
+                    }
                 }
                 MetadataEvent::Progress { state, value } => {
                     self.metadata.apply_progress_report(state, value, now);
                 }
             }
-        }
-        if !command_was_finished
-            && let Some(command) = &self.metadata.snapshot().command
-            && let crate::terminal::metadata::CommandState::Finished {
-                exit_status,
-                duration,
-            } = command.state
-        {
-            self.pending_attention
-                .borrow_mut()
-                .push(AttentionEvent::CommandFinished {
-                    exit_status,
-                    duration,
-                });
         }
         if !bytes.is_empty() {
             self.find.invalidate();

@@ -20,6 +20,7 @@ mod key_input;
 mod keyboard_protocol;
 pub(crate) mod metadata;
 pub(crate) mod native_services;
+pub(crate) mod title;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
 pub(crate) use native_services::selection;

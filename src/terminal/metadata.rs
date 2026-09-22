@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::title::TitleActivity;
 use crate::domain::{RemoteDirectory, SshDestination};
 use crate::local_path::LocalPathSemantics;
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
-pub(crate) const COMMAND_ACTIVITY_DELAY: Duration = Duration::from_millis(200);
 pub(crate) const PROGRESS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) use crate::domain::CurrentDirectory;
@@ -377,8 +377,8 @@ pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) directory: DirectoryMetadata,
     pub(crate) prompt_zone: PromptZone,
     pub(crate) command: Option<CommandMetadata>,
-    /// Whether a running command has crossed the short host-chrome activity delay.
-    pub(crate) command_activity: bool,
+    /// Whether changing title frames provide recent animation evidence.
+    pub(crate) title_activity: bool,
     pub(crate) progress: ProgressMetadata,
 }
 
@@ -390,7 +390,7 @@ impl TerminalMetadataSnapshot {
             || self.directory != other.directory
             || self.title != other.title
             || self.command != other.command
-            || self.command_activity != other.command_activity
+            || self.title_activity != other.title_activity
             || self.progress != other.progress
     }
 
@@ -405,9 +405,10 @@ impl TerminalMetadataSnapshot {
 pub(crate) struct MetadataTracker {
     snapshot: Arc<TerminalMetadataSnapshot>,
     epoch: Instant,
+    fallback_title: Arc<str>,
     command_started: Option<Instant>,
-    command_activity_deadline: Option<Instant>,
     progress_expiry: Option<Instant>,
+    title_animation: TitleActivity,
 }
 
 impl MetadataTracker {
@@ -446,13 +447,14 @@ impl MetadataTracker {
                 },
                 prompt_zone: PromptZone::Unknown,
                 command: None,
-                command_activity: false,
+                title_activity: false,
                 progress: ProgressMetadata::None,
             }),
             epoch,
+            fallback_title: Arc::from(sanitize_title(fallback_title)),
             command_started: None,
-            command_activity_deadline: None,
             progress_expiry: None,
+            title_animation: TitleActivity::default(),
         }
     }
 
@@ -460,20 +462,24 @@ impl MetadataTracker {
         Arc::clone(&self.snapshot)
     }
 
-    pub(crate) fn set_reported_title(&mut self, title: &str) -> bool {
+    pub(crate) fn set_reported_title(&mut self, title: &str, now: Instant) -> bool {
         let title = sanitize_title(title);
         let (value, provenance) = if title.is_empty() {
             (
                 self.snapshot
                     .context
                     .directory_basename(&self.snapshot.directory.path)
-                    .unwrap_or_else(|| self.snapshot.title.value.to_string()),
+                    .unwrap_or_else(|| self.fallback_title.to_string()),
                 TitleProvenance::WorkingDirectory,
             )
         } else {
             (title, TitleProvenance::TerminalControl)
         };
+        self.title_animation
+            .observe(&self.snapshot.title.value, &value, now);
+        let active = self.title_animation.active();
         self.update(|snapshot| {
+            snapshot.title_activity = active;
             snapshot.title = TitleMetadata {
                 value: Arc::from(value),
                 provenance,
@@ -501,12 +507,55 @@ impl MetadataTracker {
     }
 
     pub(crate) fn mark_stale(&mut self) -> bool {
-        self.command_activity_deadline = None;
-        self.progress_expiry = None;
-        self.update(|snapshot| {
+        self.command_started = None;
+        self.retire_command_reports(|snapshot| {
             snapshot.freshness = MetadataFreshness::Stale;
-            snapshot.command_activity = false;
+        })
+    }
+
+    fn retire_command_reports(
+        &mut self,
+        change: impl FnOnce(&mut TerminalMetadataSnapshot),
+    ) -> bool {
+        self.progress_expiry = None;
+        self.title_animation = TitleActivity::default();
+        let value = self
+            .snapshot
+            .context
+            .directory_basename(&self.snapshot.directory.path)
+            .map_or_else(|| Arc::clone(&self.fallback_title), Arc::from);
+        self.update(|snapshot| {
+            snapshot.title = TitleMetadata {
+                value,
+                provenance: TitleProvenance::WorkingDirectory,
+            };
+            snapshot.title_activity = false;
             snapshot.progress = ProgressMetadata::None;
+            change(snapshot);
+        })
+    }
+
+    fn finish_command(&mut self, exit_status: Option<i32>, now: Instant) -> bool {
+        if self
+            .snapshot
+            .command
+            .as_ref()
+            .is_some_and(|command| matches!(command.state, CommandState::Finished { .. }))
+        {
+            return false;
+        }
+        let started = self.command_started.take().unwrap_or(self.epoch);
+        self.retire_command_reports(|snapshot| {
+            snapshot.command = Some(CommandMetadata {
+                line: snapshot
+                    .command
+                    .as_ref()
+                    .map_or_else(|| Arc::from(""), |command| Arc::clone(&command.line)),
+                state: CommandState::Finished {
+                    exit_status,
+                    duration: now.saturating_duration_since(started),
+                },
+            });
         })
     }
 
@@ -517,44 +566,37 @@ impl MetadataTracker {
         };
         let fields = fields.collect::<Vec<_>>();
         match action {
-            "A" | "P" => self.update(|snapshot| snapshot.prompt_zone = PromptZone::Prompt),
+            "A" | "P" => {
+                let completed = self
+                    .snapshot
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| command.state == CommandState::Running)
+                    && self.finish_command(None, now);
+                self.update(|snapshot| snapshot.prompt_zone = PromptZone::Prompt) || completed
+            }
             "B" | "I" => self.update(|snapshot| snapshot.prompt_zone = PromptZone::CommandInput),
             "C" => {
                 self.command_started = Some(now);
-                self.command_activity_deadline = Some(now + COMMAND_ACTIVITY_DELAY);
                 let line = option(&fields, "cmdline")
                     .and_then(percent_decode)
                     .unwrap_or_default();
                 let line = sanitize_bounded(&line, MAX_COMMAND_CHARS);
-                self.update(|snapshot| {
+                self.retire_command_reports(|snapshot| {
                     snapshot.prompt_zone = PromptZone::CommandOutput;
                     snapshot.command = Some(CommandMetadata {
                         line: Arc::from(line),
                         state: CommandState::Running,
                     });
-                    snapshot.command_activity = false;
+                    snapshot.title_activity = false;
                 })
             }
             "D" => {
-                self.command_activity_deadline = None;
-                let started = self.command_started.take().unwrap_or(self.epoch);
                 let exit_status = fields
                     .first()
                     .and_then(|value| value.parse::<i32>().ok())
                     .or_else(|| option(&fields, "err").and_then(|value| value.parse().ok()));
-                self.update(|snapshot| {
-                    snapshot.command = Some(CommandMetadata {
-                        line: snapshot
-                            .command
-                            .as_ref()
-                            .map_or_else(|| Arc::from(""), |command| Arc::clone(&command.line)),
-                        state: CommandState::Finished {
-                            exit_status,
-                            duration: now.saturating_duration_since(started),
-                        },
-                    });
-                    snapshot.command_activity = false;
-                })
+                self.finish_command(exit_status, now)
             }
             _ => false,
         }
@@ -570,6 +612,7 @@ impl MetadataTracker {
         let progress = match state {
             0 => {
                 self.progress_expiry = None;
+                self.title_animation = TitleActivity::default();
                 ProgressMetadata::None
             }
             1 => ProgressMetadata::Normal(progress),
@@ -581,12 +624,16 @@ impl MetadataTracker {
         if progress != ProgressMetadata::None {
             self.progress_expiry = Some(now + PROGRESS_INACTIVITY_TIMEOUT);
         }
-        self.update(|snapshot| snapshot.progress = progress)
+        let title_activity = self.title_animation.active();
+        self.update(|snapshot| {
+            snapshot.progress = progress;
+            snapshot.title_activity = title_activity;
+        })
     }
 
     /// Returns the next point when retained status presentation must change.
     pub(crate) fn status_deadline(&self) -> Option<Instant> {
-        [self.command_activity_deadline, self.progress_expiry]
+        [self.progress_expiry, self.title_animation.deadline()]
             .into_iter()
             .flatten()
             .min()
@@ -594,28 +641,14 @@ impl MetadataTracker {
 
     /// Applies every delayed status transition due by `now`.
     pub(crate) fn advance_status(&mut self, now: Instant) -> bool {
-        let show_command_activity = self
-            .command_activity_deadline
-            .is_some_and(|deadline| now >= deadline);
-        if show_command_activity {
-            self.command_activity_deadline = None;
-        }
         let expire_progress = self.progress_expiry.is_some_and(|deadline| now >= deadline);
         if expire_progress {
             self.progress_expiry = None;
         }
-        if !show_command_activity && !expire_progress {
-            return false;
-        }
+        self.title_animation.advance(now);
+        let active = self.title_animation.active();
         self.update(|snapshot| {
-            if show_command_activity
-                && snapshot
-                    .command
-                    .as_ref()
-                    .is_some_and(|command| command.state == CommandState::Running)
-            {
-                snapshot.command_activity = true;
-            }
+            snapshot.title_activity = active;
             if expire_progress {
                 snapshot.progress = ProgressMetadata::None;
             }
@@ -843,6 +876,76 @@ mod tests {
     }
 
     #[test]
+    fn command_boundaries_retire_reported_title_and_progress() {
+        for boundary in ["D;0", "A", "C;cmdline=ls"] {
+            let epoch = Instant::now();
+            let mut tracker = MetadataTracker::new(
+                LocalPathSemantics::Posix,
+                "/tmp/project",
+                "zsh",
+                LocalMachine::default(),
+                epoch,
+            );
+            tracker.apply_semantic_prompt("C;cmdline=agent", epoch);
+            tracker.set_reported_title("π - project", epoch);
+            tracker.apply_progress_report(3, None, epoch);
+
+            tracker.apply_semantic_prompt(boundary, epoch + Duration::from_secs(1));
+
+            assert_eq!(
+                tracker.snapshot().title.provenance,
+                TitleProvenance::WorkingDirectory,
+                "{boundary}"
+            );
+            assert_eq!(
+                tracker.snapshot().title.value.as_ref(),
+                "project",
+                "{boundary}"
+            );
+            assert_eq!(
+                tracker.snapshot().progress,
+                ProgressMetadata::None,
+                "{boundary}"
+            );
+            assert_eq!(tracker.status_deadline(), None, "{boundary}");
+        }
+    }
+
+    #[test]
+    fn duplicate_completion_preserves_the_new_prompt_title() {
+        let epoch = Instant::now();
+        let mut tracker = MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            LocalMachine::default(),
+            epoch,
+        );
+        tracker.apply_semantic_prompt("C;cmdline=agent", epoch);
+        tracker.set_reported_title("π agent", epoch);
+        tracker.apply_semantic_prompt("D;0", epoch + Duration::from_secs(1));
+        tracker.set_reported_title("shell prompt", epoch + Duration::from_secs(1));
+        tracker.apply_semantic_prompt("D;0", epoch + Duration::from_secs(2));
+        tracker.apply_semantic_prompt("A", epoch + Duration::from_secs(2));
+        assert_eq!(tracker.snapshot().title.value.as_ref(), "shell prompt");
+    }
+
+    #[test]
+    fn waiting_interactive_command_does_not_report_work() {
+        let epoch = Instant::now();
+        let mut tracker = MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            LocalMachine::default(),
+            epoch,
+        );
+        tracker.apply_semantic_prompt("C;cmdline=interactive", epoch);
+        tracker.advance_status(epoch + Duration::from_secs(60));
+        assert!(!tracker.snapshot().title_activity);
+    }
+
+    #[test]
     fn accepted_semantic_and_progress_events_update_metadata() {
         let epoch = Instant::now();
         let mut tracker = MetadataTracker::new(
@@ -868,7 +971,7 @@ mod tests {
 
         assert!(tracker.apply_progress_report(1, Some(140), epoch + Duration::from_secs(3)));
         assert!(tracker.apply_semantic_prompt("D;7", epoch + Duration::from_secs(5)));
-        assert_eq!(tracker.snapshot().progress, ProgressMetadata::Normal(100));
+        assert_eq!(tracker.snapshot().progress, ProgressMetadata::None);
         assert_eq!(
             tracker.snapshot().command,
             Some(CommandMetadata {
@@ -928,27 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn running_command_activity_observes_delay_and_finishes_cleanly() {
-        let epoch = Instant::now();
-        let mut tracker = MetadataTracker::new(
-            crate::local_path::LocalPathSemantics::Posix,
-            "/tmp",
-            "zsh",
-            LocalMachine::default(),
-            epoch,
-        );
-
-        assert!(tracker.apply_semantic_prompt("C;cmdline=sleep", epoch));
-        assert!(!tracker.snapshot().command_activity);
-        assert!(!tracker.advance_status(epoch + COMMAND_ACTIVITY_DELAY - Duration::from_nanos(1)));
-        assert!(tracker.advance_status(epoch + COMMAND_ACTIVITY_DELAY));
-        assert!(tracker.snapshot().command_activity);
-        assert!(tracker.apply_semantic_prompt("D;0", epoch + Duration::from_secs(1)));
-        assert!(!tracker.snapshot().command_activity);
-        assert_eq!(tracker.status_deadline(), None);
-    }
-
-    #[test]
     fn stale_metadata_clears_progress_and_delayed_activity() {
         let epoch = Instant::now();
         let mut tracker = MetadataTracker::new(
@@ -964,7 +1046,7 @@ mod tests {
         assert!(tracker.mark_stale());
 
         assert_eq!(tracker.snapshot().progress, ProgressMetadata::None);
-        assert!(!tracker.snapshot().command_activity);
+        assert!(!tracker.snapshot().title_activity);
         assert_eq!(tracker.status_deadline(), None);
     }
 

@@ -4,8 +4,8 @@
 //! here once. The glyph slot carries the status: reported work takes the reusable progress ring
 //! when a percentage is known and the frame spinner when it is not, other work states use
 //! distinct shapes and semantic colors, and attention blinks the mark in the warning color. Each
-//! state is typed from sanitized Terminal Metadata and never from the title text: a loader a
-//! program draws in its own cells or title is not something host chrome can see or restate.
+//! state comes from sanitized Terminal Metadata. The metadata owner observes reported title
+//! animation; loaders drawn inside terminal cells remain terminal content.
 //!
 //! The progress mark inherits its color rather than taking the installed progress accent, because the
 //! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
@@ -21,6 +21,10 @@ use gpui::{
 use spaceterm_ui::{DeterminateProgress, FrameSpinner, Icon, IconName, ProgressRing, ProgressSize};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
+#[cfg(test)]
+use crate::terminal::title::ReportedTitle;
+use crate::terminal::title::is_glyph_mark;
+pub(crate) use crate::terminal::title::reported_title;
 
 /// How long an attention blink holds each of its two colors.
 const BLINK_STEP: Duration = Duration::from_millis(500);
@@ -40,134 +44,6 @@ const MINIMUM_PROGRESS_SWEEP: f64 = 0.05;
 ///
 /// The ring never paints this, and it stays content-free: nothing a program reported reaches it.
 const PROGRESS_NAME: &str = "terminal progress";
-
-/// Frames from generic activity animations that terminal programs commonly report in titles.
-///
-/// Keep this list finite. Braille also carries meaningful program artwork, so classifying its
-/// whole Unicode block would erase icons that happen to use the same character set.
-const REPORTED_ACTIVITY_FRAMES: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷⢹⢺⢼⣸⣇⡧⡗⡏◐◓◑◒◰◳◲◱◴◷◶◵";
-
-/// How many characters the first word of a title can hold and still be a glyph rather than a word.
-const MAXIMUM_GLYPH_CHARS: usize = 2;
-
-/// Characters a title keeps, because a Session can be named after them.
-const TITLE_WORD_CHARS: &str = "~/\\._-:@$#([{'\"";
-
-/// Characters that separate a program's glyph from the words after it.
-const TITLE_SEPARATOR_CHARS: &str = "-\u{2013}\u{2014}\u{00b7}|:";
-
-/// What a program put at the front of the title it reported, and the words that follow it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ReportedTitle<'a> {
-    /// The program's own glyph, when it reported one host chrome can draw.
-    pub(crate) glyph: Option<&'a str>,
-    /// The title without that glyph.
-    pub(crate) words: &'a str,
-}
-
-/// Splits the glyph a program draws at the front of its own title from the words after it.
-///
-/// Programs often open the title they report with their own icon or a spinner frame. One Session
-/// gets one glyph, so the program's takes the place of the glyph host chrome would draw rather than
-/// sitting beside it, and never appears twice. Only a first word that names nothing on its own is
-/// taken: a short decorative sequence that is not a word a Session could be named after. No glyph
-/// is recognised by name, so this stays the same for every program. The active chrome font's
-/// shaper decides whether the candidate occupies the Session's one glyph slot.
-pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
-    let title = title.trim();
-    let plain = ReportedTitle {
-        glyph: None,
-        words: title,
-    };
-    let Some(split) = title.find(char::is_whitespace) else {
-        return plain;
-    };
-    let (first, rest) = title.split_at(split);
-    if !is_glyph_word(first) {
-        return plain;
-    }
-    let words = title_words_after_glyph(rest);
-    if words.is_empty() {
-        return plain;
-    }
-    ReportedTitle {
-        glyph: is_glyph_candidate(first).then_some(first),
-        words,
-    }
-}
-
-/// Whether a reported glyph is one frame from a generic rotating activity family.
-///
-/// This recognizes visual frame families rather than programs. Meaningful program icons stay in
-/// their Session slot while OSC 133 reports a running command; transient activity frames yield to
-/// SpaceTerm's stable native spinner.
-pub(crate) fn reported_glyph_is_activity_frame(glyph: &str) -> bool {
-    let mut frames = glyph.chars().filter(|character| !is_glyph_mark(*character));
-    let Some(frame) = frames.next() else {
-        return false;
-    };
-    frames.next().is_none() && REPORTED_ACTIVITY_FRAMES.contains(frame)
-}
-
-/// Removes whitespace and one standalone delimiter token after a reported glyph.
-///
-/// Punctuation attached to the next opaque word is content, such as `--help` or `:memory`.
-fn title_words_after_glyph(rest: &str) -> &str {
-    let words = rest.trim_start();
-    let Some(split) = words.find(char::is_whitespace) else {
-        return words.trim_end();
-    };
-    let (first, remainder) = words.split_at(split);
-    if first.chars().count() == 1
-        && first
-            .chars()
-            .all(|character| TITLE_SEPARATOR_CHARS.contains(character))
-    {
-        remainder.trim()
-    } else {
-        words.trim_end()
-    }
-}
-
-/// Whether the first word of a title decorates it rather than naming what the Session is doing.
-fn is_glyph_word(word: &str) -> bool {
-    let bases = word
-        .chars()
-        .filter(|character| !is_glyph_mark(*character))
-        .count();
-    // Several letters name something, in whatever script they are written. Several symbols
-    // together are still decoration.
-    let decorative = bases == 1 || word.chars().all(|character| !character.is_alphanumeric());
-    (1..=MAXIMUM_GLYPH_CHARS).contains(&bases)
-        && decorative
-        && word.chars().all(|character| {
-            !character.is_ascii_alphanumeric() && !TITLE_WORD_CHARS.contains(character)
-        })
-}
-
-/// Whether a character belongs to the glyph before it rather than standing as one of its own.
-fn is_glyph_mark(character: char) -> bool {
-    matches!(
-        u32::from(character),
-        // Variation selectors, the zero-width joiner, and the skin tone modifiers.
-        0xFE00..=0xFE0F | 0x200D | 0x1F3FB..=0x1F3FF | 0xE0100..=0xE01EF
-    )
-}
-
-/// Whether a title prefix has the structural shape of a reported glyph candidate.
-///
-/// A Private-Use character is drawn by the font a program expects rather than by the font the host
-/// paints its chrome in, so it would paint as a missing-glyph box. An ASCII one says less than the
-/// Session's own glyph does. Actual Chrome-font support is checked after shaping.
-fn is_glyph_candidate(glyph: &str) -> bool {
-    glyph.chars().all(|character| {
-        !character.is_ascii()
-            && !matches!(
-                u32::from(character),
-                0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
-            )
-    })
-}
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
 /// reported glyph.
@@ -247,8 +123,8 @@ pub(crate) enum TerminalProgress {
     Normal(u8),
     /// Work in progress whose completion is unknown.
     Indeterminate,
-    /// A running command whose short activity delay elapsed.
-    Running,
+    /// Recently observed title animation whose short activity delay elapsed.
+    TitleActivity,
     /// Work that reported a failure.
     Error(u8),
     /// Work that reported it is paused.
@@ -264,7 +140,7 @@ impl TerminalProgress {
             return Self::None;
         }
         match metadata.progress {
-            ProgressMetadata::None if metadata.command_activity => Self::Running,
+            ProgressMetadata::None if metadata.title_activity => Self::TitleActivity,
             ProgressMetadata::None => Self::None,
             ProgressMetadata::Normal(percent) => Self::Normal(percent.min(100)),
             ProgressMetadata::Indeterminate => Self::Indeterminate,
@@ -279,7 +155,7 @@ impl TerminalProgress {
             Self::None => None,
             Self::Normal(_) => Some("normal"),
             Self::Indeterminate => Some("indeterminate"),
-            Self::Running => Some("running"),
+            Self::TitleActivity => Some("title-activity"),
             Self::Error(_) => Some("error"),
             Self::Paused(_) => Some("paused"),
         }
@@ -427,7 +303,7 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     match progress {
         TerminalProgress::None => (Tint::Inherited, 1.0),
         TerminalProgress::Normal(_) => (Tint::Busy, 1.0),
-        TerminalProgress::Indeterminate | TerminalProgress::Running => (Tint::Inherited, 1.0),
+        TerminalProgress::Indeterminate | TerminalProgress::TitleActivity => (Tint::Inherited, 1.0),
         TerminalProgress::Error(_) => (Tint::Error, 1.0),
         TerminalProgress::Paused(_) => (Tint::Paused, 1.0),
     }
@@ -478,12 +354,6 @@ impl Mark {
                     .debug_selector(selector)
                     .into_any_element()
             }
-            (StatusShape::Spinner, Some(glyph))
-                if progress == TerminalProgress::Running
-                    && !reported_glyph_is_activity_frame(&glyph) =>
-            {
-                reported_glyph(&glyph, size)
-            }
             (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
                 .debug_selector(selector)
@@ -523,7 +393,7 @@ fn status_shape(progress: TerminalProgress) -> StatusShape {
             DeterminateProgress::new(progress_sweep(percent))
                 .expect("a reported percentage is a finite share of the ring"),
         ),
-        TerminalProgress::Indeterminate | TerminalProgress::Running => StatusShape::Spinner,
+        TerminalProgress::Indeterminate | TerminalProgress::TitleActivity => StatusShape::Spinner,
         TerminalProgress::Error(_) => StatusShape::Error,
         TerminalProgress::Paused(_) => StatusShape::Paused,
     }
@@ -776,7 +646,7 @@ mod tests {
             (TerminalProgress::None, (Tint::Inherited, 1.0)),
             (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
             (TerminalProgress::Indeterminate, (Tint::Inherited, 1.0)),
-            (TerminalProgress::Running, (Tint::Inherited, 1.0)),
+            (TerminalProgress::TitleActivity, (Tint::Inherited, 1.0)),
             (TerminalProgress::Error(30), (Tint::Error, 1.0)),
             (TerminalProgress::Paused(70), (Tint::Paused, 1.0)),
         ] {
@@ -834,26 +704,12 @@ mod tests {
     }
 
     #[test]
-    fn running_activity_replaces_only_generic_spinner_frames() {
-        for frame in REPORTED_ACTIVITY_FRAMES.chars() {
-            assert!(
-                reported_glyph_is_activity_frame(&frame.to_string()),
-                "{frame}"
-            );
-        }
-        assert!(reported_glyph_is_activity_frame("◐\u{fe0f}"));
-        for glyph in ["✳", "🚀", "π", "◉", "⣿", "⡀", "⠋⠙", "\u{fe0f}"] {
-            assert!(!reported_glyph_is_activity_frame(glyph), "{glyph}");
-        }
-    }
-
-    #[test]
-    fn command_activity_is_distinct_from_explicit_indeterminate_progress() {
+    fn title_activity_is_distinct_from_explicit_indeterminate_progress() {
         let mut running = metadata(ProgressMetadata::None, MetadataFreshness::Live);
-        running.command_activity = true;
+        running.title_activity = true;
         assert_eq!(
             TerminalProgress::from_metadata(&running, true),
-            TerminalProgress::Running
+            TerminalProgress::TitleActivity
         );
         running.progress = ProgressMetadata::Indeterminate;
         assert_eq!(

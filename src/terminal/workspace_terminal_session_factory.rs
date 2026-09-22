@@ -114,6 +114,23 @@ pub(crate) struct PreparedWorkspaceTerminalLaunch {
 }
 
 impl PreparedWorkspaceTerminalLaunch {
+    /// Initial successor facts, independent of the screen retained during a Remote restart.
+    pub(crate) fn initial_remote_metadata(
+        &self,
+    ) -> Option<Arc<super::metadata::TerminalMetadataSnapshot>> {
+        let TerminalLaunchPlan::Remote(plan) = &self.launch_plan else {
+            return None;
+        };
+        Some(
+            super::metadata::MetadataTracker::new_with_context(
+                super::metadata::TerminalMetadataContext::Remote(plan.metadata_context().clone()),
+                plan.fallback_title(),
+                std::time::Instant::now(),
+            )
+            .snapshot(),
+        )
+    }
+
     pub(crate) fn starting_directory(&self) -> CurrentDirectory {
         match &self.launch_plan {
             TerminalLaunchPlan::Local(plan) => {
