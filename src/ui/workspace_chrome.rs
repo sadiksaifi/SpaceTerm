@@ -111,6 +111,8 @@ impl WorkspaceChromeLayout {
     ) -> AnyElement {
         let appearance = chrome(cx);
         let edge_reserve = trailing_reserve(appearance, cx);
+        let window_edge =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).window_edge();
         // Keep drag-region occlusion outside the tooltip target so the toggle cannot
         // block its own help. Its button preserves hover within this control container.
         let toggle = div().flex_none().block_mouse_except_scroll().child(toggle);
@@ -123,9 +125,10 @@ impl WorkspaceChromeLayout {
         div()
             .absolute()
             // The chrome now carries the frame's top space in its own height, so its controls ride
-            // the middle of that height rather than a fixed inset from its upper edge. Tabs centre
-            // in the same strip, so identity and Tabs stay on one line.
-            .top_0()
+            // the middle of that height below the window's own edge rather than a fixed inset from
+            // its upper edge. Tab chips centre in the same band, so identity and Tabs stay on one
+            // line.
+            .top(window_edge)
             .bottom_0()
             .left(leading_clearance(self.fullscreen, edge_reserve))
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip

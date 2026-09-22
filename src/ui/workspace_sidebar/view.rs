@@ -41,24 +41,29 @@ fn row_chip(
     };
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     SelectionChip::new(
-        ChipShape::symmetric(
-            // A row's chip keeps the frame's one measurement on both sides: to the window edge on
-            // one, and to the Pane beside the sidebar on the other.
-            frame.sidebar_chip_inset(),
-            appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
-            frame.chip_radius(),
-        ),
+        // A row's chip keeps the frame's one visible gap on both sides: to the window edge on one,
+        // and to the Pane beside the sidebar on the other.
+        ChipShape {
+            inset_leading: frame.sidebar_chip_leading_inset(),
+            inset_trailing: frame.sidebar_chip_trailing_inset(),
+            inset_y: appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y),
+            radius: frame.chip_radius(),
+        },
         paint,
     )
 }
 
-/// The row padding that keeps a row's content balanced inside its chip.
+/// The leading and trailing row padding that keeps a row's content balanced inside its chip.
 ///
-/// The chip's margin is equal on both sides, so the row's padding is that margin plus the air the
-/// content keeps inside the chip.
-fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
-    crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).sidebar_chip_inset()
-        + appearance.spacing(SIDEBAR_ROW_CHIP_PADDING)
+/// Each side's padding is the chip's margin on that side plus the air the content keeps inside the
+/// chip.
+fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> (Pixels, Pixels) {
+    let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+    let air = appearance.spacing(SIDEBAR_ROW_CHIP_PADDING);
+    (
+        frame.sidebar_chip_leading_inset() + air,
+        frame.sidebar_chip_trailing_inset() + air,
+    )
 }
 
 fn row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
@@ -263,7 +268,7 @@ impl WorkspaceSidebar {
             "Workspace Directory"
         };
 
-        let row_padding = row_padding(appearance, cx);
+        let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
         let row_content = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
@@ -277,7 +282,8 @@ impl WorkspaceSidebar {
             .w_full()
             .h(row_height(appearance))
             .flex_shrink_0()
-            .px(row_padding)
+            .pl(row_padding_leading)
+            .pr(row_padding_trailing)
             .flex()
             .flex_row()
             .items_center()

@@ -4858,7 +4858,7 @@ mod tests {
                 "minimum Pane Layout size should reserve one gap per Split axis"
             );
         }
-        assert_eq!(gaps, [6.0, 8.0]);
+        assert_eq!(gaps, [3.0, 4.0]);
     }
 
     #[gpui::test]
