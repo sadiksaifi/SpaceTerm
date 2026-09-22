@@ -1242,6 +1242,7 @@ impl TerminalPane {
             .command
             .as_ref()
             .filter(|command| command.state == CommandState::Running);
+        let running_activity = running.is_some() && metadata.command_activity;
         let command = running
             .map(|command| sanitize_title(&command.line))
             .filter(|line| !line.is_empty());
@@ -1255,7 +1256,7 @@ impl TerminalPane {
                 reported
                     .glyph
                     .filter(|glyph| {
-                        running.is_none()
+                        !running_activity
                             || !super::terminal_status::reported_glyph_is_activity_frame(glyph)
                     })
                     .map(|glyph| SharedString::from(glyph.to_owned())),

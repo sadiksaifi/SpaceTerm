@@ -4132,8 +4132,35 @@ mod tests {
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
 
-        // A generic animated title frame yields to one stable native spinner in each host.
+        // A generic animated title frame remains visible until command activity crosses its
+        // delay, so a short command does not flicker through the fallback Session icon.
         report_metadata(records, 1, 3, |metadata| {
+            if remote {
+                metadata.context = remote_metadata_context("/srv/app");
+            }
+            metadata.title.value = Arc::from("◐ build");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+            metadata.command = Some(CommandMetadata {
+                line: Arc::from("cargo test"),
+                state: CommandState::Running,
+            });
+            metadata.command_activity = false;
+        });
+        cx.run_until_parked();
+        let pending = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(
+            pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("◐")
+        );
+        assert_eq!(pending.progress, TerminalProgress::None);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
+
+        // Once the delay elapses, the reported frame yields to one stable native spinner in each
+        // host.
+        report_metadata(records, 1, 4, |metadata| {
             if remote {
                 metadata.context = remote_metadata_context("/srv/app");
             }
@@ -4155,7 +4182,7 @@ mod tests {
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
 
         // Explicit OSC progress still outranks a meaningful title glyph.
-        report_metadata(records, 1, 4, |metadata| {
+        report_metadata(records, 1, 5, |metadata| {
             use crate::terminal::metadata::ProgressMetadata;
 
             if remote {
@@ -4182,7 +4209,7 @@ mod tests {
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
         assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
 
-        report_metadata(records, 1, 5, |metadata| {
+        report_metadata(records, 1, 6, |metadata| {
             if remote {
                 metadata.context = remote_metadata_context("/srv/app");
             }
