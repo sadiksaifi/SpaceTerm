@@ -185,7 +185,7 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
         }
         previous = Some(terminal);
         assert!(
-            terminal >= chrome * 0.6,
+            terminal >= chrome * 0.8,
             "a Dark Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
         );
         assert!(
@@ -453,6 +453,9 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
             );
         }
         previous = Some(terminal);
+        // Bright Chrome reconstructs its Pane with near-white ink over a near-white root, which
+        // costs more coverage than a dark rung's sliver, so this bound sits below the Dark one
+        // rather than sharing it.
         assert!(
             terminal >= chrome * 0.6,
             "a Light Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
