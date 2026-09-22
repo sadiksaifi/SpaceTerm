@@ -64,12 +64,7 @@ impl TitleActivity {
             // A title rename may restart confirmation while its loader is already visible in
             // the raw title. Carry the original stable icon across that restart.
             let stable_glyph = self.animation.as_ref().map_or_else(
-                || {
-                    previous
-                        .glyph
-                        .filter(|glyph| activity_frame(glyph).is_none())
-                        .map(Arc::from)
-                },
+                || previous.glyph.or(next.glyph).map(Arc::from),
                 |animation| animation.stable_glyph.clone(),
             );
             self.animation = Some(Animation {

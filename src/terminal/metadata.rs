@@ -926,7 +926,45 @@ mod tests {
         tracker.apply_semantic_prompt("D;0", epoch + Duration::from_secs(4));
         tracker.apply_semantic_prompt("C;cmdline=another", epoch + Duration::from_secs(4));
         tracker.set_reported_title("◐ another", epoch + Duration::from_secs(4));
-        assert_eq!(glyph(&tracker), None);
+        assert_eq!(glyph(&tracker).as_deref(), Some("◐"));
+    }
+
+    #[test]
+    fn first_activity_frame_remains_reported_while_confirmation_is_pending() {
+        let epoch = Instant::now();
+        let mut tracker = MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            LocalMachine::default(),
+            epoch,
+        );
+
+        tracker.set_reported_title("◐ agent", epoch);
+
+        let snapshot = tracker.snapshot();
+        let reported = super::super::title::reported_title(&snapshot.title.value);
+        assert_eq!(snapshot.title_glyph.resolve(reported.glyph), Some("◐"));
+    }
+
+    #[test]
+    fn expired_static_activity_glyph_remains_visible_during_new_confirmation() {
+        let epoch = Instant::now();
+        let mut tracker = MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            LocalMachine::default(),
+            epoch,
+        );
+        tracker.set_reported_title("◐ agent", epoch);
+        tracker.advance_status(epoch + Duration::from_secs(2));
+
+        tracker.set_reported_title("◑ agent", epoch + Duration::from_millis(2100));
+
+        let snapshot = tracker.snapshot();
+        let reported = super::super::title::reported_title(&snapshot.title.value);
+        assert_eq!(snapshot.title_glyph.resolve(reported.glyph), Some("◐"));
     }
 
     #[test]
