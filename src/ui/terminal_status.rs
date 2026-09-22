@@ -1,13 +1,13 @@
 //! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph slot carries the status: reported work takes the reusable progress ring,
-//! as an extent when a percentage is known and as a spinner when it is not, other work states use
+//! here once. The glyph slot carries the status: reported work takes the reusable progress ring
+//! when a percentage is known and the frame spinner when it is not, other work states use
 //! distinct shapes and semantic colors, and attention blinks the mark in the warning color. Each
-//! state is typed from sanitized Terminal Metadata and never from the title text: a loader a
-//! program draws in its own cells or title is not something host chrome can see or restate.
+//! state comes from sanitized Terminal Metadata. The metadata owner observes reported title
+//! animation; loaders drawn inside terminal cells remain terminal content.
 //!
-//! The ring inherits its color rather than taking the installed progress accent, because the
+//! The progress mark inherits its color rather than taking the installed progress accent, because the
 //! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
 //! and a Pane Caption's surface can be colored by the program running in it.
 
@@ -18,11 +18,13 @@ use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
     Pixels, Rgba, Task, Window, div, px,
 };
-use spaceterm_ui::{
-    DeterminateProgress, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
-};
+use spaceterm_ui::{DeterminateProgress, FrameSpinner, Icon, IconName, ProgressRing, ProgressSize};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
+#[cfg(test)]
+use crate::terminal::title::ReportedTitle;
+use crate::terminal::title::is_glyph_mark;
+pub(crate) use crate::terminal::title::reported_title;
 
 /// How long an attention blink holds each of its two colors.
 const BLINK_STEP: Duration = Duration::from_millis(500);
@@ -42,115 +44,6 @@ const MINIMUM_PROGRESS_SWEEP: f64 = 0.05;
 ///
 /// The ring never paints this, and it stays content-free: nothing a program reported reaches it.
 const PROGRESS_NAME: &str = "terminal progress";
-
-/// How many characters the first word of a title can hold and still be a glyph rather than a word.
-const MAXIMUM_GLYPH_CHARS: usize = 2;
-
-/// Characters a title keeps, because a Session can be named after them.
-const TITLE_WORD_CHARS: &str = "~/\\._-:@$#([{'\"";
-
-/// Characters that separate a program's glyph from the words after it.
-const TITLE_SEPARATOR_CHARS: &str = "-\u{2013}\u{2014}\u{00b7}|:";
-
-/// What a program put at the front of the title it reported, and the words that follow it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ReportedTitle<'a> {
-    /// The program's own glyph, when it reported one host chrome can draw.
-    pub(crate) glyph: Option<&'a str>,
-    /// The title without that glyph.
-    pub(crate) words: &'a str,
-}
-
-/// Splits the glyph a program draws at the front of its own title from the words after it.
-///
-/// Programs often open the title they report with their own icon or a spinner frame. One Session
-/// gets one glyph, so the program's takes the place of the glyph host chrome would draw rather than
-/// sitting beside it, and never appears twice. Only a first word that names nothing on its own is
-/// taken: a short decorative sequence that is not a word a Session could be named after. No glyph
-/// is recognised by name, so this stays the same for every program. The active chrome font's
-/// shaper decides whether the candidate occupies the Session's one glyph slot.
-pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
-    let title = title.trim();
-    let plain = ReportedTitle {
-        glyph: None,
-        words: title,
-    };
-    let Some(split) = title.find(char::is_whitespace) else {
-        return plain;
-    };
-    let (first, rest) = title.split_at(split);
-    if !is_glyph_word(first) {
-        return plain;
-    }
-    let words = title_words_after_glyph(rest);
-    if words.is_empty() {
-        return plain;
-    }
-    ReportedTitle {
-        glyph: is_glyph_candidate(first).then_some(first),
-        words,
-    }
-}
-
-/// Removes whitespace and one standalone delimiter token after a reported glyph.
-///
-/// Punctuation attached to the next opaque word is content, such as `--help` or `:memory`.
-fn title_words_after_glyph(rest: &str) -> &str {
-    let words = rest.trim_start();
-    let Some(split) = words.find(char::is_whitespace) else {
-        return words.trim_end();
-    };
-    let (first, remainder) = words.split_at(split);
-    if first.chars().count() == 1
-        && first
-            .chars()
-            .all(|character| TITLE_SEPARATOR_CHARS.contains(character))
-    {
-        remainder.trim()
-    } else {
-        words.trim_end()
-    }
-}
-
-/// Whether the first word of a title decorates it rather than naming what the Session is doing.
-fn is_glyph_word(word: &str) -> bool {
-    let bases = word
-        .chars()
-        .filter(|character| !is_glyph_mark(*character))
-        .count();
-    // Several letters name something, in whatever script they are written. Several symbols
-    // together are still decoration.
-    let decorative = bases == 1 || word.chars().all(|character| !character.is_alphanumeric());
-    (1..=MAXIMUM_GLYPH_CHARS).contains(&bases)
-        && decorative
-        && word.chars().all(|character| {
-            !character.is_ascii_alphanumeric() && !TITLE_WORD_CHARS.contains(character)
-        })
-}
-
-/// Whether a character belongs to the glyph before it rather than standing as one of its own.
-fn is_glyph_mark(character: char) -> bool {
-    matches!(
-        u32::from(character),
-        // Variation selectors, the zero-width joiner, and the skin tone modifiers.
-        0xFE00..=0xFE0F | 0x200D | 0x1F3FB..=0x1F3FF | 0xE0100..=0xE01EF
-    )
-}
-
-/// Whether a title prefix has the structural shape of a reported glyph candidate.
-///
-/// A Private-Use character is drawn by the font a program expects rather than by the font the host
-/// paints its chrome in, so it would paint as a missing-glyph box. An ASCII one says less than the
-/// Session's own glyph does. Actual Chrome-font support is checked after shaping.
-fn is_glyph_candidate(glyph: &str) -> bool {
-    glyph.chars().all(|character| {
-        !character.is_ascii()
-            && !matches!(
-                u32::from(character),
-                0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
-            )
-    })
-}
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
 /// reported glyph.
@@ -230,10 +123,12 @@ pub(crate) enum TerminalProgress {
     Normal(u8),
     /// Work in progress whose completion is unknown.
     Indeterminate,
+    /// Recently observed title animation whose short activity delay elapsed.
+    TitleActivity,
     /// Work that reported a failure.
-    Error,
+    Error(u8),
     /// Work that reported it is paused.
-    Paused,
+    Paused(u8),
 }
 
 impl TerminalProgress {
@@ -245,11 +140,12 @@ impl TerminalProgress {
             return Self::None;
         }
         match metadata.progress {
+            ProgressMetadata::None if metadata.title_activity => Self::TitleActivity,
             ProgressMetadata::None => Self::None,
             ProgressMetadata::Normal(percent) => Self::Normal(percent.min(100)),
             ProgressMetadata::Indeterminate => Self::Indeterminate,
-            ProgressMetadata::Error(_) => Self::Error,
-            ProgressMetadata::Paused(_) => Self::Paused,
+            ProgressMetadata::Error(percent) => Self::Error(percent.min(100)),
+            ProgressMetadata::Paused(percent) => Self::Paused(percent.min(100)),
         }
     }
 
@@ -259,8 +155,9 @@ impl TerminalProgress {
             Self::None => None,
             Self::Normal(_) => Some("normal"),
             Self::Indeterminate => Some("indeterminate"),
-            Self::Error => Some("error"),
-            Self::Paused => Some("paused"),
+            Self::TitleActivity => Some("title-activity"),
+            Self::Error(_) => Some("error"),
+            Self::Paused(_) => Some("paused"),
         }
     }
 }
@@ -326,8 +223,8 @@ impl StatusGlyph {
             size,
             progress,
             colors,
-            // The ring's clock hangs off this Session's own glyph identity, so one spinner never
-            // shares its revolution with another Session's.
+            // The animation hangs off this Session's own glyph identity, so one spinner never
+            // shares its frame state with another Session's.
             id: ElementId::NamedChild(Box::new(id.clone()), "progress".into()),
             selector: format!("{selector_prefix}-progress"),
         };
@@ -405,9 +302,10 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
     }
     match progress {
         TerminalProgress::None => (Tint::Inherited, 1.0),
-        TerminalProgress::Normal(_) | TerminalProgress::Indeterminate => (Tint::Busy, 1.0),
-        TerminalProgress::Error => (Tint::Error, 1.0),
-        TerminalProgress::Paused => (Tint::Paused, 1.0),
+        TerminalProgress::Normal(_) => (Tint::Busy, 1.0),
+        TerminalProgress::Indeterminate | TerminalProgress::TitleActivity => (Tint::Inherited, 1.0),
+        TerminalProgress::Error(_) => (Tint::Error, 1.0),
+        TerminalProgress::Paused(_) => (Tint::Paused, 1.0),
     }
 }
 
@@ -422,7 +320,7 @@ struct Mark {
     size: Pixels,
     progress: TerminalProgress,
     colors: StatusColors,
-    /// Keys the progress ring's own animation, so a spinner survives across frames.
+    /// Keys the progress mark's own animation, so a spinner survives across frames.
     id: ElementId,
     /// Names the progress ring's parts as `{selector}-track`, `-indicator`, and `-activity`.
     selector: String,
@@ -443,15 +341,21 @@ impl Mark {
         } = self;
         let (tint, opacity) = treatment(progress, blinked);
         let mark = match (status_shape(progress), reported) {
-            // Reported work says more than any glyph, so the ring takes the slot.
-            (StatusShape::Progress(state), _) => ProgressRing::new(id, PROGRESS_NAME, state)
-                // The ring keeps the compact geometry and centers in the slot rather than
-                // stretching to it, which settles it on the same visual weight as the drawn icons
-                // it shares the slot with.
+            // Reported work says more than any glyph, so progress takes the slot.
+            (StatusShape::Determinate(progress), _) => {
+                ProgressRing::new(id, PROGRESS_NAME, progress)
+                    // The ring keeps the compact geometry and centers in the slot rather than
+                    // stretching to it, which settles it on the same visual weight as the drawn icons
+                    // it shares the slot with.
+                    .size(ProgressSize::Compact)
+                    // The status color below is resolved for this exact Pane Caption or Tab surface,
+                    // which the installed progress accent cannot know, so the ring takes it instead.
+                    .inherited()
+                    .debug_selector(selector)
+                    .into_any_element()
+            }
+            (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
-                // The status color below is resolved for this exact Pane Caption or Tab surface,
-                // which the installed progress accent cannot know, so the ring takes it instead.
-                .inherited()
                 .debug_selector(selector)
                 .into_any_element(),
             (StatusShape::Error, _) => {
@@ -476,8 +380,8 @@ impl Mark {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StatusShape {
     Glyph,
-    /// Reported work, with or without a known completion, drawn by the reusable ring.
-    Progress(ProgressState),
+    Determinate(DeterminateProgress),
+    Spinner,
     Error,
     Paused,
 }
@@ -485,13 +389,13 @@ enum StatusShape {
 fn status_shape(progress: TerminalProgress) -> StatusShape {
     match progress {
         TerminalProgress::None => StatusShape::Glyph,
-        TerminalProgress::Normal(percent) => StatusShape::Progress(ProgressState::Determinate(
+        TerminalProgress::Normal(percent) => StatusShape::Determinate(
             DeterminateProgress::new(progress_sweep(percent))
                 .expect("a reported percentage is a finite share of the ring"),
-        )),
-        TerminalProgress::Indeterminate => StatusShape::Progress(ProgressState::Indeterminate),
-        TerminalProgress::Error => StatusShape::Error,
-        TerminalProgress::Paused => StatusShape::Paused,
+        ),
+        TerminalProgress::Indeterminate | TerminalProgress::TitleActivity => StatusShape::Spinner,
+        TerminalProgress::Error(_) => StatusShape::Error,
+        TerminalProgress::Paused(_) => StatusShape::Paused,
     }
 }
 
@@ -741,9 +645,10 @@ mod tests {
         for (progress, resting) in [
             (TerminalProgress::None, (Tint::Inherited, 1.0)),
             (TerminalProgress::Normal(30), (Tint::Busy, 1.0)),
-            (TerminalProgress::Indeterminate, (Tint::Busy, 1.0)),
-            (TerminalProgress::Error, (Tint::Error, 1.0)),
-            (TerminalProgress::Paused, (Tint::Paused, 1.0)),
+            (TerminalProgress::Indeterminate, (Tint::Inherited, 1.0)),
+            (TerminalProgress::TitleActivity, (Tint::Inherited, 1.0)),
+            (TerminalProgress::Error(30), (Tint::Error, 1.0)),
+            (TerminalProgress::Paused(70), (Tint::Paused, 1.0)),
         ] {
             assert_eq!(treatment(progress, false), resting, "{progress:?}");
             assert_eq!(
@@ -764,8 +669,8 @@ mod tests {
     fn semantic_statuses_keep_distinct_shapes_when_their_colors_coincide() {
         let shapes = [
             status_shape(TerminalProgress::Indeterminate),
-            status_shape(TerminalProgress::Error),
-            status_shape(TerminalProgress::Paused),
+            status_shape(TerminalProgress::Error(30)),
+            status_shape(TerminalProgress::Paused(70)),
         ];
 
         assert!(shapes[0] != shapes[1] && shapes[0] != shapes[2] && shapes[1] != shapes[2]);
@@ -788,15 +693,28 @@ mod tests {
 
     #[test]
     fn normal_and_indeterminate_work_use_the_reusable_progress_states() {
-        let StatusShape::Progress(ProgressState::Determinate(normal)) =
-            status_shape(TerminalProgress::Normal(42))
-        else {
+        let StatusShape::Determinate(normal) = status_shape(TerminalProgress::Normal(42)) else {
             panic!("normal work should use determinate progress");
         };
         assert!((normal.value() - 0.42).abs() < f32::EPSILON);
         assert_eq!(
             status_shape(TerminalProgress::Indeterminate),
-            StatusShape::Progress(ProgressState::Indeterminate)
+            StatusShape::Spinner
+        );
+    }
+
+    #[test]
+    fn title_activity_is_distinct_from_explicit_indeterminate_progress() {
+        let mut running = metadata(ProgressMetadata::None, MetadataFreshness::Live);
+        running.title_activity = true;
+        assert_eq!(
+            TerminalProgress::from_metadata(&running, true),
+            TerminalProgress::TitleActivity
+        );
+        running.progress = ProgressMetadata::Indeterminate;
+        assert_eq!(
+            TerminalProgress::from_metadata(&running, true),
+            TerminalProgress::Indeterminate
         );
     }
 
@@ -809,8 +727,8 @@ mod tests {
                 ProgressMetadata::Indeterminate,
                 TerminalProgress::Indeterminate,
             ),
-            (ProgressMetadata::Error(30), TerminalProgress::Error),
-            (ProgressMetadata::Paused(70), TerminalProgress::Paused),
+            (ProgressMetadata::Error(30), TerminalProgress::Error(30)),
+            (ProgressMetadata::Paused(70), TerminalProgress::Paused(70)),
         ] {
             assert_eq!(
                 TerminalProgress::from_metadata(&metadata(reported, MetadataFreshness::Live), true,),

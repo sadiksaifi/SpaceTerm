@@ -100,8 +100,8 @@ pub use overlay_scrollbar::{
     ScrollbarTheme,
 };
 pub use progress::{
-    ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing, ProgressSize,
-    ProgressSizes, ProgressTheme,
+    FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing,
+    ProgressSize, ProgressSizes, ProgressTheme,
 };
 pub use resize_handle::{
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,

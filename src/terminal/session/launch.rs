@@ -121,12 +121,10 @@ impl RemoteTerminalLaunchPlan {
         self.metadata_context.initial_directory()
     }
 
-    #[cfg(test)]
     pub(crate) fn fallback_title(&self) -> &str {
         &self.fallback_title
     }
 
-    #[cfg(test)]
     pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
         &self.metadata_context
     }

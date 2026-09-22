@@ -324,6 +324,7 @@ impl PaneSessionLifecycle {
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
         self.session_factory = prepared.session_factory;
         self.current_directory = Some(prepared.prepared_launch.starting_directory());
+        self.metadata = prepared.prepared_launch.initial_remote_metadata();
         self.prepared_launch = Some(prepared.prepared_launch);
         self.local_file_capabilities = self.session_factory.local_file_capabilities();
         self.session_start_attempted = false;
@@ -331,7 +332,6 @@ impl PaneSessionLifecycle {
         self.remote_input_blocked = false;
         self.remote_restart_start_pending = true;
         self.accepted_screen_generation = None;
-        self.metadata = None;
     }
 
     fn attach(
@@ -1252,8 +1252,9 @@ impl TerminalPane {
             let reported = super::terminal_status::reported_title(&label);
             (
                 reported.words.to_owned(),
-                reported
-                    .glyph
+                metadata
+                    .title_glyph
+                    .resolve(reported.glyph)
                     .map(|glyph| SharedString::from(glyph.to_owned())),
             )
         } else if let Some(command) = command {
@@ -1477,6 +1478,7 @@ impl TerminalPane {
             self.start_session(geometry, cx);
         }
         let _ = self.sync_terminal_input_focus(window, cx);
+        cx.emit(TerminalPaneEvent::CaptionChanged);
         cx.notify();
         Ok(())
     }

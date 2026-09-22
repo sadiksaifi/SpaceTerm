@@ -186,11 +186,11 @@ fn remote_bash_should_report_navigation_and_remove_temporary_resources() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let output = String::from_utf8_lossy(&output.stdout);
     for path in [&initial, &next] {
         assert!(
-            output.contains(&format!("\x1b]7;file://localhost{}\x07", path.display())),
-            "missing directory report: {output:?}, stderr: {stderr:?}"
+            contains_directory_report(&output.stdout, path),
+            "missing directory report: {:?}, stderr: {stderr:?}",
+            String::from_utf8_lossy(&output.stdout),
         );
     }
     assert!(!fixture.path().join("injected").exists());
@@ -265,7 +265,7 @@ fn assert_remote_shell_accepts_pty_input(shell: &OsStr, expect_user_rc: bool) {
     use std::time::{Duration, Instant};
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     let config = fixture.path().join("config");
-    let next = fixture.path().join("next");
+    let next = fixture.path().join("next %20 #?;");
     fs::create_dir_all(config.join("elvish")).unwrap();
     fs::create_dir(&next).unwrap();
     fs::write(config.join("elvish/rc.elv"), "print USER-RC\n").unwrap();
@@ -327,8 +327,7 @@ fn assert_remote_shell_accepts_pty_input(shell: &OsStr, expect_user_rc: bool) {
         ),
         (next.as_path(), "exit\n".to_owned()),
     ] {
-        let report = format!("\x1b]7;file://localhost{}\x07", path.display());
-        while !String::from_utf8_lossy(&output).contains(&report) {
+        while !contains_directory_report(&output, path) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match receiver.recv_timeout(remaining) {
                 Ok(bytes) => output.extend(bytes),
@@ -374,4 +373,22 @@ fn assert_remote_shell_accepts_pty_input(shell: &OsStr, expect_user_rc: bool) {
             .to_string_lossy()
             .starts_with("spaceterm-shell.")
     }));
+}
+
+fn contains_directory_report(output: &[u8], expected: &Path) -> bool {
+    use crate::domain::RemoteDirectory;
+    use crate::terminal::metadata::{
+        RemoteTerminalMetadataContext, TerminalMetadataContext, parse_osc7_directory,
+    };
+
+    let context = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+        SshDestination::new("fixture".to_owned()).unwrap(),
+        RemoteDirectory::new("/".to_owned()).unwrap(),
+    ));
+    String::from_utf8_lossy(output)
+        .split("\x1b]7;")
+        .skip(1)
+        .filter_map(|report| report.split_once('\x07'))
+        .filter_map(|(uri, _)| parse_osc7_directory(uri, &context))
+        .any(|directory| directory.path.as_ref() == expected.to_str().unwrap())
 }

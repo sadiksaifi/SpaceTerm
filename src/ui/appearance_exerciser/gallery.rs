@@ -8,10 +8,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Checkbox, CheckboxState, ComboBox, ComboBoxItem,
-    CommandPalette, CommandPaletteItem, ControlPreviewState, DeterminateProgress, FieldState, Icon,
-    IconButton, IconName, ModalLayer, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize,
-    ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption,
-    Switch, TextInput,
+    CommandPalette, CommandPaletteItem, ControlPreviewState, DeterminateProgress, FieldState,
+    FrameSpinner, Icon, IconButton, IconName, ModalLayer, OverlayScrollbar, ProgressBar,
+    ProgressRing, ProgressSize, ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics,
+    SegmentedControl, SegmentedOption, Switch, TextInput,
 };
 
 use super::super::appearance::{
@@ -796,14 +796,22 @@ impl Gallery {
                         .child(div().w(px(130.0)).child(label))
                         .children(progress_columns.iter().enumerate().map(
                             |(index, (_, state))| {
-                                div().w(px(170.0)).child(
-                                    ProgressRing::new(
+                                let indicator = match state {
+                                    ProgressState::Determinate(progress) => ProgressRing::new(
                                         ("gallery-progress-ring", row_index * 4 + index),
                                         "Gallery progress fixture",
-                                        *state,
+                                        *progress,
                                     )
-                                    .size(size),
-                                )
+                                    .size(size)
+                                    .into_any_element(),
+                                    ProgressState::Indeterminate => FrameSpinner::new(
+                                        ("gallery-frame-spinner", row_index * 4 + index),
+                                        "Gallery progress fixture",
+                                    )
+                                    .size(size)
+                                    .into_any_element(),
+                                };
+                                div().w(px(170.0)).child(indicator)
                             },
                         )),
                 );

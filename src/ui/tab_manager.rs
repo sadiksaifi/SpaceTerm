@@ -4007,12 +4007,12 @@ mod tests {
             ),
             (
                 ProgressMetadata::Error(10),
-                TerminalProgress::Error,
+                TerminalProgress::Error(10),
                 Some(["tab-status-1-error", "pane-status-1-error"]),
             ),
             (
                 ProgressMetadata::Paused(20),
-                TerminalProgress::Paused,
+                TerminalProgress::Paused(20),
                 Some(["tab-status-1-paused", "pane-status-1-paused"]),
             ),
             (ProgressMetadata::None, TerminalProgress::None, None),
@@ -4048,7 +4048,125 @@ mod tests {
                     "remote={remote} {selector} {progress:?}"
                 );
             }
+            if progress == ProgressMetadata::Indeterminate {
+                for selector in [
+                    "tab-status-1-progress-frame",
+                    "pane-status-1-progress-frame",
+                ] {
+                    assert!(
+                        cx.debug_bounds(selector).is_some(),
+                        "remote={remote} {selector}"
+                    );
+                }
+            }
         }
+    }
+
+    #[gpui::test]
+    fn local_status_follows_reported_activity_and_command_lifetime(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        assert_reported_activity_lifecycle(&manager, &records, false, cx);
+    }
+
+    #[gpui::test]
+    fn remote_status_follows_reported_activity_and_command_lifetime(cx: &mut TestAppContext) {
+        let (manager, records, cx) = remote_tab_manager(cx);
+        assert_reported_activity_lifecycle(&manager, &records, true, cx);
+    }
+
+    fn assert_reported_activity_lifecycle(
+        manager: &Entity<TabManager>,
+        records: &TestTerminalSessionRecords,
+        remote: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        use super::super::terminal_status::TerminalProgress;
+        use crate::terminal::metadata::{MetadataTracker, TerminalMetadataContext};
+        use std::time::{Duration, Instant};
+
+        let epoch = Instant::now();
+        let context = if remote {
+            remote_metadata_context("/srv/app")
+        } else {
+            TerminalMetadataContext::local(
+                crate::local_path::LocalPathSemantics::Posix,
+                "/tmp/app",
+                Default::default(),
+            )
+        };
+        let mut tracker = MetadataTracker::new_with_context(context, "zsh", epoch);
+        let publish = |tracker: &MetadataTracker, cx: &mut VisualTestContext| {
+            records.report_metadata(1, |metadata| {
+                let revision = metadata.revision;
+                *metadata = (*tracker.snapshot()).clone();
+                metadata.revision = revision;
+            });
+            cx.run_until_parked();
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            })
+        };
+
+        tracker.apply_semantic_prompt("C;cmdline=interactive", epoch);
+        tracker.set_reported_title("✳ agent", epoch);
+        tracker.advance_status(epoch + Duration::from_secs(60));
+        assert_eq!(publish(&tracker, cx).progress, TerminalProgress::None);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
+
+        let started = epoch + Duration::from_secs(61);
+        tracker.set_reported_title("◐ agent", started);
+        let pending = publish(&tracker, cx);
+        assert_eq!(
+            pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(pending.progress, TerminalProgress::None);
+        // Claude holds its first title frame for roughly a second. A title rename during that
+        // interval must update the words without exposing the program's temporary loader.
+        tracker.advance_status(started + Duration::from_millis(700));
+        tracker.set_reported_title("◐ renamed", started + Duration::from_millis(800));
+        let pending = publish(&tracker, cx);
+        assert_eq!(pending.activity.as_ref(), "renamed");
+        assert_eq!(
+            pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(pending.progress, TerminalProgress::None);
+        tracker.set_reported_title("◑ renamed", started + Duration::from_millis(1000));
+        assert_eq!(
+            publish(&tracker, cx).progress,
+            TerminalProgress::TitleActivity
+        );
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+
+        tracker.set_reported_title("π - agent", started + Duration::from_secs(1));
+        let ready = publish(&tracker, cx);
+        assert_eq!(ready.glyph.as_ref().map(|glyph| glyph.as_ref()), Some("π"));
+        assert_eq!(ready.progress, TerminalProgress::None);
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_none());
+
+        tracker.apply_progress_report(3, None, started + Duration::from_secs(2));
+        assert_eq!(
+            publish(&tracker, cx).progress,
+            TerminalProgress::Indeterminate
+        );
+        assert!(cx.debug_bounds("tab-status-1-progress-frame").is_some());
+        assert!(cx.debug_bounds("pane-status-1-progress-frame").is_some());
+        tracker.apply_progress_report(0, None, started + Duration::from_secs(3));
+        assert_eq!(publish(&tracker, cx).progress, TerminalProgress::None);
+
+        tracker.apply_semantic_prompt("D;0", started + Duration::from_secs(4));
+        let finished = publish(&tracker, cx);
+        assert_eq!(finished.glyph, None);
+        assert_eq!(finished.progress, TerminalProgress::None);
+        tracker.apply_semantic_prompt("C;cmdline=ls", started + Duration::from_secs(5));
+        let next = publish(&tracker, cx);
+        assert_eq!(next.activity.as_ref(), "ls");
+        assert_eq!(next.glyph, None);
+        assert_eq!(next.progress, TerminalProgress::None);
     }
 
     /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.
@@ -4075,7 +4193,7 @@ mod tests {
         });
         assert_eq!(
             (identity.activity.as_ref(), identity.progress),
-            ("agent", TerminalProgress::Error)
+            ("agent", TerminalProgress::Error(0))
         );
         assert!(cx.debug_bounds("tab-item-1-inactive").is_some());
         assert!(cx.debug_bounds("tab-status-1-error").is_some());

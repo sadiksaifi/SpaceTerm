@@ -8,8 +8,18 @@ if (has-env SPACETERM_SHELL_INTEGRATION_XDG_DIR) {
   unset-env SPACETERM_SHELL_INTEGRATION_XDG_DIR
 }
 
+fn spaceterm-encode {|value|
+  for byte [(str:to-utf8-bytes $value)] {
+    if (== (num $byte) 47) {
+      printf /
+    } else {
+      printf '%%%02X' (num $byte)
+    }
+  }
+}
+
 fn spaceterm-prompt {
-  printf "\e]7;file://localhost"$pwd"\a\e]133;A\a"
+  printf "\e]7;file://localhost%s\a\e]133;A\a" (spaceterm-encode $pwd)
 }
 fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C\a" }
 fn spaceterm-finished {|info|

@@ -1,7 +1,7 @@
 use gpui::{ElementId, px, rgba};
 use spaceterm_ui::{
-    DeterminateProgress, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing,
-    ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
+    DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
 };
 
 const _: fn() = || {
@@ -17,11 +17,14 @@ const _: fn() = || {
     let ring = ProgressRing::new(
         "public-progress-ring",
         "Connecting to remote host",
-        ProgressState::Indeterminate,
+        determinate,
     )
     .size(ProgressSize::Regular)
     .inherited()
     .debug_selector("public-progress-ring");
+    let spinner = FrameSpinner::new("public-frame-spinner", "Connecting to remote host")
+        .size(ProgressSize::Regular)
+        .debug_selector("public-frame-spinner");
 
     let compact = ProgressMetrics::new(px(3.0), px(2.0), px(20.0), px(2.0));
     let regular = ProgressMetrics::new(px(6.0), px(3.0), px(28.0), px(3.0));
@@ -31,5 +34,5 @@ const _: fn() = || {
         ProgressMotion::Standard,
     );
 
-    let _ = (bar, ring, theme);
+    let _ = (bar, ring, spinner, theme);
 };
