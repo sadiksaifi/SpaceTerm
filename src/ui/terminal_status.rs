@@ -41,6 +41,12 @@ const MINIMUM_PROGRESS_SWEEP: f64 = 0.05;
 /// The ring never paints this, and it stays content-free: nothing a program reported reaches it.
 const PROGRESS_NAME: &str = "terminal progress";
 
+/// Frames from generic activity animations that terminal programs commonly report in titles.
+///
+/// Keep this list finite. Braille also carries meaningful program artwork, so classifying its
+/// whole Unicode block would erase icons that happen to use the same character set.
+const REPORTED_ACTIVITY_FRAMES: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷⢹⢺⢼⣸⣇⡧⡗⡏◐◓◑◒◰◳◲◱◴◷◶◵";
+
 /// How many characters the first word of a title can hold and still be a glyph rather than a word.
 const MAXIMUM_GLYPH_CHARS: usize = 2;
 
@@ -96,15 +102,11 @@ pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
 /// their Session slot while OSC 133 reports a running command; transient activity frames yield to
 /// SpaceTerm's stable native spinner.
 pub(crate) fn reported_glyph_is_activity_frame(glyph: &str) -> bool {
-    glyph.chars().all(|character| {
-        is_glyph_mark(character)
-            || matches!(
-                u32::from(character),
-                0x2800..=0x28FF // Braille spinner frames.
-                    | 0x25D0..=0x25D3 // Circle halves.
-                    | 0x25F0..=0x25F7 // Circle quadrants and arcs.
-            )
-    })
+    let mut frames = glyph.chars().filter(|character| !is_glyph_mark(*character));
+    let Some(frame) = frames.next() else {
+        return false;
+    };
+    frames.next().is_none() && REPORTED_ACTIVITY_FRAMES.contains(frame)
 }
 
 /// Removes whitespace and one standalone delimiter token after a reported glyph.
@@ -833,10 +835,14 @@ mod tests {
 
     #[test]
     fn running_activity_replaces_only_generic_spinner_frames() {
-        for glyph in ["⢹", "⠋", "◐", "◴"] {
-            assert!(reported_glyph_is_activity_frame(glyph), "{glyph}");
+        for frame in REPORTED_ACTIVITY_FRAMES.chars() {
+            assert!(
+                reported_glyph_is_activity_frame(&frame.to_string()),
+                "{frame}"
+            );
         }
-        for glyph in ["✳", "🚀", "π", "◉"] {
+        assert!(reported_glyph_is_activity_frame("◐\u{fe0f}"));
+        for glyph in ["✳", "🚀", "π", "◉", "⣿", "⡀", "⠋⠙", "\u{fe0f}"] {
             assert!(!reported_glyph_is_activity_frame(glyph), "{glyph}");
         }
     }
