@@ -19,6 +19,19 @@ pub(crate) struct AccessibilityDisplayOptions {
     pub(crate) differentiate_without_color: bool,
 }
 
+/// What sits behind one Operating-System Window's content.
+///
+/// The frosted variant carries the appearance of the Chrome painted over the material, because a
+/// native material transmits different amounts of the desktop in each one and the Adapter picks
+/// the material that lets a reader see the desktop through that Chrome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowBackdrop {
+    /// The window presents its own background and keeps no native material.
+    Absent,
+    /// A frosted native material behind Chrome of this appearance.
+    Frosted(Appearance),
+}
+
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
@@ -34,12 +47,12 @@ pub(crate) trait AppearancePlatform {
     fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
         AccessibilityDisplayOptions::default()
     }
-    /// Installs or removes the native backdrop behind one Operating-System Window's content.
+    /// Installs, replaces or removes the native backdrop behind one Window's content.
     ///
-    /// The window owner calls this once per effective composition change, including the change
-    /// back to an opaque window, so no window keeps a backdrop it no longer presents.
-    fn apply_window_backdrop(&self, window: &gpui::Window, blurred: bool) {
-        let _ = (window, blurred);
+    /// The window owner calls this once per change to the requested backdrop, including the
+    /// change back to an opaque window, so no window keeps a backdrop it no longer presents.
+    fn apply_window_backdrop(&self, window: &gpui::Window, backdrop: WindowBackdrop) {
+        let _ = (window, backdrop);
     }
     fn observe(&self) -> Option<SystemAppearanceObservation>;
     fn apply_native_appearance(&self, appearance: Appearance);
@@ -57,12 +70,22 @@ pub(crate) mod testing {
         reduced_motion: Rc<Cell<bool>>,
         native_window_transparency: Rc<Cell<bool>>,
         accessibility: Rc<Cell<AccessibilityDisplayOptions>>,
-        pub(crate) backdrops: Rc<RefCell<Vec<bool>>>,
+        pub(crate) backdrops: Rc<RefCell<Vec<WindowBackdrop>>>,
         notifications: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
         pub(crate) applied: Rc<RefCell<Vec<Appearance>>>,
     }
 
     impl RecordingAppearancePlatform {
+        /// Whether each recorded request asked for a backdrop, for the tests that watch only
+        /// whether one is installed.
+        pub(crate) fn backdrop_presence(&self) -> Vec<bool> {
+            self.backdrops
+                .borrow()
+                .iter()
+                .map(|backdrop| !matches!(backdrop, WindowBackdrop::Absent))
+                .collect()
+        }
+
         pub(crate) fn set_native_window_transparency_supported(&self, supported: bool) {
             self.native_window_transparency.set(supported);
             self.set_system_appearance(self.fact.get());
@@ -119,8 +142,8 @@ pub(crate) mod testing {
         fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
             self.accessibility.get()
         }
-        fn apply_window_backdrop(&self, _: &gpui::Window, blurred: bool) {
-            self.backdrops.borrow_mut().push(blurred);
+        fn apply_window_backdrop(&self, _: &gpui::Window, backdrop: WindowBackdrop) {
+            self.backdrops.borrow_mut().push(backdrop);
         }
         fn system_appearance(&self) -> Option<Appearance> {
             self.fact.get()

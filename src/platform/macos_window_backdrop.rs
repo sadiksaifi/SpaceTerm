@@ -23,12 +23,18 @@ use objc::runtime::{BOOL, Object};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use crate::appearance::Appearance;
+use crate::platform::appearance::WindowBackdrop;
+
 /// `NSVisualEffectMaterialUnderWindowBackground`: the material AppKit draws behind a window's own
-/// content. It is chosen because it is semantic rather than decorative and follows the effective
-/// Light/Dark appearance. Its exact tint belongs to the Operating System, which may draw it from
-/// the desktop behind the window, so SpaceTerm's own neutral identity comes from the Chrome
-/// painted over it rather than from an assumption about the material.
+/// content. It is semantic rather than decorative and follows the effective Light/Dark
+/// appearance. Its exact tint belongs to the Operating System, which may draw it from the desktop
+/// behind the window, so SpaceTerm's own neutral identity comes from the Chrome painted over it
+/// rather than from an assumption about the material.
 const MATERIAL_UNDER_WINDOW_BACKGROUND: NSInteger = 21;
+/// `NSVisualEffectMaterialSidebar`: the material AppKit draws behind window chrome that is meant
+/// to show the desktop through it, as the Finder's source list does.
+const MATERIAL_SIDEBAR: NSInteger = 7;
 /// `NSVisualEffectBlendingModeBehindWindow`: the material samples the desktop behind the window.
 const BLENDING_MODE_BEHIND_WINDOW: NSInteger = 0;
 /// `NSVisualEffectStateActive`: an inactive window keeps its frosted backdrop rather than
@@ -36,15 +42,33 @@ const BLENDING_MODE_BEHIND_WINDOW: NSInteger = 0;
 const STATE_ACTIVE: NSInteger = 1;
 
 /// Identifies this view among the content view's subviews, so one window installs one backdrop
-/// and can find that same backdrop again to remove it.
+/// and can find that same backdrop again to change or remove it.
 const BACKDROP_IDENTIFIER: &str = "dev.spaceterm.window-backdrop";
 
-/// Installs or removes the native blurred backdrop behind one window's content.
+/// The material that shows the desktop through Chrome of one appearance.
 ///
-/// Applying the state a window already has does nothing, so repeated appearance publications cost
-/// no native work. Removing is complete: the window keeps no hidden effect view, and a window torn
-/// down while blurred releases the view with its own content view.
-pub(crate) fn apply(window: &gpui::Window, blurred: bool) {
+/// Both materials transmit the desktop, but not by the same amount, and what a reader sees is
+/// what survives the Chrome above. A dark scheme paints near-black over the backdrop, so every
+/// bit of desktop the material admits arrives as light against dark and reads as glass.
+/// `UnderWindowBackground` is a near-white frost in its bright variant, and a bright scheme paints
+/// near-white over it, so the two agree and the window reads as an opaque sheet of paper however
+/// much of it the Transparency Setting admits. The sidebar material transmits far more, which is
+/// what a bright scheme needs to show the desktop at all, and the AppKit appearance still chooses
+/// its tint.
+fn material(appearance: Appearance) -> NSInteger {
+    match appearance {
+        Appearance::Light => MATERIAL_SIDEBAR,
+        Appearance::Dark => MATERIAL_UNDER_WINDOW_BACKGROUND,
+    }
+}
+
+/// Installs, replaces or removes the native blurred backdrop behind one window's content.
+///
+/// A window that already presents the requested backdrop keeps the view it has, so repeated
+/// appearance publications cost no native work, and one whose Chrome changed appearance keeps
+/// that same view and changes its material. Removing is complete: the window keeps no hidden
+/// effect view, and a window torn down while blurred releases the view with its own content view.
+pub(crate) fn apply(window: &gpui::Window, backdrop: WindowBackdrop) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -65,21 +89,32 @@ pub(crate) fn apply(window: &gpui::Window, blurred: bool) {
         if content_view == nil {
             return;
         }
-        apply_to_content_view(content_view, blurred);
+        apply_to_content_view(content_view, requested_material(backdrop));
+    }
+}
+
+/// The material one backdrop request asks for, or `None` to keep no material at all.
+fn requested_material(backdrop: WindowBackdrop) -> Option<NSInteger> {
+    match backdrop {
+        WindowBackdrop::Absent => None,
+        WindowBackdrop::Frosted(appearance) => Some(material(appearance)),
     }
 }
 
 /// SAFETY: called on the AppKit thread with a live content view.
-unsafe fn apply_to_content_view(content_view: id, blurred: bool) {
+unsafe fn apply_to_content_view(content_view: id, material: Option<NSInteger>) {
     unsafe {
         let identifier = NSString::alloc(nil).init_str(BACKDROP_IDENTIFIER);
         let installed = installed_backdrop(content_view, identifier);
-        if !blurred {
-            if installed != nil {
+        match (material, installed == nil) {
+            (None, false) => {
                 let _: () = msg_send![installed, removeFromSuperview];
             }
-        } else if installed == nil {
-            install(content_view, identifier);
+            (None, true) => {}
+            (Some(material), false) => {
+                let _: () = msg_send![installed, setMaterial: material];
+            }
+            (Some(material), true) => install(content_view, identifier, material),
         }
         let _: () = msg_send![identifier, release];
     }
@@ -109,7 +144,7 @@ unsafe fn installed_backdrop(content_view: id, identifier: id) -> id {
 }
 
 /// SAFETY: called on the AppKit thread with a live content view and a live identifier string.
-unsafe fn install(content_view: id, identifier: id) {
+unsafe fn install(content_view: id, identifier: id, material: NSInteger) {
     unsafe {
         let bounds: NSRect = NSView::bounds(content_view);
         let backdrop: id = msg_send![class!(NSVisualEffectView), alloc];
@@ -117,7 +152,7 @@ unsafe fn install(content_view: id, identifier: id) {
         if backdrop == nil {
             return;
         }
-        let _: () = msg_send![backdrop, setMaterial: MATERIAL_UNDER_WINDOW_BACKGROUND];
+        let _: () = msg_send![backdrop, setMaterial: material];
         let _: () = msg_send![backdrop, setBlendingMode: BLENDING_MODE_BEHIND_WINDOW];
         let _: () = msg_send![backdrop, setState: STATE_ACTIVE];
         let _: () = msg_send![backdrop, setIdentifier: identifier];
@@ -173,6 +208,14 @@ mod tests {
             }
         }
 
+        unsafe fn backdrop_material(&self) -> NSInteger {
+            unsafe {
+                let backdrop = self.backdrop();
+                assert_ne!(backdrop, nil);
+                msg_send![backdrop, material]
+            }
+        }
+
         unsafe fn subview_count(&self) -> usize {
             unsafe {
                 let subviews: id = msg_send![self.0, subviews];
@@ -200,8 +243,9 @@ mod tests {
                 let content = ContentView::new(NSSize::new(320.0, 180.0));
                 let renderer = content.add_renderer();
 
-                apply_to_content_view(content.0, true);
-                apply_to_content_view(content.0, true);
+                let dark = Some(material(Appearance::Dark));
+                apply_to_content_view(content.0, dark);
+                apply_to_content_view(content.0, dark);
 
                 let backdrop = content.backdrop();
                 assert_ne!(backdrop, nil);
@@ -212,17 +256,17 @@ mod tests {
                 assert_eq!(first, backdrop, "the backdrop must stay below the renderer");
                 assert_eq!(second, renderer);
 
-                apply_to_content_view(content.0, false);
+                apply_to_content_view(content.0, None);
                 assert_eq!(content.subview_count(), 1);
                 assert_eq!(content.backdrop(), nil);
 
-                apply_to_content_view(content.0, false);
+                apply_to_content_view(content.0, None);
                 assert_eq!(content.subview_count(), 1);
 
-                apply_to_content_view(content.0, true);
+                apply_to_content_view(content.0, dark);
                 assert_ne!(content.backdrop(), nil);
                 assert_eq!(content.subview_count(), 2);
-                apply_to_content_view(content.0, false);
+                apply_to_content_view(content.0, None);
                 assert_eq!(content.subview_count(), 1);
             }
         });
@@ -236,7 +280,7 @@ mod tests {
             unsafe {
                 let content = ContentView::new(NSSize::new(300.0, 160.0));
                 content.add_renderer();
-                apply_to_content_view(content.0, true);
+                apply_to_content_view(content.0, Some(material(Appearance::Dark)));
                 let backdrop = content.backdrop();
                 assert_ne!(backdrop, nil);
 
@@ -256,8 +300,54 @@ mod tests {
                 assert_eq!(backdrop_frame.size.width, content_bounds.size.width);
                 assert_eq!(backdrop_frame.size.height, content_bounds.size.height);
 
-                apply_to_content_view(content.0, false);
+                apply_to_content_view(content.0, None);
             }
         });
+    }
+
+    /// A window whose Chrome changes appearance while blurred keeps the view it has and takes
+    /// the other appearance's material, so the effect never blinks out and back.
+    #[gpui::test]
+    fn changing_appearance_replaces_the_material_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            // SAFETY: GPUI runs this closure on the AppKit thread, and the fixture owns the
+            // content view for the duration of every AppKit message.
+            unsafe {
+                let content = ContentView::new(NSSize::new(320.0, 180.0));
+                content.add_renderer();
+
+                apply_to_content_view(content.0, Some(material(Appearance::Dark)));
+                let installed = content.backdrop();
+                assert_eq!(
+                    content.backdrop_material(),
+                    MATERIAL_UNDER_WINDOW_BACKGROUND
+                );
+
+                apply_to_content_view(content.0, Some(material(Appearance::Light)));
+                assert_eq!(content.backdrop(), installed);
+                assert_eq!(content.subview_count(), 2);
+                assert_eq!(content.backdrop_material(), MATERIAL_SIDEBAR);
+
+                apply_to_content_view(content.0, None);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    #[test]
+    fn a_bright_scheme_asks_for_the_more_transmissive_material() {
+        assert_eq!(
+            requested_material(WindowBackdrop::Frosted(Appearance::Light)),
+            Some(MATERIAL_SIDEBAR)
+        );
+        assert_eq!(
+            requested_material(WindowBackdrop::Frosted(Appearance::Dark)),
+            Some(MATERIAL_UNDER_WINDOW_BACKGROUND)
+        );
+        assert_eq!(requested_material(WindowBackdrop::Absent), None);
     }
 }

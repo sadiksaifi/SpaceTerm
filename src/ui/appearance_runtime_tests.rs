@@ -71,7 +71,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
             );
         })
         .unwrap();
-    assert_eq!(platform.backdrops.borrow().as_slice(), &[true]);
+    assert_eq!(platform.backdrop_presence(), vec![true]);
 
     platform.set_native_window_transparency_supported(false);
     cx.run_until_parked();
@@ -84,9 +84,53 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
             );
         })
         .unwrap();
-    assert_eq!(platform.backdrops.borrow().as_slice(), &[true, false]);
+    assert_eq!(platform.backdrop_presence(), vec![true, false]);
 
     // Re-applying an unchanged composition costs no native work.
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
+        .unwrap();
+    assert_eq!(platform.backdrops.borrow().len(), 2);
+}
+
+/// The backdrop request carries the Chrome appearance, because the material a reader sees the
+/// desktop through is not the same one in both.
+#[gpui::test]
+fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
+    use crate::platform::appearance::WindowBackdrop;
+
+    let (settings, platform) = start(cx);
+    platform.set_native_window_transparency_supported(true);
+    let token = settings.begin_preview(0).unwrap();
+    let mut candidate = SettingsDocument::default();
+    candidate.preferences.mode = AppearanceMode::Auto;
+    settings.update_preview(&token, candidate).unwrap();
+    cx.run_until_parked();
+    let test_window = cx.add_window(|_, _| gpui::EmptyView);
+    let mut owner = WindowAppearanceOwner::default();
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
+        .unwrap();
+    assert_eq!(
+        platform.backdrops.borrow().as_slice(),
+        &[WindowBackdrop::Frosted(Appearance::Dark)]
+    );
+
+    platform.set_system_appearance(Some(Appearance::Light));
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(current(cx).chrome.appearance, Appearance::Light));
+    test_window
+        .update(cx, |_, window, cx| owner.apply(window, cx))
+        .unwrap();
+    assert_eq!(
+        platform.backdrops.borrow().as_slice(),
+        &[
+            WindowBackdrop::Frosted(Appearance::Dark),
+            WindowBackdrop::Frosted(Appearance::Light),
+        ]
+    );
+
+    // The same appearance asks for nothing further.
     test_window
         .update(cx, |_, window, cx| owner.apply(window, cx))
         .unwrap();

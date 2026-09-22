@@ -455,22 +455,45 @@ impl WindowTrafficLightOwner {
 #[derive(Default)]
 pub(crate) struct WindowAppearanceOwner {
     effective: Option<crate::appearance::WindowBackgroundAppearance>,
+    backdrop: Option<crate::platform::appearance::WindowBackdrop>,
 }
 
 impl WindowAppearanceOwner {
     pub(crate) fn apply(&mut self, window: &mut gpui::Window, cx: &App) {
-        let effective = current(cx).chrome.composition.effective;
-        if self.effective == Some(effective) {
+        let chrome = current(cx).chrome.clone();
+        let effective = chrome.composition.effective;
+        if self.effective != Some(effective) {
+            window.set_background_appearance(native_background(effective));
+            self.effective = Some(effective);
+        }
+        let backdrop = requested_backdrop(effective, chrome.appearance);
+        if self.backdrop == Some(backdrop) {
             return;
         }
-        window.set_background_appearance(native_background(effective));
         if let Some(runtime) = cx.try_global::<AppearanceRuntime>() {
-            runtime.platform.apply_window_backdrop(
-                window,
-                effective == crate::appearance::WindowBackgroundAppearance::Blurred,
-            );
+            runtime.platform.apply_window_backdrop(window, backdrop);
         }
-        self.effective = Some(effective);
+        self.backdrop = Some(backdrop);
+    }
+}
+
+/// What must sit behind this window's content.
+///
+/// The Chrome appearance travels with the request because the material behind the window is what
+/// the reader sees the desktop through, and a scheme only shows the desktop through a material
+/// its own paint does not match. Deciding that here keeps the choice one piece of product policy
+/// rather than an assumption inside the platform Adapter.
+fn requested_backdrop(
+    effective: crate::appearance::WindowBackgroundAppearance,
+    appearance: crate::appearance::Appearance,
+) -> crate::platform::appearance::WindowBackdrop {
+    use crate::platform::appearance::WindowBackdrop;
+    match effective {
+        crate::appearance::WindowBackgroundAppearance::Blurred => {
+            WindowBackdrop::Frosted(appearance)
+        }
+        crate::appearance::WindowBackgroundAppearance::Opaque
+        | crate::appearance::WindowBackgroundAppearance::Transparent => WindowBackdrop::Absent,
     }
 }
 

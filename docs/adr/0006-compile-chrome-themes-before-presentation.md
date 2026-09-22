@@ -42,7 +42,12 @@ Window background appearance is distinct from Light/Dark and from each straight 
 Application Settings own transparency and blur independently of scheme authorship. Native and
 accessibility capabilities determine the effective presentation without discarding those Settings.
 Window owners apply native effects once per window, and SpaceTerm owns the blurred backdrop itself
-rather than accepting a framework effect that rewrites a native material's private layers. Depth
+rather than accepting a framework effect that rewrites a native material's private layers. The
+backdrop request carries the appearance painted over it, because the desktop a native material
+admits arrives as light: against near-black Chrome it reads as glass, and under near-white Chrome
+it agrees with the paint above and disappears. A bright scheme therefore asks for the more
+transmissive of the native materials, so one Transparency Setting shows the desktop in both
+appearances. Depth
 comes from one neutral ladder in both appearances: the base is the darkest (Dark) or most shaded
 (Light) rung, and chips, controls and floating surfaces rest lighter or brighter on it. One
 Setting controls transmission through a continuous window tint. Resting Chrome surfaces use minimal-alpha
