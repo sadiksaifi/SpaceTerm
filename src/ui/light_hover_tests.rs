@@ -279,16 +279,19 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
     }
 }
 
-/// A Tab, a sidebar row and the Pane are bounded the same way in both appearances.
+/// A chip is lifted, not outlined, and the Pane is the one surface that states a real boundary.
 ///
-/// The Pane always carried a hairline; chips carried one only in Light, and there only while
-/// their collection held the keyboard, so a selected Tab read as a bounded chip while the
-/// selected sidebar row beside it read as a bare fill. One rule now covers all three.
+/// A Tab and a selected row sit on the strip behind them, so their rim only has to catch the
+/// light an edge would: enough to lift the shape, not enough to draw a line around it. The Pane
+/// separates the reading surface from the Chrome, which is a boundary, so it keeps the stronger
+/// hairline. Dark states the lift most quietly, because light ink on a dark strip reads as a
+/// frame long before the same step does on a bright one.
 #[test]
-fn every_chip_is_bounded_like_the_pane_in_both_appearances() {
+fn every_chip_lifts_without_drawing_a_border() {
     use crate::appearance::Appearance;
 
     let desktop = Color::rgb(0x2b3a55);
+    let mut loudest = std::collections::BTreeMap::new();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
         for transparency in [0.0, 0.35, 1.0] {
             let mut preferences = AppearancePreferences {
@@ -308,13 +311,16 @@ fn every_chip_is_bounded_like_the_pane_in_both_appearances() {
             let appearance = ChromeAppearance::prepare(&resolved.chrome);
             let panel = &appearance.panel_controls.reference;
             let unfocused = appearance.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
-            let weight = |rim: Color, fill: Color| rim.source_over(fill).contrast_ratio(fill);
+            // How far a rim carries the surface it is painted on away from that surface.
+            let lift = |rim: Color, fill: Color| rim.source_over(fill).contrast_ratio(fill) - 1.0;
 
             let pane_fill = appearance
                 .pane_surface(resolved.terminal.colors.background)
                 .source_over(appearance.colors.background.source_over(desktop));
-            let pane_rim = appearance.pane_rim_on(resolved.terminal.colors.background);
-            let pane_weight = weight(pane_rim, pane_fill);
+            let pane_lift = lift(
+                appearance.pane_rim_on(resolved.terminal.colors.background),
+                pane_fill,
+            );
 
             for (name, semantic_host, fill, rim) in [
                 (
@@ -346,26 +352,36 @@ fn every_chip_is_bounded_like_the_pane_in_both_appearances() {
                 let rim = paint.rim.unwrap();
                 assert!(
                     rim.a > 0,
-                    "{mode:?} at {transparency}: the {name} hairline is missing"
+                    "{mode:?} at {transparency}: the {name} lift is missing"
                 );
                 assert_eq!(
                     rim.r > 128,
                     resolved.chrome.appearance == Appearance::Dark,
-                    "{mode:?} at {transparency}: the {name} hairline uses the wrong ink: {rim:?}"
+                    "{mode:?} at {transparency}: the {name} rim uses the wrong ink: {rim:?}"
                 );
                 let painted = paint
                     .fill
                     .unwrap()
                     .source_over(semantic_host.source_over(desktop));
-                let chip_weight = weight(rim, painted);
+                let chip_lift = lift(rim, painted);
                 assert!(
-                    (chip_weight - pane_weight).abs() <= 0.15,
-                    "{mode:?} at {transparency}: the {name} hairline reads at {chip_weight:.2} \
-                     while the Pane's reads at {pane_weight:.2}"
+                    chip_lift >= 0.05,
+                    "{mode:?} at {transparency}: the {name} lift vanishes at {chip_lift:.3}"
                 );
+                assert!(
+                    chip_lift <= pane_lift * 0.7,
+                    "{mode:?} at {transparency}: the {name} rim reads as a border at \
+                     {chip_lift:.3} against the Pane boundary's {pane_lift:.3}"
+                );
+                let share = loudest.entry(mode as u8).or_insert(0.0_f64);
+                *share = share.max(chip_lift / pane_lift);
             }
         }
     }
+    assert!(
+        loudest[&(AppearanceMode::Dark as u8)] < loudest[&(AppearanceMode::Light as u8)],
+        "Dark must state the lift more quietly than Light: {loudest:?}"
+    );
 }
 
 /// A chip's geometry is a question of density, never of Light or Dark.

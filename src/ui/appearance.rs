@@ -3108,15 +3108,15 @@ fn prepare_app_state_boundary<const N: usize>(
     proposed
 }
 
-/// The separation a chip hairline must reach, or `None` to keep the authored one as painted.
+/// The separation a chip rim must reach, or `None` to keep the authored one as painted.
 ///
-/// A chip hairline is a boundary, not an indicator: it tells the reader where a Tab or a selected
-/// row ends, the same job the Pane rim does around the Terminal, and both built-in schemes author
-/// it in the band their Pane rim already occupies. Raising it to the boundary floor would draw an
-/// outline around every chip while the Pane beside it kept its hairline, which is the inconsistency
-/// this avoids. A custom definition keeps the floor, because its rim is the only edge the
-/// application can count on, and Increase Contrast keeps it everywhere, because a reader who asks
-/// for stronger boundaries is asking for exactly the outline the built-ins decline.
+/// A chip rim is a lift, not a boundary: it catches the light a raised edge would so a Tab or a
+/// selected row reads as sitting above the strip behind it, and both built-in schemes author it
+/// well under the Pane rim that does state a boundary. Raising it to the boundary floor would
+/// draw an outline around every chip, which is the frame this avoids. A custom definition keeps
+/// the floor, because its rim is the only edge the application can count on, and Increase
+/// Contrast keeps it everywhere, because a reader who asks for stronger boundaries is asking for
+/// exactly the outline the built-ins decline.
 const fn app_owned_hairline(built_in: bool, increase_contrast: bool) -> Option<f64> {
     if built_in && !increase_contrast {
         None

@@ -384,8 +384,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
         );
         assert_eq!(
             (colors.tab_active_border.a, colors.row_selected_border.a),
-            (26, 26),
-            "Light navigation should retain its quiet authored rims at {transparency}"
+            (16, 16),
+            "Light navigation should retain its authored chip lift at {transparency}"
         );
     }
 }

@@ -67,12 +67,15 @@ unfocused selection is asked for the separation the focused one actually has, ne
 floor above it, which is what once drove a bright unfocused chip into a dark recess. Readability
 at high transmission is the reader's own choice, taken once for the whole window: a Pane is not
 singled out for protection that the Chrome around it does not get. Every Pane keeps the selected
-chip's neutral hairline at any transparency. A chip hairline is a boundary rather than an
-indicator: it says where a Tab or a selected row ends, which is the job the Pane rim does around
-the Terminal, so both built-in schemes author it in the band their Pane rim occupies and
-application preparation leaves it there instead of raising it to the boundary floor that
-interactive edges answer to. A custom definition keeps that floor, since its rim is the only edge
-the application can count on, and Increase Contrast keeps it everywhere.
+chip's neutral hairline at any transparency. The Pane rim is a boundary, since it separates the
+reading surface from the Chrome. A chip rim is neither a boundary nor an indicator but a lift: it
+catches the light a raised edge would so a Tab or a selected row reads as sitting above the strip
+behind it, and it stays well under the Pane's rim, which is what keeps it from reading as a drawn
+line. A dark scheme states the lift most quietly, because light ink on a dark strip becomes a
+frame at a step a bright scheme still carries as an edge. Application preparation leaves both
+built-in lifts as authored rather than raising them to the boundary floor that interactive edges
+answer to. A custom definition keeps that floor, since its rim is the only edge the application
+can count on, and Increase Contrast keeps it everywhere.
 
 The desktop behind an Operating-System Window may use its platform's native effect. Everything
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
