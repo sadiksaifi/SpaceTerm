@@ -137,7 +137,7 @@ fn dark_terminal_surface_stays_restrained_through_default_transparency() {
                 i16::from(root.b) - i16::from(pane.b),
             ];
             assert!(
-                tint.into_iter().all(|channel| (1..=10).contains(&channel)),
+                tint.into_iter().all(|channel| (1..=20).contains(&channel)),
                 "Dark Terminal must remain a restrained neutral tint below the root at transparency {transparency}: root={root:?}, pane={pane:?}",
             );
         }
@@ -176,6 +176,43 @@ fn dark_terminal_surface_bounds_default_text_contrast_on_a_bright_desktop() {
         assert!(
             pane.r > resolved.terminal.colors.background.r,
             "the protected Pane must still admit the bright desktop at transparency {transparency}",
+        );
+    }
+}
+
+#[test]
+fn dark_terminal_surface_keeps_chromatic_ansi_text_distinct_on_a_bright_desktop() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Dark,
+        ..Default::default()
+    };
+    preferences.background.transparency = 0.35;
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable()
+                .with_composition(CompositionCapabilities::new(true, true)),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    let root = prepared
+        .surface(SurfaceRole::Sheet, prepared.colors.background)
+        .source_over(Color::rgb(0xffffff));
+    let pane = prepared
+        .pane_surface(resolved.terminal.colors.background)
+        .source_over(root);
+
+    for (index, foreground) in resolved.terminal.colors.normal[1..7]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        assert!(
+            foreground.contrast_ratio(pane) >= 3.0,
+            "Dark Terminal ANSI color {} must remain distinct over a bright desktop: foreground={foreground:?}, pane={pane:?}",
+            index + 1,
         );
     }
 }

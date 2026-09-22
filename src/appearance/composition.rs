@@ -116,7 +116,7 @@ impl SurfaceMaterials {
     ///
     /// The coverage grows with the requested transmission instead of snapping in with the glass
     /// engagement curve. This leaves the default material visibly connected to the window while
-    /// bounding text contrast when a bright desktop is fully exposed behind it.
+    /// keeping chromatic ANSI text distinct when a bright desktop is exposed behind it.
     const DARK_PANE_BACKING: f32 = 0.72;
     /// How much more ink a dark ladder spends at the maximum setting than over its own base.
     ///
@@ -312,7 +312,7 @@ impl SurfaceMaterials {
     ) -> super::Color {
         let tint = self.paint(SurfaceRole::Surface, base, terminal_background);
         let admitted = self.admitted();
-        let backing_curve = admitted * admitted * (3.0 - 2.0 * admitted);
+        let backing_curve = admitted * (2.0 - admitted);
         let backing = terminal_background
             .multiply_opacity((255.0 * backing_curve * Self::DARK_PANE_BACKING).round() as u8);
         tint.source_over(backing)
