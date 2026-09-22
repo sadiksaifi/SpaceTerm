@@ -460,33 +460,62 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
     }
 }
 
-/// A selected chip keeps the step a Pane gives up.
+/// A Light selected chip spends one overlay for its step and transmits the rest.
 ///
-/// A selection is small and has to stay legible as a selection, so it holds its authored
-/// distance from its host with whatever ink that costs. A Pane is the window's reading field
-/// and answers the Setting instead, so the two Light surfaces that share the same authored tone
-/// no longer share one paint.
+/// This is the shape of the bug it guards: a chip that holds its step against the opaque host
+/// keeps its ink while the shell under it goes on fading, so what it renders climbs with the
+/// Setting until the chip is the loudest thing in a window that was asked for glass. The same
+/// chip painted as a resting surface thins as the Setting rises and stays within reach of the
+/// authored 1.21. It does drift upward over a desktop darker than the scheme, because equal ink
+/// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
+/// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
+/// above it.
 #[test]
-fn light_selected_navigation_holds_the_step_a_pane_transmits() {
+fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
 
-    for transparency in [0.15, 0.35, 0.7, 1.0] {
+    let desktop = Color::rgb(0x2b3a55);
+    for transparency in [0.0, 0.15, 0.35, 0.7, 1.0] {
         let resolved = prepared_appearance(AppearanceMode::Light, transparency);
         let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let terminal = appearance.pane_surface(resolved.terminal.colors.background);
+        let shell = appearance
+            .surface(SurfaceRole::Sheet, appearance.colors.background)
+            .source_over(desktop);
         let panel = appearance.host_colors(ControlHost::Panel);
         let selection = appearance.unfocused_selection_colors(ControlHost::Panel);
-        let selected =
-            appearance.selection_surface(panel.row_background, selection.row_selected_background);
-
-        assert!(
-            selected.a > terminal.a,
-            "a Light selection spends more ink than a Pane at transparency {transparency}: selected={selected:?}, terminal={terminal:?}",
-        );
-        assert!(
-            terminal.a > 0,
-            "a Light Pane keeps the overlay its step costs at transparency {transparency}",
-        );
+        for (name, host, fill) in [
+            (
+                "tab",
+                appearance
+                    .host_colors(ControlHost::TitleBar)
+                    .title_bar_background,
+                appearance
+                    .host_colors(ControlHost::TitleBar)
+                    .tab_active_background,
+            ),
+            (
+                "sidebar row",
+                panel.row_background,
+                selection.row_selected_background,
+            ),
+        ] {
+            let chip = appearance.selection_surface(host, fill).source_over(shell);
+            let step = chip.contrast_ratio(shell);
+            assert!(
+                (1.15..=1.70).contains(&step),
+                "a Light {name} holds one step from its shell at transparency {transparency}: step={step}, chip={chip:?} over {shell:?}",
+            );
+            assert!(
+                chip.r > shell.r,
+                "a Light {name} lifts from its shell at transparency {transparency}",
+            );
+            let ink = appearance.selection_surface(host, fill).a;
+            assert_eq!(
+                ink == 255,
+                transparency == 0.0,
+                "a Light {name} transmits at transparency {transparency}: ink={ink}",
+            );
+        }
     }
 }
 
@@ -569,9 +598,12 @@ fn selected_surfaces_follow_transparency_in_both_appearances() {
                     selected.a > 0 && selected.a < 255,
                     "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
                 );
+                // A transmitting selection is read against the shell the window actually
+                // renders, not against the opaque reference it was solved from, so the bound it
+                // can promise there is the ink it spends rather than a fixed ratio.
                 let host = prepared.colors.panel_background;
                 assert!(
-                    selected.source_over(host).contrast_ratio(host) >= 1.12,
+                    selected.source_over(host).contrast_ratio(host) > 1.0,
                     "{mode:?} selection must remain visible while transmitting its host"
                 );
                 assert!(

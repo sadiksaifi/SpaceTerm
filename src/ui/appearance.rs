@@ -3828,8 +3828,26 @@ impl ChromeAppearance {
         }
     }
 
-    /// Persistent selection uses the shared host-relative prominent-surface material.
+    /// Persistent selection paints its difference from its host, like any other resting surface.
+    ///
+    /// A selected chip is read against the surface it sits on, so what it owes the reader is its
+    /// authored step from that host, not a fixed density. Holding the step against the opaque
+    /// host instead pins a bright chip near opacity, and a pinned chip keeps its ink while the
+    /// shell under it goes on fading: a step authored at 1.21 then renders at 2.0 and then 4.0 as
+    /// the Setting rises, until the chip is the loudest thing in a window that was asked for
+    /// glass. Dark always spent less ink than that bound asked for, so this is what a Dark chip
+    /// has painted all along.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
+        self.materials.paint(SurfaceRole::Surface, host, color)
+    }
+
+    /// The fill an unselected chip takes under the pointer.
+    ///
+    /// Hover answers a pointer rather than describing the window's hierarchy, and its authored
+    /// step is the smallest in the scheme, so Light holds it against the opaque host instead of
+    /// letting the window thin it away. The bound is the step the palette authored, which stays
+    /// below what a selected chip spends, so hover cannot overtake the selection it sits beside.
+    pub(crate) fn hover_surface(&self, host: Color, color: Color) -> Color {
         self.prominent_surface(host, color)
     }
 
@@ -4035,10 +4053,8 @@ impl ChromeAppearance {
     /// from the window sheet, so it transmits what the Transparency Setting asks of every other
     /// resting surface and keeps its authored step from the chrome around it. Light authors that
     /// step upward and Dark downward, and the same overlay carries either direction, so neither
-    /// appearance needs a backing of its own. A chip or a row may still hold its step with the
-    /// prominent material, because a small selection has to stay legible as a selection; a Pane
-    /// covers most of the window, and a Pane that held its step that way would answer the
-    /// Setting with a slab. Explicit cell backgrounds are separate.
+    /// appearance needs a backing of its own, and neither does a chip or a row resting beside it.
+    /// Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         self.surface(SurfaceRole::Surface, terminal_background)
     }

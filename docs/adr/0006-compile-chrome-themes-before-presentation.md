@@ -57,13 +57,17 @@ which stays the contrast reference. A Pane is an ordinary resting surface in bot
 paints only the accepted Terminal background's difference from the window sheet, which Light
 authors above the window root and Dark below it. A Pane therefore transmits exactly what the
 Transparency Setting asks of every other resting surface, and the largest surface in the window
-answers that Setting instead of holding its own backing against it. A small selected chip still
-holds its authored step against its host with whatever ink that costs, because it has to stay
-legible as a selection; reproducing a bright Pane's step that way would cost an almost opaque
-white and put a slab where the Setting asked for glass. Readability at high transmission is the
-reader's own choice, taken once for the whole window: a Pane is not singled out for protection
-that the Chrome around it does not get. Every Pane keeps the selected chip's neutral hairline at
-any transparency.
+answers that Setting instead of holding its own backing against it. A persistent selection is a
+resting surface on the same terms: it paints its authored step from the chip or row beneath it
+and lets the window transmit the rest, because a fill that holds its step against the opaque host
+keeps its ink while the shell under it fades, and a step authored at 1.21 would then render at
+twice that and more as the Setting rose. Hover is the exception, since it answers a pointer
+rather than describing hierarchy and its authored step is the smallest in the scheme. An
+unfocused selection is asked for the separation the focused one actually has, never for a fixed
+floor above it, which is what once drove a bright unfocused chip into a dark recess. Readability
+at high transmission is the reader's own choice, taken once for the whole window: a Pane is not
+singled out for protection that the Chrome around it does not get. Every Pane keeps the selected
+chip's neutral hairline at any transparency.
 
 The desktop behind an Operating-System Window may use its platform's native effect. Everything
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality

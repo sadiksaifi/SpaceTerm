@@ -421,10 +421,12 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             true,
         );
         let panel = prepared.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
-        assert_eq!(
+        // An unfocused selection takes the focused fill or the scheme's dimmer authored one,
+        // never a darker fill invented to reach a floor the window's material cannot hold.
+        assert!(
+            [Color::rgb(0xfafafa), Color::rgb(0xf4f4f4)].contains(&panel.row_selected_background),
+            "unfocused sidebar at transparency {transparency}: {:?}; active {:?}; host {:?}",
             panel.row_selected_background,
-            Color::rgb(0xfafafa),
-            "unfocused sidebar at transparency {transparency}; active {:?}; host {:?}",
             prepared.panel_controls.reference.row_selected_background,
             prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
         );
@@ -720,9 +722,10 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                             active_colors.row_background,
                         )
                         .source_over(host_background);
-                    for (fill, primary, secondary, icon, matched) in [
+                    for (fill, focused_fill, primary, secondary, icon, matched) in [
                         (
                             mixed.row_selected_background,
+                            active_colors.row_selected_background,
                             mixed.row_selected_foreground,
                             mixed.row_selected_secondary,
                             mixed.row_selected_icon,
@@ -730,6 +733,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                         (
                             mixed.row_selected_hover_background,
+                            active_colors.row_selected_hover_background,
                             mixed.row_selected_hover_foreground,
                             mixed.row_selected_hover_secondary,
                             mixed.row_selected_hover_icon,
@@ -762,6 +766,26 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                                 )
                                 .source_over(row_host),
                         ];
+                        // An unfocused selection is asked for the separation the focused one
+                        // actually has, which is all a translucent fill can promise, and never
+                        // for more than the subdued bound.
+                        let focused_backgrounds = [
+                            active
+                                .selection_surface(semantic_host, focused_fill)
+                                .source_over(host_background),
+                            active
+                                .selection_surface(active_colors.row_background, focused_fill)
+                                .source_over(row_host),
+                        ];
+                        let selection_floor = if increase_contrast {
+                            selection_floor
+                        } else {
+                            focused_backgrounds
+                                .into_iter()
+                                .zip(resting_backgrounds)
+                                .map(|(focused, resting)| focused.contrast_ratio(resting))
+                                .fold(selection_floor, f64::min)
+                        };
                         for (background, resting) in
                             backgrounds.into_iter().zip(resting_backgrounds)
                         {
@@ -798,11 +822,13 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         inactive_colors.row_selected_hover_border
                     );
                 }
+                let focused_floating = active.host_colors(spaceterm_ui::ControlHost::Floating);
                 for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
                     let host = shell_endpoint_background(shell, underlay);
-                    for (fill, primary, secondary, icon, matched) in [
+                    for (fill, focused_fill, primary, secondary, icon, matched) in [
                         (
                             mixed.row_selected_background,
+                            focused_floating.row_selected_background,
                             mixed.row_selected_foreground,
                             mixed.row_selected_secondary,
                             mixed.row_selected_icon,
@@ -810,6 +836,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                         (
                             mixed.row_selected_hover_background,
+                            focused_floating.row_selected_hover_background,
                             mixed.row_selected_hover_foreground,
                             mixed.row_selected_hover_secondary,
                             mixed.row_selected_hover_icon,
@@ -817,6 +844,11 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                     ] {
                         let background = fill.source_over(host);
+                        let selection_floor = if increase_contrast {
+                            selection_floor
+                        } else {
+                            selection_floor.min(focused_fill.source_over(host).contrast_ratio(host))
+                        };
                         assert!(
                             background.contrast_ratio(host) >= selection_floor,
                             "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {host:?}"
