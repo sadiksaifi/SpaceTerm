@@ -155,8 +155,8 @@ endorsement:
 https://www.nasa.gov/nasa-brand-center/images-and-media/
 
 
-spinners Dots9 frame sequence
------------------------------
+spinners Dots frame sequence
+----------------------------
 Source: https://github.com/FGRibreau/spinners
 Version: 4.2.0, commit f4aa1abddd6c8edc645093f7ab4c7eba6fc1d428
 
@@ -183,8 +183,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-cli-spinners dots9 frame sequence
----------------------------------
+cli-spinners dots frame sequence
+--------------------------------
 Source: https://github.com/sindresorhus/cli-spinners
 Version: 3.4.0, commit c5f18f654e0f6bdbf830713927f815a42190d774
 

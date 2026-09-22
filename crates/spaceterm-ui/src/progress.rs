@@ -237,8 +237,13 @@ const BAR_RESTING_OPACITY: f32 = 0.55;
 /// along the fill rather than sliding across it as a segment.
 const BAR_CREST_LAYERS: [(f32, f32); 3] = [(0.46, 0.18), (0.56, 0.22), (0.3, 0.3)];
 
-/// Monochrome frames from the `Dots9` visual reference credited in packaged notices.
-pub(crate) const SPINNER_FRAMES: [char; 8] = ['⢹', '⢺', '⢼', '⣸', '⣇', '⡧', '⡗', '⡏'];
+/// Monochrome frames from the `Dots` visual reference credited in packaged notices.
+///
+/// The sequence lights the six-dot ring and walks the unlit gap around it, so what travels is the
+/// gap and the ring itself stays whole. That is what reads as rotation. A sequence that instead
+/// lights one column solid and walks a single dot beside it reads as a bar with a mark sliding
+/// past it, which is not the same motion.
+pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
 
 /// Unicode Braille bit, column, and row for each of the eight possible dots.
@@ -252,6 +257,32 @@ const BRAILLE_DOTS: [(u8, u8, u8); 8] = [
     (5, 1, 2),
     (7, 1, 3),
 ];
+
+/// The columns and rows the installed frame sequence lights.
+///
+/// `Dots` never lights the fourth row, so laying its artwork over a full eight-dot cell would
+/// leave the bottom quarter of the square empty and hang the ring above the center of whatever
+/// text sits beside it. A test holds the sequence to this extent.
+const SPINNER_COLUMNS: f32 = 2.0;
+const SPINNER_ROWS: f32 = 3.0;
+
+/// A dot's diameter as a share of the distance between neighboring dot centers.
+///
+/// Physical Braille sets a 1.5 mm dot on a 2.5 mm pitch. Holding near that ratio leaves a gap
+/// between every pair of neighbors in both axes, so lit dots stay countable instead of fusing
+/// into a bar. The ratio sits slightly under the physical one because these dots are painted a
+/// few pixels wide, where antialiasing spreads each edge and closes a gap the geometry still has.
+const SPINNER_DOT_PITCH_RATIO: f32 = 0.55;
+
+/// The cell's height as a share of the square the spinner occupies.
+///
+/// The spinner takes the same slot as a drawn icon or a reported glyph, and neither of those fills
+/// its box: a glyph set at the slot's size inks roughly two thirds of that height and leaves the
+/// rest to ascent and descent. Reaching the square's edges instead would put the spinner on a
+/// heavier optical weight than everything it sits beside, which is the whole complaint against a
+/// spinner that looks too big. Insetting to a glyph's ink proportion settles it onto the same
+/// weight, and the dots shrink with the cell because one pitch derives them both.
+const SPINNER_CELL_HEIGHT_RATIO: f32 = 0.7;
 
 /// An inherited ring's determinate track, as a share of the inherited color's own opacity.
 ///
@@ -457,26 +488,34 @@ fn spinner_frame(selector: SharedString, extent: Pixels, index: usize) -> gpui::
         )
 }
 
-/// Active dots for one Dots9 frame, normalized so their painted union is square.
+/// Active dots for one `Dots` frame, laid out on a centered Braille lattice.
+///
+/// One pitch governs both axes, so the two columns sit exactly as far apart as consecutive rows
+/// and the cell keeps the tall, narrow proportion a Braille glyph has. The cell is centered in the
+/// square at a glyph's ink height rather than stretched to the square's edges. Stretching it is
+/// what turns each column into a solid bar and the ring into an exclamation mark.
 pub(crate) fn spinner_dot_bounds(
     bounds: Bounds<Pixels>,
     index: usize,
 ) -> impl Iterator<Item = Bounds<Pixels>> {
     let extent = bounds.size.width.min(bounds.size.height).max(px(0.0));
-    let left = bounds.origin.x + (bounds.size.width - extent) / 2.0;
-    let top = bounds.origin.y + (bounds.size.height - extent) / 2.0;
-    let diameter = extent / 6.0;
-    let radius = diameter / 2.0;
+    let cell_height = extent * SPINNER_CELL_HEIGHT_RATIO;
+    let pitch = cell_height / (SPINNER_ROWS - 1.0 + SPINNER_DOT_PITCH_RATIO);
+    let diameter = pitch * SPINNER_DOT_PITCH_RATIO;
+    let cell_width = pitch * (SPINNER_COLUMNS - 1.0) + diameter;
+    let left = bounds.origin.x + (bounds.size.width - cell_width) / 2.0;
+    let top = bounds.origin.y + (bounds.size.height - cell_height) / 2.0;
     let mask = (u32::from(SPINNER_FRAMES[index]) - 0x2800) as u8;
 
     BRAILLE_DOTS
         .into_iter()
         .filter(move |(bit, _, _)| mask & (1 << bit) != 0)
         .map(move |(_, column, row)| {
-            let center_x = left + extent * (0.25 + f32::from(column) * 0.5);
-            let center_y = top + extent * (0.25 + f32::from(row) / 6.0);
             Bounds::new(
-                point(center_x - radius, center_y - radius),
+                point(
+                    left + pitch * f32::from(column),
+                    top + pitch * f32::from(row),
+                ),
                 gpui::size(diameter, diameter),
             )
         })
