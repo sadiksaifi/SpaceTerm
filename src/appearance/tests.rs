@@ -1834,36 +1834,3 @@ fn color_encoding_accepts_short_forms_and_exports_long_rgba() {
     assert_eq!(color, Color::rgb(0xaabbcc));
     assert_eq!(serde_json::to_string(&color).unwrap(), "\"#aabbccff\"");
 }
-
-#[test]
-fn scratch_final() {
-    use spaceterm_ui::ControlHost;
-    for (mode, desktop) in [
-        (AppearanceMode::Dark, Color::rgb(0x2b3a55)),
-        (AppearanceMode::Light, Color::rgb(0x2b3a55)),
-    ] {
-        for transparency in [0.0_f32, 0.35, 1.0] {
-            let resolved = prepared_appearance(mode, transparency);
-            let a = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-            let shell = a
-                .surface(SurfaceRole::Sheet, a.colors.background)
-                .source_over(desktop);
-            let title = a.host_colors(ControlHost::TitleBar);
-            let pane = a
-                .pane_surface(resolved.terminal.colors.background)
-                .source_over(shell);
-            let chip = a
-                .selection_surface(title.title_bar_background, title.tab_active_background)
-                .source_over(shell);
-            let rim = a.colors.tab_active_border.source_over(chip);
-            println!(
-                "{mode:?} t={transparency}: rim={:?} paneRim={:?} chip step={:.2} pane step={:.2} rim on chip={:.2}",
-                a.colors.tab_active_border,
-                a.pane_rim_on(resolved.terminal.colors.background),
-                chip.contrast_ratio(shell),
-                pane.contrast_ratio(shell),
-                rim.contrast_ratio(chip),
-            );
-        }
-    }
-}
