@@ -579,7 +579,6 @@ impl MacWindow {
             is_minimizable,
             focus,
             show,
-            maximized,
             display_id,
             window_min_size,
             tabbing_identifier,
@@ -847,29 +846,17 @@ impl MacWindow {
                 }
             }
 
-            // Zoom maximized windows while still hidden, so the window appears
-            // filling the screen with no expand animation. AppKit captures the
-            // pre-zoom frame as the zoom restore frame, so the zoom must run
-            // from the restore bounds: pre-sizing to the visible frame first
-            // would make the first unzoom a no-op. Window::new skips its zoom
-            // when the backend already maximized the window.
-            if maximized {
-                native_window.zoom_(nil);
-            }
-
             if focus && show {
                 native_window.makeKeyAndOrderFront_(nil);
             } else if show {
                 native_window.orderFront_(nil);
             }
 
-            if !maximized {
-                // Set the initial position of the window to the specified origin.
-                // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
-                // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
-                //  is different from the primary screen.
-                NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
-            }
+            // Set the initial position of the window to the specified origin.
+            // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
+            // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
+            //  is different from the primary screen.
+            NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
             window.0.lock().move_traffic_light();
 
             pool.drain();

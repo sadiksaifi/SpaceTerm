@@ -30,7 +30,6 @@ pub(crate) struct TestWindowState {
     moved_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
     is_fullscreen: bool,
-    is_maximized: bool,
 }
 
 #[derive(Clone)]
@@ -77,9 +76,6 @@ impl TestWindow {
             moved_callback: None,
             input_handler: None,
             is_fullscreen: false,
-            // Birth maximized when requested so the open-maximized path is
-            // idempotent, mirroring backends that maximize during open.
-            is_maximized: params.maximized,
         })))
     }
 
@@ -123,15 +119,11 @@ impl PlatformWindow for TestWindow {
     }
 
     fn window_bounds(&self) -> WindowBounds {
-        if self.is_maximized() {
-            WindowBounds::Maximized(self.bounds())
-        } else {
-            WindowBounds::Windowed(self.bounds())
-        }
+        WindowBounds::Windowed(self.bounds())
     }
 
     fn is_maximized(&self) -> bool {
-        self.0.lock().is_maximized
+        false
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -233,12 +225,8 @@ impl PlatformWindow for TestWindow {
         unimplemented!()
     }
 
-    // Mirror the toggle semantics of the macOS, Wayland, and X11 backends.
-    // Test windows birth maximized when requested, so this only runs for
-    // user-initiated toggles (SpaceTerm #314).
     fn zoom(&self) {
-        let mut lock = self.0.lock();
-        lock.is_maximized = !lock.is_maximized;
+        unimplemented!()
     }
 
     fn toggle_fullscreen(&self) {
