@@ -368,8 +368,15 @@ fn every_chip_lifts_without_drawing_a_border() {
                     chip_lift >= 0.05,
                     "{mode:?} at {transparency}: the {name} lift vanishes at {chip_lift:.3}"
                 );
+                // A bright fill carries more edge before it reads as a line, so Light is allowed
+                // the wider share of the Pane's boundary and Dark is held well under it.
+                let ceiling = if resolved.chrome.appearance == Appearance::Dark {
+                    0.5
+                } else {
+                    0.85
+                };
                 assert!(
-                    chip_lift <= pane_lift * 0.7,
+                    chip_lift <= pane_lift * ceiling,
                     "{mode:?} at {transparency}: the {name} rim reads as a border at \
                      {chip_lift:.3} against the Pane boundary's {pane_lift:.3}"
                 );

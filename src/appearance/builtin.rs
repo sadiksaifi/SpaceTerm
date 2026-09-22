@@ -250,9 +250,9 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             // A bright scheme may state the lift a little further than a dark one: the same
             // edge covers more distance against a near-white fill before it reads as a line.
             // A chip keeps it whether or not its collection holds the keyboard; the fill dims.
-            selected_rim: Color::rgba(0x00000010),
-            selected_rim_hover: Color::rgba(0x0000001a),
-            selected_rim_inactive: Color::rgba(0x00000010),
+            selected_rim: Color::rgba(0x00000014),
+            selected_rim_hover: Color::rgba(0x00000020),
+            selected_rim_inactive: Color::rgba(0x00000014),
             mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
             mark_track: 0xe5e5e5,
