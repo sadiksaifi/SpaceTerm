@@ -1186,9 +1186,8 @@ pub(crate) struct WindowParams {
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
     pub show: bool,
 
-    /// Whether the window opens maximized. macOS zooms while the native
-    /// window is still hidden, so launch shows no expand animation and
-    /// AppKit keeps the restore bounds as the zoom restore frame.
+    /// Whether the window opens maximized. macOS uses the system Fill action
+    /// when available so tiled-window margins remain under AppKit's control.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub maximized: bool,
 

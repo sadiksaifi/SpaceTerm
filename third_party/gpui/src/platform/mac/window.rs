@@ -91,6 +91,27 @@ pub enum UserTabbingPreference {
     InFullScreen,
 }
 
+fn supports_system_fill(window: id) -> bool {
+    unsafe {
+        let responds: BOOL = msg_send![window, respondsToSelector: sel!(_zoomFill:)];
+        responds == YES
+    }
+}
+
+fn fill_or_zoom(window: id) {
+    unsafe {
+        if supports_system_fill(window) {
+            // AppKit's Fill action participates in system tiling and therefore
+            // honors the user's "Tiled windows have margins" setting. `zoom:`
+            // is the classic maximize operation and always uses the full
+            // visible frame.
+            let _: () = msg_send![window, _zoomFill: nil];
+        } else {
+            window.zoom_(nil);
+        }
+    }
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     // Widely used private APIs; Apple uses them for their Terminal.app.
@@ -847,13 +868,12 @@ impl MacWindow {
                 }
             }
 
-            // Zoom maximized windows while still hidden, so the window appears
-            // filling the screen with no expand animation. AppKit captures the
-            // pre-zoom frame as the zoom restore frame, so the zoom must run
-            // from the restore bounds: pre-sizing to the visible frame first
-            // would make the first unzoom a no-op. Window::new skips its zoom
-            // when the backend already maximized the window.
-            if maximized {
+            // AppKit ignores its Fill action for hidden windows. Use system
+            // Fill after ordering visible windows so macOS owns tiled margins.
+            // Older systems fall back to zooming while hidden, which preserves
+            // the animation-free launch and the restore frame.
+            let uses_system_fill = maximized && show && supports_system_fill(native_window);
+            if maximized && !uses_system_fill {
                 native_window.zoom_(nil);
             }
 
@@ -861,6 +881,15 @@ impl MacWindow {
                 native_window.makeKeyAndOrderFront_(nil);
             } else if show {
                 native_window.orderFront_(nil);
+            }
+
+            if uses_system_fill {
+                let executor = window.0.lock().executor.clone();
+                executor
+                    .spawn(async move {
+                        fill_or_zoom(native_window);
+                    })
+                    .detach();
             }
 
             if !maximized {
@@ -1551,8 +1580,7 @@ impl PlatformWindow for MacWindow {
                             window.zoom_(nil);
                         }
                         "Fill" => {
-                            // There is no documented API for "Fill" action, so we'll just zoom the window
-                            window.zoom_(nil);
+                            fill_or_zoom(window);
                         }
                         _ => {
                             window.zoom_(nil);

@@ -480,12 +480,10 @@ pub(crate) fn open(
     let workspace_traffic_light_position = host
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
-    // Open maximized so the workspace fills the screen on launch. These centered
-    // bounds are the restore size after unmaximizing. GPUI zooms natively on
-    // macOS, Windows, and Linux, so no platform adapter is needed. On macOS the
-    // zoom runs while the native window is still hidden, so the window appears
-    // filling the screen with no expand animation and AppKit keeps these
-    // bounds as the zoom restore frame.
+    // Open maximized so the workspace fills the screen on launch. These
+    // centered bounds are the restore size after unmaximizing. Each backend
+    // uses its native maximize operation; macOS uses system Fill when available
+    // so the user's tiled-window margin preference remains authoritative.
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
