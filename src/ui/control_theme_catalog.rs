@@ -1275,6 +1275,7 @@ mod tests {
                 let materials = ResolvedWindowComposition::resolve(
                     &preferences.background,
                     crate::appearance::CompositionCapabilities::new(true, true),
+                    appearance,
                 )
                 .materials;
                 let paint = reference.material_presentation(materials);

@@ -1,7 +1,7 @@
 //! Requested native backdrop and effective presentation are independent from scheme classification.
 use serde::{Deserialize, Serialize};
 
-use super::ChromeColors;
+use super::{Appearance, ChromeColors};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,15 +66,20 @@ pub(crate) enum SurfaceRole {
     Floating,
 }
 
-/// The resolved translucency of every surface role, carried as one scalar.
+/// The resolved translucency of every surface role.
+///
+/// One Setting drives both scalars. `glass` is what it asks of a resting surface, and `sheet` is
+/// what the window's own continuous tint gives up to reach it, which is not the same amount in
+/// both appearances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SurfaceMaterials {
     glass: u8,
+    sheet: u8,
 }
 
 impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
-    pub(crate) const OPAQUE: Self = Self { glass: 0 };
+    pub(crate) const OPAQUE: Self = Self { glass: 0, sheet: 0 };
 
     /// Returns the same material policy with only a share of its requested transmission.
     ///
@@ -89,6 +94,7 @@ impl SurfaceMaterials {
         };
         Self {
             glass: (f32::from(self.glass) * share).round() as u8,
+            sheet: (f32::from(self.sheet) * share).round() as u8,
         }
     }
 
@@ -119,6 +125,20 @@ impl SurfaceMaterials {
     /// rungs close up as the setting rises. The overlay grows with the setting instead, staying
     /// within a few percent of the ceiling so every rung still transmits nearly all its backing.
     const DARK_BACKING_GAIN: f64 = 0.5;
+    /// How many times over a bright scheme's window tint gives up what the Setting leaves it.
+    ///
+    /// The Setting admits the same share of the native material in both appearances. In a dark
+    /// scheme that share arrives as light against near-black and reads as glass. A bright scheme
+    /// paints near-white, so the admitted backdrop is close to what it covers and the window
+    /// reads as paper instead. A bright sheet therefore gives up its tint twice over: what the
+    /// Setting leaves standing is taken again. Both ends keep their meaning, since nothing taken
+    /// twice is still nothing and everything taken twice is still everything, and the rate at the
+    /// bottom of the range only doubles, so the Stepper stays continuous.
+    ///
+    /// Only the sheet reads this. Resting surfaces keep the overlays their appearance authored,
+    /// so a Pane, a chip and a row hold their spacing while the shell behind them clears.
+    const BRIGHT_SHEET_PASSES: i32 = 2;
+
     /// The setting by which the window's glass behaves as glass: resting surfaces spend no more
     /// than their ladder ceiling. The ceiling eases in from the opaque presentation below it, so
     /// leaving 0 moves the surfaces continuously instead of stepping.
@@ -150,15 +170,21 @@ impl SurfaceMaterials {
     const LADDER_NEAR: f64 = 48.0;
     const LADDER_FAR: f64 = 96.0;
 
-    /// The setting controls transmission through the window sheet linearly.
-    fn derive(transparency: f32) -> Self {
+    /// The setting controls transmission through the window sheet, on the curve the Chrome
+    /// resting on it needs to show the backdrop at all.
+    fn derive(transparency: f32, appearance: Appearance) -> Self {
         let amount = if transparency.is_finite() {
             transparency.clamp(0.0, 1.0)
         } else {
             0.0
         };
+        let sheet = match appearance {
+            Appearance::Light => 1.0 - (1.0 - amount).powi(Self::BRIGHT_SHEET_PASSES),
+            Appearance::Dark => amount,
+        };
         Self {
             glass: (amount * 255.0).round() as u8,
+            sheet: (sheet * 255.0).round() as u8,
         }
     }
 
@@ -190,6 +216,9 @@ impl SurfaceMaterials {
     /// Floating surfaces use a linear curve because their larger residual would make the
     /// quadratic curve non-monotonic.
     fn presence(self, role: SurfaceRole) -> f32 {
+        if matches!(role, SurfaceRole::Sheet) {
+            return 1.0 - f32::from(self.sheet) / 255.0;
+        }
         let admitted = self.admitted();
         let residual = Self::transmission(role).0;
         if matches!(role, SurfaceRole::Floating) {
@@ -351,7 +380,11 @@ impl SurfaceMaterials {
         if self.is_opaque() {
             return target;
         }
-        let overlay = Self { glass: u8::MAX }.paint(SurfaceRole::Surface, base, target);
+        let overlay = Self {
+            glass: u8::MAX,
+            sheet: u8::MAX,
+        }
+        .paint(SurfaceRole::Surface, base, target);
         let overlay = overlay.with_alpha(overlay.a.min(Self::FLOATING_WASH_CEILING));
         let amount = f64::from(self.engagement());
         let target_alpha = f64::from(target.a) / 255.0;
@@ -415,13 +448,14 @@ impl ResolvedWindowComposition {
     pub(crate) fn resolve(
         preferences: &super::preferences::BackgroundPreferences,
         capabilities: CompositionCapabilities,
+        appearance: Appearance,
     ) -> Self {
         let requested = if preferences.blur {
             WindowBackgroundAppearance::Blurred
         } else {
             WindowBackgroundAppearance::Transparent
         };
-        let requested_materials = SurfaceMaterials::derive(preferences.transparency);
+        let requested_materials = SurfaceMaterials::derive(preferences.transparency, appearance);
         let accessibility_allows_transparency = capabilities.accessibility_allows_transparency();
         let floating_materials = if accessibility_allows_transparency {
             requested_materials
@@ -646,10 +680,12 @@ mod tests {
             increase_contrast: true,
             ..CompositionCapabilities::new(true, true)
         };
-        let increased = ResolvedWindowComposition::resolve(&preferences, capabilities);
+        let increased =
+            ResolvedWindowComposition::resolve(&preferences, capabilities, Appearance::Dark);
         let ordinary = ResolvedWindowComposition::resolve(
             &preferences,
             CompositionCapabilities::new(true, true),
+            Appearance::Dark,
         );
         assert_eq!(increased.effective, ordinary.effective);
         assert_eq!(increased.materials, ordinary.materials);
@@ -662,6 +698,7 @@ mod tests {
                 reduce_transparency: true,
                 ..capabilities
             },
+            Appearance::Dark,
         );
         assert_eq!(reduced.effective, WindowBackgroundAppearance::Opaque);
         assert!(reduced.materials.is_opaque());
@@ -675,6 +712,7 @@ mod tests {
         let baseline = ResolvedWindowComposition::resolve(
             &preferences,
             CompositionCapabilities::new(true, true),
+            Appearance::Dark,
         );
         let capabilities = CompositionCapabilities {
             native_window_transparency: true,
@@ -685,7 +723,8 @@ mod tests {
             differentiate_without_color: true,
         };
 
-        let resolved = ResolvedWindowComposition::resolve(&preferences, capabilities);
+        let resolved =
+            ResolvedWindowComposition::resolve(&preferences, capabilities, Appearance::Dark);
 
         assert_eq!(
             (
@@ -712,12 +751,15 @@ mod tests {
         let absent = Color::rgba(0x12345600);
 
         assert_eq!(SurfaceMaterials::OPAQUE.edge(host, authored), authored);
-        assert_eq!(SurfaceMaterials::derive(1.0).edge(host, absent), absent);
+        assert_eq!(
+            SurfaceMaterials::derive(1.0, Appearance::Dark).edge(host, absent),
+            absent
+        );
     }
 
     #[test]
     fn material_edges_preserve_authored_alpha_composites_and_contrast_polarity() {
-        let material = SurfaceMaterials::derive(1.0);
+        let material = SurfaceMaterials::derive(1.0, Appearance::Dark);
         for (host, authored, rises) in [
             (Color::rgb(0x202020), Color::rgba(0xe0e0e080), true),
             (Color::rgb(0xe0e0e0), Color::rgba(0x20202080), false),
@@ -766,7 +808,7 @@ mod tests {
             "opaque presentation must retain every authored edge exactly"
         );
 
-        let paint = colors.material_presentation(SurfaceMaterials::derive(1.0));
+        let paint = colors.material_presentation(SurfaceMaterials::derive(1.0, Appearance::Dark));
         assert_eq!(paint.element_border, colors.element_border);
         assert_eq!(
             paint.input_border.source_over(colors.input_background),
@@ -807,7 +849,7 @@ mod tests {
         for presentation in [
             colors.opaque_presentation(),
             colors.floating_presentation(),
-            colors.material_presentation(SurfaceMaterials::derive(0.6)),
+            colors.material_presentation(SurfaceMaterials::derive(0.6, Appearance::Dark)),
         ] {
             assert_eq!(
                 presentation.progress_track,
@@ -864,7 +906,7 @@ mod tests {
     #[test]
     fn overlay_reconstructs_neutral_and_chromatic_targets_without_a_full_tint() {
         // Use almost-opaque material to exercise the overlay path without appreciable fading.
-        let material = SurfaceMaterials::derive(1.0 / 255.0);
+        let material = SurfaceMaterials::derive(1.0 / 255.0, Appearance::Dark);
         for (base, target) in [
             (0x141517, 0x25272b),
             (0x203040, 0x305020),
@@ -900,7 +942,7 @@ mod tests {
         for (base, rungs) in ladders {
             let base = Color::rgb(base);
             let alphas = |transparency| {
-                let material = SurfaceMaterials::derive(transparency);
+                let material = SurfaceMaterials::derive(transparency, Appearance::Dark);
                 rungs.map(|rung| {
                     material
                         .paint(SurfaceRole::Surface, base, Color::rgb(rung).with_alpha(255))
@@ -934,7 +976,7 @@ mod tests {
         }
         // The bright ladder is genuinely compressed where it used to collapse: reproducing a
         // white Pane exactly would spend the whole of the sheet's remaining transmission.
-        let bright = SurfaceMaterials::derive(0.35);
+        let bright = SurfaceMaterials::derive(0.35, Appearance::Dark);
         let exact = u16::from(bright.alpha(SurfaceRole::Surface));
         let painted = u16::from(
             bright
@@ -953,31 +995,49 @@ mod tests {
     #[test]
     fn transmission_falls_smoothly_to_a_usable_maximum() {
         let base = Color::rgb(0xdcdee3);
-        let mut previous = (255_u8, 255_u8, 255_u8);
-        for glass in 0..=255_u8 {
-            let material = SurfaceMaterials { glass };
-            let sheet = material.alpha(SurfaceRole::Sheet);
-            let floating = material.alpha(SurfaceRole::Floating);
-            let raised = material
-                .paint(SurfaceRole::Surface, base, Color::rgb(0xffffff))
-                .a;
-            let current = (sheet, floating, raised);
-            assert!(
-                current.0 <= previous.0 && current.1 <= previous.1 && current.2 <= previous.2,
-                "transmission must not reverse at {glass}: {previous:?} then {current:?}"
+        // A bright sheet clears twice as fast at the bottom of the range, which is the steepest
+        // the Stepper ever gets, so both appearances walk the whole of it.
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let mut previous = (255_u8, 255_u8, 255_u8);
+            for glass in 0..=255_u8 {
+                let material = SurfaceMaterials::derive(f32::from(glass) / 255.0, appearance);
+                let sheet = material.alpha(SurfaceRole::Sheet);
+                let floating = material.alpha(SurfaceRole::Floating);
+                let raised = material
+                    .paint(SurfaceRole::Surface, base, Color::rgb(0xffffff))
+                    .a;
+                let current = (sheet, floating, raised);
+                assert!(
+                    current.0 <= previous.0 && current.1 <= previous.1 && current.2 <= previous.2,
+                    "transmission must not reverse at {glass} in {appearance:?}: \
+                     {previous:?} then {current:?}"
+                );
+                assert!(
+                    previous.0 - current.0 <= 2 && previous.1 - current.1 <= 2,
+                    "transmission must not step at {glass} in {appearance:?}: \
+                     {previous:?} then {current:?}"
+                );
+                previous = current;
+            }
+            assert_eq!(
+                SurfaceMaterials::derive(0.0, appearance).alpha(SurfaceRole::Sheet),
+                255,
+                "an untouched setting keeps the opaque presentation in {appearance:?}"
             );
-            assert!(
-                previous.0 - current.0 <= 2 && previous.1 - current.1 <= 2,
-                "transmission must not step at {glass}: {previous:?} then {current:?}"
+            assert_eq!(
+                SurfaceMaterials::derive(1.0, appearance).alpha(SurfaceRole::Sheet),
+                0,
+                "the maximum setting hands the desktop the whole of the window's tint"
             );
-            previous = current;
         }
-        let maximum = SurfaceMaterials::derive(1.0);
-        assert_eq!(
-            maximum.alpha(SurfaceRole::Sheet),
-            0,
-            "the maximum setting hands the desktop the whole of the window's tint"
+        // A bright scheme paints near-white, so it must clear more of its tint than a dark one
+        // for the same Setting to show any desktop at all.
+        let setting = 0.35;
+        assert!(
+            SurfaceMaterials::derive(setting, Appearance::Light).alpha(SurfaceRole::Sheet)
+                < SurfaceMaterials::derive(setting, Appearance::Dark).alpha(SurfaceRole::Sheet),
         );
+        let maximum = SurfaceMaterials::derive(1.0, Appearance::Dark);
         assert!(
             maximum.alpha(SurfaceRole::Floating) >= 96,
             "a menu must still constrain the color of content it is drawn over"
@@ -1004,7 +1064,7 @@ mod tests {
     fn stated_colors_keep_the_alpha_they_need() {
         let base = Color::rgb(0xdcdee3);
         // Almost-opaque material, so the overlay is read without appreciable fading.
-        let sheer = SurfaceMaterials::derive(1.0 / 255.0);
+        let sheer = SurfaceMaterials::derive(1.0 / 255.0, Appearance::Dark);
         // Saturated actions and status fills, and a neutral panel authored far from the base.
         for target in [0x1a63bb, 0xc23b34, 0x22713f, 0x1c1c1e] {
             let target = Color::rgb(target);
@@ -1022,7 +1082,7 @@ mod tests {
             }
         }
         // A neutral surface walking away from the base leaves the ladder without a cliff.
-        let material = SurfaceMaterials::derive(0.35);
+        let material = SurfaceMaterials::derive(0.35, Appearance::Dark);
         let opacity = |distance: u8| {
             let shade = 0xdc - distance;
             let target = Color::from_rgb_components(shade, shade + 2, shade + 7);
@@ -1043,7 +1103,7 @@ mod tests {
     /// a visible surface.
     #[test]
     fn authored_alpha_is_scaled_and_sentinels_stay_invisible() {
-        let material = SurfaceMaterials::derive(0.35);
+        let material = SurfaceMaterials::derive(0.35, Appearance::Dark);
         let base = Color::rgb(0xdcdee3);
         for role in [
             SurfaceRole::Sheet,

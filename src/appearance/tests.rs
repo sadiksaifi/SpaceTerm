@@ -10,14 +10,17 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
     let supported = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, true),
+        Appearance::Dark,
     );
     let unsupported = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(false, true),
+        Appearance::Dark,
     );
     let inaccessible = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, false),
+        Appearance::Dark,
     );
 
     assert!((supported.materials.floating_backdrop_alpha_limit() - 0.15).abs() < f32::EPSILON);
@@ -28,6 +31,7 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
     let opaque = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, true),
+        Appearance::Dark,
     );
     assert_eq!(opaque.materials.floating_backdrop_alpha_limit(), 1.0);
 }
@@ -469,7 +473,8 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
 /// authored 1.21. It does drift upward over a desktop darker than the scheme, because equal ink
 /// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
 /// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
-/// above it, where a chip now passes 2.0 only at the maximum.
+/// above it, where a chip now reads 1.92 at that Setting and peaks at 2.31 with the shell most of
+/// the way cleared.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
@@ -502,7 +507,7 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
             let chip = appearance.selection_surface(host, fill).source_over(shell);
             let step = chip.contrast_ratio(shell);
             assert!(
-                (1.15..=2.2).contains(&step),
+                (1.15..=2.35).contains(&step),
                 "a Light {name} holds one step from its shell at transparency {transparency}: step={step}, chip={chip:?} over {shell:?}",
             );
             assert!(
@@ -626,6 +631,7 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
             let materials = ResolvedWindowComposition::resolve(
                 &preferences.background,
                 CompositionCapabilities::new(true, true),
+                appearance,
             )
             .materials;
             let pane = materials.paint(
@@ -676,6 +682,7 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
         let materials = ResolvedWindowComposition::resolve(
             &preferences.background,
             CompositionCapabilities::new(true, true),
+            Appearance::Light,
         )
         .materials;
         let sheet = materials

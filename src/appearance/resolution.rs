@@ -269,10 +269,16 @@ impl SchemeCatalog {
         if preferences.mode == super::AppearanceMode::Auto && system.appearance.is_none() {
             diagnostics.push(AppearanceDiagnostic::SystemAppearanceUnavailable);
         }
-        let composition =
-            super::ResolvedWindowComposition::resolve(&preferences.background, system.composition);
+        let capabilities = system.composition;
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
+        // The window's tint rests under this appearance's Chrome, and how much backdrop it must
+        // give up to show through depends on what is painted over it.
+        let composition = super::ResolvedWindowComposition::resolve(
+            &preferences.background,
+            capabilities,
+            appearance,
+        );
         let requested_chrome = preferences.chrome.schemes.get(appearance);
         let requested_terminal = preferences.terminal.schemes.get(appearance);
         let (effective_chrome, compiled_chrome, found_chrome) = self.resolve_chrome_scheme(

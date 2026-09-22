@@ -47,7 +47,11 @@ backdrop request carries the appearance painted over it, because the desktop a n
 admits arrives as light: against near-black Chrome it reads as glass, and under near-white Chrome
 it agrees with the paint above and disappears. A bright scheme therefore asks for the more
 transmissive of the native materials, so one Transparency Setting shows the desktop in both
-appearances. Depth
+appearances. One Setting still drives the whole window, and a bright scheme reads it on a curve
+that gives up its tint twice over: what the Setting leaves standing is taken again. The ends keep
+their meaning, an untouched Setting keeps the opaque presentation and the maximum clears the tint
+entirely, and only the sheet reads that curve, so a Pane, a chip and a row hold the spacing their
+appearance authored while the shell behind them clears. Depth
 comes from one neutral ladder in both appearances: the base is the darkest (Dark) or most shaded
 (Light) rung, and chips, controls and floating surfaces rest lighter or brighter on it. One
 Setting controls transmission through a continuous window tint. Resting Chrome surfaces use minimal-alpha
