@@ -52,6 +52,27 @@ fn zsh_reports_reserved_and_unicode_metadata_without_changing_protocol_structure
 }
 
 #[test]
+fn zsh_metadata_encoding_ignores_a_user_defined_printf_function() {
+    let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
+    let output = Command::new("/bin/zsh")
+        .args([
+            "-dfi",
+            "-c",
+            r#"printf() { builtin print -rn -- compromised; }; builtin source -- "$1"; _spaceterm_encode '/tmp/a b'"#,
+            "spaceterm",
+        ])
+        .arg(integration)
+        .env("SPACETERM_SHELL_INTEGRATION_VERSION", "1")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        (output.status.success(), output.stderr, output.stdout),
+        (true, Vec::new(), b"/tmp/a%20b".to_vec()),
+    );
+}
+
+#[test]
 fn bash_reports_reserved_and_unicode_directory_without_losing_exit_status() {
     use crate::local_path::LocalPathSemantics;
     use crate::terminal::metadata::{LocalMachine, MetadataTracker};

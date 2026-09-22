@@ -14,10 +14,10 @@ _spaceterm_encode() (
         _spaceterm_rest=${_spaceterm_value#?}
         _spaceterm_character=${_spaceterm_value%"$_spaceterm_rest"}
         case "$_spaceterm_character" in
-            [a-zA-Z0-9/._~-]) printf '%s' "$_spaceterm_character" ;;
+            [a-zA-Z0-9/._~-]) builtin printf '%s' "$_spaceterm_character" ;;
             *)
-                printf -v _spaceterm_code '%d' "'$_spaceterm_character"
-                printf '%%%02X' "$((_spaceterm_code & 255))"
+                builtin printf -v _spaceterm_code '%d' "'$_spaceterm_character"
+                builtin printf '%%%02X' "$((_spaceterm_code & 255))"
                 ;;
         esac
         _spaceterm_value=$_spaceterm_rest
