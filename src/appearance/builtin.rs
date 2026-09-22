@@ -503,15 +503,17 @@ impl ChromePalette {
 /// The authored SpaceTerm Terminal palettes, paired with the Chrome ladder of the same appearance.
 ///
 /// The default background, foreground, and grays share Chrome's achromatic family, so a Pane reads
-/// as part of the window rather than as a tinted inset. ANSI hues stay distinct and are tuned to
-/// read over their own background and over the translucent Pane backdrop at every transparency;
-/// dim colors keep their hue at a lower weight instead of fading toward gray. Selection answers a
-/// reader's action and takes a restrained accent blue; find matches keep the familiar yellow and
-/// orange so they never compete with selection.
+/// as part of the window rather than as a tinted inset. Dark seats its background a single small
+/// step below the Chrome root: far enough that the reading surface is deliberately quieter than
+/// the shell around it, near enough that the two still read as one window. ANSI hues stay distinct
+/// and are tuned to read over their own background and over the translucent Pane backdrop at every
+/// transparency; dim colors keep their hue at a lower weight instead of fading toward gray.
+/// Selection answers a reader's action and takes a restrained accent blue; find matches keep the
+/// familiar yellow and orange so they never compete with selection.
 fn spaceterm_dark_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0xd8d8d8),
-        background: Color::rgb(0x141414),
+        background: Color::rgb(0x101010),
         normal: [
             0x2e2e2e, 0xe5696b, 0x83c07e, 0xe6b85c, 0x5fa3f0, 0xc387d9, 0x5fc0c8, 0xc8c8c8,
         ]

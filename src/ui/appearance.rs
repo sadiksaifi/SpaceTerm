@@ -4031,15 +4031,18 @@ impl ChromeAppearance {
 
     /// The backdrop a Pane paints beneath its Terminal.
     ///
-    /// Light uses the selected navigation material. Dark paints a Terminal background's
-    /// difference from the window sheet over enough Terminal-colored backing to keep text
-    /// readable on bright desktops. Explicit cell backgrounds are separate.
+    /// Light lifts a Pane above its chrome, so it holds that step with the selected navigation
+    /// material. Dark seats a Pane just below the window root, where the step is small enough
+    /// that reproducing it costs a sliver of ink: the Pane is an ordinary resting surface there
+    /// and paints only its difference from the window sheet. A Dark Pane therefore transmits
+    /// what the Transparency Setting asks of every other resting surface, and stays a subtle
+    /// step darker than the chrome around it at every setting. Explicit cell backgrounds are
+    /// separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         if self.appearance == Appearance::Light {
             return self.prominent_surface(self.colors.background, terminal_background);
         }
-        self.materials
-            .dark_pane_surface(self.colors.background, terminal_background)
+        self.surface(SurfaceRole::Surface, terminal_background)
     }
 
     /// Prepares the Pane boundary independently of selected-row rims and short Tab separators.

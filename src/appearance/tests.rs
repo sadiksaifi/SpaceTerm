@@ -108,86 +108,14 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
     }
 }
 
-#[test]
-fn dark_terminal_surface_stays_restrained_through_default_transparency() {
+/// The Dark Pane material, prepared at one Transparency Setting.
+fn prepared_dark_appearance(transparency: f32) -> ResolvedAppearance {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Dark,
         ..Default::default()
     };
-    for transparency in [0.0, 0.05, 0.35] {
-        preferences.background.transparency = transparency;
-        let resolved = SchemeCatalog::default()
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable()
-                    .with_composition(CompositionCapabilities::new(true, true)),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let root_fill = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
-        let pane_fill = prepared.pane_surface(resolved.terminal.colors.background);
-        for desktop in [Color::rgb(0x202020), Color::rgb(0x808080)] {
-            let root = root_fill.source_over(desktop);
-            let pane = pane_fill.source_over(root);
-            let tint = [
-                i16::from(root.r) - i16::from(pane.r),
-                i16::from(root.g) - i16::from(pane.g),
-                i16::from(root.b) - i16::from(pane.b),
-            ];
-            assert!(
-                tint.into_iter().all(|channel| (1..=20).contains(&channel)),
-                "Dark Terminal must remain a restrained neutral tint below the root at transparency {transparency}: root={root:?}, pane={pane:?}",
-            );
-        }
-    }
-}
-
-#[test]
-fn dark_terminal_surface_bounds_default_text_contrast_on_a_bright_desktop() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Dark,
-        ..Default::default()
-    };
-    for transparency in [0.15, 0.35, 0.7, 1.0] {
-        preferences.background.transparency = transparency;
-        let resolved = SchemeCatalog::default()
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable()
-                    .with_composition(CompositionCapabilities::new(true, true)),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let root = prepared
-            .surface(SurfaceRole::Sheet, prepared.colors.background)
-            .source_over(Color::rgb(0xffffff));
-        let pane = prepared
-            .pane_surface(resolved.terminal.colors.background)
-            .source_over(root);
-
-        assert!(
-            resolved.terminal.colors.foreground.contrast_ratio(pane) >= 4.5,
-            "Dark Terminal text must remain readable over a bright desktop at transparency {transparency}: pane={pane:?}",
-        );
-        assert!(
-            pane.r > resolved.terminal.colors.background.r,
-            "the protected Pane must still admit the bright desktop at transparency {transparency}",
-        );
-    }
-}
-
-#[test]
-fn dark_terminal_surface_keeps_chromatic_ansi_text_distinct_on_a_bright_desktop() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Dark,
-        ..Default::default()
-    };
-    preferences.background.transparency = 0.35;
-    let resolved = SchemeCatalog::default()
+    preferences.background.transparency = transparency;
+    SchemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
@@ -195,26 +123,91 @@ fn dark_terminal_surface_keeps_chromatic_ansi_text_distinct_on_a_bright_desktop(
                 .with_composition(CompositionCapabilities::new(true, true)),
             &AvailableFonts::default(),
         )
-        .unwrap();
-    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-    let root = prepared
-        .surface(SurfaceRole::Sheet, prepared.colors.background)
-        .source_over(Color::rgb(0xffffff));
-    let pane = prepared
-        .pane_surface(resolved.terminal.colors.background)
-        .source_over(root);
+        .unwrap()
+}
 
-    for (index, foreground) in resolved.terminal.colors.normal[1..7]
-        .iter()
-        .copied()
-        .enumerate()
-    {
+/// A Dark Pane reads as the window's own surface, one quiet step below the chrome around it.
+///
+/// The step is measured against the opaque scheme reference, which every material derives from,
+/// so it holds whatever the desktop behind the window happens to be. Glass narrows it slightly,
+/// because a dark rung spends no more ink than the ladder ceiling once the window transmits.
+#[test]
+fn dark_pane_rests_one_subtle_step_below_the_window_root() {
+    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
+        let resolved = prepared_dark_appearance(transparency);
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let root = prepared.colors.background;
+        let pane = prepared
+            .pane_surface(resolved.terminal.colors.background)
+            .source_over(root);
+
         assert!(
-            foreground.contrast_ratio(pane) >= 3.0,
-            "Dark Terminal ANSI color {} must remain distinct over a bright desktop: foreground={foreground:?}, pane={pane:?}",
-            index + 1,
+            [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
+                .into_iter()
+                .all(|(pane, root)| pane < root),
+            "a Dark Pane stays darker than the window root at transparency {transparency}: pane={pane:?}",
+        );
+        let step = root.contrast_ratio(pane);
+        assert!(
+            (1.015..=1.05).contains(&step),
+            "a Dark Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
         );
     }
+}
+
+/// The Transparency Setting owns the Terminal surface as much as it owns the chrome.
+///
+/// A Pane covers the largest part of the window, so a Pane that held its own backing would answer
+/// the Setting with a slab the reader never asked for. It transmits with the window instead, and
+/// keeps only the sliver of ink its step below the root costs.
+#[test]
+fn dark_pane_transmits_what_the_transparency_setting_asks() {
+    let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
+    let mut previous: Option<f64> = None;
+    for transparency in settings {
+        let resolved = prepared_dark_appearance(transparency);
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+        let pane = prepared.pane_surface(resolved.terminal.colors.background);
+        let transmitted = |fill: Color| 1.0 - f64::from(fill.a) / 255.0;
+        let chrome = transmitted(sheet);
+        let terminal = chrome * transmitted(pane);
+
+        if let Some(previous) = previous {
+            assert!(
+                terminal > previous,
+                "a Dark Pane admits more desktop as the Setting rises: {terminal} at transparency {transparency} after {previous}",
+            );
+        }
+        previous = Some(terminal);
+        assert!(
+            terminal >= chrome * 0.8,
+            "a Dark Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
+        );
+        assert!(
+            terminal < chrome || transparency == 0.0,
+            "a Dark Pane stays denser than the chrome at transparency {transparency}",
+        );
+    }
+}
+
+/// An authored Terminal background that states a color keeps it; a neutral one joins the ladder.
+#[test]
+fn dark_pane_keeps_a_stated_terminal_background_apart_from_the_neutral_ladder() {
+    let resolved = prepared_dark_appearance(0.35);
+    let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+    let neutral = prepared.pane_surface(resolved.terminal.colors.background);
+    let stated = prepared.pane_surface(Color::rgb(0x002b36));
+
+    assert!(
+        stated.a > neutral.a * 2,
+        "a stated Terminal background spends more ink than a neutral rung: stated={stated:?}, neutral={neutral:?}",
+    );
+    let rendered = stated.source_over(prepared.colors.background);
+    assert!(
+        rendered.b > rendered.r,
+        "a stated Terminal background keeps its hue: {rendered:?}",
+    );
 }
 
 #[test]
