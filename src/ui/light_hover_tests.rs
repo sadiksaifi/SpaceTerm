@@ -142,12 +142,13 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
     }
 }
 
-/// Settings shares the Workspace's content tone, and keeps the denser paint its groups need.
+/// A Settings group rises from its canvas and carries the Workspace's content tone.
 ///
-/// A Pane hosts text and nothing else, so it can transmit with the window. The Settings canvas
-/// hosts inset groups whose own step is measured from it, and those groups would sink past the
-/// navigation beside them if the canvas thinned with the Setting. The two content surfaces
-/// therefore share the tone rather than the paint.
+/// The ladder runs one way in both appearances: navigation is the most shaded rung, the page
+/// above it, and the groups on the page above that. Light once ran it backwards, sinking its
+/// groups to keep them off the tone a selected control takes, which cut grey wells into a white
+/// page. The canvas keeps the denser paint, because a bright scheme's navigation rests on the
+/// window root and a canvas that thinned toward it would merge into the column beside it.
 #[test]
 fn light_settings_uses_the_workspace_content_hierarchy() {
     use super::appearance::settings::{
@@ -165,8 +166,8 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
         let card = settings.surface(Card);
 
         assert_eq!(
-            canvas.semantic, resolved.terminal.colors.background,
-            "Settings and the built-in Terminal must share the content tone"
+            card.semantic, resolved.terminal.colors.background,
+            "a Settings group and the built-in Terminal must share the content tone"
         );
         assert!(
             canvas.paint.a >= content.a,
@@ -174,9 +175,18 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
             canvas.paint,
         );
         assert!(
-            sidebar.background.r < card.background.r && card.background.r < canvas.background.r,
-            "Light hierarchy at {transparency}: muted navigation {sidebar:?}, grouped content {card:?}, light canvas {canvas:?}"
+            sidebar.background.r < canvas.background.r && canvas.background.r < card.background.r,
+            "Light hierarchy at {transparency}: muted navigation {sidebar:?}, page {canvas:?}, raised group {card:?}"
         );
+        for (name, lower, upper) in [
+            ("navigation and page", sidebar.background, canvas.background),
+            ("page and group", canvas.background, card.background),
+        ] {
+            assert!(
+                upper.contrast_ratio(lower) >= 1.05,
+                "Light {name} at {transparency} must separate by fill: {lower:?} then {upper:?}"
+            );
+        }
         assert_eq!(
             settings.card_edge().a,
             0,

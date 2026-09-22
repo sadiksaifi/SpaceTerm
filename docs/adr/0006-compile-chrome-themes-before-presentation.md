@@ -112,7 +112,10 @@ small step from that tint, below it in Dark and above it in Light, so reproducin
 ink and a Pane reads as a distinct region of the same window rather than as an inset. A bright
 scheme spends the wider overlay, since white ink over a near-white base covers less distance.
 Containers and resting controls paint only their color difference from that reference, and nested
-list rows paint only their own fill.
+list rows paint only their own fill. Grouped content rises from the page it sits on in both
+appearances, since the ladder runs one way: a bright scheme that sank its groups instead, to keep
+them off the tone a raised control takes, cut recesses into its own page. A control whose fill
+then matches the group under it is carried by its edge and shadow rather than by another rung.
 Explicit Terminal cell backgrounds remain opaque even when their RGB matches the default. Text and
 terminal protocol colors retain their own semantics.
 

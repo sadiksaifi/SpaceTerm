@@ -183,7 +183,7 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
         let divider = settings.separator(Card).source_over(card);
 
         assert!(
-            card.r < canvas.r && card.contrast_ratio(canvas) >= 1.05,
+            card.r > canvas.r && card.contrast_ratio(canvas) >= 1.05,
             "Light Settings at {transparency}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
         );
         assert!(
@@ -371,7 +371,16 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
                     );
                     assert_eq!(sidebar.paint.a, canvas.paint.a);
                 } else {
-                    assert!(sidebar.paint.a < canvas.paint.a);
+                    // A bright scheme's navigation rests on the window root, so its canvas
+                    // cannot thin toward that root without merging into the column beside it.
+                    // It holds its own rung instead, at whatever ink that costs.
+                    assert_eq!(
+                        canvas
+                            .background
+                            .source_over(settings.chrome.colors.background),
+                        canvas.semantic,
+                        "the Light Settings canvas must hold its authored rung"
+                    );
                 }
                 assert!(canvas.paint.a < card_alpha);
                 assert!(card_alpha < u8::MAX);
