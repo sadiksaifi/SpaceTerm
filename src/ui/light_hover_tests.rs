@@ -50,10 +50,23 @@ fn light_popup_uses_base_host_and_raised_selection() {
     );
 }
 
+/// Hover is read over the shell the window renders, so that is where it has to hold its step.
+///
+/// The opaque reference the fill is solved from is not a surface anyone sees once the window
+/// transmits, and no authored tone can hold a tenth of a step against it through the material.
+/// Over a desktop the same ink reads plainly, and it grows rather than fades as the Setting
+/// rises, because equal ink buys a wider ratio the darker its backing is.
 #[test]
 fn light_unselected_navigation_hover_remains_visible_through_materials() {
+    let desktop = Color::rgb(0x808080);
     for transparency in [0.0, 0.35, 1.0] {
         let appearance = light(transparency);
+        let shell = appearance
+            .surface(
+                crate::appearance::SurfaceRole::Sheet,
+                appearance.colors.background,
+            )
+            .source_over(desktop);
         for (name, host, hover) in [
             (
                 "Tab",
@@ -73,10 +86,11 @@ fn light_unselected_navigation_hover_remains_visible_through_materials() {
                 hover_rim: None,
             }
             .raised_on(&appearance, host);
-            let hovered = chip.hover_fill.unwrap().source_over(host);
+            // The chip is solved against its semantic host and rendered over the shell.
+            let hovered = chip.hover_fill.unwrap().source_over(shell);
             assert!(
-                hovered.contrast_ratio(host) >= 1.10,
-                "{name} hover at {transparency} disappears: {hovered:?} over {host:?}"
+                hovered.contrast_ratio(shell) >= 1.10,
+                "{name} hover at {transparency} disappears: {hovered:?} over {shell:?}"
             );
         }
     }
@@ -263,4 +277,128 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
             }
         }
     }
+}
+
+/// A Tab, a sidebar row and the Pane are bounded the same way in both appearances.
+///
+/// The Pane always carried a hairline; chips carried one only in Light, and there only while
+/// their collection held the keyboard, so a selected Tab read as a bounded chip while the
+/// selected sidebar row beside it read as a bare fill. One rule now covers all three.
+#[test]
+fn every_chip_is_bounded_like_the_pane_in_both_appearances() {
+    use crate::appearance::Appearance;
+
+    let desktop = Color::rgb(0x2b3a55);
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        for transparency in [0.0, 0.35, 1.0] {
+            let mut preferences = AppearancePreferences {
+                mode,
+                ..Default::default()
+            };
+            preferences.background.transparency = transparency;
+            let resolved = SchemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable()
+                        .with_composition(CompositionCapabilities::new(true, true)),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let appearance = ChromeAppearance::prepare(&resolved.chrome);
+            let panel = &appearance.panel_controls.reference;
+            let unfocused = appearance.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
+            let weight = |rim: Color, fill: Color| rim.source_over(fill).contrast_ratio(fill);
+
+            let pane_fill = appearance
+                .pane_surface(resolved.terminal.colors.background)
+                .source_over(appearance.colors.background.source_over(desktop));
+            let pane_rim = appearance.pane_rim_on(resolved.terminal.colors.background);
+            let pane_weight = weight(pane_rim, pane_fill);
+
+            for (name, semantic_host, fill, rim) in [
+                (
+                    "Active Tab",
+                    appearance.colors.title_bar_background,
+                    resolved.chrome.colors.tab_active_background,
+                    appearance.colors.tab_active_border,
+                ),
+                (
+                    "focused sidebar row",
+                    appearance.colors.panel_background,
+                    panel.row_selected_background,
+                    panel.row_selected_border,
+                ),
+                (
+                    "unfocused sidebar row",
+                    appearance.colors.panel_background,
+                    unfocused.row_selected_background,
+                    unfocused.row_selected_border,
+                ),
+            ] {
+                let paint = super::selection_chip::ChipPaint {
+                    fill: Some(fill),
+                    rim: Some(rim),
+                    hover_fill: None,
+                    hover_rim: None,
+                }
+                .selected_on(&appearance, semantic_host);
+                let rim = paint.rim.unwrap();
+                assert!(
+                    rim.a > 0,
+                    "{mode:?} at {transparency}: the {name} hairline is missing"
+                );
+                assert_eq!(
+                    rim.r > 128,
+                    resolved.chrome.appearance == Appearance::Dark,
+                    "{mode:?} at {transparency}: the {name} hairline uses the wrong ink: {rim:?}"
+                );
+                let painted = paint
+                    .fill
+                    .unwrap()
+                    .source_over(semantic_host.source_over(desktop));
+                let chip_weight = weight(rim, painted);
+                assert!(
+                    (chip_weight - pane_weight).abs() <= 0.15,
+                    "{mode:?} at {transparency}: the {name} hairline reads at {chip_weight:.2} \
+                     while the Pane's reads at {pane_weight:.2}"
+                );
+            }
+        }
+    }
+}
+
+/// A chip's geometry is a question of density, never of Light or Dark.
+#[test]
+fn chip_geometry_matches_across_appearances() {
+    use crate::appearance::AppearanceMode;
+
+    let mut sizes = Vec::new();
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        let preferences = crate::appearance::AppearancePreferences {
+            mode,
+            ..Default::default()
+        };
+        let resolved = crate::appearance::SchemeCatalog::default()
+            .resolve(
+                crate::appearance::AppearanceGeneration::INITIAL,
+                &preferences,
+                crate::appearance::SystemAppearance::unavailable(),
+                &crate::appearance::AvailableFonts::default(),
+            )
+            .unwrap();
+        let appearance = ChromeAppearance::prepare(&resolved.chrome);
+        sizes.push((
+            appearance.spacing_scale,
+            appearance.spacing(super::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y),
+            appearance
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Body)
+                .line_height,
+        ));
+    }
+    assert_eq!(
+        sizes[0], sizes[1],
+        "chip geometry must not follow appearance"
+    );
 }

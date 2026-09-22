@@ -243,6 +243,7 @@ fn prepare_variant(
             floors,
             explicit_segmented_track,
             true,
+            false,
         );
         chrome.colors = super::with_final_host_content(chrome.colors, &window.colors);
         chrome.control_colors = window.colors;
@@ -289,6 +290,7 @@ fn prepare_variant(
         floors,
         explicit_segmented_track,
         chrome.built_in_light,
+        chrome.built_in_dark,
     );
     chrome.card_controls = prepare_state_control_host(
         &settings_authored,
@@ -299,6 +301,7 @@ fn prepare_variant(
         floors,
         explicit_segmented_track,
         chrome.built_in_light,
+        chrome.built_in_dark,
     );
     chrome.semantic_text_pairs = super::super::chrome_semantic_pairs::prepare_semantic_text_pairs(
         &chrome.colors,

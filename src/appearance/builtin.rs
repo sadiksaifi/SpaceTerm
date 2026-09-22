@@ -182,10 +182,12 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_outline: Color::rgb(0x313131),
             control_outline_strong: Color::rgb(0x3e3e3e),
             tab_separator: Color::rgb(0x363636),
-            // Dark states a selected chip with its fill alone.
-            selected_rim: Color::rgba(0),
-            selected_rim_hover: Color::rgba(0),
-            selected_rim_inactive: Color::rgba(0),
+            // A chip carries the same hairline a Pane does, so a Tab, a sidebar row and the
+            // reading surface are bounded the same way. Dark draws it in light ink at the weight
+            // its Pane rim already uses, and the fill alone states keyboard focus.
+            selected_rim: Color::rgba(0xffffff1c),
+            selected_rim_hover: Color::rgba(0xffffff2b),
+            selected_rim_inactive: Color::rgba(0xffffff1c),
             mark_outline: 0x767676,
             mark_outline_strong: 0x898989,
             mark_track: 0x202020,
@@ -246,7 +248,10 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             tab_separator: Color::rgba(0x00000028),
             selected_rim: Color::rgba(0x0000001a),
             selected_rim_hover: Color::rgba(0x0000002b),
-            selected_rim_inactive: Color::rgba(0x0000000f),
+            // A chip keeps its hairline whether or not its collection holds the keyboard, so a
+            // sidebar row is bounded like the Tab above it and the Pane beside it. The fill is
+            // what dims.
+            selected_rim_inactive: Color::rgba(0x0000001a),
             mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
             mark_track: 0xe5e5e5,
@@ -800,10 +805,15 @@ mod tests {
                     colors.tab_inactive_selected_border,
                 ),
             ] {
-                assert_eq!(
+                assert!(
                     border.a > 0,
-                    appearance == Appearance::Light,
-                    "{appearance:?} built-in {role} should follow its theme edge policy"
+                    "{appearance:?} built-in {role} should carry the chip hairline"
+                );
+                assert_eq!(
+                    weight(border) > weight(colors.row_selected_background),
+                    appearance == Appearance::Dark,
+                    "{appearance:?} built-in {role} should draw its hairline in the ink its \
+                     appearance bounds surfaces with"
                 );
             }
 

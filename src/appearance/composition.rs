@@ -131,6 +131,16 @@ impl SurfaceMaterials {
     /// amounts of paint for the same authored step. Both stay translucent.
     const LADDER_CEILING_BRIGHT: f64 = 0.45;
     const LADDER_CEILING_DARK: f64 = 0.12;
+    /// The most a chip or a row may add over the window's sheet.
+    ///
+    /// The ceiling above keeps a surface from painting the backdrop out, which is a question of
+    /// area: a Pane or a sidebar covers the desktop, so what it spends is what the reader loses.
+    /// A selected chip and a hovered row cover a few hundred square points between them, so the
+    /// ink they spend costs the reader nothing they would have seen, and they may reproduce more
+    /// of their step. They need it, too. A chip is small, and a small shape needs more contrast
+    /// than a large one to read as the same step. A dark scheme's rungs already fit under their
+    /// own ceiling, so this raises nothing there.
+    const LADDER_CEILING_COMPACT: f64 = 0.65;
     /// The channel spread within which a color reads as a neutral rather than as a stated hue,
     /// and the spread by which it reads entirely as a hue.
     const NEUTRAL_SPREAD: f64 = 32.0;
@@ -242,6 +252,28 @@ impl SurfaceMaterials {
         base: super::Color,
         target: super::Color,
     ) -> super::Color {
+        self.paint_with_ceiling(role, base, target, false)
+    }
+
+    /// Resolves a fill for a surface small enough to spend its ink without costing the backdrop.
+    ///
+    /// Chips and rows take this. Everything that owns area takes [`SurfaceMaterials::paint`].
+    pub(crate) fn paint_compact(
+        self,
+        role: SurfaceRole,
+        base: super::Color,
+        target: super::Color,
+    ) -> super::Color {
+        self.paint_with_ceiling(role, base, target, true)
+    }
+
+    fn paint_with_ceiling(
+        self,
+        role: SurfaceRole,
+        base: super::Color,
+        target: super::Color,
+        compact: bool,
+    ) -> super::Color {
         if self.is_opaque() || matches!(role, SurfaceRole::Sheet | SurfaceRole::Floating) {
             return target.multiply_opacity(self.alpha(role));
         }
@@ -274,10 +306,10 @@ impl SurfaceMaterials {
         // keeps the Pane, the selected chip and the hovered row apart at every setting. Saturated
         // action and status fills retain their color strength for readable foregrounds.
         let bright = Self::is_bright(base);
-        let ceiling = if bright {
-            Self::LADDER_CEILING_BRIGHT
-        } else {
-            Self::LADDER_CEILING_DARK
+        let ceiling = match (bright, compact) {
+            (true, true) => Self::LADDER_CEILING_COMPACT,
+            (true, false) => Self::LADDER_CEILING_BRIGHT,
+            (false, _) => Self::LADDER_CEILING_DARK,
         };
         let ceiling = 1.0 - (1.0 - ceiling) * f64::from(self.engagement());
         let ladder = Self::ladder_membership(b, t);

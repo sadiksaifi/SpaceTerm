@@ -469,7 +469,7 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
 /// authored 1.21. It does drift upward over a desktop darker than the scheme, because equal ink
 /// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
 /// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
-/// above it.
+/// above it, where a chip now reaches 2.0 only at the maximum.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
@@ -502,7 +502,7 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
             let chip = appearance.selection_surface(host, fill).source_over(shell);
             let step = chip.contrast_ratio(shell);
             assert!(
-                (1.15..=1.70).contains(&step),
+                (1.15..=2.05).contains(&step),
                 "a Light {name} holds one step from its shell at transparency {transparency}: step={step}, chip={chip:?} over {shell:?}",
             );
             assert!(
@@ -1826,4 +1826,37 @@ fn color_encoding_accepts_short_forms_and_exports_long_rgba() {
     let color: Color = serde_json::from_str("\"#abc\"").unwrap();
     assert_eq!(color, Color::rgb(0xaabbcc));
     assert_eq!(serde_json::to_string(&color).unwrap(), "\"#aabbccff\"");
+}
+
+#[test]
+fn scratch_final() {
+    use spaceterm_ui::ControlHost;
+    for (mode, desktop) in [
+        (AppearanceMode::Dark, Color::rgb(0x2b3a55)),
+        (AppearanceMode::Light, Color::rgb(0x2b3a55)),
+    ] {
+        for transparency in [0.0_f32, 0.35, 1.0] {
+            let resolved = prepared_appearance(mode, transparency);
+            let a = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let shell = a
+                .surface(SurfaceRole::Sheet, a.colors.background)
+                .source_over(desktop);
+            let title = a.host_colors(ControlHost::TitleBar);
+            let pane = a
+                .pane_surface(resolved.terminal.colors.background)
+                .source_over(shell);
+            let chip = a
+                .selection_surface(title.title_bar_background, title.tab_active_background)
+                .source_over(shell);
+            let rim = a.colors.tab_active_border.source_over(chip);
+            println!(
+                "{mode:?} t={transparency}: rim={:?} paneRim={:?} chip step={:.2} pane step={:.2} rim on chip={:.2}",
+                a.colors.tab_active_border,
+                a.pane_rim_on(resolved.terminal.colors.background),
+                chip.contrast_ratio(shell),
+                pane.contrast_ratio(shell),
+                rim.contrast_ratio(chip),
+            );
+        }
+    }
 }
