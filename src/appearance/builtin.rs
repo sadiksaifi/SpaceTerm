@@ -554,7 +554,10 @@ fn spaceterm_dark_terminal() -> TerminalColors {
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0x242424),
-        background: Color::rgb(0xfafafa),
+        // The reading surface takes the brightest rung a transmitting surface can hold, the same
+        // one a selection takes. Pure white costs an ink of alpha 251 over the window root, and a
+        // Pane that opaque stops answering the Transparency Setting at all.
+        background: Color::rgb(0xfdfdfd),
         normal: [
             0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
         ]

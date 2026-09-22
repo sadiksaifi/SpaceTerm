@@ -415,7 +415,7 @@ fn light_pane_rests_one_subtle_step_above_the_window_root() {
         );
         let step = pane.contrast_ratio(root);
         assert!(
-            (1.035..=1.21).contains(&step),
+            (1.035..=1.24).contains(&step),
             "a Light Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
         );
     }

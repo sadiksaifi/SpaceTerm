@@ -20,18 +20,18 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
-    // Every selection takes one rung, and it is the one above the raised tone that grouped
-    // content, controls and the Terminal share. It stops short of white, which no transmitting
-    // surface can reproduce.
+    // A selection and the reading surface take the brightest rung a transmitting surface can
+    // hold, one above the raised tone that controls and grouped content share. Neither reaches
+    // white, which no transmitting surface can reproduce.
     let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
     assert_eq!(
-        resolved.terminal.colors.background, prepared.colors.elevated_surface_background,
-        "the Terminal and the raised Chrome surface share one tone"
+        resolved.terminal.colors.background, selected,
+        "the Terminal and a selection share the brightest transmitting rung"
     );
     assert!(
-        selected.r > resolved.terminal.colors.background.r,
-        "a selection rests one rung above that shared tone"
+        selected.r > prepared.colors.elevated_surface_background.r,
+        "that rung rests above the raised tone controls and grouped content share"
     );
     for (role, fill) in [
         ("Tab", prepared.colors.tab_active_background),

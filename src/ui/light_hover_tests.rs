@@ -142,7 +142,7 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
     }
 }
 
-/// A Settings group rises from its canvas and carries the Workspace's content tone.
+/// A Settings group rises from its canvas and carries the raised Chrome tone.
 ///
 /// The ladder runs one way in both appearances: navigation is the most shaded rung, the page
 /// above it, and the groups on the page above that. Light once ran it backwards, sinking its
@@ -160,14 +160,19 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
         let resolved = resolve_light(transparency);
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let content = active.pane_surface(resolved.terminal.colors.background);
+        let raised = active.colors.elevated_surface_background;
         let (settings, _) = settings::prepare_variants(&resolved.chrome, active, inactive);
         let sidebar = settings.surface(Sidebar);
         let canvas = settings.surface(Canvas);
         let card = settings.surface(Card);
 
         assert_eq!(
-            card.semantic, resolved.terminal.colors.background,
-            "a Settings group and the built-in Terminal must share the content tone"
+            card.semantic, raised,
+            "a Settings group must take the raised Chrome tone"
+        );
+        assert!(
+            resolved.terminal.colors.background.r > card.semantic.r,
+            "the reading surface stays the brighter of the two content surfaces"
         );
         assert!(
             canvas.paint.a >= content.a,

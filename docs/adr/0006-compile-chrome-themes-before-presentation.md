@@ -110,7 +110,11 @@ material, which conflicts with the shared-material presentation.
 The window root owns the continuous window tint. Each built-in Terminal background is authored one
 small step from that tint, below it in Dark and above it in Light, so reproducing it costs little
 ink and a Pane reads as a distinct region of the same window rather than as an inset. A bright
-scheme spends the wider overlay, since white ink over a near-white base covers less distance.
+scheme spends the wider overlay, since white ink over a near-white base covers less distance. It
+takes the brightest rung a transmitting surface can hold for that reading surface and for a
+selection, and stops short of the appearance endpoint: reproducing pure white costs an ink no
+window can be seen through, so the surface that took it would answer the Transparency Setting
+with nothing.
 Containers and resting controls paint only their color difference from that reference, and nested
 list rows paint only their own fill. Grouped content rises from the page it sits on in both
 appearances, since the ladder runs one way: a bright scheme that sank its groups instead, to keep
