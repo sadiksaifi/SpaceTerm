@@ -1,9 +1,27 @@
 //! Reported title structure and conservative animation evidence.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ACTIVITY_DELAY: Duration = Duration::from_millis(200);
 const ACTIVITY_FRESHNESS: Duration = Duration::from_secs(2);
+
+/// Keeps an animation candidate from briefly replacing the program's stable icon.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TitleGlyph {
+    #[default]
+    Reported,
+    Retained(Option<Arc<str>>),
+}
+
+impl TitleGlyph {
+    pub(crate) fn resolve<'a>(&'a self, reported: Option<&'a str>) -> Option<&'a str> {
+        match self {
+            Self::Reported => reported,
+            Self::Retained(glyph) => glyph.as_deref(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TitleActivity {
@@ -15,6 +33,7 @@ struct Animation {
     last_change: Instant,
     changed: bool,
     active: bool,
+    stable_glyph: Option<Arc<str>>,
 }
 
 impl TitleActivity {
@@ -26,6 +45,11 @@ impl TitleActivity {
         };
         let previous = reported_title(previous);
         let previous_frame = previous.glyph.and_then(activity_frame);
+        // Once an unchanged candidate expires, identical reports must not repeatedly hide a
+        // static icon behind another confirmation interval.
+        if self.animation.is_none() && previous_frame == Some(next_frame) {
+            return;
+        }
         let continues = previous.words == next.words
             && previous_frame.is_some_and(|(family, _)| family == next_frame.0);
         if let Some(animation) = &mut self.animation
@@ -37,11 +61,23 @@ impl TitleActivity {
                 animation.changed = true;
             }
         } else {
+            // A title rename may restart confirmation while its loader is already visible in
+            // the raw title. Carry the original stable icon across that restart.
+            let stable_glyph = self.animation.as_ref().map_or_else(
+                || {
+                    previous
+                        .glyph
+                        .filter(|glyph| activity_frame(glyph).is_none())
+                        .map(Arc::from)
+                },
+                |animation| animation.stable_glyph.clone(),
+            );
             self.animation = Some(Animation {
                 started: now,
                 last_change: now,
                 changed: false,
                 active: false,
+                stable_glyph,
             });
         }
         self.advance(now);
@@ -61,6 +97,14 @@ impl TitleActivity {
         self.animation
             .as_ref()
             .is_some_and(|animation| animation.active)
+    }
+
+    pub(super) fn glyph(&self) -> TitleGlyph {
+        self.animation
+            .as_ref()
+            .map_or(TitleGlyph::Reported, |animation| {
+                TitleGlyph::Retained(animation.stable_glyph.clone())
+            })
     }
 
     pub(super) fn deadline(&self) -> Option<Instant> {

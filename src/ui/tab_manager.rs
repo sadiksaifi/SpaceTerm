@@ -4108,7 +4108,7 @@ mod tests {
         };
 
         tracker.apply_semantic_prompt("C;cmdline=interactive", epoch);
-        tracker.set_reported_title("agent", epoch);
+        tracker.set_reported_title("✳ agent", epoch);
         tracker.advance_status(epoch + Duration::from_secs(60));
         assert_eq!(publish(&tracker, cx).progress, TerminalProgress::None);
         assert!(cx.debug_bounds("tab-status-1-progress-frame").is_none());
@@ -4119,11 +4119,21 @@ mod tests {
         let pending = publish(&tracker, cx);
         assert_eq!(
             pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
-            Some("◐")
+            Some("✳")
         );
         assert_eq!(pending.progress, TerminalProgress::None);
-        tracker.set_reported_title("◑ agent", started + Duration::from_millis(100));
-        tracker.advance_status(started + Duration::from_millis(200));
+        // Claude holds its first title frame for roughly a second. A title rename during that
+        // interval must update the words without exposing the program's temporary loader.
+        tracker.advance_status(started + Duration::from_millis(700));
+        tracker.set_reported_title("◐ renamed", started + Duration::from_millis(800));
+        let pending = publish(&tracker, cx);
+        assert_eq!(pending.activity.as_ref(), "renamed");
+        assert_eq!(
+            pending.glyph.as_ref().map(|glyph| glyph.as_ref()),
+            Some("✳")
+        );
+        assert_eq!(pending.progress, TerminalProgress::None);
+        tracker.set_reported_title("◑ renamed", started + Duration::from_millis(1000));
         assert_eq!(
             publish(&tracker, cx).progress,
             TerminalProgress::TitleActivity

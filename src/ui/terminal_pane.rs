@@ -1252,8 +1252,9 @@ impl TerminalPane {
             let reported = super::terminal_status::reported_title(&label);
             (
                 reported.words.to_owned(),
-                reported
-                    .glyph
+                metadata
+                    .title_glyph
+                    .resolve(reported.glyph)
                     .map(|glyph| SharedString::from(glyph.to_owned())),
             )
         } else if let Some(command) = command {

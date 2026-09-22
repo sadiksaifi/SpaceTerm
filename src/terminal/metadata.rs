@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::title::TitleActivity;
+use super::title::{TitleActivity, TitleGlyph};
 use crate::domain::{RemoteDirectory, SshDestination};
 use crate::local_path::LocalPathSemantics;
 
@@ -379,6 +379,7 @@ pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) command: Option<CommandMetadata>,
     /// Whether changing title frames provide recent animation evidence.
     pub(crate) title_activity: bool,
+    pub(crate) title_glyph: TitleGlyph,
     pub(crate) progress: ProgressMetadata,
 }
 
@@ -391,6 +392,7 @@ impl TerminalMetadataSnapshot {
             || self.title != other.title
             || self.command != other.command
             || self.title_activity != other.title_activity
+            || self.title_glyph != other.title_glyph
             || self.progress != other.progress
     }
 
@@ -448,6 +450,7 @@ impl MetadataTracker {
                 prompt_zone: PromptZone::Unknown,
                 command: None,
                 title_activity: false,
+                title_glyph: TitleGlyph::Reported,
                 progress: ProgressMetadata::None,
             }),
             epoch,
@@ -475,11 +478,17 @@ impl MetadataTracker {
         } else {
             (title, TitleProvenance::TerminalControl)
         };
-        self.title_animation
-            .observe(&self.snapshot.title.value, &value, now);
+        let previous = if self.snapshot.title.provenance == TitleProvenance::TerminalControl {
+            &self.snapshot.title.value
+        } else {
+            ""
+        };
+        self.title_animation.observe(previous, &value, now);
         let active = self.title_animation.active();
+        let glyph = self.title_animation.glyph();
         self.update(|snapshot| {
             snapshot.title_activity = active;
+            snapshot.title_glyph = glyph;
             snapshot.title = TitleMetadata {
                 value: Arc::from(value),
                 provenance,
@@ -530,6 +539,7 @@ impl MetadataTracker {
                 provenance: TitleProvenance::WorkingDirectory,
             };
             snapshot.title_activity = false;
+            snapshot.title_glyph = TitleGlyph::Reported;
             snapshot.progress = ProgressMetadata::None;
             change(snapshot);
         })
@@ -625,9 +635,11 @@ impl MetadataTracker {
             self.progress_expiry = Some(now + PROGRESS_INACTIVITY_TIMEOUT);
         }
         let title_activity = self.title_animation.active();
+        let glyph = self.title_animation.glyph();
         self.update(|snapshot| {
             snapshot.progress = progress;
             snapshot.title_activity = title_activity;
+            snapshot.title_glyph = glyph;
         })
     }
 
@@ -647,8 +659,10 @@ impl MetadataTracker {
         }
         self.title_animation.advance(now);
         let active = self.title_animation.active();
+        let glyph = self.title_animation.glyph();
         self.update(|snapshot| {
             snapshot.title_activity = active;
+            snapshot.title_glyph = glyph;
             if expire_progress {
                 snapshot.progress = ProgressMetadata::None;
             }
@@ -873,6 +887,46 @@ mod tests {
         ] {
             assert!(parse_osc7_directory(invalid, &context).is_none());
         }
+    }
+
+    #[test]
+    fn pending_title_glyph_is_bounded_and_does_not_cross_command_boundaries() {
+        let epoch = Instant::now();
+        let mut tracker = MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            LocalMachine::default(),
+            epoch,
+        );
+        let glyph = |tracker: &MetadataTracker| {
+            let snapshot = tracker.snapshot();
+            let reported = super::super::title::reported_title(&snapshot.title.value);
+            snapshot
+                .title_glyph
+                .resolve(reported.glyph)
+                .map(str::to_owned)
+        };
+        tracker.apply_semantic_prompt("C;cmdline=agent", epoch);
+        tracker.set_reported_title("✳ agent", epoch);
+        tracker.set_reported_title("◐ agent", epoch);
+        assert_eq!(glyph(&tracker).as_deref(), Some("✳"));
+
+        // An unchanging symbol eventually remains a reported icon, without claiming activity.
+        tracker.advance_status(epoch + Duration::from_secs(2));
+        assert_eq!(glyph(&tracker).as_deref(), Some("◐"));
+        assert!(!tracker.snapshot().title_activity);
+        assert_eq!(tracker.status_deadline(), None);
+        tracker.set_reported_title("◐ agent", epoch + Duration::from_millis(2100));
+        assert_eq!(glyph(&tracker).as_deref(), Some("◐"));
+        assert_eq!(tracker.status_deadline(), None);
+
+        tracker.set_reported_title("✳ agent", epoch + Duration::from_secs(3));
+        tracker.set_reported_title("◐ agent", epoch + Duration::from_secs(3));
+        tracker.apply_semantic_prompt("D;0", epoch + Duration::from_secs(4));
+        tracker.apply_semantic_prompt("C;cmdline=another", epoch + Duration::from_secs(4));
+        tracker.set_reported_title("◐ another", epoch + Duration::from_secs(4));
+        assert_eq!(glyph(&tracker), None);
     }
 
     #[test]
