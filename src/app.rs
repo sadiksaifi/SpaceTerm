@@ -480,15 +480,11 @@ pub(crate) fn open(
     let workspace_traffic_light_position = host
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
-    // Open maximized so the workspace fills the screen on launch. These
-    // centered bounds are the restore size after unmaximizing. Each backend
-    // uses its native maximize operation; macOS uses system Fill when available
-    // so the user's tiled-window margin preference remains authoritative.
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
         WindowOptions {
             window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Maximized(bounds)),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.0), px(260.0))),
             titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
                 title: titlebar.title.clone(),
@@ -1079,7 +1075,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn workspace_window_should_open_maximized_to_fill_screen(cx: &mut gpui::TestAppContext) {
+    fn workspace_window_should_open_windowed_at_the_default_size(cx: &mut gpui::TestAppContext) {
         let host = host_with_settings();
         let window = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
@@ -1089,17 +1085,14 @@ mod runtime_tests {
                 .update(cx, |_, window, _| window.is_maximized())
                 .unwrap()
         });
-        assert!(
-            is_maximized,
-            "the workspace window should open maximized to fill the screen"
-        );
+        assert!(!is_maximized, "the workspace window should open windowed");
 
-        let restore_size = cx.update(|cx| {
+        let initial_size = cx.update(|cx| {
             window
                 .update(cx, |_, window, _| window.window_bounds().get_bounds().size)
                 .unwrap()
         });
-        assert_eq!(restore_size, size(px(900.0), px(580.0)));
+        assert_eq!(initial_size, size(px(900.0), px(580.0)));
     }
 
     #[gpui::test]

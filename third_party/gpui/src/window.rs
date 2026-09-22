@@ -978,7 +978,6 @@ impl Window {
                 is_minimizable,
                 focus,
                 show,
-                maximized: matches!(window_bounds, Some(WindowBounds::Maximized(_))),
                 display_id,
                 window_min_size,
                 #[cfg(target_os = "macos")]
@@ -1015,18 +1014,7 @@ impl Window {
         if let Some(ref window_open_state) = window_bounds {
             match window_open_state {
                 WindowBounds::Fullscreen(_) => platform_window.toggle_fullscreen(),
-                WindowBounds::Maximized(_) => {
-                    // macOS handles the launch request while opening the
-                    // native window. Its system Fill transition starts after
-                    // the window becomes visible, so a synchronous size check
-                    // cannot determine whether the request was accepted.
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        if !platform_window.is_maximized() {
-                            platform_window.zoom()
-                        }
-                    }
-                }
+                WindowBounds::Maximized(_) => platform_window.zoom(),
                 WindowBounds::Windowed(_) => {}
             }
         }
