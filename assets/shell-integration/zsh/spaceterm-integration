@@ -5,8 +5,26 @@ typeset -g _SPACETERM_INTEGRATION_LOADED=1
 typeset -gi _spaceterm_command_active=0
 
 autoload -Uz add-zsh-hook
+# Encode protocol fields bytewise so delimiters and UTF-8 survive OSC parsing.
+_spaceterm_encode() (
+    LC_ALL=C
+    export LC_ALL
+    _spaceterm_value=$1
+    while [ -n "$_spaceterm_value" ]; do
+        _spaceterm_rest=${_spaceterm_value#?}
+        _spaceterm_character=${_spaceterm_value%"$_spaceterm_rest"}
+        case "$_spaceterm_character" in
+            [a-zA-Z0-9/._~-]) printf '%s' "$_spaceterm_character" ;;
+            *)
+                printf -v _spaceterm_code '%d' "'$_spaceterm_character"
+                printf '%%%02X' "$((_spaceterm_code & 255))"
+                ;;
+        esac
+        _spaceterm_value=$_spaceterm_rest
+    done
+)
 _spaceterm_report_directory() {
-    builtin printf '\e]7;file://localhost%s\a' "$PWD"
+    builtin printf '\e]7;file://localhost%s\a' "$(_spaceterm_encode "$PWD")"
 }
 _spaceterm_before_prompt() {
     builtin local -i cmd_status=$?
@@ -19,8 +37,7 @@ _spaceterm_before_prompt() {
     [[ "$PS1" == *']133;B'* ]] || PS1+=$'%{\e]133;B\a%}'
 }
 _spaceterm_before_command() {
-    local line=${1//$'\e'/}
-    builtin printf '\e]133;C;cmdline=%s\a' "$line"
+    builtin printf '\e]133;C;cmdline=%s\a' "$(_spaceterm_encode "$1")"
     _spaceterm_command_active=1
 }
 add-zsh-hook chpwd _spaceterm_report_directory
