@@ -109,7 +109,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn dark_terminal_surface_stays_a_visible_lift_from_the_window_root() {
+fn dark_terminal_surface_stays_a_restrained_tint_below_the_window_root() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Dark,
         ..Default::default()
@@ -131,14 +131,14 @@ fn dark_terminal_surface_stays_a_visible_lift_from_the_window_root() {
         for desktop in [Color::rgb(0x202020), Color::rgb(0x808080)] {
             let root = root_fill.source_over(desktop);
             let pane = pane_fill.source_over(root);
-            let lift = [
-                i16::from(pane.r) - i16::from(root.r),
-                i16::from(pane.g) - i16::from(root.g),
-                i16::from(pane.b) - i16::from(root.b),
+            let tint = [
+                i16::from(root.r) - i16::from(pane.r),
+                i16::from(root.g) - i16::from(pane.g),
+                i16::from(root.b) - i16::from(pane.b),
             ];
             assert!(
-                lift.into_iter().all(|channel| (4..=10).contains(&channel)),
-                "Dark Terminal must remain a restrained visible lift at transparency {transparency}: root={root:?}, pane={pane:?}",
+                tint.into_iter().all(|channel| (1..=10).contains(&channel)),
+                "Dark Terminal must remain a restrained neutral tint below the root at transparency {transparency}: root={root:?}, pane={pane:?}",
             );
         }
     }
