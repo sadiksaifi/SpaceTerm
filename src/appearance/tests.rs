@@ -109,12 +109,12 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn dark_terminal_surface_stays_a_restrained_tint_below_the_window_root() {
+fn dark_terminal_surface_stays_restrained_through_default_transparency() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Dark,
         ..Default::default()
     };
-    for transparency in [0.0, 0.05, 0.35, 0.7, 1.0] {
+    for transparency in [0.0, 0.05, 0.35] {
         preferences.background.transparency = transparency;
         let resolved = SchemeCatalog::default()
             .resolve(
@@ -141,6 +141,42 @@ fn dark_terminal_surface_stays_a_restrained_tint_below_the_window_root() {
                 "Dark Terminal must remain a restrained neutral tint below the root at transparency {transparency}: root={root:?}, pane={pane:?}",
             );
         }
+    }
+}
+
+#[test]
+fn dark_terminal_surface_bounds_default_text_contrast_on_a_bright_desktop() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Dark,
+        ..Default::default()
+    };
+    for transparency in [0.15, 0.35, 0.7, 1.0] {
+        preferences.background.transparency = transparency;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let root = prepared
+            .surface(SurfaceRole::Sheet, prepared.colors.background)
+            .source_over(Color::rgb(0xffffff));
+        let pane = prepared
+            .pane_surface(resolved.terminal.colors.background)
+            .source_over(root);
+
+        assert!(
+            resolved.terminal.colors.foreground.contrast_ratio(pane) >= 4.5,
+            "Dark Terminal text must remain readable over a bright desktop at transparency {transparency}: pane={pane:?}",
+        );
+        assert!(
+            pane.r > resolved.terminal.colors.background.r,
+            "the protected Pane must still admit the bright desktop at transparency {transparency}",
+        );
     }
 }
 

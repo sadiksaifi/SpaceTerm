@@ -112,6 +112,12 @@ impl SurfaceMaterials {
     /// How much already-painted in-window content a floating shell may retain at maximum
     /// transparency. The remainder exposes the effective native window backdrop.
     const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
+    /// Terminal-colored coverage retained beneath the Dark Pane tint at maximum transmission.
+    ///
+    /// The coverage grows with the requested transmission instead of snapping in with the glass
+    /// engagement curve. This leaves the default material visibly connected to the window while
+    /// bounding text contrast when a bright desktop is fully exposed behind it.
+    const DARK_PANE_BACKING: f32 = 0.72;
     /// How much more ink a dark ladder spends at the maximum setting than over its own base.
     ///
     /// A dark rung is solved as light ink over the scheme's near-black base, but the backdrop the
@@ -296,6 +302,20 @@ impl SurfaceMaterials {
         super::Color::rgb((u32::from(ink[0]) << 16) | (u32::from(ink[1]) << 8) | u32::from(ink[2]))
             .with_alpha((opacity.min(1.0) * f64::from(target.a)).round() as u8)
             .multiply_opacity(retention)
+    }
+
+    /// Composes a Dark Pane's root-relative tint over its readability backing.
+    pub(crate) fn dark_pane_surface(
+        self,
+        base: super::Color,
+        terminal_background: super::Color,
+    ) -> super::Color {
+        let tint = self.paint(SurfaceRole::Surface, base, terminal_background);
+        let admitted = self.admitted();
+        let backing_curve = admitted * admitted * (3.0 - 2.0 * admitted);
+        let backing = terminal_background
+            .multiply_opacity((255.0 * backing_curve * Self::DARK_PANE_BACKING).round() as u8);
+        tint.source_over(backing)
     }
 
     /// Resolves a decorative edge as a host-relative overlay when glass is active.

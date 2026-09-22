@@ -4031,14 +4031,15 @@ impl ChromeAppearance {
 
     /// The backdrop a Pane paints beneath its Terminal.
     ///
-    /// Light uses the selected navigation material. Dark paints only a Terminal background's
-    /// difference from the window sheet, so a matching background inherits the root unchanged.
-    /// Explicit cell backgrounds are separate.
+    /// Light uses the selected navigation material. Dark paints a Terminal background's
+    /// difference from the window sheet over enough Terminal-colored backing to keep text
+    /// readable on bright desktops. Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         if self.appearance == Appearance::Light {
             return self.prominent_surface(self.colors.background, terminal_background);
         }
-        self.surface(SurfaceRole::Surface, terminal_background)
+        self.materials
+            .dark_pane_surface(self.colors.background, terminal_background)
     }
 
     /// Prepares the Pane boundary independently of selected-row rims and short Tab separators.
