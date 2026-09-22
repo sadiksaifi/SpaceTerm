@@ -10,17 +10,17 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
     let supported = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, true),
-        Appearance::Dark,
+        ChromeTone::Dark,
     );
     let unsupported = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(false, true),
-        Appearance::Dark,
+        ChromeTone::Dark,
     );
     let inaccessible = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, false),
-        Appearance::Dark,
+        ChromeTone::Dark,
     );
 
     assert!((supported.materials.floating_backdrop_alpha_limit() - 0.15).abs() < f32::EPSILON);
@@ -31,7 +31,7 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
     let opaque = ResolvedWindowComposition::resolve(
         &preferences.background,
         CompositionCapabilities::new(true, true),
-        Appearance::Dark,
+        ChromeTone::Dark,
     );
     assert_eq!(opaque.materials.floating_backdrop_alpha_limit(), 1.0);
 }
@@ -631,7 +631,7 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
             let materials = ResolvedWindowComposition::resolve(
                 &preferences.background,
                 CompositionCapabilities::new(true, true),
-                appearance,
+                ChromeTone::of(reference.background),
             )
             .materials;
             let pane = materials.paint(
@@ -682,7 +682,7 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
         let materials = ResolvedWindowComposition::resolve(
             &preferences.background,
             CompositionCapabilities::new(true, true),
-            Appearance::Light,
+            ChromeTone::Bright,
         )
         .materials;
         let sheet = materials
@@ -947,6 +947,58 @@ fn retired_builtin_selections_retain_overrides_without_missing_scheme_diagnostic
     assert_eq!(
         parse_settings(&serde_json::to_vec(&loaded).unwrap()).unwrap(),
         loaded
+    );
+}
+
+/// The window's tint answers the Chrome painted over it, not the slot the definition is filed in.
+///
+/// A scheme offered for Light may paint a near-black window root. The faster sheet curve exists
+/// because near-white paint hides what the window admits, which is not true of that scheme, and
+/// clearing its tint twice as fast would drop its own light text toward the desktop behind it.
+#[test]
+fn a_dark_rooted_bright_slot_scheme_keeps_the_dark_window_tint() {
+    let sheet_alpha = |preferences: &AppearancePreferences| {
+        SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap()
+            .chrome
+            .composition
+            .materials
+            .alpha(SurfaceRole::Sheet)
+    };
+
+    let mut bright = AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    };
+    bright.background.transparency = 0.35;
+    let mut dark_rooted = bright.clone();
+    dark_rooted.chrome.overrides.insert(
+        builtin_fallback_scheme(SchemeKind::Chrome, Appearance::Light),
+        ChromeColorOverrides {
+            background: Some(Color::rgb(0x010203)),
+            text: Some(Color::rgb(0xfefefe)),
+            ..Default::default()
+        },
+    );
+    let mut dark = bright.clone();
+    dark.mode = AppearanceMode::Dark;
+
+    assert_eq!(ChromeTone::of(Color::rgb(0x010203)), ChromeTone::Dark);
+    assert_eq!(
+        sheet_alpha(&dark_rooted),
+        sheet_alpha(&dark),
+        "a dark-rooted scheme keeps the tint dark Chrome keeps, whatever slot it occupies"
+    );
+    assert!(
+        sheet_alpha(&dark_rooted) > sheet_alpha(&bright),
+        "the faster curve belongs to the built-in bright scheme, which does paint near-white"
     );
 }
 

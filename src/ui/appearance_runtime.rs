@@ -466,7 +466,10 @@ impl WindowAppearanceOwner {
             window.set_background_appearance(native_background(effective));
             self.effective = Some(effective);
         }
-        let backdrop = requested_backdrop(effective, chrome.appearance);
+        let backdrop = requested_backdrop(
+            effective,
+            crate::appearance::ChromeTone::of(chrome.colors.background),
+        );
         if self.backdrop == Some(backdrop) {
             return;
         }
@@ -479,19 +482,19 @@ impl WindowAppearanceOwner {
 
 /// What must sit behind this window's content.
 ///
-/// The Chrome appearance travels with the request because the material behind the window is what
-/// the reader sees the desktop through, and a scheme only shows the desktop through a material
-/// its own paint does not match. Deciding that here keeps the choice one piece of product policy
-/// rather than an assumption inside the platform Adapter.
+/// The Chrome tone travels with the request because the material behind the window is what the
+/// reader sees the desktop through, and Chrome only shows the desktop through a material its own
+/// paint does not match. The tone is read from the compiled window root rather than from the
+/// Light or Dark slot, so a definition filed under Light that paints a near-black root asks for
+/// the material its own paint can show. Deciding that here keeps the choice one piece of product
+/// policy rather than an assumption inside the platform Adapter.
 fn requested_backdrop(
     effective: crate::appearance::WindowBackgroundAppearance,
-    appearance: crate::appearance::Appearance,
+    tone: crate::appearance::ChromeTone,
 ) -> crate::platform::appearance::WindowBackdrop {
     use crate::platform::appearance::WindowBackdrop;
     match effective {
-        crate::appearance::WindowBackgroundAppearance::Blurred => {
-            WindowBackdrop::Frosted(appearance)
-        }
+        crate::appearance::WindowBackgroundAppearance::Blurred => WindowBackdrop::Frosted(tone),
         crate::appearance::WindowBackgroundAppearance::Opaque
         | crate::appearance::WindowBackgroundAppearance::Transparent => WindowBackdrop::Absent,
     }

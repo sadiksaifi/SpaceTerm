@@ -23,7 +23,7 @@ use objc::runtime::{BOOL, Object};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::appearance::Appearance;
+use crate::appearance::ChromeTone;
 use crate::platform::appearance::WindowBackdrop;
 
 /// `NSVisualEffectMaterialUnderWindowBackground`: the material AppKit draws behind a window's own
@@ -45,20 +45,20 @@ const STATE_ACTIVE: NSInteger = 1;
 /// and can find that same backdrop again to change or remove it.
 const BACKDROP_IDENTIFIER: &str = "dev.spaceterm.window-backdrop";
 
-/// The material that shows the desktop through Chrome of one appearance.
+/// The material that shows the desktop through Chrome of one tone.
 ///
 /// Both materials transmit the desktop, but not by the same amount, and what a reader sees is
-/// what survives the Chrome above. A dark scheme paints near-black over the backdrop, so every
-/// bit of desktop the material admits arrives as light against dark and reads as glass.
-/// `UnderWindowBackground` is a near-white frost in its bright variant, and a bright scheme paints
+/// what survives the Chrome above. Dark Chrome paints near-black over the backdrop, so every bit
+/// of desktop the material admits arrives as light against dark and reads as glass.
+/// `UnderWindowBackground` is a near-white frost in its bright variant, and bright Chrome paints
 /// near-white over it, so the two agree and the window reads as an opaque sheet of paper however
 /// much of it the Transparency Setting admits. The sidebar material transmits far more, which is
-/// what a bright scheme needs to show the desktop at all, and the AppKit appearance still chooses
+/// what bright Chrome needs to show the desktop at all, and the AppKit appearance still chooses
 /// its tint.
-fn material(appearance: Appearance) -> NSInteger {
-    match appearance {
-        Appearance::Light => MATERIAL_SIDEBAR,
-        Appearance::Dark => MATERIAL_UNDER_WINDOW_BACKGROUND,
+fn material(tone: ChromeTone) -> NSInteger {
+    match tone {
+        ChromeTone::Bright => MATERIAL_SIDEBAR,
+        ChromeTone::Dark => MATERIAL_UNDER_WINDOW_BACKGROUND,
     }
 }
 
@@ -243,7 +243,7 @@ mod tests {
                 let content = ContentView::new(NSSize::new(320.0, 180.0));
                 let renderer = content.add_renderer();
 
-                let dark = Some(material(Appearance::Dark));
+                let dark = Some(material(ChromeTone::Dark));
                 apply_to_content_view(content.0, dark);
                 apply_to_content_view(content.0, dark);
 
@@ -280,7 +280,7 @@ mod tests {
             unsafe {
                 let content = ContentView::new(NSSize::new(300.0, 160.0));
                 content.add_renderer();
-                apply_to_content_view(content.0, Some(material(Appearance::Dark)));
+                apply_to_content_view(content.0, Some(material(ChromeTone::Dark)));
                 let backdrop = content.backdrop();
                 assert_ne!(backdrop, nil);
 
@@ -305,10 +305,10 @@ mod tests {
         });
     }
 
-    /// A window whose Chrome changes appearance while blurred keeps the view it has and takes
-    /// the other appearance's material, so the effect never blinks out and back.
+    /// A window whose Chrome changes tone while blurred keeps the view it has and takes the other
+    /// tone's material, so the effect never blinks out and back.
     #[gpui::test]
-    fn changing_appearance_replaces_the_material_in_place(cx: &mut gpui::TestAppContext) {
+    fn changing_tone_replaces_the_material_in_place(cx: &mut gpui::TestAppContext) {
         cx.update(|_| {
             // SAFETY: GPUI runs this closure on the AppKit thread, and the fixture owns the
             // content view for the duration of every AppKit message.
@@ -316,14 +316,14 @@ mod tests {
                 let content = ContentView::new(NSSize::new(320.0, 180.0));
                 content.add_renderer();
 
-                apply_to_content_view(content.0, Some(material(Appearance::Dark)));
+                apply_to_content_view(content.0, Some(material(ChromeTone::Dark)));
                 let installed = content.backdrop();
                 assert_eq!(
                     content.backdrop_material(),
                     MATERIAL_UNDER_WINDOW_BACKGROUND
                 );
 
-                apply_to_content_view(content.0, Some(material(Appearance::Light)));
+                apply_to_content_view(content.0, Some(material(ChromeTone::Bright)));
                 assert_eq!(content.backdrop(), installed);
                 assert_eq!(content.subview_count(), 2);
                 assert_eq!(content.backdrop_material(), MATERIAL_SIDEBAR);
@@ -339,13 +339,13 @@ mod material_tests {
     use super::*;
 
     #[test]
-    fn a_bright_scheme_asks_for_the_more_transmissive_material() {
+    fn bright_chrome_asks_for_the_more_transmissive_material() {
         assert_eq!(
-            requested_material(WindowBackdrop::Frosted(Appearance::Light)),
+            requested_material(WindowBackdrop::Frosted(ChromeTone::Bright)),
             Some(MATERIAL_SIDEBAR)
         );
         assert_eq!(
-            requested_material(WindowBackdrop::Frosted(Appearance::Dark)),
+            requested_material(WindowBackdrop::Frosted(ChromeTone::Dark)),
             Some(MATERIAL_UNDER_WINDOW_BACKGROUND)
         );
         assert_eq!(requested_material(WindowBackdrop::Absent), None);

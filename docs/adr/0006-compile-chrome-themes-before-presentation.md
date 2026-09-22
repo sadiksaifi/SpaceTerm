@@ -43,12 +43,15 @@ Application Settings own transparency and blur independently of scheme authorshi
 accessibility capabilities determine the effective presentation without discarding those Settings.
 Window owners apply native effects once per window, and SpaceTerm owns the blurred backdrop itself
 rather than accepting a framework effect that rewrites a native material's private layers. The
-backdrop request carries the appearance painted over it, because the desktop a native material
-admits arrives as light: against near-black Chrome it reads as glass, and under near-white Chrome
-it agrees with the paint above and disappears. A bright scheme therefore asks for the more
-transmissive of the native materials, so one Transparency Setting shows the desktop in both
-appearances. One Setting still drives the whole window, and a bright scheme reads it on a curve
-that gives up its tint twice over: what the Setting leaves standing is taken again. The ends keep
+backdrop request carries the tone of the Chrome painted over it, because the desktop a native
+material admits arrives as light: against near-black Chrome it reads as glass, and under
+near-white Chrome it agrees with the paint above and disappears. Bright Chrome therefore asks for
+the more transmissive of the native materials, so one Transparency Setting shows the desktop under
+either. One Setting still drives the whole window, and bright Chrome reads it on a curve that
+gives up its tint twice over: what the Setting leaves standing is taken again. That tone is read
+from the compiled window root rather than from the Light or Dark slot a definition is filed under,
+since a scheme offered for Light may paint a near-black root and a reader sees the desktop through
+that root exactly as they would through a dark scheme's. The ends keep
 their meaning, an untouched Setting keeps the opaque presentation and the maximum clears the tint
 entirely, and only the sheet reads that curve, so a Pane, a chip and a row hold the spacing their
 appearance authored while the shell behind them clears. Depth

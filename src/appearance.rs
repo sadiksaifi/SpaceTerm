@@ -201,7 +201,7 @@ mod tests;
 pub(crate) use crate::theme::Color;
 pub(crate) use compiler::{CaptionPaint, ColorProvenance, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
-    CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
+    ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     WindowBackgroundAppearance,
 };
 pub(crate) use document::{

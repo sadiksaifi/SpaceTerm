@@ -272,13 +272,6 @@ impl SchemeCatalog {
         let capabilities = system.composition;
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
-        // The window's tint rests under this appearance's Chrome, and how much backdrop it must
-        // give up to show through depends on what is painted over it.
-        let composition = super::ResolvedWindowComposition::resolve(
-            &preferences.background,
-            capabilities,
-            appearance,
-        );
         let requested_chrome = preferences.chrome.schemes.get(appearance);
         let requested_terminal = preferences.terminal.schemes.get(appearance);
         let (effective_chrome, compiled_chrome, found_chrome) = self.resolve_chrome_scheme(
@@ -293,6 +286,15 @@ impl SchemeCatalog {
         chrome_colors
             .validate()
             .map_err(|_| ResolutionError::UnsupportedAlpha)?;
+        // The window's tint rests under this Chrome, and how much backdrop it must give up to
+        // show through is a question of what is painted over it, not of the slot the definition
+        // is filed under. A scheme offered for Light may paint a near-black root, and a reader
+        // sees the desktop through that root exactly as they would through a dark scheme's.
+        let composition = super::ResolvedWindowComposition::resolve(
+            &preferences.background,
+            capabilities,
+            super::ChromeTone::of(chrome_colors.background),
+        );
         let (effective_terminal, mut terminal_colors, found_terminal) =
             self.resolve_terminal_scheme(requested_terminal, appearance)?;
         if !found_terminal {

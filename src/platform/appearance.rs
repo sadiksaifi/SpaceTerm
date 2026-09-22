@@ -1,6 +1,6 @@
 //! Operating-System appearance facts remain independent of forced application presentation.
 
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, ChromeTone};
 
 /// Keeps the native observation alive until its application owner is destroyed.
 pub(crate) trait SystemAppearanceSubscription {}
@@ -21,15 +21,15 @@ pub(crate) struct AccessibilityDisplayOptions {
 
 /// What sits behind one Operating-System Window's content.
 ///
-/// The frosted variant carries the appearance of the Chrome painted over the material, because a
-/// native material transmits different amounts of the desktop in each one and the Adapter picks
-/// the material that lets a reader see the desktop through that Chrome.
+/// The frosted variant carries the tone of the Chrome painted over the material, because a native
+/// material transmits different amounts of the desktop in each one and the Adapter picks the
+/// material that lets a reader see the desktop through that Chrome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowBackdrop {
     /// The window presents its own background and keeps no native material.
     Absent,
-    /// A frosted native material behind Chrome of this appearance.
-    Frosted(Appearance),
+    /// A frosted native material behind Chrome of this tone.
+    Frosted(ChromeTone),
 }
 
 /// Selected at startup; only this Adapter queries or changes native appearance.

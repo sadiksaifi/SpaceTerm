@@ -97,6 +97,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
 /// desktop through is not the same one in both.
 #[gpui::test]
 fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
+    use crate::appearance::ChromeTone;
     use crate::platform::appearance::WindowBackdrop;
 
     let (settings, platform) = start(cx);
@@ -113,7 +114,7 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(
         platform.backdrops.borrow().as_slice(),
-        &[WindowBackdrop::Frosted(Appearance::Dark)]
+        &[WindowBackdrop::Frosted(ChromeTone::Dark)]
     );
 
     platform.set_system_appearance(Some(Appearance::Light));
@@ -125,8 +126,8 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
     assert_eq!(
         platform.backdrops.borrow().as_slice(),
         &[
-            WindowBackdrop::Frosted(Appearance::Dark),
-            WindowBackdrop::Frosted(Appearance::Light),
+            WindowBackdrop::Frosted(ChromeTone::Dark),
+            WindowBackdrop::Frosted(ChromeTone::Bright),
         ]
     );
 
