@@ -1,6 +1,7 @@
 //! Native Adapter integration evidence.
 use crate::platform::launch_host::resource_root;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[test]
 fn zsh_reports_reserved_and_unicode_metadata_without_changing_protocol_structure() {
@@ -107,6 +108,47 @@ fn bash_reports_reserved_and_unicode_directory_without_losing_exit_status() {
     );
     assert!(tracker.set_reported_directory(reports[1].strip_prefix("7;").unwrap()));
     assert_eq!(&*tracker.snapshot().directory.path, directory);
+}
+
+#[test]
+fn bash_encodes_a_long_directory_without_blocking_prompt_rendering() {
+    let integration = resource_root().join("shell-integration/bash/spaceterm.bash");
+    let directory = format!("/tmp/{}", "a".repeat(4000));
+    let mut child = Command::new("/bin/bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-ic",
+            r#"source "$1"; PWD=$2; _spaceterm_prompt"#,
+            "spaceterm",
+        ])
+        .arg(integration)
+        .arg(&directory)
+        .env("SPACETERM_SHELL_INTEGRATION_VERSION", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "long directory encoding exceeded five seconds: {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let reports = osc_reports(&output.stdout);
+    assert_eq!(reports[0], format!("7;file://localhost{directory}"));
 }
 
 fn osc_reports(bytes: &[u8]) -> Vec<&str> {
