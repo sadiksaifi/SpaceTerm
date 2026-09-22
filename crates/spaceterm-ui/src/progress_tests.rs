@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, px, rgba};
 
-use crate::progress::spinner_frame_index;
+use crate::progress::{SPINNER_FRAMES, spinner_dot_bounds, spinner_frame_index};
 use crate::{
     DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint,
     ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
@@ -57,7 +57,10 @@ impl Render for ProgressFixture {
                 .debug_selector("test-progress")
                 .into_any_element(),
         };
-        div().w(px(BAR_WIDTH)).child(indicator)
+        div()
+            .w(px(BAR_WIDTH))
+            .text_color(rgba(0x123456ff))
+            .child(indicator)
     }
 }
 
@@ -196,30 +199,70 @@ fn named_sizes_select_their_installed_geometry(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn frame_spinner_named_sizes_are_stable_across_frames(cx: &mut TestAppContext) {
-    let compact = fixture_window(
+fn frame_spinner_is_square_in_every_size_and_motion_mode(cx: &mut TestAppContext) {
+    for (size, expected) in [
+        (ProgressSize::Compact, px(20.0)),
+        (ProgressSize::Regular, px(32.0)),
+    ] {
+        for motion in [ProgressMotion::Standard, ProgressMotion::Reduced] {
+            let cx = fixture_window(
+                cx,
+                FixtureKind::Spinner,
+                ProgressState::Indeterminate,
+                size,
+                motion,
+            );
+            let root_selector = match motion {
+                ProgressMotion::Standard => "test-progress",
+                ProgressMotion::Reduced => "test-progress-reduced-motion",
+            };
+            let root = cx
+                .debug_bounds(root_selector)
+                .expect("frame spinner root should render");
+            let frame = cx
+                .debug_bounds("test-progress-frame")
+                .expect("frame spinner frame should render");
+
+            assert_eq!(root.size, gpui::size(expected, expected));
+            assert_eq!(frame, root);
+            assert_eq!(frame.size.width, frame.size.height);
+        }
+    }
+}
+
+#[test]
+fn every_spinner_frame_paints_square_dots_in_a_square_union() {
+    for extent in [px(12.0), px(18.0), px(20.0), px(32.0)] {
+        let frame = gpui::Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(extent, extent));
+        for index in 0..SPINNER_FRAMES.len() {
+            let dots = spinner_dot_bounds(frame, index).collect::<Vec<_>>();
+            let union = dots
+                .iter()
+                .copied()
+                .reduce(|union, dot| union.union(&dot))
+                .expect("every spinner frame should paint at least one dot");
+
+            assert!(dots.iter().all(|dot| dot.size.width == dot.size.height));
+            assert!(dots.iter().all(|dot| dot.is_contained_within(&frame)));
+            assert_eq!(union.size.width, union.size.height, "frame {index}");
+        }
+    }
+}
+
+#[gpui::test]
+fn frame_spinner_paints_only_with_the_inherited_foreground(cx: &mut TestAppContext) {
+    let cx = fixture_window(
         cx,
         FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Compact,
-        ProgressMotion::Standard,
-    )
-    .debug_bounds("test-progress")
-    .expect("compact frame spinner should render")
-    .size;
-    let regular = fixture_window(
-        cx,
-        FixtureKind::Spinner,
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ProgressMotion::Standard,
-    )
-    .debug_bounds("test-progress")
-    .expect("regular frame spinner should render")
-    .size;
+        ProgressMotion::Reduced,
+    );
+    let quads = cx.update(|window, _| window.painted_quads_for_test());
+    let expected = gpui::Background::from(rgba(0x123456ff));
 
-    assert_eq!(compact, gpui::size(px(20.0), px(20.0)));
-    assert_eq!(regular, gpui::size(px(32.0), px(32.0)));
+    assert!(!quads.is_empty());
+    assert!(quads.iter().all(|quad| quad.background == expected));
 }
 
 #[test]

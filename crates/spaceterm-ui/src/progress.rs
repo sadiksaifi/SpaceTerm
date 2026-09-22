@@ -10,7 +10,7 @@
 //! operation keeps one shape from start to finish. Determinate work fills a restrained track:
 //! leading to trailing on the bar, clockwise from twelve o'clock on the ring. Indeterminate work
 //! is activity rather than extent: the bar fills end to end and animates its shade along its
-//! length, while [`FrameSpinner`] advances a compact sequence of monochrome glyphs.
+//! length, while [`FrameSpinner`] advances a compact sequence of monochrome dot frames.
 //!
 //! Both indicators paint in the application's installed colors. A ring may instead inherit the
 //! semantic foreground of the surface it is embedded in, for a slot whose contrast the embedder
@@ -238,8 +238,20 @@ const BAR_RESTING_OPACITY: f32 = 0.55;
 const BAR_CREST_LAYERS: [(f32, f32); 3] = [(0.46, 0.18), (0.56, 0.22), (0.3, 0.3)];
 
 /// Monochrome frames from the `Dots9` visual reference credited in packaged notices.
-const SPINNER_FRAMES: [&str; 8] = ["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
+pub(crate) const SPINNER_FRAMES: [char; 8] = ['⢹', '⢺', '⢼', '⣸', '⣇', '⡧', '⡗', '⡏'];
 const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
+
+/// Unicode Braille bit, column, and row for each of the eight possible dots.
+const BRAILLE_DOTS: [(u8, u8, u8); 8] = [
+    (0, 0, 0),
+    (1, 0, 1),
+    (2, 0, 2),
+    (6, 0, 3),
+    (3, 1, 0),
+    (4, 1, 1),
+    (5, 1, 2),
+    (7, 1, 3),
+];
 
 /// An inherited ring's determinate track, as a share of the inherited color's own opacity.
 ///
@@ -430,11 +442,44 @@ fn spinner_frame(selector: SharedString, extent: Pixels, index: usize) -> gpui::
     div()
         .debug_selector(move || format!("{selector}-frame"))
         .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(extent)
-        .child(SharedString::from(SPINNER_FRAMES[index]))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, _| {
+                    let color = window.text_style().color;
+                    for dot in spinner_dot_bounds(bounds, index) {
+                        window
+                            .paint_quad(gpui::fill(dot, color).corner_radii(dot.size.width / 2.0));
+                    }
+                },
+            )
+            .size(extent),
+        )
+}
+
+/// Active dots for one Dots9 frame, normalized so their painted union is square.
+pub(crate) fn spinner_dot_bounds(
+    bounds: Bounds<Pixels>,
+    index: usize,
+) -> impl Iterator<Item = Bounds<Pixels>> {
+    let extent = bounds.size.width.min(bounds.size.height).max(px(0.0));
+    let left = bounds.origin.x + (bounds.size.width - extent) / 2.0;
+    let top = bounds.origin.y + (bounds.size.height - extent) / 2.0;
+    let diameter = extent / 6.0;
+    let radius = diameter / 2.0;
+    let mask = (u32::from(SPINNER_FRAMES[index]) - 0x2800) as u8;
+
+    BRAILLE_DOTS
+        .into_iter()
+        .filter(move |(bit, _, _)| mask & (1 << bit) != 0)
+        .map(move |(_, column, row)| {
+            let center_x = left + extent * (0.25 + f32::from(column) * 0.5);
+            let center_y = top + extent * (0.25 + f32::from(row) / 6.0);
+            Bounds::new(
+                point(center_x - radius, center_y - radius),
+                gpui::size(diameter, diameter),
+            )
+        })
 }
 
 pub(crate) fn spinner_frame_index(delta: f32) -> usize {
