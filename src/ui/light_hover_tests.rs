@@ -37,7 +37,7 @@ fn light_popup_uses_base_host_and_raised_selection() {
             .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
             .row_selected_background,
     ] {
-        assert_eq!(selected, Color::rgb(0xfafafa));
+        assert_eq!(selected, Color::rgb(0xfdfdfd));
     }
     let shell = appearance
         .floating_surfaces()

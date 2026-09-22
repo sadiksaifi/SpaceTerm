@@ -223,14 +223,18 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_pressed: 0xdcdcdc,
             ghost_hover: 0xd2d2d2,
             ghost_pressed: 0xc4c4c4,
-            selected: 0xfafafa,
+            // A selection sits one rung above the raised tone that controls, grouped content and
+            // the Terminal share, so a selected Tab or row is the brightest thing in the window.
+            // It stops short of white: reproducing pure white takes an ink no window can see
+            // through, and a selection transmits like every other resting surface.
+            selected: 0xfdfdfd,
             selected_inactive: 0xf4f4f4,
             row_hover: 0xf4f4f4,
-            row_selected: 0xfafafa,
-            row_selected_hover: Some(0xfafafa),
-            navigation_selected: Some(0xfafafa),
-            tab_active: 0xfafafa,
-            tab_active_hover: Some(0xfafafa),
+            row_selected: 0xfdfdfd,
+            row_selected_hover: Some(0xfdfdfd),
+            navigation_selected: Some(0xfdfdfd),
+            tab_active: 0xfdfdfd,
+            tab_active_hover: Some(0xfdfdfd),
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
@@ -910,7 +914,10 @@ mod tests {
                 ("raised surface", colors.elevated_surface_background),
             ] {
                 if appearance == Appearance::Light && host_name == "raised surface" {
-                    assert_eq!(colors.row_selected_background, host);
+                    // A bright selection takes the rung above this surface, and hover stays
+                    // below it, so the raised host sits between the two rather than under both.
+                    assert!(weight(colors.row_selected_background) > weight(host));
+                    assert!(weight(colors.row_hover_background) < weight(host));
                     continue;
                 }
                 let hover_step = weight(colors.row_hover_background) - weight(host);

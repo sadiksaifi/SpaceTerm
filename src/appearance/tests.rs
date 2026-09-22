@@ -469,7 +469,7 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
 /// authored 1.21. It does drift upward over a desktop darker than the scheme, because equal ink
 /// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
 /// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
-/// above it, where a chip now reaches 2.0 only at the maximum.
+/// above it, where a chip now passes 2.0 only at the maximum.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
@@ -502,7 +502,7 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
             let chip = appearance.selection_surface(host, fill).source_over(shell);
             let step = chip.contrast_ratio(shell);
             assert!(
-                (1.15..=2.05).contains(&step),
+                (1.15..=2.2).contains(&step),
                 "a Light {name} holds one step from its shell at transparency {transparency}: step={step}, chip={chip:?} over {shell:?}",
             );
             assert!(

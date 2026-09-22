@@ -20,8 +20,19 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
-    let selected = Color::rgb(0xfafafa);
+    // Every selection takes one rung, and it is the one above the raised tone that grouped
+    // content, controls and the Terminal share. It stops short of white, which no transmitting
+    // surface can reproduce.
+    let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
+    assert_eq!(
+        resolved.terminal.colors.background, prepared.colors.elevated_surface_background,
+        "the Terminal and the raised Chrome surface share one tone"
+    );
+    assert!(
+        selected.r > resolved.terminal.colors.background.r,
+        "a selection rests one rung above that shared tone"
+    );
     for (role, fill) in [
         ("Tab", prepared.colors.tab_active_background),
         (
@@ -50,7 +61,6 @@ fn light_selections_and_terminal_share_the_common_surface() {
             "floating segment",
             prepared.floating_segmented_colors.selection_background,
         ),
-        ("Terminal", resolved.terminal.colors.background),
     ] {
         assert_eq!(
             fill, selected,
@@ -434,7 +444,7 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
         // An unfocused selection takes the focused fill or the scheme's dimmer authored one,
         // never a darker fill invented to reach a floor the window's material cannot hold.
         assert!(
-            [Color::rgb(0xfafafa), Color::rgb(0xf4f4f4)].contains(&panel.row_selected_background),
+            [Color::rgb(0xfdfdfd), Color::rgb(0xf4f4f4)].contains(&panel.row_selected_background),
             "unfocused sidebar at transparency {transparency}: {:?}; active {:?}; host {:?}",
             panel.row_selected_background,
             prepared.panel_controls.reference.row_selected_background,
@@ -489,16 +499,17 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
     let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let background = Color::rgb(0xe5e5e5);
     let raised = Color::rgb(0xfafafa);
+    let selected = Color::rgb(0xfdfdfd);
     assert_eq!(prepared.colors.background, background);
     assert_eq!(prepared.colors.title_bar_background, background);
     assert_eq!(prepared.colors.panel_background, background);
     assert_eq!(prepared.colors.elevated_surface_background, raised);
-    assert_eq!(prepared.colors.tab_active_background, raised);
+    assert_eq!(prepared.colors.tab_active_background, selected);
     assert_eq!(
         prepared.panel_controls.reference.row_selected_background,
-        raised
+        selected
     );
-    assert_eq!(prepared.floating_colors.row_selected_background, raised);
+    assert_eq!(prepared.floating_colors.row_selected_background, selected);
 }
 
 #[test]
