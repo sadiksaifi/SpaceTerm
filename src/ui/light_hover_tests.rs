@@ -128,6 +128,12 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
     }
 }
 
+/// Settings shares the Workspace's content tone, and keeps the denser paint its groups need.
+///
+/// A Pane hosts text and nothing else, so it can transmit with the window. The Settings canvas
+/// hosts inset groups whose own step is measured from it, and those groups would sink past the
+/// navigation beside them if the canvas thinned with the Setting. The two content surfaces
+/// therefore share the tone rather than the paint.
 #[test]
 fn light_settings_uses_the_workspace_content_hierarchy() {
     use super::appearance::settings::{
@@ -148,9 +154,10 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
             canvas.semantic, resolved.terminal.colors.background,
             "Settings and the built-in Terminal must share the content tone"
         );
-        assert_eq!(
-            canvas.paint, content,
-            "Content surfaces must share the same transmission treatment"
+        assert!(
+            canvas.paint.a >= content.a,
+            "the Settings canvas must keep at least the Pane's ink at {transparency}: canvas={:?}, pane={content:?}",
+            canvas.paint,
         );
         assert!(
             sidebar.background.r < card.background.r && card.background.r < canvas.background.r,

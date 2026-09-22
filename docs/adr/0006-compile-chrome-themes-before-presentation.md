@@ -53,15 +53,17 @@ material instead of adding another dense sheet. Zero keeps the opaque presentati
 clears the window tint and retains elevation on resting and floating surfaces. The separate blur
 Setting controls native and in-window spatial filtering without changing material transmission.
 Surface composition derives material fills from the opaque presentation,
-which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
-elevated surface in Light, where a Pane sits above its chrome. Dark seats a Pane one small step
-below the window root, so it is an ordinary resting surface there and paints only the accepted
-Terminal background's difference from the window sheet. A Dark Pane therefore transmits exactly
-what the Transparency Setting asks of every other resting surface, and the largest surface in the
-window answers that Setting instead of holding its own backing against it. Readability at high
-transmission is the reader's own choice, taken once for the whole window: a Pane is not singled
-out for protection that the Chrome around it does not get. Every Pane keeps the selected chip's
-neutral hairline at any transparency.
+which stays the contrast reference. A Pane is an ordinary resting surface in both appearances: it
+paints only the accepted Terminal background's difference from the window sheet, which Light
+authors above the window root and Dark below it. A Pane therefore transmits exactly what the
+Transparency Setting asks of every other resting surface, and the largest surface in the window
+answers that Setting instead of holding its own backing against it. A small selected chip still
+holds its authored step against its host with whatever ink that costs, because it has to stay
+legible as a selection; reproducing a bright Pane's step that way would cost an almost opaque
+white and put a slab where the Setting asked for glass. Readability at high transmission is the
+reader's own choice, taken once for the whole window: a Pane is not singled out for protection
+that the Chrome around it does not get. Every Pane keeps the selected chip's neutral hairline at
+any transparency.
 
 The desktop behind an Operating-System Window may use its platform's native effect. Everything
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
@@ -93,10 +95,12 @@ against arbitrary final desktop pixels. Opaque accessibility presentation remain
 fallback. A full source-over floating tint would restore that guarantee by obscuring the native
 material, which conflicts with the shared-material presentation.
 
-The window root owns the continuous window tint. The built-in Dark Terminal background is authored
-one small step below that tint, so reproducing it costs a sliver of ink and a Pane reads as a
-quieter region of the same window rather than as an inset. Containers and resting controls paint
-only their color difference from that reference, and nested list rows paint only their own fill.
+The window root owns the continuous window tint. Each built-in Terminal background is authored one
+small step from that tint, below it in Dark and above it in Light, so reproducing it costs little
+ink and a Pane reads as a distinct region of the same window rather than as an inset. A bright
+scheme spends the wider overlay, since white ink over a near-white base covers less distance.
+Containers and resting controls paint only their color difference from that reference, and nested
+list rows paint only their own fill.
 Explicit Terminal cell backgrounds remain opaque even when their RGB matches the default. Text and
 terminal protocol colors retain their own semantics.
 

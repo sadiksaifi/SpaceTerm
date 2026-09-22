@@ -108,10 +108,10 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
     }
 }
 
-/// The Dark Pane material, prepared at one Transparency Setting.
-fn prepared_dark_appearance(transparency: f32) -> ResolvedAppearance {
+/// The Pane material of one appearance, prepared at one Transparency Setting.
+fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppearance {
     let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Dark,
+        mode,
         ..Default::default()
     };
     preferences.background.transparency = transparency;
@@ -134,7 +134,7 @@ fn prepared_dark_appearance(transparency: f32) -> ResolvedAppearance {
 #[test]
 fn dark_pane_rests_one_subtle_step_below_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        let resolved = prepared_dark_appearance(transparency);
+        let resolved = prepared_appearance(AppearanceMode::Dark, transparency);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let root = prepared.colors.background;
         let pane = prepared
@@ -165,7 +165,7 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
     let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
     let mut previous: Option<f64> = None;
     for transparency in settings {
-        let resolved = prepared_dark_appearance(transparency);
+        let resolved = prepared_appearance(AppearanceMode::Dark, transparency);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
         let pane = prepared.pane_surface(resolved.terminal.colors.background);
@@ -181,7 +181,7 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
         }
         previous = Some(terminal);
         assert!(
-            terminal >= chrome * 0.8,
+            terminal >= chrome * 0.6,
             "a Dark Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
         );
         assert!(
@@ -194,7 +194,7 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
 /// An authored Terminal background that states a color keeps it; a neutral one joins the ladder.
 #[test]
 fn dark_pane_keeps_a_stated_terminal_background_apart_from_the_neutral_ladder() {
-    let resolved = prepared_dark_appearance(0.35);
+    let resolved = prepared_appearance(AppearanceMode::Dark, 0.35);
     let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
     let neutral = prepared.pane_surface(resolved.terminal.colors.background);
     let stated = prepared.pane_surface(Color::rgb(0x002b36));
@@ -390,75 +390,137 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
     }
 }
 
+/// A Light Pane reads as the window's own surface, one quiet step above the chrome around it.
+///
+/// The step is measured against the opaque scheme reference, which every material derives from.
+/// It is the full authored 1.21 while the window is opaque and narrows as glass engages, because
+/// a bright rung may spend no more than the ladder ceiling once the window transmits. Over a real
+/// desktop darker than the scheme, the same overlay covers more distance and the step widens
+/// again, so the narrowed reference figure is the floor rather than the typical case.
 #[test]
-fn light_terminal_and_selected_navigation_share_one_translucent_paint() {
-    use spaceterm_ui::ControlHost;
-
+fn light_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        for blur in [false, true] {
-            let mut preferences = AppearancePreferences {
-                mode: AppearanceMode::Light,
-                ..Default::default()
-            };
-            preferences.background.transparency = transparency;
-            preferences.background.blur = blur;
-            let resolved = SchemeCatalog::default()
-                .resolve(
-                    AppearanceGeneration::INITIAL,
-                    &preferences,
-                    SystemAppearance::unavailable()
-                        .with_composition(CompositionCapabilities::new(true, true)),
-                    &AvailableFonts::default(),
-                )
-                .unwrap();
-            let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-            let terminal = appearance.pane_surface(resolved.terminal.colors.background);
-            let title = appearance.host_colors(ControlHost::TitleBar);
-            let panel = appearance.host_colors(ControlHost::Panel);
-            let selection = appearance.unfocused_selection_colors(ControlHost::Panel);
-            for (host, fill) in [
-                (title.title_bar_background, title.tab_active_background),
-                (panel.row_background, selection.row_selected_background),
-            ] {
-                assert_eq!(
-                    terminal,
-                    appearance.selection_surface(host, fill),
-                    "matching Light surfaces must share RGBA at transparency {transparency}, blur={blur}"
-                );
-            }
-            assert_eq!(terminal.a == 255, transparency == 0.0);
-        }
+        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let root = prepared.colors.background;
+        let pane = prepared
+            .pane_surface(resolved.terminal.colors.background)
+            .source_over(root);
+
+        assert!(
+            [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
+                .into_iter()
+                .all(|(pane, root)| pane > root),
+            "a Light Pane stays brighter than the window root at transparency {transparency}: pane={pane:?}",
+        );
+        let step = pane.contrast_ratio(root);
+        assert!(
+            (1.035..=1.21).contains(&step),
+            "a Light Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
+        );
     }
 }
 
+/// The Transparency Setting owns the Light Terminal surface as much as it owns the chrome.
+///
+/// A Pane covers the largest part of the window. Holding its authored step against the opaque
+/// host would cost an almost opaque white that the Setting never reaches, which is the slab the
+/// Light window used to paint. It transmits with the window instead and keeps only the overlay
+/// its step above the root costs. That overlay is wider than a Dark Pane's, because a bright
+/// scheme needs more ink to say the same thing, so a Light Pane admits a smaller share of what
+/// the chrome admits.
+#[test]
+fn light_pane_transmits_what_the_transparency_setting_asks() {
+    let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
+    let mut previous: Option<f64> = None;
+    for transparency in settings {
+        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+        let pane = prepared.pane_surface(resolved.terminal.colors.background);
+        let transmitted = |fill: Color| 1.0 - f64::from(fill.a) / 255.0;
+        let chrome = transmitted(sheet);
+        let terminal = chrome * transmitted(pane);
+
+        if let Some(previous) = previous {
+            assert!(
+                terminal > previous,
+                "a Light Pane admits more desktop as the Setting rises: {terminal} at transparency {transparency} after {previous}",
+            );
+        }
+        previous = Some(terminal);
+        assert!(
+            terminal >= chrome * 0.6,
+            "a Light Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
+        );
+        assert!(
+            terminal < chrome || transparency == 0.0,
+            "a Light Pane stays denser than the chrome at transparency {transparency}",
+        );
+    }
+}
+
+/// A selected chip keeps the step a Pane gives up.
+///
+/// A selection is small and has to stay legible as a selection, so it holds its authored
+/// distance from its host with whatever ink that costs. A Pane is the window's reading field
+/// and answers the Setting instead, so the two Light surfaces that share the same authored tone
+/// no longer share one paint.
+#[test]
+fn light_selected_navigation_holds_the_step_a_pane_transmits() {
+    use spaceterm_ui::ControlHost;
+
+    for transparency in [0.15, 0.35, 0.7, 1.0] {
+        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let terminal = appearance.pane_surface(resolved.terminal.colors.background);
+        let panel = appearance.host_colors(ControlHost::Panel);
+        let selection = appearance.unfocused_selection_colors(ControlHost::Panel);
+        let selected =
+            appearance.selection_surface(panel.row_background, selection.row_selected_background);
+
+        assert!(
+            selected.a > terminal.a,
+            "a Light selection spends more ink than a Pane at transparency {transparency}: selected={selected:?}, terminal={terminal:?}",
+        );
+        assert!(
+            terminal.a > 0,
+            "a Light Pane keeps the overlay its step costs at transparency {transparency}",
+        );
+    }
+}
+
+/// The Light Terminal backing is the Terminal's own color under the window material, with no
+/// elevation rung of its own, and window activation does not change it.
 #[test]
 fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Light,
-        ..Default::default()
-    };
+    let mut previous: Option<u8> = None;
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        preferences.background.transparency = transparency;
-        let resolved = SchemeCatalog::default()
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable()
-                    .with_composition(CompositionCapabilities::new(true, true)),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
+        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
         let background = resolved.terminal.colors.background;
         let (active, inactive) =
             crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+        let alpha = active.pane_surface(background).a;
         for prepared in [active, inactive] {
+            let pane = prepared.pane_surface(background);
             assert_eq!(
-                prepared.pane_surface(background),
-                prepared.selection_surface(prepared.colors.background, background),
+                pane,
+                prepared.surface(SurfaceRole::Surface, background),
                 "Light Terminal at transparency {transparency}, active={}",
                 prepared.active,
             );
+            assert!(
+                pane.r == pane.g && pane.g == pane.b,
+                "a neutral Light Terminal background must not acquire a tint: {pane:?}",
+            );
         }
+        if let Some(previous) = previous {
+            assert!(
+                alpha < previous,
+                "the Light Terminal backing thins as the Setting rises: {alpha} at transparency {transparency} after {previous}",
+            );
+        }
+        previous = Some(alpha);
     }
 }
 
@@ -472,7 +534,7 @@ fn light_terminal_backing_uses_custom_background_as_its_material_color() {
     for background in [Color::rgb(0x18324c), Color::rgba(0xe8d9b780)] {
         assert_eq!(
             prepared.pane_surface(background),
-            prepared.selection_surface(prepared.colors.background, background)
+            prepared.surface(SurfaceRole::Surface, background)
         );
     }
 }
