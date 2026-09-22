@@ -80,8 +80,13 @@ chip's neutral hairline at any transparency. The Pane rim is a boundary, since i
 reading surface from the Chrome. A chip rim is neither a boundary nor an indicator but a lift: it
 catches the light a raised edge would so a Tab or a selected row reads as sitting above the strip
 behind it, and it stays well under the Pane's rim, which is what keeps it from reading as a drawn
-line. A dark scheme states the lift most quietly, because light ink on a dark strip becomes a
-frame at a step a bright scheme still carries as an edge. Application preparation leaves both
+line. The rim belongs to the chip rather than to the strip: a dark scheme states it on the far
+side of the fill, away from the strip, where it reads as the chip's own lit edge and the chip
+gains a little mass. A bright fill sits at the top of the range with no room above it, so its rim
+states the same edge inward, and then it must stop early. What it is a fraction of is the fill's
+own step over the strip, which collapses as the window transmits, so a rim that keeps a fixed
+weight there outruns the fill it belongs to and lands on the strip's tone, drawing the line this
+avoids. Application preparation leaves both
 built-in lifts as authored rather than raising them to the boundary floor that interactive edges
 answer to. A custom definition keeps that floor, since its rim is the only edge the application
 can count on, and Increase Contrast keeps it everywhere.

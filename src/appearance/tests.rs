@@ -388,7 +388,7 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
         );
         assert_eq!(
             (colors.tab_active_border.a, colors.row_selected_border.a),
-            (20, 20),
+            (4, 4),
             "Light navigation should retain its authored chip lift at {transparency}"
         );
     }

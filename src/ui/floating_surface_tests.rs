@@ -160,7 +160,7 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
                 "Light {name} at {transparency}: selected hover should keep its content fill"
             );
             assert!(
-                (1.10..=1.22).contains(&edge.contrast_ratio(host)),
+                (1.025..=1.09).contains(&edge.contrast_ratio(host)),
                 "Light {name} at {transparency}: the resting lift {edge:?} must stay visible on \
                  {host:?} without drawing a border"
             );

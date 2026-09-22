@@ -251,12 +251,17 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_outline: Color::rgba(0x0000002b),
             control_outline_strong: Color::rgba(0x00000040),
             tab_separator: Color::rgba(0x00000028),
-            // A bright scheme may state the lift a little further than a dark one: the same
-            // edge covers more distance against a near-white fill before it reads as a line.
+            // The rim belongs to the chip, not to the strip behind it. A dark scheme states it
+            // as light on the far side of the fill, where it reads as the chip's own lit edge
+            // and the chip gains a little mass. A bright fill sits at the top of the range with
+            // no room above it, so this states the same edge inward instead, and it has to stop
+            // early: the fill's own step over the strip collapses as the window transmits, and
+            // an edge that outruns it lands on the strip's tone and draws a line around the
+            // chip. At the default Setting this covers about a third of that step.
             // A chip keeps it whether or not its collection holds the keyboard; the fill dims.
-            selected_rim: Color::rgba(0x00000014),
-            selected_rim_hover: Color::rgba(0x00000020),
-            selected_rim_inactive: Color::rgba(0x00000014),
+            selected_rim: Color::rgba(0x00000004),
+            selected_rim_hover: Color::rgba(0x00000006),
+            selected_rim_inactive: Color::rgba(0x00000004),
             mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
             mark_track: 0xe5e5e5,

@@ -299,14 +299,19 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
 /// A Tab and a selected row sit on the strip behind them, so their rim only has to catch the
 /// light an edge would: enough to lift the shape, not enough to draw a line around it. The Pane
 /// separates the reading surface from the Chrome, which is a boundary, so it keeps the stronger
-/// hairline. Dark states the lift most quietly, because light ink on a dark strip reads as a
-/// frame long before the same step does on a bright one.
+/// hairline.
+///
+/// The rim belongs to the chip. A dark scheme states it on the far side of the fill, away from
+/// the strip, where it reads as the chip's own lit edge and the chip gains a little mass. A
+/// bright fill sits at the top of the range with no room above it, so its rim states the same
+/// edge inward, toward the strip, and then it has to stop early: the fill's own step over the
+/// strip is what the rim is a fraction of, and a rim that outruns it lands on the strip's tone
+/// and draws a line around the chip instead.
 #[test]
 fn every_chip_lifts_without_drawing_a_border() {
     use crate::appearance::Appearance;
 
     let desktop = Color::rgb(0x2b3a55);
-    let mut loudest = std::collections::BTreeMap::new();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
         for transparency in [0.0, 0.35, 1.0] {
             let mut preferences = AppearancePreferences {
@@ -374,36 +379,38 @@ fn every_chip_lifts_without_drawing_a_border() {
                     resolved.chrome.appearance == Appearance::Dark,
                     "{mode:?} at {transparency}: the {name} rim uses the wrong ink: {rim:?}"
                 );
-                let painted = paint
-                    .fill
-                    .unwrap()
-                    .source_over(semantic_host.source_over(desktop));
+                let strip = semantic_host.source_over(desktop);
+                let painted = paint.fill.unwrap().source_over(strip);
                 let chip_lift = lift(rim, painted);
                 assert!(
-                    chip_lift >= 0.05,
+                    chip_lift >= 0.03,
                     "{mode:?} at {transparency}: the {name} lift vanishes at {chip_lift:.3}"
                 );
-                // A bright fill carries more edge before it reads as a line, so Light is allowed
-                // the wider share of the Pane's boundary and Dark is held well under it.
-                let ceiling = if resolved.chrome.appearance == Appearance::Dark {
-                    0.5
-                } else {
-                    0.85
-                };
+                let rimmed = rim.source_over(painted);
+                let inward = (i32::from(painted.r) - i32::from(rimmed.r)).signum()
+                    == (i32::from(painted.r) - i32::from(strip.r)).signum();
+                assert_eq!(
+                    inward,
+                    resolved.chrome.appearance == Appearance::Light,
+                    "{mode:?} at {transparency}: the {name} rim states its edge the wrong way: \
+                     strip={strip:?} fill={painted:?} rim={rimmed:?}"
+                );
+                // The rim is a fraction of the chip's own step from its strip. Past that step it
+                // reaches the strip's tone and reads as a line rather than as the chip's edge.
+                let chip_step = painted.contrast_ratio(strip) - 1.0;
                 assert!(
-                    chip_lift <= pane_lift * ceiling,
+                    chip_lift <= chip_step * 0.6,
+                    "{mode:?} at {transparency}: the {name} rim outruns the chip it belongs to \
+                     at {chip_lift:.3} against the fill's own {chip_step:.3}"
+                );
+                assert!(
+                    chip_lift <= pane_lift * 0.5,
                     "{mode:?} at {transparency}: the {name} rim reads as a border at \
                      {chip_lift:.3} against the Pane boundary's {pane_lift:.3}"
                 );
-                let share = loudest.entry(mode as u8).or_insert(0.0_f64);
-                *share = share.max(chip_lift / pane_lift);
             }
         }
     }
-    assert!(
-        loudest[&(AppearanceMode::Dark as u8)] < loudest[&(AppearanceMode::Light as u8)],
-        "Dark must state the lift more quietly than Light: {loudest:?}"
-    );
 }
 
 /// A chip's geometry is a question of density, never of Light or Dark.
