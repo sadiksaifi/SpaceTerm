@@ -54,10 +54,11 @@ clears the window tint and retains elevation on resting and floating surfaces. T
 Setting controls native and in-window spatial filtering without changing material transmission.
 Surface composition derives material fills from the opaque presentation,
 which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
-elevated surface. Dark Panes also retain a translucent Terminal-colored backing beneath that lift:
-thin elevation tints alone transmit too much desktop variation behind muted ANSI colors.
-Readability takes precedence over keeping a Pane lighter than its surroundings on bright backdrops.
-Light keeps its existing material. Every Pane keeps the selected chip's neutral hairline at any transparency.
+elevated surface in Light. A Dark Pane paints the accepted Terminal background's difference from
+the window sheet over a Terminal-colored backing. That backing grows gradually with transmission:
+it stays restrained through the default setting, then bounds text contrast as brighter desktop
+pixels become more exposed. Custom Terminal backgrounds retain their authored distinction through
+the same operation. Every Pane keeps the selected chip's neutral hairline at any transparency.
 
 The desktop behind an Operating-System Window may use its platform's native effect. Everything
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
@@ -89,9 +90,11 @@ against arbitrary final desktop pixels. Opaque accessibility presentation remain
 fallback. A full source-over floating tint would restore that guarantee by obscuring the native
 material, which conflicts with the shared-material presentation.
 
-The window root owns the continuous window tint. Containers and resting controls paint only their color
-difference from that reference, and nested list rows paint only their own fill. Explicit Terminal cell
-backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
+The window root owns the continuous window tint. The built-in Dark Terminal default backdrop adds
+its small dark difference from that tint and retains only enough Terminal-colored backing to protect
+text against bright desktop endpoints. Containers and resting controls paint only their color
+difference from that reference, and nested list rows paint only their own fill. Explicit Terminal
+cell backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
 colors retain their own semantics.
 
 Controls inherit their containing surface's material. Window, Panel, Card and Floating hosts select
