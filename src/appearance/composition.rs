@@ -59,8 +59,8 @@ pub(crate) enum SurfaceRole {
     Sheet,
     /// Sidebar, title bar, Tab strip, stage perimeter, Split gaps and Pane corner fillets.
     Base,
-    /// Anything resting on the base without covering other content: Panes, Tab and sidebar
-    /// chips, buttons, fields, steppers, toggles and rows.
+    /// Anything resting on the base without covering other content: Tab and sidebar chips,
+    /// buttons, fields, steppers, toggles and rows.
     Surface,
     /// Menus, popovers, dialogs and tooltips, which filter and tint rendered content beneath them.
     Floating,
@@ -112,14 +112,6 @@ impl SurfaceMaterials {
     /// How much already-painted in-window content a floating shell may retain at maximum
     /// transparency. The remainder exposes the effective native window backdrop.
     const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
-    /// The Pane backdrop's lift toward the scheme's elevated surface, reached by `GLASS_ENGAGED_AT`.
-    ///
-    /// Panes stay close to the base, below the brighter cards and selected controls.
-    /// This limits the light tint added to the Terminal surface.
-    const LIFT_BRIGHT: f32 = 0.5;
-    const LIFT_DARK: f32 = 0.5;
-    /// Terminal colors need a steadier backing than navigation surfaces in Dark.
-    const PANE_PROTECTION_DARK: f32 = 0.5;
     /// How much more ink a dark ladder spends at the maximum setting than over its own base.
     ///
     /// A dark rung is solved as light ink over the scheme's near-black base, but the backdrop the
@@ -356,44 +348,6 @@ impl SurfaceMaterials {
         [base.r, base.g, base.b]
             .iter()
             .all(|channel| *channel >= 128)
-    }
-
-    /// How far a Pane's default backdrop over `base` moves toward the scheme's elevated surface. A
-    /// near-black Terminal background that admits the desktop reads as an opening, not a surface,
-    /// so the lift reaches its full value by the default setting. Zero while opaque.
-    pub(super) fn elevation(self, base: super::Color) -> f32 {
-        let lift = if Self::is_bright(base) {
-            Self::LIFT_BRIGHT
-        } else {
-            Self::LIFT_DARK
-        };
-        self.engagement() * lift
-    }
-
-    /// Composes the Pane tint and its readability backing in one fill.
-    pub(crate) fn pane_surface(
-        self,
-        base: super::Color,
-        elevated: super::Color,
-        terminal_background: super::Color,
-    ) -> super::Color {
-        let target = terminal_background.mix(elevated, f64::from(self.elevation(base)));
-        let lift = self.paint(SurfaceRole::Surface, base, target);
-        let protection = self.pane_protection(base);
-        if protection == 0.0 {
-            return lift;
-        }
-        let backing = terminal_background.multiply_opacity((protection * 255.0).round() as u8);
-        lift.source_over(backing)
-    }
-
-    /// Dark backing beneath a Pane's elevation tint. Light keeps its existing material.
-    fn pane_protection(self, base: super::Color) -> f32 {
-        if Self::is_bright(base) {
-            0.0
-        } else {
-            Self::PANE_PROTECTION_DARK * self.engagement()
-        }
     }
 
     pub(crate) const fn is_opaque(self) -> bool {

@@ -92,30 +92,53 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                     "{mode:?} at {transparency}: an elevated resting surface retains more color than the sheet"
                 );
                 if transparency == 1.0 {
-                    // The sheet clears while Panes and controls keep enough tint to retain shape.
+                    // The sheet clears while elevated controls keep enough tint to retain shape.
                     assert_eq!(sheet.a, 0);
-                    assert!(pane.a > 0 && pane.a < 255);
                     if mode == AppearanceMode::Dark {
-                        assert!(pane.a < 192);
+                        assert_eq!(pane, sheet);
+                    } else {
+                        assert!(pane.a > 0 && pane.a < 255);
                     }
                     assert!(controls.row_selected_background.a > 0);
                     assert!(controls.elevated_surface_background.a >= 96);
-                } else {
+                } else if mode == AppearanceMode::Light {
                     // Check transmission through two resting layers above the window sheet.
                     let retained = (1.0 - f64::from(pane.a) / 255.0)
                         * (1.0 - f64::from(controls.row_selected_background.a) / 255.0);
-                    let repeated_full_tints = f64::from(transparency).powi(2);
-                    if mode == AppearanceMode::Dark {
-                        assert!(
-                            retained > repeated_full_tints * 3.0,
-                            "{mode:?}: resting layers retain {retained}"
-                        );
-                    } else {
-                        // Light Panes now retain the same stronger tint as selected navigation.
-                        assert!(retained > 0.0, "Light surfaces must still transmit");
-                    }
+                    assert!(retained > 0.0, "Light surfaces must still transmit");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn dark_terminal_surface_matches_the_window_root_material() {
+    let mut preferences = AppearancePreferences {
+        mode: AppearanceMode::Dark,
+        ..Default::default()
+    };
+    for transparency in [0.0, 0.05, 0.35, 0.7, 1.0] {
+        preferences.background.transparency = transparency;
+        let resolved = SchemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::unavailable()
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+        let root_fill = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+        let pane_fill = prepared.pane_surface(resolved.terminal.colors.background);
+        for desktop in [Color::rgb(0x202020), Color::rgb(0x808080)] {
+            let root = root_fill.source_over(desktop);
+            assert_eq!(
+                pane_fill.source_over(root),
+                root,
+                "Dark Terminal and window root must share one material at transparency {transparency}",
+            );
         }
     }
 }
@@ -297,69 +320,6 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             (26, 26),
             "Light navigation should retain its quiet authored rims at {transparency}"
         );
-    }
-}
-
-#[test]
-fn dark_terminal_backing_improves_text_contrast_and_reduces_desktop_variation() {
-    let catalog = SchemeCatalog::default();
-    for transparency in [0.15, 0.35, 0.7, 1.0] {
-        let mut preferences = AppearancePreferences {
-            mode: AppearanceMode::Dark,
-            ..Default::default()
-        };
-        preferences.background.transparency = transparency;
-        let resolved = catalog
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable()
-                    .with_composition(CompositionCapabilities::new(true, true)),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let terminal = &resolved.terminal.colors;
-        let pane = prepared.pane_surface(terminal.background);
-        let lift_only = prepared.surface(
-            SurfaceRole::Surface,
-            terminal.background.mix(
-                prepared.colors.elevated_surface_background,
-                f64::from(prepared.materials.elevation(prepared.colors.background)),
-            ),
-        );
-        let render = |fill: Color, desktop: Color| {
-            fill.source_over(
-                prepared
-                    .surface(SurfaceRole::Sheet, prepared.colors.background)
-                    .source_over(desktop),
-            )
-        };
-        for desktop in [0x808080, 0x906060, 0x608090].map(Color::rgb) {
-            let protected = render(pane, desktop);
-            let unprotected = render(lift_only, desktop);
-            for text in [terminal.foreground, terminal.normal[2], terminal.normal[4]] {
-                assert!(
-                    text.contrast_ratio(protected) > text.contrast_ratio(unprotected),
-                    "Dark at {transparency}: backing must improve text contrast"
-                );
-            }
-        }
-        let dark = render(pane, Color::rgb(0x303030));
-        let bright = render(pane, Color::rgb(0x909090));
-        let previous_dark = render(lift_only, Color::rgb(0x303030));
-        let previous_bright = render(lift_only, Color::rgb(0x909090));
-        for (new, previous) in [
-            (bright.r - dark.r, previous_bright.r - previous_dark.r),
-            (bright.g - dark.g, previous_bright.g - previous_dark.g),
-            (bright.b - dark.b, previous_bright.b - previous_dark.b),
-        ] {
-            assert!(new > 0, "the Pane should still admit the desktop");
-            assert!(
-                f32::from(new) <= f32::from(previous) * 0.6 + 1.0,
-                "the desktop should influence text backing substantially less"
-            );
-        }
     }
 }
 
