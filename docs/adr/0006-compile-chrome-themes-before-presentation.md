@@ -96,9 +96,9 @@ material, which conflicts with the shared-material presentation.
 The window root owns the continuous window tint. The built-in Dark Terminal background is authored
 one small step below that tint, so reproducing it costs a sliver of ink and a Pane reads as a
 quieter region of the same window rather than as an inset. Containers and resting controls paint
-only their color difference from that reference, and nested list rows paint only their own fill. Explicit Terminal
-cell backgrounds remain opaque even when their RGB matches the default. Text and terminal protocol
-colors retain their own semantics.
+only their color difference from that reference, and nested list rows paint only their own fill.
+Explicit Terminal cell backgrounds remain opaque even when their RGB matches the default. Text and
+terminal protocol colors retain their own semantics.
 
 Controls inherit their containing surface's material. Window, Panel, Card and Floating hosts select
 prepared control themes from the same catalog. Their normal, hover, pressed, selected and disabled
