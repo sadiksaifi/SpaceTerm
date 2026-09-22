@@ -94,11 +94,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
                 if transparency == 1.0 {
                     // The sheet clears while elevated controls keep enough tint to retain shape.
                     assert_eq!(sheet.a, 0);
-                    if mode == AppearanceMode::Dark {
-                        assert_eq!(pane, sheet);
-                    } else {
-                        assert!(pane.a > 0 && pane.a < 255);
-                    }
+                    assert!(pane.a > 0 && pane.a < 255);
                     assert!(controls.row_selected_background.a > 0);
                     assert!(controls.elevated_surface_background.a >= 96);
                 } else if mode == AppearanceMode::Light {
@@ -113,7 +109,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn dark_terminal_surface_matches_the_window_root_material() {
+fn dark_terminal_surface_stays_a_subtle_lift_from_the_window_root() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Dark,
         ..Default::default()
@@ -134,10 +130,15 @@ fn dark_terminal_surface_matches_the_window_root_material() {
         let pane_fill = prepared.pane_surface(resolved.terminal.colors.background);
         for desktop in [Color::rgb(0x202020), Color::rgb(0x808080)] {
             let root = root_fill.source_over(desktop);
-            assert_eq!(
-                pane_fill.source_over(root),
-                root,
-                "Dark Terminal and window root must share one material at transparency {transparency}",
+            let pane = pane_fill.source_over(root);
+            let lift = [
+                i16::from(pane.r) - i16::from(root.r),
+                i16::from(pane.g) - i16::from(root.g),
+                i16::from(pane.b) - i16::from(root.b),
+            ];
+            assert!(
+                lift.into_iter().all(|channel| (1..=3).contains(&channel)),
+                "Dark Terminal must remain a small neutral lift at transparency {transparency}: root={root:?}, pane={pane:?}",
             );
         }
     }

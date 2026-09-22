@@ -511,7 +511,7 @@ impl ChromePalette {
 fn spaceterm_dark_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0xd8d8d8),
-        background: Color::rgb(0x151515),
+        background: Color::rgb(0x171717),
         normal: [
             0x2e2e2e, 0xe5696b, 0x83c07e, 0xe6b85c, 0x5fa3f0, 0xc387d9, 0x5fc0c8, 0xc8c8c8,
         ]
