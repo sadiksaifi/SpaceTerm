@@ -182,10 +182,13 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_outline: Color::rgb(0x313131),
             control_outline_strong: Color::rgb(0x3e3e3e),
             tab_separator: Color::rgb(0x363636),
-            // Dark states a selected chip with its fill alone.
-            selected_rim: Color::rgba(0),
-            selected_rim_hover: Color::rgba(0),
-            selected_rim_inactive: Color::rgba(0),
+            // A chip is lifted rather than outlined. The rim catches the light the way a raised
+            // edge would, so a Tab and a sidebar row read as sitting above the strip behind them
+            // without a drawn line around them; Dark states it faintest, where an outline reads
+            // as a frame. The fill alone states keyboard focus.
+            selected_rim: Color::rgba(0xffffff0a),
+            selected_rim_hover: Color::rgba(0xffffff10),
+            selected_rim_inactive: Color::rgba(0xffffff0a),
             mark_outline: 0x767676,
             mark_outline_strong: 0x898989,
             mark_track: 0x202020,
@@ -220,14 +223,18 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_pressed: 0xdcdcdc,
             ghost_hover: 0xd2d2d2,
             ghost_pressed: 0xc4c4c4,
-            selected: 0xfafafa,
+            // A selection sits one rung above the raised tone that controls, grouped content and
+            // the Terminal share, so a selected Tab or row is the brightest thing in the window.
+            // It stops short of white: reproducing pure white takes an ink no window can see
+            // through, and a selection transmits like every other resting surface.
+            selected: 0xfdfdfd,
             selected_inactive: 0xf4f4f4,
             row_hover: 0xf4f4f4,
-            row_selected: 0xfafafa,
-            row_selected_hover: Some(0xfafafa),
-            navigation_selected: Some(0xfafafa),
-            tab_active: 0xfafafa,
-            tab_active_hover: Some(0xfafafa),
+            row_selected: 0xfdfdfd,
+            row_selected_hover: Some(0xfdfdfd),
+            navigation_selected: Some(0xfdfdfd),
+            tab_active: 0xfdfdfd,
+            tab_active_hover: Some(0xfdfdfd),
             row_selected_text: 0x161616,
             row_selected_secondary: 0x505050,
             text: 0x1e1e1e,
@@ -244,9 +251,17 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_outline: Color::rgba(0x0000002b),
             control_outline_strong: Color::rgba(0x00000040),
             tab_separator: Color::rgba(0x00000028),
-            selected_rim: Color::rgba(0x0000001a),
-            selected_rim_hover: Color::rgba(0x0000002b),
-            selected_rim_inactive: Color::rgba(0x0000000f),
+            // The rim belongs to the chip, not to the strip behind it. A dark scheme states it
+            // as light on the far side of the fill, where it reads as the chip's own lit edge
+            // and the chip gains a little mass. A bright fill sits at the top of the range with
+            // no room above it, so this states the same edge inward instead, and it has to stop
+            // early: the fill's own step over the strip collapses as the window transmits, and
+            // an edge that outruns it lands on the strip's tone and draws a line around the
+            // chip. At the default Setting this covers about a third of that step.
+            // A chip keeps it whether or not its collection holds the keyboard; the fill dims.
+            selected_rim: Color::rgba(0x00000004),
+            selected_rim_hover: Color::rgba(0x00000006),
+            selected_rim_inactive: Color::rgba(0x00000004),
             mark_outline: 0x7f7f7f,
             mark_outline_strong: 0x6d6d6d,
             mark_track: 0xe5e5e5,
@@ -544,7 +559,10 @@ fn spaceterm_dark_terminal() -> TerminalColors {
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0x242424),
-        background: Color::rgb(0xfafafa),
+        // The reading surface takes the brightest rung a transmitting surface can hold, the same
+        // one a selection takes. Pure white costs an ink of alpha 251 over the window root, and a
+        // Pane that opaque stops answering the Transparency Setting at all.
+        background: Color::rgb(0xfdfdfd),
         normal: [
             0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
         ]
@@ -800,10 +818,15 @@ mod tests {
                     colors.tab_inactive_selected_border,
                 ),
             ] {
-                assert_eq!(
+                assert!(
                     border.a > 0,
-                    appearance == Appearance::Light,
-                    "{appearance:?} built-in {role} should follow its theme edge policy"
+                    "{appearance:?} built-in {role} should carry the chip hairline"
+                );
+                assert_eq!(
+                    weight(border) > weight(colors.row_selected_background),
+                    appearance == Appearance::Dark,
+                    "{appearance:?} built-in {role} should draw its hairline in the ink its \
+                     appearance bounds surfaces with"
                 );
             }
 
@@ -899,7 +922,10 @@ mod tests {
                 ("raised surface", colors.elevated_surface_background),
             ] {
                 if appearance == Appearance::Light && host_name == "raised surface" {
-                    assert_eq!(colors.row_selected_background, host);
+                    // A bright selection takes the rung above this surface, and hover stays
+                    // below it, so the raised host sits between the two rather than under both.
+                    assert!(weight(colors.row_selected_background) > weight(host));
+                    assert!(weight(colors.row_hover_background) < weight(host));
                     continue;
                 }
                 let hover_step = weight(colors.row_hover_background) - weight(host);

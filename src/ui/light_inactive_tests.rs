@@ -166,7 +166,7 @@ fn assert_active_segment_uses_elevated_surface(
     floating: bool,
 ) {
     let track = paint.element_background.source_over(final_host);
-    let elevated = Color::rgb(0xfafafa);
+    let elevated = Color::rgb(0xfdfdfd);
     let materials = if floating {
         appearance.floating_materials
     } else {

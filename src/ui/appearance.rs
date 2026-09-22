@@ -3108,12 +3108,30 @@ fn prepare_app_state_boundary<const N: usize>(
     proposed
 }
 
+/// The separation a chip rim must reach, or `None` to keep the authored one as painted.
+///
+/// A chip rim is a lift, not a boundary: it catches the light a raised edge would so a Tab or a
+/// selected row reads as sitting above the strip behind it, and both built-in schemes author it
+/// well under the Pane rim that does state a boundary. Raising it to the boundary floor would
+/// draw an outline around every chip, which is the frame this avoids. A custom definition keeps
+/// the floor, because its rim is the only edge the application can count on, and Increase
+/// Contrast keeps it everywhere, because a reader who asks for stronger boundaries is asking for
+/// exactly the outline the built-ins decline.
+const fn app_owned_hairline(built_in: bool, increase_contrast: bool) -> Option<f64> {
+    if built_in && !increase_contrast {
+        None
+    } else {
+        Some(FloatingContrastFloors::STANDARD.boundary)
+    }
+}
+
 fn prepare_app_owned_rows(
     colors: &mut ChromeColors,
     materials: SurfaceMaterials,
     semantic_host: Color,
     final_host: Color,
     floors: FloatingContrastFloors,
+    hairline: Option<f64>,
 ) {
     macro_rules! row {
         ($fill:ident, [$primary:ident, $secondary:ident, $icon:ident, $matched:ident], $selection:expr) => {{
@@ -3190,13 +3208,16 @@ fn prepare_app_owned_rows(
     colors.navigation_selected_foreground = foreground;
     colors.navigation_selected_secondary = secondary;
     colors.navigation_selected_icon = icon;
+    let Some(minimum) = hairline else {
+        return;
+    };
     colors.row_selected_border = prepare_app_state_boundary(
         materials,
         semantic_host,
         final_host,
         [colors.row_selected_background],
         colors.row_selected_border,
-        floors.boundary,
+        minimum,
     );
     colors.row_selected_hover_border = prepare_app_state_boundary(
         materials,
@@ -3204,7 +3225,7 @@ fn prepare_app_owned_rows(
         final_host,
         [colors.row_selected_hover_background],
         colors.row_selected_hover_border,
-        floors.boundary,
+        minimum,
     );
 }
 
@@ -3214,6 +3235,7 @@ fn prepare_app_owned_tabs(
     semantic_host: Color,
     final_host: Color,
     floors: FloatingContrastFloors,
+    hairline: Option<f64>,
 ) {
     macro_rules! tab {
         ($fill:ident, [$foreground:ident, $icon:ident], $selection:expr) => {{
@@ -3259,6 +3281,9 @@ fn prepare_app_owned_tabs(
         [tab_inactive_selected_foreground, tab_inactive_selected_icon],
         Some(1.4)
     );
+    let Some(minimum) = hairline else {
+        return;
+    };
     colors.tab_active_border = prepare_app_state_boundary(
         materials,
         semantic_host,
@@ -3268,7 +3293,7 @@ fn prepare_app_owned_tabs(
             colors.tab_active_hover_background,
         ],
         colors.tab_active_border,
-        floors.boundary,
+        minimum,
     );
     colors.tab_inactive_selected_border = prepare_app_state_boundary(
         materials,
@@ -3276,7 +3301,7 @@ fn prepare_app_owned_tabs(
         final_host,
         [colors.tab_inactive_selected_background],
         colors.tab_inactive_selected_border,
-        floors.boundary,
+        minimum,
     );
 }
 
@@ -3293,6 +3318,7 @@ fn prepare_state_control_host(
     floors: FloatingContrastFloors,
     explicit_segmented_track: bool,
     built_in_light: bool,
+    built_in_dark: bool,
 ) -> PreparedControlHost {
     let (mut reference, mut fallback_families) = rehost_control_reference(authored, host);
     if host_role == spaceterm_ui::ControlHost::Panel
@@ -3331,6 +3357,10 @@ fn prepare_state_control_host(
             semantic_host,
             final_host,
             FloatingContrastFloors::for_increase_contrast(state.capabilities.increase_contrast),
+            app_owned_hairline(
+                built_in_light || built_in_dark,
+                state.capabilities.increase_contrast,
+            ),
         );
     }
     let colors = resolve_material_control_colors(
@@ -3828,9 +3858,27 @@ impl ChromeAppearance {
         }
     }
 
-    /// Persistent selection uses the shared host-relative prominent-surface material.
+    /// Persistent selection paints its difference from its host, like any other resting surface.
+    ///
+    /// A selected chip is read against the surface it sits on, so what it owes the reader is its
+    /// authored step from that host, not a fixed density. Holding the step against the opaque
+    /// host instead pins a bright chip near opacity, and a pinned chip keeps its ink while the
+    /// shell under it goes on fading: a step authored at 1.21 then renders at 2.0 and then 4.0 as
+    /// the Setting rises, until the chip is the loudest thing in a window that was asked for
+    /// glass. Dark always spent less ink than that bound asked for, so this is what a Dark chip
+    /// has painted all along.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
-        self.prominent_surface(host, color)
+        self.materials
+            .paint_compact(SurfaceRole::Surface, host, color)
+    }
+
+    /// The fill an unselected chip takes under the pointer.
+    ///
+    /// Hover is the same kind of small surface as a selection and takes the same material, so the
+    /// two keep the order their authored tones set: a hovered row can never overtake the selected
+    /// row beside it, whatever the window transmits.
+    pub(crate) fn hover_surface(&self, host: Color, color: Color) -> Color {
+        self.selection_surface(host, color)
     }
 
     /// Strengthens a selected chip's hover rim when its fill remains unchanged.
@@ -3870,11 +3918,6 @@ impl ChromeAppearance {
         let toward = |amount: u16| resting.mix(endpoint, f64::from(amount) / 255.0);
         let amount = least(&|amount| toward(amount).contrast_ratio(host) >= target);
         self.materials.edge(host, toward(amount))
-    }
-
-    /// Selected navigation and Light Pane interiors share one material-strength policy.
-    fn prominent_surface(&self, host: Color, color: Color) -> Color {
-        prominent_surface_with(self.materials, host, color)
     }
 
     /// Applies the window's material for one surface role to an authored background color.
@@ -4031,17 +4074,13 @@ impl ChromeAppearance {
 
     /// The backdrop a Pane paints beneath its Terminal.
     ///
-    /// Light lifts a Pane above its chrome, so it holds that step with the selected navigation
-    /// material. Dark seats a Pane just below the window root, where the step is small enough
-    /// that reproducing it costs a sliver of ink: the Pane is an ordinary resting surface there
-    /// and paints only its difference from the window sheet. A Dark Pane therefore transmits
-    /// what the Transparency Setting asks of every other resting surface, and stays a subtle
-    /// step darker than the chrome around it at every setting. Explicit cell backgrounds are
-    /// separate.
+    /// A Pane is an ordinary resting surface in both appearances: it paints only its difference
+    /// from the window sheet, so it transmits what the Transparency Setting asks of every other
+    /// resting surface and keeps its authored step from the chrome around it. Light authors that
+    /// step upward and Dark downward, and the same overlay carries either direction, so neither
+    /// appearance needs a backing of its own, and neither does a chip or a row resting beside it.
+    /// Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
-        if self.appearance == Appearance::Light {
-            return self.prominent_surface(self.colors.background, terminal_background);
-        }
         self.surface(SurfaceRole::Surface, terminal_background)
     }
 
@@ -4223,12 +4262,17 @@ impl ChromeAppearance {
         if capabilities.increase_contrast || !built_in_light {
             let app_owned_floors =
                 FloatingContrastFloors::for_increase_contrast(capabilities.increase_contrast);
+            let hairline = app_owned_hairline(
+                built_in_light || built_in_dark,
+                capabilities.increase_contrast,
+            );
             prepare_app_owned_rows(
                 &mut colors,
                 resolved.composition.materials,
                 title_bar,
                 final_title_bar,
                 app_owned_floors,
+                hairline,
             );
             prepare_app_owned_tabs(
                 &mut colors,
@@ -4236,6 +4280,7 @@ impl ChromeAppearance {
                 title_bar,
                 final_title_bar,
                 app_owned_floors,
+                hairline,
             );
         }
         let floating_reference = if built_in_light {
@@ -4339,6 +4384,7 @@ impl ChromeAppearance {
             floating_contrast_floors,
             explicit_segmented_track,
             built_in_light,
+            built_in_dark,
         );
         let card_host = non_floating_control_host_background(
             resolved.composition.materials,
@@ -4355,6 +4401,7 @@ impl ChromeAppearance {
             floating_contrast_floors,
             explicit_segmented_track,
             built_in_light,
+            built_in_dark,
         );
         let title_bar_controls = prepare_state_control_host(
             &authored,
@@ -4377,6 +4424,7 @@ impl ChromeAppearance {
             floating_contrast_floors,
             explicit_segmented_track,
             built_in_light,
+            built_in_dark,
         );
         let FloatingColorResolution {
             colors: floating_control_colors,
@@ -4806,6 +4854,7 @@ mod typography_tests {
                     capabilities: CompositionCapabilities::default(),
                 },
                 super::FloatingContrastFloors::STANDARD,
+                false,
                 false,
                 false,
             );

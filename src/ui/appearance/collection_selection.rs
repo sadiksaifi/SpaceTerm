@@ -78,7 +78,6 @@ pub(super) fn prepare(
             result.colors_mut(host),
             inactive_colors,
             active.capabilities.increase_contrast,
-            1.12,
             |fill| {
                 let surface = active
                     .selection_surface(semantic_host, fill)
@@ -102,11 +101,6 @@ pub(super) fn prepare(
         &mut result.floating,
         &inactive.floating_colors,
         active.capabilities.increase_contrast,
-        if active.appearance == crate::appearance::Appearance::Dark {
-            super::SUBDUED_SELECTION_CONTRAST
-        } else {
-            1.12
-        },
         |fill| hosts.map(|host| fill.source_over(host)),
     );
     result
@@ -128,7 +122,6 @@ fn prepare_colors(
     active: &mut ChromeColors,
     inactive: &ChromeColors,
     increase_contrast: bool,
-    minimum_selection_contrast: f64,
     backgrounds: impl Fn(Color) -> [Color; 2] + Copy,
 ) {
     let primary = if increase_contrast { 7.0 } else { 4.5 };
@@ -144,7 +137,6 @@ fn prepare_colors(
             (&mut active.row_selected_match, primary),
         ],
         increase_contrast,
-        minimum_selection_contrast,
         backgrounds,
     );
     prepare_state(
@@ -157,7 +149,6 @@ fn prepare_colors(
             (&mut active.row_selected_hover_match, primary),
         ],
         increase_contrast,
-        minimum_selection_contrast,
         backgrounds,
     );
     active.row_selected_border = inactive.row_selected_border;
@@ -169,7 +160,6 @@ fn prepare_state<const N: usize>(
     inactive_fill: Color,
     mut content: [(&mut Color, f64); N],
     increase_contrast: bool,
-    minimum_selection_contrast: f64,
     backgrounds: impl Fn(Color) -> [Color; 2],
 ) {
     let active_fill = *target_fill;
@@ -179,13 +169,14 @@ fn prepare_state<const N: usize>(
         super::SUBDUED_SELECTION_CONTRAST
     } else {
         // A translucent selected fill cannot promise its opaque reference contrast. Retain the
-        // visible active step instead of flipping a raised selection into a dark recess.
+        // visible active step instead of flipping a raised selection into a dark recess, and ask
+        // an unfocused selection for no more separation than the focused one actually has: a
+        // fixed floor above that step is only reachable by leaving the window's material behind.
         backgrounds(active_fill)
             .into_iter()
             .zip(hosts)
             .map(|(background, host)| background.contrast_ratio(host))
             .fold(super::SUBDUED_SELECTION_CONTRAST, f64::min)
-            .max(minimum_selection_contrast)
     };
     let inactive_keeps_direction = backgrounds(active_fill)
         .into_iter()

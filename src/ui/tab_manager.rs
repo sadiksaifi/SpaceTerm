@@ -2164,10 +2164,9 @@ mod tests {
                 ),
                 "{appearance:?} Active Tab title should match a selected navigation label"
             );
-            assert_eq!(
+            assert!(
                 colors.tab_active_border.a > 0,
-                appearance == Appearance::Light,
-                "{appearance:?} Active Tab should follow its theme edge policy"
+                "{appearance:?} Active Tab should carry the chip hairline"
             );
             assert_eq!(
                 chip.hover_fill == chip.fill,

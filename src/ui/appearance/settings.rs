@@ -243,6 +243,7 @@ fn prepare_variant(
             floors,
             explicit_segmented_track,
             true,
+            false,
         );
         chrome.colors = super::with_final_host_content(chrome.colors, &window.colors);
         chrome.control_colors = window.colors;
@@ -289,6 +290,7 @@ fn prepare_variant(
         floors,
         explicit_segmented_track,
         chrome.built_in_light,
+        chrome.built_in_dark,
     );
     chrome.card_controls = prepare_state_control_host(
         &settings_authored,
@@ -299,6 +301,7 @@ fn prepare_variant(
         floors,
         explicit_segmented_track,
         chrome.built_in_light,
+        chrome.built_in_dark,
     );
     chrome.semantic_text_pairs = super::super::chrome_semantic_pairs::prepare_semantic_text_pairs(
         &chrome.colors,
@@ -338,8 +341,9 @@ fn prepare_surfaces(
             resolved.provenance.get("elevated_surface_background"),
             Some(ColorProvenance::Authored)
         );
-    // Navigation stays muted. The content canvas shares the Workspace's bright material;
-    // inset groups sit between those tones rather than competing with selected controls.
+    // Navigation stays muted, and a group rises from the canvas it sits on. Light once sank its
+    // groups instead, to keep them off the tone a selected control takes, which left grey wells
+    // cut into a white page while Dark raised the same groups. A group is elevated in both.
     let sidebar_semantic = if chrome.built_in_light {
         chrome.colors.panel_background
     } else if chrome.built_in_dark
@@ -353,16 +357,16 @@ fn prepare_surfaces(
     } else {
         settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance)
     };
+    let elevated = chrome.colors.elevated_surface_background;
+    // Dark seats the canvas on the window root, which its lifted navigation already clears. A
+    // bright scheme's navigation rests on that root, so the canvas takes the rung between root
+    // and group instead, leaving one step on either side of it.
     let canvas_semantic = if light_content_hierarchy {
-        chrome.colors.elevated_surface_background
+        root.mix(elevated, 0.5)
     } else {
         root
     };
-    let card_semantic = if light_content_hierarchy {
-        root.mix(canvas_semantic, 0.5)
-    } else {
-        chrome.colors.elevated_surface_background
-    };
+    let card_semantic = elevated;
     let sidebar_materials = chrome.materials;
     let card_materials = chrome
         .materials
@@ -373,6 +377,10 @@ fn prepare_surfaces(
         });
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
     let canvas_paint = if light_content_hierarchy {
+        // A bright canvas sits one rung above the navigation beside it and one below the groups
+        // on it. Both steps are small, and a sheet that thins with the Setting gives up the
+        // first of them: the navigation column would merge into the page it borders. Hold the
+        // rung instead, the way a group holds its own step from this canvas.
         super::prominent_surface_with(chrome.materials, root, canvas_semantic)
     } else {
         // This column is a window backing, not a nested card. Keep the same requested
@@ -552,7 +560,7 @@ mod tests {
 
         assert!(card.paint.a < u8::MAX, "the card must keep transmitting");
         assert!(
-            card.background.r < canvas.r && card.background.contrast_ratio(canvas) >= 1.05,
+            card.background.r > canvas.r && card.background.contrast_ratio(canvas) >= 1.05,
             "the card must retain its content-tone step over the canvas"
         );
     }

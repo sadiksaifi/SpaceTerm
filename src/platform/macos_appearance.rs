@@ -8,7 +8,7 @@ use objc::{class, msg_send, sel, sel_impl};
 
 use super::appearance::{
     AccessibilityDisplayOptions, AppearancePlatform, SystemAppearanceObservation,
-    SystemAppearanceSubscription,
+    SystemAppearanceSubscription, WindowBackdrop,
 };
 use crate::appearance::Appearance;
 
@@ -122,8 +122,8 @@ impl AppearancePlatform for MacosAppearancePlatform {
             }
         }
     }
-    fn apply_window_backdrop(&self, window: &gpui::Window, blurred: bool) {
-        super::macos_window_backdrop::apply(window, blurred);
+    fn apply_window_backdrop(&self, window: &gpui::Window, backdrop: WindowBackdrop) {
+        super::macos_window_backdrop::apply(window, backdrop);
     }
     fn system_appearance(&self) -> Option<Appearance> {
         // SAFETY: the preference is read on the AppKit thread. It is the system preference,

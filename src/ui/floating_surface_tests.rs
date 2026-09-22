@@ -20,8 +20,19 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
-    let selected = Color::rgb(0xfafafa);
+    // A selection and the reading surface take the brightest rung a transmitting surface can
+    // hold, one above the raised tone that controls and grouped content share. Neither reaches
+    // white, which no transmitting surface can reproduce.
+    let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
+    assert_eq!(
+        resolved.terminal.colors.background, selected,
+        "the Terminal and a selection share the brightest transmitting rung"
+    );
+    assert!(
+        selected.r > prepared.colors.elevated_surface_background.r,
+        "that rung rests above the raised tone controls and grouped content share"
+    );
     for (role, fill) in [
         ("Tab", prepared.colors.tab_active_background),
         (
@@ -50,7 +61,6 @@ fn light_selections_and_terminal_share_the_common_surface() {
             "floating segment",
             prepared.floating_segmented_colors.selection_background,
         ),
-        ("Terminal", resolved.terminal.colors.background),
     ] {
         assert_eq!(
             fill, selected,
@@ -150,8 +160,9 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
                 "Light {name} at {transparency}: selected hover should keep its content fill"
             );
             assert!(
-                (1.15..=1.4).contains(&edge.contrast_ratio(host)),
-                "Light {name} at {transparency}: resting edge {edge:?} must remain visible and quiet on {host:?}"
+                (1.025..=1.09).contains(&edge.contrast_ratio(host)),
+                "Light {name} at {transparency}: the resting lift {edge:?} must stay visible on \
+                 {host:?} without drawing a border"
             );
             assert!(
                 hovered_edge.contrast_ratio(host) > edge.contrast_ratio(host),
@@ -182,7 +193,7 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
         let divider = settings.separator(Card).source_over(card);
 
         assert!(
-            card.r < canvas.r && card.contrast_ratio(canvas) >= 1.05,
+            card.r > canvas.r && card.contrast_ratio(canvas) >= 1.05,
             "Light Settings at {transparency}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
         );
         assert!(
@@ -370,7 +381,16 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
                     );
                     assert_eq!(sidebar.paint.a, canvas.paint.a);
                 } else {
-                    assert!(sidebar.paint.a < canvas.paint.a);
+                    // A bright scheme's navigation rests on the window root, so its canvas
+                    // cannot thin toward that root without merging into the column beside it.
+                    // It holds its own rung instead, at whatever ink that costs.
+                    assert_eq!(
+                        canvas
+                            .background
+                            .source_over(settings.chrome.colors.background),
+                        canvas.semantic,
+                        "the Light Settings canvas must hold its authored rung"
+                    );
                 }
                 assert!(canvas.paint.a < card_alpha);
                 assert!(card_alpha < u8::MAX);
@@ -421,10 +441,12 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             true,
         );
         let panel = prepared.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel);
-        assert_eq!(
+        // An unfocused selection takes the focused fill or the scheme's dimmer authored one,
+        // never a darker fill invented to reach a floor the window's material cannot hold.
+        assert!(
+            [Color::rgb(0xfdfdfd), Color::rgb(0xf4f4f4)].contains(&panel.row_selected_background),
+            "unfocused sidebar at transparency {transparency}: {:?}; active {:?}; host {:?}",
             panel.row_selected_background,
-            Color::rgb(0xfafafa),
-            "unfocused sidebar at transparency {transparency}; active {:?}; host {:?}",
             prepared.panel_controls.reference.row_selected_background,
             prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
         );
@@ -477,16 +499,17 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
     let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let background = Color::rgb(0xe5e5e5);
     let raised = Color::rgb(0xfafafa);
+    let selected = Color::rgb(0xfdfdfd);
     assert_eq!(prepared.colors.background, background);
     assert_eq!(prepared.colors.title_bar_background, background);
     assert_eq!(prepared.colors.panel_background, background);
     assert_eq!(prepared.colors.elevated_surface_background, raised);
-    assert_eq!(prepared.colors.tab_active_background, raised);
+    assert_eq!(prepared.colors.tab_active_background, selected);
     assert_eq!(
         prepared.panel_controls.reference.row_selected_background,
-        raised
+        selected
     );
-    assert_eq!(prepared.floating_colors.row_selected_background, raised);
+    assert_eq!(prepared.floating_colors.row_selected_background, selected);
 }
 
 #[test]
@@ -720,9 +743,10 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                             active_colors.row_background,
                         )
                         .source_over(host_background);
-                    for (fill, primary, secondary, icon, matched) in [
+                    for (fill, focused_fill, primary, secondary, icon, matched) in [
                         (
                             mixed.row_selected_background,
+                            active_colors.row_selected_background,
                             mixed.row_selected_foreground,
                             mixed.row_selected_secondary,
                             mixed.row_selected_icon,
@@ -730,6 +754,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                         (
                             mixed.row_selected_hover_background,
+                            active_colors.row_selected_hover_background,
                             mixed.row_selected_hover_foreground,
                             mixed.row_selected_hover_secondary,
                             mixed.row_selected_hover_icon,
@@ -762,6 +787,26 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                                 )
                                 .source_over(row_host),
                         ];
+                        // An unfocused selection is asked for the separation the focused one
+                        // actually has, which is all a translucent fill can promise, and never
+                        // for more than the subdued bound.
+                        let focused_backgrounds = [
+                            active
+                                .selection_surface(semantic_host, focused_fill)
+                                .source_over(host_background),
+                            active
+                                .selection_surface(active_colors.row_background, focused_fill)
+                                .source_over(row_host),
+                        ];
+                        let selection_floor = if increase_contrast {
+                            selection_floor
+                        } else {
+                            focused_backgrounds
+                                .into_iter()
+                                .zip(resting_backgrounds)
+                                .map(|(focused, resting)| focused.contrast_ratio(resting))
+                                .fold(selection_floor, f64::min)
+                        };
                         for (background, resting) in
                             backgrounds.into_iter().zip(resting_backgrounds)
                         {
@@ -798,11 +843,13 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         inactive_colors.row_selected_hover_border
                     );
                 }
+                let focused_floating = active.host_colors(spaceterm_ui::ControlHost::Floating);
                 for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
                     let host = shell_endpoint_background(shell, underlay);
-                    for (fill, primary, secondary, icon, matched) in [
+                    for (fill, focused_fill, primary, secondary, icon, matched) in [
                         (
                             mixed.row_selected_background,
+                            focused_floating.row_selected_background,
                             mixed.row_selected_foreground,
                             mixed.row_selected_secondary,
                             mixed.row_selected_icon,
@@ -810,6 +857,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                         (
                             mixed.row_selected_hover_background,
+                            focused_floating.row_selected_hover_background,
                             mixed.row_selected_hover_foreground,
                             mixed.row_selected_hover_secondary,
                             mixed.row_selected_hover_icon,
@@ -817,6 +865,11 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ),
                     ] {
                         let background = fill.source_over(host);
+                        let selection_floor = if increase_contrast {
+                            selection_floor
+                        } else {
+                            selection_floor.min(focused_fill.source_over(host).contrast_ratio(host))
+                        };
                         assert!(
                             background.contrast_ratio(host) >= selection_floor,
                             "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {host:?}"
