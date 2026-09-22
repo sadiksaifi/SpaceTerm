@@ -55,8 +55,8 @@ Setting controls native and in-window spatial filtering without changing materia
 Surface composition derives material fills from the opaque presentation,
 which stays the contrast reference. A translucent Pane lifts its default backdrop toward the
 elevated surface in Light. A Dark Pane instead paints only the accepted Terminal background's
-difference from the window sheet. The built-in Dark Terminal background is the next neutral rung
-above the root Chrome color, so it adds a small host-relative lift without another dense backing.
+difference from the window sheet. The built-in Dark Terminal background is a restrained neutral
+rung above the root Chrome color, so it adds a visible host-relative lift without another dense backing.
 Custom Terminal backgrounds retain their authored distinction through the same operation. Every
 Pane keeps the selected chip's neutral hairline at any transparency.
 

@@ -109,7 +109,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_scheme_colors(
 }
 
 #[test]
-fn dark_terminal_surface_stays_a_subtle_lift_from_the_window_root() {
+fn dark_terminal_surface_stays_a_visible_lift_from_the_window_root() {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Dark,
         ..Default::default()
@@ -137,8 +137,8 @@ fn dark_terminal_surface_stays_a_subtle_lift_from_the_window_root() {
                 i16::from(pane.b) - i16::from(root.b),
             ];
             assert!(
-                lift.into_iter().all(|channel| (1..=3).contains(&channel)),
-                "Dark Terminal must remain a small neutral lift at transparency {transparency}: root={root:?}, pane={pane:?}",
+                lift.into_iter().all(|channel| (4..=10).contains(&channel)),
+                "Dark Terminal must remain a restrained visible lift at transparency {transparency}: root={root:?}, pane={pane:?}",
             );
         }
     }
