@@ -3,7 +3,9 @@
 mod text;
 mod view;
 
-use super::workspace_chrome::WorkspaceChromeLayout;
+use super::workspace_chrome::{
+    WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
+};
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
@@ -506,12 +508,14 @@ impl WorkspaceSidebar {
     }
     fn collapsed_top_chrome_width(&self, window: &Window, cx: &App) -> Pixels {
         let active = self.rows.iter().find(|row| row.active);
-        WorkspaceChromeLayout::collapsed_width(
-            active.map_or("", |row| row.name.as_ref()),
-            active.is_some_and(|row| row.pinned),
-            window,
-            cx,
-        )
+        let identity = WorkspaceChromeIdentity {
+            name: active.map_or_else(String::new, |row| row.name.to_string()),
+            pinned: active.is_some_and(|row| row.pinned),
+            status: active.and_then(|row| {
+                WorkspaceChromeStatus::resolve(row.available, row.remote_connection_phase)
+            }),
+        };
+        WorkspaceChromeLayout::collapsed_width(&identity, window, cx)
     }
 }
 impl Render for WorkspaceSidebar {

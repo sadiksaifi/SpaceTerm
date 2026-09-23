@@ -2764,6 +2764,23 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
             .is_some(),
         "the collapsed identity must keep the Active Remote Workspace's disconnected state visible"
     );
+    let label = cx
+        .debug_bounds("workspace-chip-label")
+        .expect("collapsed identity name");
+    let dot = cx
+        .debug_bounds("workspace-switcher-status-disconnected")
+        .expect("disconnected status dot");
+    let switcher = cx
+        .debug_bounds("workspace-switcher")
+        .expect("collapsed Workspace switcher");
+    assert!(
+        dot.left() >= label.right() && dot.right() <= switcher.right(),
+        "the status dot must trail the name inside the collapsed switcher"
+    );
+    assert!(
+        (dot.center().y - label.center().y).abs() <= px(1.0),
+        "the status dot must sit on the name's vertical center"
+    );
     cx.simulate_keystrokes("cmd-b");
     redraw(cx);
 
@@ -5514,19 +5531,16 @@ fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut T
     let icon = cx
         .debug_bounds("workspace-switcher-icon")
         .expect("the collapsed Workspace chip should keep the Workspace glyph");
-    let identity = cx
-        .debug_bounds("workspace-switcher-identity-icon")
-        .expect("the collapsed Workspace glyph should paint its own resolved tint");
     let label = cx
         .debug_bounds("workspace-chip-label")
         .expect("the collapsed Workspace name was rendered");
     let strip = cx
         .debug_bounds("tab-items")
         .expect("the Tab strip was rendered");
-    assert!(icon.size.width > px(0.0) && identity.size.width > px(0.0));
+    assert!(icon.size.width > px(0.0));
     assert!(
-        identity.right() <= label.left(),
-        "the glyph should lead the Workspace name, got {identity:?} and {label:?}"
+        icon.right() <= label.left(),
+        "the glyph should lead the Workspace name, got {icon:?} and {label:?}"
     );
     assert_eq!(
         strip.size.height, expanded_strip.size.height,
@@ -5788,8 +5802,7 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
         WorkspaceChromeLayout::collapsed_width(
-            manager.read(cx).workspaces.active_workspace().name(),
-            false,
+            &chrome_identity(manager.read(cx).workspaces.active_workspace()),
             window,
             cx,
         )
@@ -6374,8 +6387,11 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
         .expect("the collapsed sidebar divider was not rendered");
     let collapsed_width = cx.update(|window, cx| {
         WorkspaceChromeLayout::collapsed_width(
-            "A Workspace Name That Must Be Truncated",
-            false,
+            &WorkspaceChromeIdentity {
+                name: "A Workspace Name That Must Be Truncated".to_owned(),
+                pinned: false,
+                status: None,
+            },
             window,
             cx,
         )
@@ -7030,8 +7046,7 @@ fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
         WorkspaceChromeLayout::collapsed_width(
-            manager.read(cx).workspaces.active_workspace().name(),
-            false,
+            &chrome_identity(manager.read(cx).workspaces.active_workspace()),
             window,
             cx,
         )
