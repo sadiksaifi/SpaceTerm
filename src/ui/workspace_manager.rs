@@ -1,7 +1,8 @@
 use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use super::workspace_chrome::{
-    TOGGLE_SIZE, WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatusHosts,
+    TOGGLE_SIZE, WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
+    WorkspaceChromeStatusHosts,
 };
 #[cfg(test)]
 use super::workspace_sidebar::{
@@ -54,8 +55,8 @@ use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
     PinnedDirectory, RemoteConnectionReduction, RemoteConnectionState, RemoteDirectory,
-    RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceError,
-    WorkspaceId, WorkspaceLocation,
+    RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry,
+    WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
@@ -892,8 +893,7 @@ impl WorkspaceManager {
         };
         let chrome = WorkspaceChromeLayout::resolve(
             self.sidebar.read(cx).layout(),
-            workspace.name(),
-            workspace.pinned_directory().is_some(),
+            &chrome_identity(workspace),
             window,
             cx,
         );
@@ -2886,15 +2886,13 @@ impl WorkspaceManager {
             .remote_connection_state()
             .map(RemoteConnectionState::phase);
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let name = workspace.name().to_owned();
         let (path, _) = directory_labels(
             workspace.location(),
             workspace.local_display_directory(),
             workspace.remote_display_directory(),
             &self.local_home_directory_path,
         );
-        let availability = workspace.availability().clone();
-        let tooltip_detail = match &availability {
+        let tooltip_detail = match workspace.availability() {
             DirectoryAvailability::Unavailable { reason } => format!("{path}: {reason}"),
             DirectoryAvailability::Available => remote_status
                 .map(|status| format!("{path}: {status}"))
@@ -2902,14 +2900,9 @@ impl WorkspaceManager {
         };
 
         (
-            WorkspaceChromeIdentity {
-                name: name.clone(),
-                pinned: workspace.pinned_directory().is_some(),
-                availability,
-                remote_connection_phase,
-            },
+            chrome_identity(workspace),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
-                .detail(format!("{name}\n{tooltip_detail}"))
+                .detail(format!("{}\n{tooltip_detail}", workspace.name()))
                 .debug_selector("workspace-switcher-tooltip"),
         )
     }
@@ -3246,13 +3239,8 @@ impl WorkspaceManager {
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         let workspace = self.workspaces.active_workspace();
         let sidebar_layout = self.sidebar.read(cx).layout();
-        let chrome = WorkspaceChromeLayout::resolve(
-            sidebar_layout,
-            workspace.name(),
-            workspace.pinned_directory().is_some(),
-            window,
-            cx,
-        );
+        let chrome =
+            WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
         active_tab_manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 sidebar_layout.visible,
@@ -3438,6 +3426,20 @@ fn remote_workspace_reconnect_error_content(
             "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it."
                 .to_owned(),
         )),
+    }
+}
+
+/// The collapsed title-bar identity a Workspace presents.
+fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity {
+    WorkspaceChromeIdentity {
+        name: workspace.name().to_owned(),
+        pinned: workspace.pinned_directory().is_some(),
+        status: WorkspaceChromeStatus::resolve(
+            matches!(workspace.availability(), DirectoryAvailability::Available),
+            workspace
+                .remote_connection_state()
+                .map(RemoteConnectionState::phase),
+        ),
     }
 }
 

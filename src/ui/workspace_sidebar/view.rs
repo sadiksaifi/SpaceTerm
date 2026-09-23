@@ -189,10 +189,8 @@ impl WorkspaceSidebar {
         row_text_appearance.colors = row_colors.clone();
         let click_sidebar = sidebar.clone();
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
-        let remote_color = remote_connection_phase.and_then(|phase| {
-            (phase != RemoteConnectionPhase::Connected)
-                .then(|| remote_connection_color(phase, &row_colors))
-        });
+        let remote_color =
+            remote_connection_phase.map(|phase| remote_connection_color(phase, &row_colors));
         let (detail, detail_color, detail_selector) = if !available {
             (
                 "Directory unavailable".into(),
@@ -216,10 +214,12 @@ impl WorkspaceSidebar {
         };
         let detail_paint =
             detail_color.map(|color| workspace_row_status_paint(color, active, 4.5, &row_colors));
-        let remote_icon_paint =
-            remote_color.map(|color| workspace_row_status_paint(color, active, 3.0, &row_colors));
-        let unavailable_icon_paint = (!available)
-            .then(|| workspace_row_status_paint(row_colors.warning, active, 3.0, &row_colors));
+        // The row icon carries one status in the same precedence as the collapsed identity: an
+        // unavailable directory first, then the Remote connection.
+        let icon_paint = (!available)
+            .then_some(row_colors.warning)
+            .or(remote_color)
+            .map(|color| workspace_row_status_paint(color, active, 3.0, &row_colors));
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -315,17 +315,15 @@ impl WorkspaceSidebar {
                     .justify_center()
                     .child(
                         div()
-                            .relative()
                             .text_color(gpui_color(
-                                remote_icon_paint.map_or(row_colors.row_icon, |paint| paint.normal),
+                                icon_paint.map_or(row_colors.row_icon, |paint| paint.normal),
                             ))
                             .when(appearance.active, |icon| {
                                 icon.group_hover(row_group.clone(), |style| {
                                     style.text_color(gpui_color(
-                                        remote_icon_paint
-                                            .map_or(row_colors.row_hover_icon, |paint| {
-                                                paint.hovered
-                                            }),
+                                        icon_paint.map_or(row_colors.row_hover_icon, |paint| {
+                                            paint.hovered
+                                        }),
                                     ))
                                 })
                             })
@@ -337,32 +335,6 @@ impl WorkspaceSidebar {
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
                             ))
-                            .when(!available, |icon| {
-                                icon.child(
-                                    div()
-                                        .absolute()
-                                        .right(px(-5.0))
-                                        .bottom(px(-4.0))
-                                        .text_color(gpui_color(
-                                            unavailable_icon_paint
-                                                .map_or(row_colors.warning, |paint| paint.normal),
-                                        ))
-                                        .when(appearance.active, |badge| {
-                                            badge.group_hover(row_group.clone(), |style| {
-                                                style.text_color(gpui_color(
-                                                    unavailable_icon_paint
-                                                        .map_or(row_colors.warning, |paint| {
-                                                            paint.hovered
-                                                        }),
-                                                ))
-                                            })
-                                        })
-                                        .child(Icon::inherited(
-                                            IconName::TriangleAlert,
-                                            appearance.icons.metrics(IconRole::Caption).glyph_size,
-                                        )),
-                                )
-                            }),
                     ),
             )
             .child(

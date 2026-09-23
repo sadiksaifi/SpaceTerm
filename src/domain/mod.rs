@@ -15,7 +15,7 @@ pub(crate) use workspace_collection::{
     CurrentDirectory, DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory,
     RemoteDirectory, RemoteDirectoryIdentity, RemoteUser, RemoteWorkspaceTarget,
     RemoteWorkspaceValueError, SshDestination, ValidatedLocalDirectory, WorkspaceCollection,
-    WorkspaceError, WorkspaceId, WorkspaceLocation,
+    WorkspaceEntry, WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 
 pub(crate) use remote_workspace::{

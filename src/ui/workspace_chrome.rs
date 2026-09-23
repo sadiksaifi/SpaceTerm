@@ -10,7 +10,7 @@ use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
-use crate::domain::{DirectoryAvailability, RemoteConnectionPhase};
+use crate::domain::RemoteConnectionPhase;
 
 pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 
@@ -32,6 +32,8 @@ pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels) -> Pixels
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_NAME_GAP: f32 = 5.0;
+/// Diameter of the collapsed identity's status dot.
+const STATUS_DOT_SIZE: f32 = 6.0;
 
 /// The air the top-left chrome keeps at its trailing edge.
 ///
@@ -51,8 +53,7 @@ pub(super) struct WorkspaceChromeLayout {
 impl WorkspaceChromeLayout {
     pub(super) fn resolve(
         sidebar: SidebarLayout,
-        name: &str,
-        pinned: bool,
+        identity: &WorkspaceChromeIdentity,
         window: &Window,
         cx: &App,
     ) -> Self {
@@ -60,22 +61,33 @@ impl WorkspaceChromeLayout {
             width: if sidebar.visible {
                 sidebar.width
             } else {
-                Self::collapsed_width(name, pinned, window, cx)
+                Self::collapsed_width(identity, window, cx)
             },
             sidebar_visible: sidebar.visible,
             fullscreen: window.is_fullscreen(),
         }
     }
 
-    pub(super) fn collapsed_width(name: &str, pinned: bool, window: &Window, cx: &App) -> Pixels {
+    pub(super) fn collapsed_width(
+        identity: &WorkspaceChromeIdentity,
+        window: &Window,
+        cx: &App,
+    ) -> Pixels {
         let appearance = chrome(cx);
-        let name_width = appearance
-            .typography
-            .measure(TextRole::BodyEmphasis, name, window);
+        let name_width =
+            appearance
+                .typography
+                .measure(TextRole::BodyEmphasis, &identity.name, window);
         let pin_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let identity_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
-        let pin_width = if pinned {
+        let pin_width = if identity.pinned {
             pin_size + appearance.spacing(PIN_NAME_GAP)
+        } else {
+            px(0.0)
+        };
+        // The status dot never gives up its room: a long name truncates before it.
+        let status_width = if identity.status.is_some() {
+            appearance.spacing(SWITCHER_IDENTITY_GAP + STATUS_DOT_SIZE)
         } else {
             px(0.0)
         };
@@ -87,12 +99,14 @@ impl WorkspaceChromeLayout {
             - chrome_theme.custom_trigger_width(px(0.0))
             - appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
             - identity_size
-            - appearance.spacing(SWITCHER_IDENTITY_GAP);
+            - appearance.spacing(SWITCHER_IDENTITY_GAP)
+            - status_width;
         let identity_width = (name_width + pin_width).min(content_maximum.max(px(0.0)));
         let content_width = appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
             + identity_size
             + appearance.spacing(SWITCHER_IDENTITY_GAP)
-            + identity_width;
+            + identity_width
+            + status_width;
         let edge_reserve = trailing_reserve(appearance, cx);
         (leading_clearance(window.is_fullscreen(), edge_reserve)
             + edge_reserve
@@ -164,33 +178,119 @@ impl WorkspaceChromeStatusHosts {
     }
 }
 
+/// The one status the collapsed Workspace identity presents.
+///
+/// An unavailable directory takes precedence over the Remote connection, because no Terminal can
+/// start in the Workspace until it is resolved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceChromeStatus {
+    Unavailable,
+    Connected,
+    Reconnecting,
+    Disconnected,
+    Closing,
+    Failed,
+}
+
+impl WorkspaceChromeStatus {
+    pub(super) fn resolve(
+        available: bool,
+        remote_connection_phase: Option<RemoteConnectionPhase>,
+    ) -> Option<Self> {
+        if !available {
+            return Some(Self::Unavailable);
+        }
+        remote_connection_phase.map(|phase| match phase {
+            RemoteConnectionPhase::Connected => Self::Connected,
+            RemoteConnectionPhase::Reconnecting => Self::Reconnecting,
+            RemoteConnectionPhase::Disconnected => Self::Disconnected,
+            RemoteConnectionPhase::Closing => Self::Closing,
+            RemoteConnectionPhase::Failed => Self::Failed,
+        })
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "Directory unavailable",
+            Self::Connected => "Connected remote",
+            Self::Reconnecting => "Reconnecting",
+            Self::Disconnected => "Disconnected",
+            Self::Closing => "Closing",
+            Self::Failed => "Connection failed",
+        }
+    }
+
+    const fn selector(self) -> &'static str {
+        match self {
+            Self::Unavailable => "workspace-switcher-status-unavailable",
+            Self::Connected => "workspace-switcher-status-connected",
+            Self::Reconnecting => "workspace-switcher-status-reconnecting",
+            Self::Disconnected => "workspace-switcher-status-disconnected",
+            Self::Closing => "workspace-switcher-status-closing",
+            Self::Failed => "workspace-switcher-status-failed",
+        }
+    }
+
+    fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
+        match self {
+            Self::Unavailable => colors.warning,
+            Self::Connected => colors.success,
+            Self::Reconnecting => colors.info,
+            Self::Disconnected | Self::Closing => colors.icon_muted,
+            Self::Failed => colors.error,
+        }
+    }
+
+    /// The dot's paint on the chip's resting and hovered surfaces.
+    ///
+    /// The dot is a graphical object, so it meets graphical-object contrast against each surface.
+    fn paint(
+        self,
+        appearance: &ChromeAppearance,
+        hosts: WorkspaceChromeStatusHosts,
+    ) -> WorkspaceStatusPaint {
+        resolve_workspace_status(
+            self.color(&appearance.colors),
+            hosts.normal,
+            hosts.hovered,
+            3.0,
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceChromeIdentity {
     pub(super) name: String,
     pub(super) pinned: bool,
-    pub(super) availability: DirectoryAvailability,
-    pub(super) remote_connection_phase: Option<RemoteConnectionPhase>,
+    pub(super) status: Option<WorkspaceChromeStatus>,
 }
 
 impl WorkspaceChromeIdentity {
+    /// Renders the collapsed identity: the Workspace glyph, its name, and a trailing status dot.
+    ///
+    /// The glyph and name keep the title bar's own paint in every state. Only the dot carries the
+    /// status, so the identity reads the same for a Local Workspace and a healthy Remote one.
     pub(super) fn render(
         self,
         switcher_color: Rgba,
         appearance: &ChromeAppearance,
         status_hosts: WorkspaceChromeStatusHosts,
     ) -> AnyElement {
-        let status = self.status(appearance, status_hosts);
-        let badge = self.badge();
-        let status_normal = status.map(|status| gpui_color(status.paint.normal));
-        let status_hovered = status.map(|status| {
-            gpui_color(if appearance.active {
-                status.paint.hovered
-            } else {
-                status.paint.normal
-            })
-        });
-        let status_selector = status.map(|status| status.selector);
         let status_group = "workspace-chrome-status";
+        let active = appearance.active;
+        let status_dot = self.status.map(|status| {
+            let paint = status.paint(appearance, status_hosts);
+            let normal = gpui_color(paint.normal);
+            let hovered = gpui_color(if active { paint.hovered } else { paint.normal });
+            let size = appearance.spacing(STATUS_DOT_SIZE);
+            div()
+                .debug_selector(move || status.selector().to_owned())
+                .flex_none()
+                .size(size)
+                .rounded(size / 2.0)
+                .bg(normal)
+                .group_hover(status_group, move |style| style.bg(hovered))
+        });
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
@@ -218,10 +318,7 @@ impl WorkspaceChromeIdentity {
                     .debug_selector(|| "workspace-chip-label".to_owned())
                     .min_w_0()
                     .truncate()
-                    .text_color(status_normal.unwrap_or(switcher_color))
-                    .group_hover(status_group, move |style| {
-                        style.text_color(status_hovered.unwrap_or(switcher_color))
-                    })
+                    .text_color(switcher_color)
                     .child(self.name),
             );
         div()
@@ -238,191 +335,23 @@ impl WorkspaceChromeIdentity {
                 div()
                     .debug_selector(|| "workspace-switcher-icon".to_owned())
                     .flex_shrink_0()
-                    .child(render_identity_icon(
-                        status_selector.unwrap_or("workspace-switcher-identity-icon"),
-                        status_group,
-                        status_normal.unwrap_or(switcher_color),
-                        status_hovered.unwrap_or(switcher_color),
+                    .child(Icon::custom(
+                        CustomIconName::RectangleStack,
                         appearance.icons.metrics(IconRole::Chrome).glyph_size,
-                        badge.map(|badge| WorkspaceChromeBadgePaint {
-                            icon: badge.icon,
-                            selector: badge.selector,
-                            normal: status_normal.unwrap_or(switcher_color),
-                            hovered: status_hovered.unwrap_or(switcher_color),
-                            normal_host: gpui_color(status_hosts.normal),
-                            hovered_host: gpui_color(status_hosts.hovered),
-                        }),
-                        appearance.icons.metrics(IconRole::Caption).glyph_size,
+                        switcher_color,
                     )),
             )
             .child(chip)
+            .children(status_dot)
             .into_any_element()
     }
 
     pub(super) fn accessibility_name(&self) -> String {
-        let status = if matches!(self.availability, DirectoryAvailability::Unavailable { .. }) {
-            Some("Directory unavailable")
-        } else {
-            self.remote_connection_phase.map(|phase| match phase {
-                RemoteConnectionPhase::Connected => "Connected remote",
-                RemoteConnectionPhase::Reconnecting => "Reconnecting",
-                RemoteConnectionPhase::Disconnected => "Disconnected",
-                RemoteConnectionPhase::Closing => "Closing",
-                RemoteConnectionPhase::Failed => "Connection failed",
-            })
-        };
-        status.map_or_else(
+        self.status.map_or_else(
             || format!("Switch Workspace, {}", self.name),
-            |status| format!("Switch Workspace, {}, {status}", self.name),
+            |status| format!("Switch Workspace, {}, {}", self.name, status.label()),
         )
     }
-
-    fn badge(&self) -> Option<WorkspaceChromeBadge> {
-        if matches!(self.availability, DirectoryAvailability::Unavailable { .. }) {
-            return Some(WorkspaceChromeBadge {
-                icon: IconName::TriangleAlert,
-                selector: "workspace-switcher-status-unavailable-badge",
-            });
-        }
-        self.remote_connection_phase.map(|phase| match phase {
-            RemoteConnectionPhase::Connected => WorkspaceChromeBadge {
-                icon: IconName::Globe,
-                selector: "workspace-switcher-status-connected-badge",
-            },
-            RemoteConnectionPhase::Reconnecting => WorkspaceChromeBadge {
-                icon: IconName::Info,
-                selector: "workspace-switcher-status-reconnecting-badge",
-            },
-            RemoteConnectionPhase::Disconnected => WorkspaceChromeBadge {
-                icon: IconName::TriangleAlert,
-                selector: "workspace-switcher-status-disconnected-badge",
-            },
-            RemoteConnectionPhase::Closing => WorkspaceChromeBadge {
-                icon: IconName::Pause,
-                selector: "workspace-switcher-status-closing-badge",
-            },
-            RemoteConnectionPhase::Failed => WorkspaceChromeBadge {
-                icon: IconName::TriangleAlert,
-                selector: "workspace-switcher-status-failed-badge",
-            },
-        })
-    }
-
-    fn status(
-        &self,
-        appearance: &ChromeAppearance,
-        hosts: WorkspaceChromeStatusHosts,
-    ) -> Option<WorkspaceChromeStatusPaint> {
-        let (proposed, selector) =
-            if matches!(self.availability, DirectoryAvailability::Unavailable { .. }) {
-                (
-                    appearance.colors.warning,
-                    "workspace-switcher-status-unavailable",
-                )
-            } else {
-                match self.remote_connection_phase? {
-                    RemoteConnectionPhase::Connected => return None,
-                    RemoteConnectionPhase::Reconnecting => (
-                        appearance.colors.info,
-                        "workspace-switcher-status-reconnecting",
-                    ),
-                    RemoteConnectionPhase::Disconnected => (
-                        appearance.colors.icon_muted,
-                        "workspace-switcher-status-disconnected",
-                    ),
-                    RemoteConnectionPhase::Closing => (
-                        appearance.colors.icon_muted,
-                        "workspace-switcher-status-closing",
-                    ),
-                    RemoteConnectionPhase::Failed => {
-                        (appearance.colors.error, "workspace-switcher-status-failed")
-                    }
-                }
-            };
-        Some(WorkspaceChromeStatusPaint {
-            selector,
-            paint: resolve_workspace_status(proposed, hosts.normal, hosts.hovered, 4.5),
-        })
-    }
-}
-
-/// The Workspace identity glyph, which the collapsed chip and the expanded chooser both present.
-///
-/// A bundled vector paints from its own resolved tint rather than from an inherited text color, so
-/// the resting and hovered paints are drawn as two stacked glyphs and the hover swaps which one is
-/// visible. Both are the one icon: the chip keeps the same identity in either sidebar state.
-fn render_identity_icon(
-    selector: &'static str,
-    group: &'static str,
-    normal: Rgba,
-    hovered: Rgba,
-    size: Pixels,
-    badge: Option<WorkspaceChromeBadgePaint>,
-    badge_glyph_size: Pixels,
-) -> AnyElement {
-    let glyph = |tint: Rgba| Icon::custom(CustomIconName::RectangleStack, size, tint);
-    let badge_size = badge_glyph_size + px(2.0);
-    div()
-        .debug_selector(move || selector.to_owned())
-        .relative()
-        .flex()
-        .flex_none()
-        .size(size)
-        .child(glyph(normal))
-        .when(hovered != normal, |icon| {
-            icon.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .opacity(0.0)
-                    .group_hover(group, |style| style.opacity(1.0))
-                    .child(glyph(hovered)),
-            )
-        })
-        .when_some(badge, |icon, badge| {
-            icon.child(
-                div()
-                    .debug_selector(move || badge.selector.to_owned())
-                    .absolute()
-                    .right(px(-4.0))
-                    .bottom(px(-3.0))
-                    .size(badge_size)
-                    .rounded(badge_size / 2.0)
-                    .border(px(super::chrome_geometry::HAIRLINE))
-                    .border_color(badge.normal_host)
-                    .text_color(badge.normal)
-                    .group_hover(group, move |style| {
-                        style
-                            .border_color(badge.hovered_host)
-                            .text_color(badge.hovered)
-                    })
-                    .child(Icon::inherited(badge.icon, badge_glyph_size)),
-            )
-        })
-        .into_any_element()
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WorkspaceChromeBadge {
-    icon: IconName,
-    selector: &'static str,
-}
-
-#[derive(Clone, Copy)]
-struct WorkspaceChromeBadgePaint {
-    icon: IconName,
-    selector: &'static str,
-    normal: Rgba,
-    hovered: Rgba,
-    normal_host: Rgba,
-    hovered_host: Rgba,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WorkspaceChromeStatusPaint {
-    selector: &'static str,
-    paint: WorkspaceStatusPaint,
 }
 
 fn gpui_color(color: Color) -> Rgba {
@@ -447,8 +376,17 @@ mod tests {
         );
     }
 
+    const STATUSES: [WorkspaceChromeStatus; 6] = [
+        WorkspaceChromeStatus::Unavailable,
+        WorkspaceChromeStatus::Connected,
+        WorkspaceChromeStatus::Reconnecting,
+        WorkspaceChromeStatus::Disconnected,
+        WorkspaceChromeStatus::Closing,
+        WorkspaceChromeStatus::Failed,
+    ];
+
     #[test]
-    fn unhealthy_identity_status_should_be_readable_on_each_title_bar_host() {
+    fn status_dot_should_be_readable_on_each_title_bar_host() {
         for colors in [
             builtin_chrome_base(Appearance::Dark),
             builtin_chrome_base(Appearance::Light),
@@ -461,44 +399,18 @@ mod tests {
                 appearance.colors.title_bar_background,
                 appearance.colors.title_bar_inactive_background,
             ] {
-                for (availability, remote_connection_phase) in [
-                    (
-                        DirectoryAvailability::Unavailable {
-                            reason: "unavailable".to_owned(),
-                        },
-                        None,
-                    ),
-                    (
-                        DirectoryAvailability::Available,
-                        Some(RemoteConnectionPhase::Reconnecting),
-                    ),
-                    (
-                        DirectoryAvailability::Available,
-                        Some(RemoteConnectionPhase::Disconnected),
-                    ),
-                    (
-                        DirectoryAvailability::Available,
-                        Some(RemoteConnectionPhase::Failed),
-                    ),
-                ] {
-                    let identity = WorkspaceChromeIdentity {
-                        name: "Workspace".to_owned(),
-                        pinned: false,
-                        availability,
-                        remote_connection_phase,
-                    };
-                    let status = identity
-                        .status(&appearance, WorkspaceChromeStatusHosts::new(host, host))
-                        .expect("unhealthy status paint");
-                    assert!(status.paint.normal.contrast_ratio(host) >= 4.5);
-                    assert!(status.paint.hovered.contrast_ratio(host) >= 4.5);
+                for status in STATUSES {
+                    let paint =
+                        status.paint(&appearance, WorkspaceChromeStatusHosts::new(host, host));
+                    assert!(paint.normal.contrast_ratio(host) >= 3.0, "{status:?}");
+                    assert!(paint.hovered.contrast_ratio(host) >= 3.0, "{status:?}");
                 }
             }
         }
     }
 
     #[test]
-    fn unhealthy_identity_status_should_read_on_distinct_painted_chip_hosts() {
+    fn status_dot_should_read_on_distinct_painted_chip_hosts() {
         let scheme_id = SchemeId::new("test.workspace-status-hosts").unwrap();
         let custom = CustomScheme::Chrome(Box::new(ChromeScheme {
             window_background: None,
@@ -542,86 +454,69 @@ mod tests {
             .hover_fill
             .or(surface.fill)
             .map_or(title_bar_host, |fill| fill.source_over(title_bar_host));
-        let identity = WorkspaceChromeIdentity {
-            name: "Workspace".to_owned(),
-            pinned: false,
-            availability: DirectoryAvailability::Unavailable {
-                reason: "unavailable".to_owned(),
-            },
-            remote_connection_phase: None,
-        };
 
-        let status = identity
-            .status(
-                &appearance,
-                WorkspaceChromeStatusHosts::new(painted_normal, painted_hovered),
-            )
-            .expect("unhealthy status paint");
+        let paint = WorkspaceChromeStatus::Unavailable.paint(
+            &appearance,
+            WorkspaceChromeStatusHosts::new(painted_normal, painted_hovered),
+        );
 
-        assert!(status.paint.normal.contrast_ratio(painted_normal) >= 4.5);
-        assert!(status.paint.hovered.contrast_ratio(painted_hovered) >= 4.5);
+        assert!(paint.normal.contrast_ratio(painted_normal) >= 3.0);
+        assert!(paint.hovered.contrast_ratio(painted_hovered) >= 3.0);
     }
 
     #[test]
-    fn collapsed_workspace_identity_carries_connection_and_availability_badges() {
-        let identity = |availability, remote_connection_phase| WorkspaceChromeIdentity {
-            name: "Workspace".to_owned(),
-            pinned: false,
-            availability,
-            remote_connection_phase,
-        };
-        let cases = [
+    fn collapsed_identity_should_present_one_status_with_unavailable_first() {
+        assert_eq!(WorkspaceChromeStatus::resolve(true, None), None);
+        assert_eq!(
+            WorkspaceChromeStatus::resolve(false, Some(RemoteConnectionPhase::Connected)),
+            Some(WorkspaceChromeStatus::Unavailable)
+        );
+        for (phase, status) in [
             (
                 RemoteConnectionPhase::Connected,
-                IconName::Globe,
-                "Connected remote",
+                WorkspaceChromeStatus::Connected,
             ),
             (
                 RemoteConnectionPhase::Reconnecting,
-                IconName::Info,
-                "Reconnecting",
+                WorkspaceChromeStatus::Reconnecting,
             ),
             (
                 RemoteConnectionPhase::Disconnected,
-                IconName::TriangleAlert,
-                "Disconnected",
+                WorkspaceChromeStatus::Disconnected,
             ),
-            (RemoteConnectionPhase::Closing, IconName::Pause, "Closing"),
             (
-                RemoteConnectionPhase::Failed,
-                IconName::TriangleAlert,
-                "Connection failed",
+                RemoteConnectionPhase::Closing,
+                WorkspaceChromeStatus::Closing,
             ),
-        ];
-        for (phase, icon, status) in cases {
-            let identity = identity(DirectoryAvailability::Available, Some(phase));
-            let badge = identity.badge().expect("remote Workspace badge");
+            (RemoteConnectionPhase::Failed, WorkspaceChromeStatus::Failed),
+        ] {
             assert_eq!(
-                std::mem::discriminant(&badge.icon),
-                std::mem::discriminant(&icon)
-            );
-            assert_eq!(
-                identity.accessibility_name(),
-                format!("Switch Workspace, Workspace, {status}")
+                WorkspaceChromeStatus::resolve(true, Some(phase)),
+                Some(status)
             );
         }
 
-        let local = identity(DirectoryAvailability::Available, None);
-        assert!(local.badge().is_none());
-        assert_eq!(local.accessibility_name(), "Switch Workspace, Workspace");
-        let unavailable = identity(
-            DirectoryAvailability::Unavailable {
-                reason: "unavailable".to_owned(),
-            },
-            None,
-        );
+        let identity = |status| WorkspaceChromeIdentity {
+            name: "Workspace".to_owned(),
+            pinned: false,
+            status,
+        };
         assert_eq!(
-            std::mem::discriminant(&unavailable.badge().expect("unavailable badge").icon),
-            std::mem::discriminant(&IconName::TriangleAlert)
+            identity(None).accessibility_name(),
+            "Switch Workspace, Workspace"
         );
-        assert_eq!(
-            unavailable.accessibility_name(),
-            "Switch Workspace, Workspace, Directory unavailable"
-        );
+        for (status, label) in [
+            (WorkspaceChromeStatus::Unavailable, "Directory unavailable"),
+            (WorkspaceChromeStatus::Connected, "Connected remote"),
+            (WorkspaceChromeStatus::Reconnecting, "Reconnecting"),
+            (WorkspaceChromeStatus::Disconnected, "Disconnected"),
+            (WorkspaceChromeStatus::Closing, "Closing"),
+            (WorkspaceChromeStatus::Failed, "Connection failed"),
+        ] {
+            assert_eq!(
+                identity(Some(status)).accessibility_name(),
+                format!("Switch Workspace, Workspace, {label}")
+            );
+        }
     }
 }
