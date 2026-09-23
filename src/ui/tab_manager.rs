@@ -1813,7 +1813,7 @@ fn render_tab_identity(
                 .items_center()
                 .child(
                     StatusGlyph {
-                        icon: tab_origin_icon(identity.remote),
+                        icon: IconName::Terminal,
                         reported: identity.glyph,
                         size: icon_size,
                         progress: identity.progress,
@@ -1833,14 +1833,6 @@ fn render_tab_identity(
         )
         .child(words)
         .into_any_element()
-}
-
-const fn tab_origin_icon(remote: bool) -> IconName {
-    if remote {
-        IconName::Globe
-    } else {
-        IconName::Terminal
-    }
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -2121,18 +2113,6 @@ mod tests {
         assert_eq!(inactive.rim, Some(colors.tab_active_border));
         assert_eq!(inactive.hover_fill, None);
         assert_eq!(inactive.hover_rim, None);
-    }
-
-    #[test]
-    fn remote_tabs_use_the_remote_origin_glyph() {
-        assert_eq!(
-            std::mem::discriminant(&tab_origin_icon(false)),
-            std::mem::discriminant(&IconName::Terminal)
-        );
-        assert_eq!(
-            std::mem::discriminant(&tab_origin_icon(true)),
-            std::mem::discriminant(&IconName::Globe)
-        );
     }
 
     /// The Active Tab carries selected-row content on a material tuned for the title bar.

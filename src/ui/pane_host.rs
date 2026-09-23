@@ -2183,7 +2183,6 @@ fn render_pane_caption_content(
             })
             .child(render_pane_status(
                 pane_id,
-                text.origin.remote,
                 (text.progress, text.glyph, attention),
                 &paint,
                 appearance,
@@ -2202,7 +2201,6 @@ fn render_pane_caption_content(
         caption_content = caption_content
             .child(render_pane_status(
                 pane_id,
-                text.origin.remote,
                 (text.progress, text.glyph, attention),
                 &paint,
                 appearance,
@@ -2292,21 +2290,12 @@ fn render_pane_origin(
 }
 
 /// Renders the status after the Pane's directory and before its activity.
-///
-/// The glyph states Local or Remote from the Terminal's own classification, so a Remote Pane stays
-/// distinguishable by shape when its account and machine text no longer fit.
 fn render_pane_status(
     pane_id: PaneId,
-    remote: bool,
     (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
     paint: &crate::appearance::CaptionPaint,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
-    let icon = if remote {
-        IconName::Globe
-    } else {
-        IconName::Terminal
-    };
     div()
         .mr(appearance.spacing(PANE_STATUS_ICON_GAP))
         .flex()
@@ -2315,7 +2304,7 @@ fn render_pane_status(
         .text_color(gpui_color(paint.foreground))
         .child(
             StatusGlyph {
-                icon,
+                icon: IconName::Terminal,
                 reported,
                 size: appearance.icons.metrics(IconRole::Status).glyph_size,
                 progress,
