@@ -1,6 +1,6 @@
 # PR merge readiness
 
-Status: active, 2026-09-26. PR #352 remains open and unmerged.
+Status: ready to merge, 2026-09-26. PR #352 remains open and unmerged.
 The user asked for the total time to merge, not a batch estimate. The coordinator
 estimated 45-60 minutes and froze implementation scope. Further performance
 experiments belong in the documented follow-up queue. No merge is authorized.
@@ -40,7 +40,7 @@ experiments belong in the documented follow-up queue. No merge is authorized.
   implementation and record native Metal allocation accounting with its limits.
 - [x] Review final production and measurement changes independently, resolve
   material findings, and finish source records.
-- [ ] Make atomic commits, push the existing branch, update the full PR body,
+- [x] Make atomic commits, push the existing branch, update the full PR body,
   and verify its remote head and check state.
 
 ## Research that does not block this PR
@@ -54,3 +54,12 @@ is only 1.74-2.82 ms, so speculative prewarming is not selected.
 
 These limits must remain visible in the PR. Merge readiness does not prove a
 global performance optimum or erase the research queue.
+
+## Publication
+
+All selected implementation and evidence are committed and pushed on
+`perf/application-resources`. The PR body describes the entire branch and the
+limits of each measurement. GitHub reports `MERGEABLE` and `CLEAN`, with no
+reported CI checks. Local validation supplies the recorded automated gate.
+The remote PR title, body, base `main`, head branch, open state, and commit were
+read back and verified. No merge was performed.

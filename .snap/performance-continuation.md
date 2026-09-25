@@ -1,6 +1,6 @@
 # Continuing performance execution
 
-Status: implementation and validation complete; publication pending, 2026-09-26.
+Status: implementation, validation, and publication complete, 2026-09-26.
 Baseline for this continuation: `3831cd1`.
 
 This is a chronological work log. Earlier pending work is superseded by

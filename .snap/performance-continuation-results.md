@@ -1,6 +1,6 @@
 # Continuing performance results
 
-Status: final native captures and full validation passed; final publication pending, 2026-09-26.
+Status: final native captures, validation, reviews, and publication complete, 2026-09-26.
 
 ## Build and capture conditions
 

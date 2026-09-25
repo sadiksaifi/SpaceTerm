@@ -1,7 +1,7 @@
 # Performance goal
 
 Status: implementation, measurements, validation, and independent reviews complete
-on 2026-09-26; final PR publication is pending. The user asked for a concrete
+on 2026-09-26. All changes are published and PR #352 is ready to merge. The user asked for a concrete
 merge-ready endpoint, and implementation scope was frozen. PR
 [#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) remains open and unmerged.
 See [final results](performance-continuation-results.md) and
@@ -44,7 +44,8 @@ wake behavior, investigated graphics-ledger footprint, added native process-exit
 observation, removed Find corpus allocations, and verified lazy path targets.
 Focused, unfocused-visible, and hidden output/consumption checks pass. The normal
 release build and complete validation pass. Three independent final reviews have
-no unresolved material findings. Publication remains the final required step.
+no unresolved material findings. Publication and remote verification are complete.
+GitHub reports `MERGEABLE` and `CLEAN`; no CI checks are reported.
 
 A global optimum cannot be proven. Remaining Pane scaling, graphics residency,
 and first-frame experiments are explicit follow-up research in
