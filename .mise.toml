@@ -299,12 +299,12 @@ run = './scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --bin 
 [tasks."bench:macos:fonts"]
 description = "Measure native font enumeration and classification in fresh optimized processes"
 usage = '''
-arg "[mode]" help="listing, full, or selected" default="full"
+arg "[mode]" help="listing, full, selected, families-descriptors, families-direct, families-attributes, or families-compare" default="full"
 arg "[repetitions]" help="Number of fresh-process samples" default="10"
 '''
 run = '''
 set -eu
-case "${usage_mode}" in listing|full|selected) ;; *) echo "invalid font benchmark mode" >&2; exit 2 ;; esac
+case "${usage_mode}" in listing|full|selected|families-descriptors|families-direct|families-attributes|families-compare) ;; *) echo "invalid font benchmark mode" >&2; exit 2 ;; esac
 ./scripts/cargo-artifacts.sh run -- cargo build --release --locked --example performance_fonts
 perf_target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 perf_iteration=0
