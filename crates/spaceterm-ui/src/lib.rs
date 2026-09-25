@@ -48,10 +48,10 @@ pub use button::{
 };
 pub use combo_box::{
     ComboBox, ComboBoxAcceptance, ComboBoxAccessory, ComboBoxActivationSource, ComboBoxCloseReason,
-    ComboBoxCopy, ComboBoxFallback, ComboBoxHandle, ComboBoxItem, ComboBoxKeybindingProfile,
-    ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme,
-    install_combo_box_keybindings, install_portable_combo_box_keybindings,
-    window_combo_box_is_open,
+    ComboBoxCommand, ComboBoxCommandActivation, ComboBoxCopy, ComboBoxHandle, ComboBoxItem,
+    ComboBoxKeybindingProfile, ComboBoxLifecycleEvent, ComboBoxMetrics, ComboBoxPaint,
+    ComboBoxTheme, NoComboBoxCommands, install_combo_box_keybindings,
+    install_portable_combo_box_keybindings, window_combo_box_is_open,
 };
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
